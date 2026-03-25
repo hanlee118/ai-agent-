@@ -1,6 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { NavLink, Route, Routes, useLocation } from "react-router-dom";
-import type { AuthStatus } from "@occ/shared";
+import type { AuthStatus, OpenClawAgentSummary, ProjectSummary } from "@occ/shared";
+import {
+  Activity,
+  Bell,
+  Bot,
+  ChevronRight,
+  FolderKanban,
+  Globe,
+  History,
+  LayoutDashboard,
+  Search,
+  Settings,
+  ShieldCheck,
+  TerminalSquare
+} from "lucide-react";
 import { DashboardPage } from "./pages/DashboardPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { ProjectRoomPage } from "./pages/ProjectRoomPage";
@@ -20,6 +34,8 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [sidebarProjects, setSidebarProjects] = useState<ProjectSummary[]>([]);
+  const [sidebarAgents, setSidebarAgents] = useState<OpenClawAgentSummary[]>([]);
 
   const copy = isEnglish
     ? {
@@ -38,6 +54,15 @@ export default function App() {
         settings: "Settings",
         workspaceTitle: "Workspace",
         workspaceCopy: "Manage a live AI team through portfolio, delivery, and runtime modules.",
+        shellSearch: "Search projects, agents, memory, or logs",
+        recentProjects: "Live Projects",
+        recentAgents: "Agent Roster",
+        commanderName: "Commander",
+        commanderLevel: "Level 4 Access",
+        workspaces: "Workspaces",
+        workspacePrimary: "OpenClaw",
+        workspaceSecondary: "Strategy",
+        workspaceData: "Memory Grid",
         topbarBadge: "v1.0.0",
         topbarTitle: "Agent Collaboration Workbench",
         languageLabel: "Language",
@@ -85,6 +110,15 @@ export default function App() {
         settings: "设置",
         workspaceTitle: "工作区",
         workspaceCopy: "面向真实协作团队的项目组合、交付跟踪和运行管理入口。",
+        shellSearch: "搜索项目、Agent、记忆或日志",
+        recentProjects: "在线项目",
+        recentAgents: "Agent 名册",
+        commanderName: "Commander",
+        commanderLevel: "四级指挥权限",
+        workspaces: "工作域",
+        workspacePrimary: "OpenClaw",
+        workspaceSecondary: "策略台",
+        workspaceData: "记忆仓",
         topbarBadge: "v1.0.0",
         topbarTitle: "Agent 协作工作台",
         languageLabel: "语言",
@@ -130,6 +164,22 @@ export default function App() {
       .finally(() => setAuthLoading(false));
   }, []);
 
+  useEffect(() => {
+    if (!authStatus?.authenticated) {
+      return;
+    }
+
+    void Promise.all([api.getProjects(), api.getOpenClawAgents()])
+      .then(([projects, agents]) => {
+        setSidebarProjects(projects.slice(0, 6));
+        setSidebarAgents(agents.slice(0, 8));
+      })
+      .catch(() => {
+        setSidebarProjects([]);
+        setSidebarAgents([]);
+      });
+  }, [authStatus?.authenticated]);
+
   async function handleLogout() {
     await api.logoutAuth();
     setAuthStatus(await api.getAuthStatus());
@@ -145,6 +195,16 @@ export default function App() {
     const description = copy.pageDescriptions[normalizedPath] ?? copy.pageFallbackCopy;
     return { title, description };
   }, [copy.pageDescriptions, copy.pageFallback, copy.pageFallbackCopy, copy.pageTitles, location.pathname]);
+
+  const navItems = useMemo(() => [
+    { to: "/", label: copy.dashboard, description: isEnglish ? "Overview and active command loops." : "总览与活跃指挥回路。", icon: LayoutDashboard },
+    { to: "/projects", label: copy.projects, description: isEnglish ? "Portfolio, delivery and mission flow." : "项目组合、交付和任务流。", icon: FolderKanban },
+    { to: "/openclaw", label: copy.openclaw, description: isEnglish ? "Workspace sync and field execution." : "工作区同步与现场执行。", icon: TerminalSquare },
+    { to: "/agents", label: copy.agents, description: isEnglish ? "Models, roles and command settings." : "模型、角色和指挥配置。", icon: Bot },
+    { to: "/system", label: copy.system, description: isEnglish ? "Runtime, health, costs and release." : "运行、健康、成本与发布。", icon: Activity },
+    { to: "/audit", label: copy.audit, description: isEnglish ? "Critical actions and governance trail." : "关键动作与治理轨迹。", icon: History },
+    { to: "/settings", label: copy.settings, description: isEnglish ? "Preferences and workspace defaults." : "偏好与工作区默认配置。", icon: Settings }
+  ], [copy.agents, copy.audit, copy.dashboard, copy.openclaw, copy.projects, copy.settings, copy.system, isEnglish]);
 
   if (authLoading) {
     return <div className="card">{copy.checking}</div>;
@@ -163,50 +223,122 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="stack">
-          <div className="sidebar-brand">
+    <div className="app-shell app-shell-modern">
+      <aside className="workspace-rail">
+        <div className="workspace-rail-group">
+          <button className="workspace-rail-item workspace-rail-item-active" type="button" aria-label={copy.workspacePrimary}>
+            <TerminalSquare size={22} />
+          </button>
+          <button className="workspace-rail-item" type="button" aria-label={copy.workspaceSecondary}>
+            <ShieldCheck size={22} />
+          </button>
+          <button className="workspace-rail-item" type="button" aria-label={copy.workspaceData}>
+            <Globe size={22} />
+          </button>
+        </div>
+        <div className="workspace-rail-footer">
+          <button className="workspace-rail-item workspace-rail-item-muted" type="button" aria-label={copy.settings}>
+            <Settings size={20} />
+          </button>
+        </div>
+      </aside>
+
+      <aside className="sidebar sidebar-modern">
+        <div className="stack shell-stack">
+          <div className="sidebar-brand sidebar-brand-modern">
             <p className="eyebrow">{copy.shellEyebrow}</p>
             <h1>{copy.title}</h1>
             <p className="sidebar-copy">{copy.subtitle}</p>
           </div>
 
-          <div className="nav-group">
+          <div className="nav-group nav-group-modern">
             <p className="group-title">{copy.navigation}</p>
             <nav className="nav-list">
-              <NavItem to="/" label={copy.dashboard} description={isEnglish ? "Overview, modules, guided entry." : "概览、模块入口、快速开始。"} />
-              <NavItem to="/projects" label={copy.projects} description={isEnglish ? "Portfolio, status, and project rooms." : "项目组合、状态和作战室。"} />
-              <NavItem to="/openclaw" label={copy.openclaw} description={isEnglish ? "Projects, deliverables, workload." : "项目、交付物、团队承载。"} />
-              <NavItem to="/agents" label={copy.agents} description={isEnglish ? "Identity, tasks, sessions, SOUL." : "画像、任务、会话、SOUL。"} />
-              <NavItem to="/system" label={copy.system} description={isEnglish ? "Runtime, release, audit." : "运行态、发布、审计。"} />
-              <NavItem to="/audit" label={copy.audit} description={isEnglish ? "Critical actions and command trail." : "关键动作与指令轨迹。"} />
-              <NavItem to="/settings" label={copy.settings} description={isEnglish ? "Language and workspace defaults." : "语言和工作区默认设置。"} />
+              {navItems.map((item) => (
+                <NavItem
+                  key={item.to}
+                  to={item.to}
+                  label={item.label}
+                  description={item.description}
+                  icon={item.icon}
+                />
+              ))}
             </nav>
+          </div>
+
+          <div className="nav-group nav-group-modern">
+            <div className="section-title-row">
+              <p className="group-title">{copy.recentProjects}</p>
+            </div>
+            <div className="sidebar-mini-list">
+              {sidebarProjects.map((project) => (
+                <NavLink key={project.id} to={`/projects/${project.id}`} className="sidebar-mini-link">
+                  <div className="sidebar-mini-icon">{project.name.slice(0, 1).toUpperCase()}</div>
+                  <div className="sidebar-mini-copy">
+                    <span className="sidebar-mini-title">{project.name}</span>
+                    <span className="sidebar-mini-subtitle">{project.currentStage} · {project.progress}%</span>
+                  </div>
+                  <ChevronRight size={16} />
+                </NavLink>
+              ))}
+            </div>
+          </div>
+
+          <div className="nav-group nav-group-modern">
+            <div className="section-title-row">
+              <p className="group-title">{copy.recentAgents}</p>
+            </div>
+            <div className="sidebar-mini-list">
+              {sidebarAgents.map((agent) => (
+                <NavLink key={agent.agentId} to={`/agents/${agent.agentId}`} className="sidebar-mini-link">
+                  <div className="sidebar-mini-icon">{agent.emoji || agent.name.slice(0, 1).toUpperCase()}</div>
+                  <div className="sidebar-mini-copy">
+                    <span className="sidebar-mini-title">{agent.name}</span>
+                    <span className="sidebar-mini-subtitle">{agent.model} · {agent.status}</span>
+                  </div>
+                  <span className={agent.status === "active" ? "shell-presence shell-presence-active" : "shell-presence"} />
+                </NavLink>
+              ))}
+            </div>
           </div>
         </div>
 
-        <section className="sidebar-card sidebar-status-card">
-          <span className="status-dot status-live" />
-          <div>
-            <strong>{copy.statusTitle}</strong>
-            <p>{copy.statusCopy}</p>
+        <section className="sidebar-card sidebar-status-card commander-card">
+          <div className="commander-avatar-shell">{copy.commanderName.slice(0, 1)}</div>
+          <div className="commander-copy">
+            <strong>{copy.commanderName}</strong>
+            <p>{copy.commanderLevel}</p>
+            <span className="status-inline">
+              <span className="status-live" />
+              {copy.statusTitle}
+            </span>
           </div>
         </section>
       </aside>
 
-      <div className="workspace-shell">
-        <header className="workspace-header">
-          <div>
-            <div className="pill-row">
-              <span className="pill pill-primary">{copy.topbarBadge}</span>
+      <div className="workspace-shell workspace-shell-modern">
+        <header className="workspace-header workspace-header-modern">
+          <div className="workspace-header-main">
+            <div className="pill-row pill-row-modern">
+              <span className="pill pill-primary">{copy.workspacePrimary}</span>
+              <span className="pill">{copy.topbarBadge}</span>
               <span className="pill">{copy.workspaceTitle}</span>
             </div>
             <h2 className="workspace-title">{topbarCopy.title}</h2>
             <p className="workspace-subtitle">{topbarCopy.description}</p>
           </div>
 
-          <div className="workspace-actions">
+          <div className="workspace-actions workspace-actions-modern">
+            <label className="shell-search">
+              <Search size={17} />
+              <input placeholder={copy.shellSearch} />
+            </label>
+
+            <button className="workspace-icon-button" type="button" aria-label="notifications">
+              <Bell size={18} />
+              <span className="workspace-icon-dot" />
+            </button>
+
             <div className="locale-switcher" aria-label={copy.languageLabel}>
               <button
                 className={locale === "zh-CN" ? "locale-pill locale-pill-active" : "locale-pill"}
@@ -222,13 +354,13 @@ export default function App() {
               </button>
             </div>
 
-            <button className="button button-ghost" onClick={() => void handleLogout()}>
+            <button className="button button-ghost button-shell" onClick={() => void handleLogout()}>
               {copy.logout}
             </button>
           </div>
         </header>
 
-        <main className="main-content">
+        <main className="main-content main-content-modern">
           <Routes>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
@@ -246,14 +378,27 @@ export default function App() {
   );
 }
 
-function NavItem({ to, label, description }: { to: string; label: string; description: string }) {
+function NavItem({
+  to,
+  label,
+  description,
+  icon: Icon
+}: {
+  to: string;
+  label: string;
+  description: string;
+  icon: typeof LayoutDashboard;
+}) {
   return (
     <NavLink
       to={to}
       className={({ isActive }) => (isActive ? "nav-link nav-link-active" : "nav-link")}
     >
-      <span className="nav-label">{label}</span>
-      <span className="nav-description">{description}</span>
+      <span className="nav-icon"><Icon size={18} /></span>
+      <span className="nav-copy">
+        <span className="nav-label">{label}</span>
+        <span className="nav-description">{description}</span>
+      </span>
     </NavLink>
   );
 }
