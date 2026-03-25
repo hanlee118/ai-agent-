@@ -1,0 +1,19 @@
+{
+  "name": "occ-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@10.32.1",
+  "scripts": {
+    "dev:web": "pnpm --filter @occ/web dev",
+    "dev:api": "pnpm --filter @occ/api dev",
+    "release:local": "./scripts/release-local.sh",
+    "start:prod": "./scripts/start-local-prod.sh",
+    "backup:local": "./scripts/backup-local.sh",
+    "verify:local": "node scripts/verify-local.mjs",
+    "daemon:start": "./scripts/daemon-start.sh",
+    "daemon:stop": "./scripts/daemon-stop.sh",
+    "daemon:status": "./scripts/daemon-status.sh",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck"
+  }
+}

@@ -1,0 +1,14 @@
+node_modules
+.DS_Store
+dist
+.turbo
+.cache
+.runtime
+coverage
+.env
+.occ-secret
+apps/api/.occ-secret
+pnpm-lock.yaml
+*.tsbuildinfo
+*.db
+*.db-journal

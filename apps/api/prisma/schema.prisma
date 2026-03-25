@@ -1,0 +1,218 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model AgentProfile {
+  roleId            String   @id
+  name              String
+  tagline           String
+  description       String
+  status            String
+  workload          Int
+  styles            Json
+  skills            Json
+  recentHighlights  Json
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}
+
+model ManagedAgentConfig {
+  agentId                String            @id
+  displayName            String?
+  title                  String?
+  intro                  String?
+  responsibility         String?
+  selectedModel          String
+  defaultModel           String
+  fallbackModel          String?
+  executionMode          String            @default("confirm_first")
+  requireConfirmation    Boolean           @default(true)
+  autoApproveMinorSteps  Boolean           @default(false)
+  maxPromptTokens        Int?
+  maxCompletionTokens    Int?
+  maxDailyTokens         Int?
+  memoryEnabled          Boolean           @default(true)
+  allowedAgentIds        Json?
+  toolAllowlist          Json?
+  createdAt              DateTime          @default(now())
+  updatedAt              DateTime          @updatedAt
+  memoryEntries          AgentMemoryEntry[]
+  usageLogs              AgentUsageLog[]
+}
+
+model AgentMemoryEntry {
+  id            String             @id @default(cuid())
+  agentId       String
+  projectId     String?
+  type          String
+  summary       String
+  content       String
+  importance    Int                @default(50)
+  tags          Json
+  source        String?
+  lastAccessedAt DateTime          @default(now())
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  agent         ManagedAgentConfig @relation(fields: [agentId], references: [agentId], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+  @@index([agentId, importance])
+}
+
+model AgentUsageLog {
+  id               String             @id @default(cuid())
+  agentId          String
+  model            String
+  promptTokens     Int                @default(0)
+  completionTokens Int                @default(0)
+  totalTokens      Int                @default(0)
+  status           String
+  commandType      String
+  createdAt        DateTime           @default(now())
+  agent            ManagedAgentConfig @relation(fields: [agentId], references: [agentId], onDelete: Cascade)
+
+  @@index([agentId, createdAt])
+}
+
+model SystemConfig {
+  id                   String   @id
+  provider             String   @default("scripted")
+  apiBaseUrl           String   @default("")
+  apiKey               String   @default("")
+  modelName            String   @default("")
+  adminPasswordHash    String   @default("")
+  adminPasswordSalt    String   @default("")
+  adminPasswordUpdatedAt DateTime?
+  configSource         String   @default("default")
+  lastValidatedAt      DateTime?
+  lastValidationStatus String   @default("unknown")
+  lastValidationError  String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+}
+
+model AuthSession {
+  id          String   @id @default(cuid())
+  tokenHash   String   @unique
+  expiresAt   DateTime
+  lastUsedAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  actorType   String
+  actorLabel  String
+  action      String
+  resourceType String
+  resourceId  String?
+  summary     String
+  detail      String?
+  requestId   String?
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([action, createdAt])
+}
+
+model Project {
+  id                  String          @id
+  name                String
+  description         String
+  parsedKeywords      Json
+  parsedConstraints   Json
+  parsedRisks         Json
+  parsedSuggestedTeam Json
+  parsedSummary       String
+  status              String
+  currentStage        String
+  progress            Int
+  pendingApproval     Boolean         @default(false)
+  currentRole         String
+  team                Json
+  summary             String
+  liveTitle           String
+  liveBody            String
+  liveStartedAt       DateTime
+  liveProvider        String
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  stages              Stage[]
+  tasks               Task[]
+  deliverables        Deliverable[]
+  timeline            TimelineEvent[]
+}
+
+model Stage {
+  id         String   @id @default(cuid())
+  projectId  String
+  type       String
+  label      String
+  assignee   String
+  status     String
+  progress   Int
+  sortOrder  Int
+  startedAt  DateTime?
+  endedAt    DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, type])
+  @@index([projectId, sortOrder])
+}
+
+model Deliverable {
+  id         String   @id @default(cuid())
+  projectId  String
+  stageType  String
+  name       String
+  type       String
+  content    String
+  version    Int
+  status     String
+  createdBy  String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, stageType])
+}
+
+model TimelineEvent {
+  id         String   @id @default(cuid())
+  projectId  String
+  timestamp  DateTime
+  agentId    String?
+  type       String
+  title      String
+  content    String
+  priority   String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, timestamp])
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  projectId   String
+  stageType   String
+  title       String
+  description String
+  assignee    String
+  status      String
+  priority    String
+  sortOrder   Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, stageType])
+  @@index([assignee, status])
+}
