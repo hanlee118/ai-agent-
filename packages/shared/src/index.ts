@@ -616,6 +616,40 @@ export interface SystemReadiness {
   warnings: string[];
 }
 
+export type LocalAgentTool = "claude" | "codex" | "openclaw";
+export type LocalAgentSessionState = "active" | "idle" | "stale";
+
+export interface LocalAgentSessionItem {
+  id: string;
+  tool: LocalAgentTool;
+  title: string;
+  status: LocalAgentSessionState;
+  path: string;
+  updatedAt: string;
+  lastMessage?: string;
+  agentId?: string;
+  projectLabel?: string;
+  activeSignal?: string;
+}
+
+export interface LocalAgentToolSummary {
+  tool: LocalAgentTool;
+  label: string;
+  rootPath: string;
+  available: boolean;
+  sessionCount: number;
+  activeCount: number;
+  idleCount: number;
+  staleCount: number;
+  lastUpdatedAt?: string;
+}
+
+export interface LocalAgentMonitorOverview {
+  scannedAt: string;
+  tools: LocalAgentToolSummary[];
+  sessions: LocalAgentSessionItem[];
+}
+
 export interface CreateProjectInput {
   name?: string;
   description: string;

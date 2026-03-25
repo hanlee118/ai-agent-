@@ -50,6 +50,7 @@ import {
 } from "./system/runtime-config.js";
 import { listAuditLogs, writeAuditLog } from "./system/audit-log.js";
 import { getSystemReadiness } from "./system/readiness.js";
+import { getLocalAgentMonitorOverview } from "./system/local-agent-monitor.js";
 import {
   clearSessionCookie,
   createSessionCookie,
@@ -268,6 +269,10 @@ app.get("/api/system/health", asyncRoute(async (_req, res) => {
 
 app.get("/api/system/readiness", asyncRoute(async (_req, res) => {
   res.json(await getSystemReadiness());
+}));
+
+app.get("/api/system/local-agent-monitor", asyncRoute(async (_req, res) => {
+  res.json(await getLocalAgentMonitorOverview());
 }));
 
 app.get("/api/system/audit-logs", asyncRoute(async (req, res) => {

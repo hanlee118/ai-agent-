@@ -29,6 +29,7 @@
 - 支持持久化 Agent 长期记忆、调用日志和当日 Token 使用摘要
 - 支持通过平台创建新的 OpenClaw Agent，并同步写入真实工作区配置
 - 支持系统健康检查、平台就绪度检查、运行配置校验和审计日志查询
+- 新增本地多工具会话监控，统一观察 Codex、Claude Code 与 OpenClaw 的最近会话和活跃状态
 - 支持中文 / 英文双语切换
 
 ## 产品结构
@@ -111,6 +112,9 @@ pnpm start:prod
 - `OPENCLAW_ROOT`
 - `OPENCLAW_CONFIG_PATH`
 - `OPENCLAW_WORKSPACE_ROOT`
+- `CODEX_SESSIONS_ROOT`
+- `CLAUDE_PROJECTS_ROOT`
+- `OPENCLAW_AGENT_ROOT`
 - `APP_SECRET`
 - `PORT`
 
@@ -118,6 +122,7 @@ pnpm start:prod
 
 - `OPENCLAW_ROOT` 允许你在服务器或容器里把 OpenClaw 数据挂载到自定义目录
 - `OPENCLAW_CONFIG_PATH` 与 `OPENCLAW_WORKSPACE_ROOT` 可单独覆盖默认路径
+- `CODEX_SESSIONS_ROOT`、`CLAUDE_PROJECTS_ROOT`、`OPENCLAW_AGENT_ROOT` 允许你定制 Nexus 风格的本地会话监控根目录
 - 未显式配置时，系统默认使用 `~/.openclaw`
 
 ## 数据与治理能力

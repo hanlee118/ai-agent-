@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import type {
   AuditLogItem,
+  LocalAgentMonitorOverview,
+  LocalAgentSessionItem,
   RuntimeMode,
   RuntimeSettings,
   RuntimeStatus,
@@ -17,6 +19,7 @@ export function SystemPage() {
   const { isEnglish } = useLocale();
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [localAgentMonitor, setLocalAgentMonitor] = useState<LocalAgentMonitorOverview | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [readiness, setReadiness] = useState<SystemReadiness | null>(null);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
@@ -43,6 +46,10 @@ export function SystemPage() {
         validate: "Validate Connectivity",
         serviceHealth: "Service Health",
         readiness: "Platform Readiness",
+        localMonitor: "Local Agent Monitor",
+        localMonitorCopy: "A Nexus-style observability layer for recent Codex, Claude Code, and OpenClaw sessions on this machine.",
+        monitorRoots: "Monitor Roots",
+        recentSessions: "Recent Sessions",
         dbPath: "Database path",
         openclawConfig: "OpenClaw config",
         workspaceRoot: "Workspace root",
@@ -61,6 +68,10 @@ export function SystemPage() {
         validate: "校验模型连通性",
         serviceHealth: "服务状态",
         readiness: "平台就绪度",
+        localMonitor: "本地 Agent 会话监控",
+        localMonitorCopy: "借鉴 Nexus 的理念，把 Codex、Claude Code 与 OpenClaw 的最近会话、活跃状态和目录源头统一放到系统页里观测。",
+        monitorRoots: "监控根目录",
+        recentSessions: "最近会话",
         dbPath: "数据库路径",
         openclawConfig: "OpenClaw 配置",
         workspaceRoot: "工作区根目录",
@@ -74,12 +85,13 @@ export function SystemPage() {
   async function refresh() {
     setLoading(true);
     try {
-      const [healthInfo, runtimeInfo, settingsInfo, auditInfo, readinessInfo] = await Promise.all([
+      const [healthInfo, runtimeInfo, settingsInfo, auditInfo, readinessInfo, monitorInfo] = await Promise.all([
         api.getSystemHealth(),
         api.getRuntime(),
         api.getRuntimeSettings(),
         api.getAuditLogs(20),
-        api.getSystemReadiness()
+        api.getSystemReadiness(),
+        api.getLocalAgentMonitor()
       ]);
 
       setHealth(healthInfo);
@@ -87,6 +99,7 @@ export function SystemPage() {
       setSettings(settingsInfo);
       setAuditLogs(auditInfo);
       setReadiness(readinessInfo);
+      setLocalAgentMonitor(monitorInfo);
       syncForm(settingsInfo);
       setFlash(null);
     } catch (requestError) {
@@ -316,6 +329,49 @@ export function SystemPage() {
           <article className="card">
             <div className="section-header">
               <div>
+                <p className="eyebrow">Local Monitor</p>
+                <h3>{copy.localMonitor}</h3>
+                <p className="hero-copy">{copy.localMonitorCopy}</p>
+              </div>
+            </div>
+
+            <div className="metric-inline-grid">
+              {(localAgentMonitor?.tools ?? []).map((tool) => (
+                <MetricInline
+                  key={tool.tool}
+                  label={tool.label}
+                  value={`${tool.sessionCount} · ${tool.activeCount}/${tool.idleCount}/${tool.staleCount}`}
+                />
+              ))}
+            </div>
+
+            <div className="sub-card">
+              <p className="group-title">{copy.monitorRoots}</p>
+              <div className="stack tight">
+                {(localAgentMonitor?.tools ?? []).map((tool) => (
+                  <div key={tool.tool} className="meta-chip">
+                    <span>{tool.label}</span>
+                    <strong>{tool.rootPath}</strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="timeline-list">
+              {(localAgentMonitor?.sessions ?? []).slice(0, 8).map((session) => (
+                <LocalSessionCard key={session.id} session={session} isEnglish={isEnglish} />
+              ))}
+              {(localAgentMonitor?.sessions.length ?? 0) === 0 ? (
+                <p className="muted-text">
+                  {isEnglish ? "No recent local AI sessions were detected under the configured roots." : "当前在监控根目录下还没有发现新的本地 AI 会话。"}
+                </p>
+              ) : null}
+            </div>
+          </article>
+
+          <article className="card">
+            <div className="section-header">
+              <div>
                 <p className="eyebrow">Service Health</p>
                 <h3>{copy.serviceHealth}</h3>
               </div>
@@ -437,6 +493,41 @@ function ChecklistItem({ title, detail, ok }: { title: string; detail: string; o
     <article className={ok ? "attention-card" : "attention-card attention-warning"}>
       <strong>{title}</strong>
       <p>{detail}</p>
+    </article>
+  );
+}
+
+function LocalSessionCard({
+  session,
+  isEnglish
+}: {
+  session: LocalAgentSessionItem;
+  isEnglish: boolean;
+}) {
+  const toolLabel = session.tool === "claude"
+    ? "Claude"
+    : session.tool === "codex"
+      ? "Codex"
+      : "OpenClaw";
+  const statusLabel = isEnglish
+    ? session.status
+    : session.status === "active"
+      ? "活跃"
+      : session.status === "idle"
+        ? "空闲"
+        : "静默";
+
+  return (
+    <article className="timeline-item">
+      <div className="timeline-time">{formatTime(session.updatedAt)}</div>
+      <div>
+        <div className="timeline-head">
+          <strong>{session.title}</strong>
+          <span className={`pill ${session.status === "active" ? "pill-primary" : ""}`}>{toolLabel} · {statusLabel}</span>
+        </div>
+        <p>{session.projectLabel || session.path}</p>
+        {session.lastMessage ? <p>{session.lastMessage}</p> : null}
+      </div>
     </article>
   );
 }

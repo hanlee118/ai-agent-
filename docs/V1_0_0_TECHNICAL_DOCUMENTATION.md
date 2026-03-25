@@ -79,6 +79,17 @@ scripts/      Build, release, verify, backup, daemon scripts
 - `openai-compatible`
   - 适合对接兼容 OpenAI API 的模型服务
 
+### 4.4 本地会话监控
+
+当前系统已补充一层借鉴 Nexus 理念的本地会话观测能力：
+
+- 统一扫描 `Codex`
+- 统一扫描 `Claude Code`
+- 统一扫描 `OpenClaw`
+- 在系统页展示最近会话、活跃状态和监控根目录
+
+当前监控优先基于本地会话文件的最近活动与活跃信号，不侵入原始 Agent 工具执行流程。
+
 ## 5. 主要源码模块
 
 ### 5.1 前端
@@ -120,6 +131,8 @@ scripts/      Build, release, verify, backup, daemon scripts
   - 运行配置持久化和校验
 - `apps/api/src/system/readiness.ts`
   - 系统就绪度检查
+- `apps/api/src/system/local-agent-monitor.ts`
+  - 本地多工具 Agent 会话监控
 - `apps/api/src/system/audit-log.ts`
   - 审计日志写入与查询
 - `apps/api/src/security/auth.ts`
@@ -228,6 +241,7 @@ Prisma Schema 位于：
 - `POST /api/system/runtime/validate`
 - `GET /api/system/health`
 - `GET /api/system/readiness`
+- `GET /api/system/local-agent-monitor`
 - `GET /api/system/audit-logs`
 
 ### 8.4 OpenClaw 接口
