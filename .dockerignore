@@ -1,0 +1,13 @@
+node_modules
+.git
+.DS_Store
+.runtime
+.cache
+dist
+coverage
+apps/api/prisma/dev.db
+*.db
+*.db-journal
+.env
+.occ-secret
+apps/api/.occ-secret

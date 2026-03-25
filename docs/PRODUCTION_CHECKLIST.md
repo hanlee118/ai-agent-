@@ -5,6 +5,7 @@
 - Copy `apps/api/.env.example` to `apps/api/.env`
 - Confirm `DATABASE_URL` points to `file:./prisma/dev.db`
 - Confirm `MODEL_PROVIDER`, `MODEL_API_BASE_URL`, `MODEL_NAME`, `MODEL_API_KEY` are complete if you want real model mode
+- If deploying to cloud or Docker, explicitly set `OPENCLAW_ROOT`, `OPENCLAW_CONFIG_PATH`, `OPENCLAW_WORKSPACE_ROOT`
 - Do not commit `.env`, `.occ-secret`, or any real OpenClaw private config
 
 ## 2. Database
@@ -22,6 +23,7 @@
 
 - Confirm `~/.openclaw/openclaw.json` exists
 - Confirm `~/.openclaw/workspace` exists
+- If using a mounted data disk, confirm your configured `OPENCLAW_*` paths resolve correctly
 - Open the System page and verify:
   - `OpenClaw config` path is detected
   - `Workspace root` path is detected
@@ -58,3 +60,4 @@
   - `docs/technical-architecture.md`
   - `docs/ui-design.md`
   - `docs/PRODUCTION_CHECKLIST.md`
+  - `docs/DEPLOYMENT_GUIDE.md`

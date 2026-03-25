@@ -9,7 +9,6 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type {
   OpenClawAgentDetail,
@@ -52,6 +51,11 @@ import type {
 } from "@occ/shared";
 import { promisify } from "node:util";
 import { prisma } from "../db.js";
+import {
+  OPENCLAW_CONFIG_PATH,
+  OPENCLAW_ROOT,
+  OPENCLAW_WORKSPACE_ROOT
+} from "./paths.js";
 
 type TeamMember = {
   name: string;
@@ -132,9 +136,6 @@ type RawProjectTasksPayload = {
 
 const execFileAsync = promisify(execFile);
 
-const OPENCLAW_ROOT = path.join(os.homedir(), ".openclaw");
-const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_ROOT, "openclaw.json");
-const OPENCLAW_WORKSPACE_ROOT = path.join(OPENCLAW_ROOT, "workspace");
 const TEAM_FILE_PATH = path.join(OPENCLAW_WORKSPACE_ROOT, "TEAM.md");
 const PROJECT_DOC_FILES = [
   "README.md",

@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: ai-agent-workbench
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    disk:
+      name: occ-data
+      mountPath: /var/data
+      sizeGB: 5
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: DATABASE_URL
+        value: file:/var/data/occ/dev.db
+      - key: OPENCLAW_ROOT
+        value: /var/data/openclaw
+      - key: OPENCLAW_CONFIG_PATH
+        value: /var/data/openclaw/openclaw.json
+      - key: OPENCLAW_WORKSPACE_ROOT
+        value: /var/data/openclaw/workspace
+      - key: MODEL_PROVIDER
+        value: scripted

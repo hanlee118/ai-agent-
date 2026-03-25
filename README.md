@@ -1,192 +1,228 @@
 # Agent Collaboration Workbench
 
-1.0.0 版本。一个面向真实 OpenClaw 团队协作的 AI 工作台仓库，已经具备项目、Agent、运行配置、审计、长期记忆和 OpenClaw 工作区联动能力，可作为本地生产部署版本使用。
+[![CI](https://github.com/hanlee118/ai-agent-/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlee118/ai-agent-/actions/workflows/ci.yml)
+[![Pages](https://github.com/hanlee118/ai-agent-/actions/workflows/pages.yml/badge.svg)](https://github.com/hanlee118/ai-agent-/actions/workflows/pages.yml)
+[![Version](https://img.shields.io/badge/version-1.0.0-0f172a.svg)](https://github.com/hanlee118/ai-agent-/releases)
 
-## 已实现能力
+一个面向真实 OpenClaw 团队协作的 Agent 工作台。它把项目管理、Agent 指挥、任务治理、SOUL/SOP 配置、长期记忆、审计追踪和系统运行检查收敛到一个更接近 SaaS 管理后台的工作平台中。
+
+在线项目主页：
+[https://hanlee118.github.io/ai-agent-/](https://hanlee118.github.io/ai-agent-/)
+
+仓库地址：
+[https://github.com/hanlee118/ai-agent-](https://github.com/hanlee118/ai-agent-)
+
+## 核心价值
+
+- 不是单聊天窗口，而是完整的 Agent 团队协作控制台
+- 不是纯演示页面，而是可连接真实 OpenClaw 工作区的运行平台
+- 不是只看结果，而是能管理模型、执行策略、审批机制、Token 上限、长期记忆和审计日志
+
+## v1.0.0 已实现能力
 
 - 自然语言创建项目，并生成理解确认卡
 - 统一查看 `Dashboard`、`Projects`、`Project Room`、`OpenClaw Workspace`、`Agents`、`Agent Commander`、`System`、`Audit`、`Settings`
-- 读取真实 `~/.openclaw` 工作区中的项目、Agent、任务、文档、会话和最近消息
-- 进入单个 Agent 的 `Agent Commander` 页面，独立切换模型、切换执行策略、预览理解确认卡、下发任务
+- 读取真实 `~/.openclaw` 或自定义 `OPENCLAW_ROOT` 工作区中的项目、Agent、任务、文档、会话和最近消息
+- 在单个 Agent 指挥页中独立切换模型、切换执行策略、预览理解确认卡、下发任务
 - 支持 `confirm_first` / `autonomous` 两种执行模式
-- 支持为每个 Agent 配置 Token 限额：
-  - 单次输入上限
-  - 单次输出上限
-  - 每日 Token 总量上限
-- 支持为每个 Agent 配置治理信息：
-  - 显示名称与职位
-  - Agent 介绍与职责
-  - 允许协作的 Agent 列表
-  - 允许使用的工具白名单
-- 支持为每个 Agent 持久化长期记忆，并保存在数据库中
-- 支持记录每个 Agent 的调用日志与当日 Token 使用摘要
-- 支持通过平台创建新的 OpenClaw Agent，并同步写入真实 `~/.openclaw/openclaw.json`
-- 系统记录关键审计日志，并支持运行配置保存与模型连通性校验
-- `System` 页面新增平台就绪度检查，可直接核对数据库文件、OpenClaw 配置、工作区路径与风险告警
-- 首次启动可初始化管理员密码，后续通过登录鉴权进入系统
+- 支持为每个 Agent 配置 Token 限额、治理信息、协作白名单、工具白名单
+- 支持持久化 Agent 长期记忆、调用日志和当日 Token 使用摘要
+- 支持通过平台创建新的 OpenClaw Agent，并同步写入真实工作区配置
+- 支持系统健康检查、平台就绪度检查、运行配置校验和审计日志查询
+- 支持中文 / 英文双语切换
 
-## 目录结构
+## 产品结构
 
 ```text
 apps/
-  api/        Express API + Prisma + OpenClaw integration
+  api/        Express API + Prisma + SQLite + OpenClaw integration
   web/        React + Vite frontend
 packages/
-  shared/     共享类型与枚举
-docs/         产品、UI、架构与 AI Studio 设计文档
-aistudio/     Google AI Studio 导出的前端参考实现
+  shared/     共享类型、接口和契约
+docs/         产品、需求、架构、设计与部署文档
+aistudio/     AI Studio 导出的前端参考工程
+scripts/      发布、校验、备份、守护脚本
+site/         GitHub Pages 项目主页
 ```
 
-## 启动方式
+## 架构概览
+
+```mermaid
+flowchart LR
+  U["User / Admin"] --> W["React Web App"]
+  W --> A["Express API"]
+  A --> D["SQLite / Prisma"]
+  A --> O["OpenClaw Workspace"]
+  A --> R["Runtime Provider"]
+  R --> M["Scripted or OpenAI-compatible Model"]
+```
+
+## 快速开始
+
+### 1. 安装依赖
 
 ```bash
 pnpm install
+```
+
+### 2. 初始化数据库
+
+```bash
 pnpm --filter @occ/api db:generate
 pnpm --filter @occ/api db:push
+pnpm --filter @occ/api db:seed
+```
+
+如果本机 Prisma SQLite `db:push` 出现 schema engine 异常，可使用兜底方式：
+
+```bash
+pnpm --filter @occ/api db:bootstrap
+pnpm --filter @occ/api db:seed
+```
+
+### 3. 本地开发
+
+```bash
 pnpm dev:api
 pnpm dev:web
 ```
 
-默认前端使用 `http://localhost:8787` 作为 API 地址。
+默认前端访问 `http://localhost:5173`，API 默认监听 `http://localhost:8787`。
 
-数据库路径：
-
-- `apps/api/prisma/dev.db`
-- `apps/api/.env.example` 已改为与运行时一致的 `file:./prisma/dev.db`
-- 如果本地 Prisma SQLite `db:push` 出现 schema engine 异常，可先执行 `pnpm --filter @occ/api db:bootstrap` 初始化基础表，再执行 `pnpm --filter @occ/api db:seed`
-
-## 单服务发布
+### 4. 单服务生产启动
 
 ```bash
 pnpm build
-node apps/api/dist/index.js
+pnpm start:prod
 ```
 
-当 `apps/web/dist` 存在时，API 会同时提供前端页面和后端接口。
+## 环境变量
 
-## 当前数据库设计
+后端示例环境文件位于：
+[apps/api/.env.example](apps/api/.env.example)
 
-当前数据库除原有项目主链路外，已经增加以下关键模型：
+当前支持的关键变量：
+
+- `DATABASE_URL`
+- `MODEL_PROVIDER`
+- `MODEL_API_BASE_URL`
+- `MODEL_API_KEY`
+- `MODEL_NAME`
+- `OPENCLAW_ROOT`
+- `OPENCLAW_CONFIG_PATH`
+- `OPENCLAW_WORKSPACE_ROOT`
+- `APP_SECRET`
+- `PORT`
+
+其中：
+
+- `OPENCLAW_ROOT` 允许你在服务器或容器里把 OpenClaw 数据挂载到自定义目录
+- `OPENCLAW_CONFIG_PATH` 与 `OPENCLAW_WORKSPACE_ROOT` 可单独覆盖默认路径
+- 未显式配置时，系统默认使用 `~/.openclaw`
+
+## 数据与治理能力
+
+当前数据库已覆盖以下核心治理模型：
 
 - `ManagedAgentConfig`
-  - 每个 Agent 的当前模型、默认模型、备用模型
-  - 执行模式、确认策略、Token 限额、长期记忆开关
+  - 当前模型、默认模型、回退模型
+  - 执行模式、确认策略、Token 限额、记忆开关
   - 显示名称、职位、介绍、职责
   - 协作 Agent 白名单、工具白名单
 - `AgentMemoryEntry`
-  - 每个 Agent 的长期记忆
-  - 支持类型、摘要、正文、重要度、标签、来源
+  - 长期记忆类型、摘要、正文、重要度、标签、来源
 - `AgentUsageLog`
-  - 每个 Agent 的调用记录
-  - 支持输入 Token、输出 Token、总量、状态、调用类型
-
-这意味着平台已经具备继续扩展以下能力的数据库基础：
-
-- 成本控制
-- 预算审计
-- 记忆检索
-- 长期行为画像
-- 多 Agent 运行治理
+  - 输入 Token、输出 Token、总用量、状态、调用类型
 
 ## 关键接口
 
-基础平台接口：
+### 基础平台
 
+- `GET /api/auth/status`
+- `POST /api/auth/setup`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
 - `GET /api/projects`
 - `POST /api/projects`
 - `GET /api/projects/:id`
 - `GET /api/projects/:id/tasks`
-- `GET /api/tasks`
 - `PATCH /api/tasks/:taskId`
 - `GET /api/system/runtime`
-- `GET /api/system/runtime/config`
 - `PUT /api/system/runtime/config`
 - `POST /api/system/runtime/validate`
 - `GET /api/system/health`
 - `GET /api/system/readiness`
 - `GET /api/system/audit-logs`
-- `GET /api/auth/status`
-- `POST /api/auth/setup`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
 
-OpenClaw 工作区接口：
+### OpenClaw
 
 - `GET /api/openclaw/workspace`
-- `GET /api/openclaw/status`
 - `GET /api/openclaw/projects`
 - `GET /api/openclaw/projects/:projectId`
-- `GET /api/openclaw/projects/:projectId/report`
 - `PATCH /api/openclaw/projects/:projectId/tasks/:taskId`
 - `PATCH /api/openclaw/projects/:projectId/tasks`
-
-OpenClaw Agent 接口：
-
+- `GET /api/openclaw/projects/:projectId/report`
 - `GET /api/openclaw/agents`
 - `POST /api/openclaw/agents`
 - `GET /api/openclaw/agents/:agentId`
 - `PUT /api/openclaw/agents/:agentId/settings`
 - `POST /api/openclaw/agents/:agentId/preview`
-- `POST /api/openclaw/agents/:agentId/memory`
 - `PUT /api/openclaw/agents/:agentId/soul`
 - `PUT /api/openclaw/agents/:agentId/sop`
 - `POST /api/openclaw/agents/:agentId/message`
 - `POST /api/openclaw/agents/batch-message`
+- `POST /api/openclaw/agents/:agentId/memory`
 - `GET /api/openclaw/sla`
 
-## 当前运行说明
+## 文档索引
 
-当前实现已经具备“本地生产版”的基础能力：
+- [产品说明文档](docs/V1_0_0_PRODUCT_OVERVIEW.md)
+- [需求文档](docs/V1_0_0_REQUIREMENTS_SPEC.md)
+- [技术文档](docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)
+- [部署指南](docs/DEPLOYMENT_GUIDE.md)
+- [操作手册](docs/OPERATION_MANUAL.md)
+- [生产检查清单](docs/PRODUCTION_CHECKLIST.md)
 
-- 数据存储使用 `Prisma + SQLite`
-- 实时观测通过 `SSE` 推送阶段执行流
-- API 构建产物可直接托管前端 `apps/web/dist`
-- Agent 运行层支持 `scripted` 回退模式，并支持持久化 OpenAI 兼容配置
-- Agent 长期记忆、Token 限额、执行策略和调用日志已进入数据库层
-- Agent 治理配置也已进入数据库层，可在前端页面直接编辑并持久化
-- API 提供 `health`、`ready`、请求 ID 和统一错误返回
+## 正式发布路径
 
-## 本地发布脚本
+### A. 仓库主页与公开介绍
+
+本仓库内置 GitHub Pages 站点配置。推送到 `main` 后，GitHub Actions 会自动把 [site/index.html](site/index.html) 发布到稳定公开地址：
+[site/index.html](site/index.html)
+
+[https://hanlee118.github.io/ai-agent-/](https://hanlee118.github.io/ai-agent-/)
+
+### B. 可长期运行的正式部署
+
+本仓库已补齐以下正式部署资产：
+
+- [Dockerfile](Dockerfile)
+- [.dockerignore](.dockerignore)
+- [render.yaml](render.yaml)
+- [scripts/start-render.sh](scripts/start-render.sh)
+
+这意味着你可以把当前项目直接接入：
+
+- Render
+- Railway
+- 自有 Linux 云主机
+- Docker / Docker Compose 环境
+
+注意：如果你要保留真实 OpenClaw 联动，正式环境必须为 SQLite 数据文件和 OpenClaw 工作区提供持久化目录。
+
+## 验证命令
 
 ```bash
-pnpm release:local
-pnpm start:prod
+pnpm typecheck
+pnpm build
 pnpm verify:local
 ```
 
-首次启动后，浏览器会先进入初始化页面，请设置管理员密码。系统会自动生成本地密钥文件 `.occ-secret` 用于加密保存运行配置中的 API Key。
+## 当前版本说明
 
-## 备份与守护
+v1.0.0 已经是一个真实可用的本地生产版本，不再是单纯演示工程。它适合作为：
 
-```bash
-pnpm backup:local
-pnpm daemon:start
-pnpm daemon:status
-pnpm daemon:stop
-```
-
-- 备份会输出到 `backups/<timestamp>/`
-- 如需恢复，使用 `OCC_FORCE_RESTORE=1 ./scripts/restore-local.sh <backup-dir>`
-- 守护模式日志保存在 `.runtime/openclaw.log`
-
-## GitHub 发布建议
-
-当前仓库已经基本满足发布到 GitHub 的工程条件：
-
-- `node_modules`、数据库文件、环境密钥都在 `.gitignore` 中
-- 前后端可独立开发，也可单服务发布
-- 数据库结构可优先通过 `pnpm --filter @occ/api db:push` 重建，若本机 SQLite Prisma 引擎异常，则可用 `pnpm --filter @occ/api db:bootstrap` 兜底初始化
-- 产品需求、AI Studio 设计 Brief、高保真 Prompt 文档均已落在 `docs/`
-
-推送到 GitHub 之前，建议确认：
-
-1. 不要提交真实 `~/.openclaw` 私有配置
-2. 不要提交真实模型 API Key
-3. 若要公开仓库，建议确认 `aistudio/` 中是否包含不适合公开的设计素材
-4. 发布前按 [docs/PRODUCTION_CHECKLIST.md](/Users/dalongxia/Documents/Playground/docs/PRODUCTION_CHECKLIST.md) 逐项核对
-
-## v1.0.0 正式文档
-
-- [产品说明文档](/Users/dalongxia/Documents/Playground/docs/V1_0_0_PRODUCT_OVERVIEW.md)
-- [需求文档](/Users/dalongxia/Documents/Playground/docs/V1_0_0_REQUIREMENTS_SPEC.md)
-- [技术文档](/Users/dalongxia/Documents/Playground/docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)
+- 企业 Agent 协作平台原型
+- 私有化部署的本地工作台
+- 多 Agent 团队治理底座
+- 后续 1.x 版本持续演进的基线

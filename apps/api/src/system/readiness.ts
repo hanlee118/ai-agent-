@@ -1,15 +1,13 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import type { SystemReadiness } from "@occ/shared";
 import { prisma } from "../db.js";
 import { getRuntimeStatus } from "../agents/runtime.js";
 import { getOpenClawWorkspace } from "../openclaw/workspace.js";
-
-const OPENCLAW_ROOT = path.join(os.homedir(), ".openclaw");
-const OPENCLAW_CONFIG_PATH = path.join(OPENCLAW_ROOT, "openclaw.json");
-const OPENCLAW_WORKSPACE_ROOT = path.join(OPENCLAW_ROOT, "workspace");
+import {
+  OPENCLAW_CONFIG_PATH,
+  OPENCLAW_WORKSPACE_ROOT
+} from "../openclaw/paths.js";
 
 export async function getSystemReadiness(): Promise<SystemReadiness> {
   const runtime = await getRuntimeStatus();

@@ -83,55 +83,55 @@ scripts/      Build, release, verify, backup, daemon scripts
 
 ### 5.1 前端
 
-- `/Users/dalongxia/Documents/Playground/apps/web/src/App.tsx`
+- `apps/web/src/App.tsx`
   - 全局路由、布局壳层、鉴权入口、语言切换
-- `/Users/dalongxia/Documents/Playground/apps/web/src/lib/api.ts`
+- `apps/web/src/lib/api.ts`
   - 前端 API 请求层
-- `/Users/dalongxia/Documents/Playground/apps/web/src/lib/locale.tsx`
+- `apps/web/src/lib/locale.tsx`
   - 国际化状态管理
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/DashboardPage.tsx`
+- `apps/web/src/pages/DashboardPage.tsx`
   - 总控首页
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/ProjectsPage.tsx`
+- `apps/web/src/pages/ProjectsPage.tsx`
   - 项目组合页
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/ProjectRoomPage.tsx`
+- `apps/web/src/pages/ProjectRoomPage.tsx`
   - 项目作战室
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/OpenClawPage.tsx`
+- `apps/web/src/pages/OpenClawPage.tsx`
   - 团队工作区
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/AgentsPage.tsx`
+- `apps/web/src/pages/AgentsPage.tsx`
   - Agent 列表
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/AgentCommanderPage.tsx`
+- `apps/web/src/pages/AgentCommanderPage.tsx`
   - Agent 指挥页
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/SystemPage.tsx`
+- `apps/web/src/pages/SystemPage.tsx`
   - 系统运营与就绪度
-- `/Users/dalongxia/Documents/Playground/apps/web/src/pages/AuditPage.tsx`
+- `apps/web/src/pages/AuditPage.tsx`
   - 审计轨迹
 
 ### 5.2 后端
 
-- `/Users/dalongxia/Documents/Playground/apps/api/src/index.ts`
+- `apps/api/src/index.ts`
   - API 入口、路由、静态资源托管、认证中间件
-- `/Users/dalongxia/Documents/Playground/apps/api/src/data/repository.ts`
+- `apps/api/src/data/repository.ts`
   - 平台项目、任务、阶段、交付物主数据仓储
-- `/Users/dalongxia/Documents/Playground/apps/api/src/openclaw/workspace.ts`
+- `apps/api/src/openclaw/workspace.ts`
   - OpenClaw 工作区读取、Agent 与项目联动、任务回写
-- `/Users/dalongxia/Documents/Playground/apps/api/src/agents/runtime.ts`
+- `apps/api/src/agents/runtime.ts`
   - 当前运行模式与状态解析
-- `/Users/dalongxia/Documents/Playground/apps/api/src/system/runtime-config.ts`
+- `apps/api/src/system/runtime-config.ts`
   - 运行配置持久化和校验
-- `/Users/dalongxia/Documents/Playground/apps/api/src/system/readiness.ts`
+- `apps/api/src/system/readiness.ts`
   - 系统就绪度检查
-- `/Users/dalongxia/Documents/Playground/apps/api/src/system/audit-log.ts`
+- `apps/api/src/system/audit-log.ts`
   - 审计日志写入与查询
-- `/Users/dalongxia/Documents/Playground/apps/api/src/security/auth.ts`
+- `apps/api/src/security/auth.ts`
   - 管理员初始化、登录、会话校验
-- `/Users/dalongxia/Documents/Playground/apps/api/src/security/secret-store.ts`
+- `apps/api/src/security/secret-store.ts`
   - 本地密钥与敏感配置保护
-- `/Users/dalongxia/Documents/Playground/apps/api/src/db.ts`
+- `apps/api/src/db.ts`
   - Prisma 客户端与 SQLite 路径归一化
 
 ### 5.3 共享契约
 
-- `/Users/dalongxia/Documents/Playground/packages/shared/src/index.ts`
+- `packages/shared/src/index.ts`
   - 所有共享类型、枚举、接口定义
 
 ## 6. 数据架构
@@ -142,7 +142,7 @@ scripts/      Build, release, verify, backup, daemon scripts
 
 Prisma Schema 位于：
 
-- `/Users/dalongxia/Documents/Playground/apps/api/prisma/schema.prisma`
+- `apps/api/prisma/schema.prisma`
 
 ### 6.1 核心数据模型
 
