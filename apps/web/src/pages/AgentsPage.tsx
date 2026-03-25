@@ -66,6 +66,15 @@ export function AgentsPage() {
   const activeTaskTotal = agents.reduce((sum, agent) => sum + agent.taskCount, 0);
   const autonomousCount = agents.filter((agent) => agent.commander.executionMode === "autonomous").length;
   const overloadedCount = agents.filter((agent) => agent.taskCount >= 3 || agent.blockedTaskCount > 0).length;
+  const overloadedAgents = useMemo(
+    () => sortedAgents.filter((agent) => agent.taskCount >= 3 || agent.blockedTaskCount > 0).slice(0, 5),
+    [sortedAgents]
+  );
+  const hasJeremy = agents.some((agent) => {
+    const normalizedId = agent.agentId.toLowerCase();
+    const normalizedName = agent.name.toLowerCase();
+    return normalizedId === "jeremy" || normalizedId === "design_director" || normalizedName.includes("jeremy");
+  });
   const copy = isEnglish
     ? {
         title: "Live OpenClaw agent roster",
@@ -93,7 +102,20 @@ export function AgentsPage() {
         noTask: "No structured task detected.",
         sessions: "Sessions",
         blocked: "Blocked",
-        allowed: "Collaboration"
+        allowed: "Collaboration",
+        rosterTitle: "Command-ready roster",
+        rosterCopy: "Review who is carrying load, who is blocked, and which specialist should receive the next instruction.",
+        governanceTitle: "Roster governance",
+        governanceCopy: "Create or patch team roles from here, then jump into the dedicated commander page for model switching and approvals.",
+        workloadTitle: "Attention queue",
+        workloadCopy: "These agents are most likely to need reassignment, intervention, or a quick sync check.",
+        missingDesignLead: "Design Director Jeremy is not in the managed roster yet.",
+        fillJeremy: "Fill Jeremy preset",
+        currentModel: "Current model",
+        executionMode: "Execution",
+        confirmFirst: "Confirm first",
+        tasksLabel: "Tasks",
+        updatedLabel: "Updated"
       }
     : {
         title: "真实 OpenClaw Agent 团队总览",
@@ -121,7 +143,20 @@ export function AgentsPage() {
         noTask: "当前没有识别到结构化任务。",
         sessions: "会话数",
         blocked: "阻塞数",
-        allowed: "协作范围"
+        allowed: "协作范围",
+        rosterTitle: "可指挥的团队名册",
+        rosterCopy: "快速识别谁在承压、谁已阻塞、谁适合接下一单，再直接跳转到专属指挥页。",
+        governanceTitle: "团队治理",
+        governanceCopy: "在这里补齐角色、创建 Agent，再进入单独指挥页切换模型和执行策略。",
+        workloadTitle: "重点关注队列",
+        workloadCopy: "这些 Agent 最可能需要改派、介入或被你优先询问进展。",
+        missingDesignLead: "当前受管团队里还没有设计总监 Jeremy。",
+        fillJeremy: "填入 Jeremy 模板",
+        currentModel: "当前模型",
+        executionMode: "执行方式",
+        confirmFirst: "执行前确认",
+        tasksLabel: "任务数",
+        updatedLabel: "最近更新"
       };
 
   if (error) {
@@ -161,6 +196,25 @@ export function AgentsPage() {
     }
   }
 
+  function applyJeremyPreset() {
+    setNewAgentId("jeremy");
+    setNewAgentName("Jeremy");
+    setNewAgentTitle(isEnglish ? "Design Director" : "设计总监");
+    setNewAgentModel("gpt-5.2");
+    setNewAgentIntro(
+      isEnglish
+        ? "Leads product design direction, interaction quality, and final visual reviews."
+        : "负责产品设计方向、交互质量与最终视觉评审。"
+    );
+    setNewAgentResponsibility(
+      isEnglish
+        ? "Own the design system, information hierarchy, UI consistency, and review of critical pages."
+        : "负责设计系统、信息层级、界面一致性以及关键页面评审。"
+    );
+    setNewAgentTools("openclaw, rg, pnpm");
+    setNewAgentAllowedAgents("product_owner, frontend_lead, backend_lead");
+  }
+
   return (
     <div className="page">
       <header className="page-header">
@@ -186,130 +240,188 @@ export function AgentsPage() {
         <MetricTile label={copy.runtime} value={health?.runtime.mode ?? "unknown"} />
       </section>
 
-      <section className="card">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">{copy.createAgent}</p>
-            <h3>{copy.createAgent}</h3>
-          </div>
-        </div>
-        <div className="form-grid">
-          <label className="form-field">
-            <span>{copy.agentId}</span>
-            <input value={newAgentId} onChange={(event) => setNewAgentId(event.target.value)} placeholder="design_lead" />
-          </label>
-          <label className="form-field">
-            <span>{copy.name}</span>
-            <input value={newAgentName} onChange={(event) => setNewAgentName(event.target.value)} placeholder="Jeremy" />
-          </label>
-          <label className="form-field">
-            <span>{copy.titleLabel}</span>
-            <input value={newAgentTitle} onChange={(event) => setNewAgentTitle(event.target.value)} placeholder={isEnglish ? "Design Director" : "设计总监"} />
-          </label>
-          <label className="form-field">
-            <span>{copy.modelLabel}</span>
-            <input value={newAgentModel} onChange={(event) => setNewAgentModel(event.target.value)} placeholder="gpt-5.2" />
-          </label>
-          <label className="form-field">
-            <span>{copy.introLabel}</span>
-            <input value={newAgentIntro} onChange={(event) => setNewAgentIntro(event.target.value)} placeholder={isEnglish ? "Design reviews, UI system, design quality." : "负责设计评审、界面系统和体验质量。"} />
-          </label>
-          <label className="form-field">
-            <span>{copy.responsibilityLabel}</span>
-            <input value={newAgentResponsibility} onChange={(event) => setNewAgentResponsibility(event.target.value)} placeholder={isEnglish ? "Lead product design and review visual consistency." : "负责产品设计统筹与视觉一致性把控。"} />
-          </label>
-          <label className="form-field">
-            <span>{copy.toolsLabel}</span>
-            <input value={newAgentTools} onChange={(event) => setNewAgentTools(event.target.value)} placeholder="openclaw, rg, pnpm" />
-          </label>
-          <label className="form-field">
-            <span>{copy.collaboratorsLabel}</span>
-            <input value={newAgentAllowedAgents} onChange={(event) => setNewAgentAllowedAgents(event.target.value)} placeholder="jeremy, product_owner" />
-          </label>
-        </div>
-        <div className="action-row">
-          <button className="button button-primary" onClick={() => void handleCreateAgent()} disabled={creating}>
-            {creating ? copy.creatingAgent : copy.createAgent}
-          </button>
-        </div>
-      </section>
-
-      {health ? (
-        <section className="card">
-          <div className="section-header">
-            <div>
-              <p className="eyebrow">{copy.runtimeWatch}</p>
-              <h3>{copy.serviceHealth}</h3>
-            </div>
-          </div>
-          <div className="agent-mini-list">
-            {health.services.map((service) => (
-              <div key={service.name} className="agent-mini-card">
-                <div>
-                  <strong>{service.name}</strong>
-                  <p>{service.detail}</p>
-                </div>
-                <span className={`status-badge status-${service.status === "healthy" ? "completed" : "paused"}`}>
-                  {service.status}
-                </span>
-              </div>
-            ))}
-          </div>
-        </section>
-      ) : null}
-
-      <section className="agent-grid">
-        {sortedAgents.map((agent) => (
-          <article className="card agent-card" key={agent.agentId}>
+      <section className="agent-workbench">
+        <div className="agent-workbench-main">
+          <article className="card">
             <div className="section-header">
               <div>
-                <p className="eyebrow">{agent.agentId}</p>
-                <h3>{agent.emoji} {agent.name}</h3>
+                <p className="eyebrow">{copy.rosterTitle}</p>
+                <h3>{copy.rosterTitle}</h3>
+                <p className="hero-copy">{copy.rosterCopy}</p>
               </div>
-              <div className="pill-row">
-                <span className={`status-badge status-${agent.status}`}>{agent.status}</span>
-                {agent.commander.executionMode === "autonomous" ? (
-                  <span className="pill pill-primary">{copy.autonomous}</span>
-                ) : null}
-              </div>
+              <span className="pill">{sortedAgents.length}</span>
             </div>
 
-            <p className="highlight-text">{agent.title}</p>
-            <p className="agent-description">{agent.intro}</p>
+            <div className="agent-roster-list">
+              {sortedAgents.map((agent) => (
+                <article className="agent-roster-row" key={agent.agentId}>
+                  <div className="agent-roster-main">
+                    <div className="agent-roster-head">
+                      <div>
+                        <div className="pill-row">
+                          <span className={`status-badge status-${agent.status}`}>{agent.status}</span>
+                          {agent.commander.executionMode === "autonomous" ? (
+                            <span className="pill pill-primary">{copy.autonomous}</span>
+                          ) : (
+                            <span className="pill">{copy.confirmFirst}</span>
+                          )}
+                        </div>
+                        <h3 className="agent-roster-title">{agent.emoji} {agent.name}</h3>
+                      </div>
+                      <Link className="button button-primary inline-button" to={`/agents/${agent.agentId}`}>
+                        {copy.openCommander}
+                      </Link>
+                    </div>
 
-            <div className="agent-kpi-grid">
-              <div className="agent-kpi-card">
-                <span>{copy.currentTask}</span>
-                <strong>{agent.currentTask ? agent.currentTask.title : copy.noTask}</strong>
-                <span className="muted-text">{agent.currentTask ? agent.currentTask.projectName : agent.responsibility}</span>
-              </div>
-              <div className="agent-kpi-card">
-                <span>{copy.sessions}</span>
-                <strong>{agent.sessionCount}</strong>
-                <span className="muted-text">{copy.blocked} {agent.blockedTaskCount}</span>
-              </div>
-            </div>
+                    <p className="highlight-text">{agent.title}</p>
+                    <p className="agent-description">{agent.intro}</p>
 
-            <div className="meta-strip meta-strip-compact">
-              <MiniMeta label="Model" value={agent.commander.selectedModel} />
-              <MiniMeta label={copy.allowed} value={String(agent.allowedAgentIds.length)} />
-              <MiniMeta label="Tasks" value={String(agent.taskCount)} />
-              <MiniMeta label="Updated" value={agent.lastActiveAt ? formatTime(agent.lastActiveAt, isEnglish ? "en-US" : "zh-CN") : "-"} />
-            </div>
+                    <div className="agent-kpi-grid">
+                      <div className="agent-kpi-card">
+                        <span>{copy.currentTask}</span>
+                        <strong>{agent.currentTask ? agent.currentTask.title : copy.noTask}</strong>
+                        <span className="muted-text">{agent.currentTask ? agent.currentTask.projectName : agent.responsibility}</span>
+                      </div>
+                      <div className="agent-kpi-card">
+                        <span>{copy.sessions}</span>
+                        <strong>{agent.sessionCount}</strong>
+                        <span className="muted-text">{copy.blocked} {agent.blockedTaskCount}</span>
+                      </div>
+                    </div>
 
-            <div className="pill-row">
-              {agent.availableModels.slice(0, 3).map((model) => (
-                <span className="pill" key={model.id}>
-                  {model.label}
-                </span>
+                    <div className="pill-row">
+                      {agent.availableModels.slice(0, 3).map((model) => (
+                        <span className="pill" key={model.id}>
+                          {model.label}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="agent-roster-side">
+                    <MiniMeta label={copy.currentModel} value={agent.commander.selectedModel} />
+                    <MiniMeta label={copy.executionMode} value={agent.commander.executionMode} />
+                    <MiniMeta label={copy.tasksLabel} value={String(agent.taskCount)} />
+                    <MiniMeta label={copy.allowed} value={String(agent.allowedAgentIds.length)} />
+                    <MiniMeta label={copy.updatedLabel} value={agent.lastActiveAt ? formatTime(agent.lastActiveAt, isEnglish ? "en-US" : "zh-CN") : "-"} />
+                  </div>
+                </article>
               ))}
             </div>
-
-            <Link className="button button-primary" to={`/agents/${agent.agentId}`}>
-              {copy.openCommander}
-            </Link>
           </article>
-        ))}
+        </div>
+
+        <aside className="agent-workbench-side">
+          <article className="card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">{copy.workloadTitle}</p>
+                <h3>{copy.workloadTitle}</h3>
+              </div>
+            </div>
+            <p className="hero-copy">{copy.workloadCopy}</p>
+            <div className="attention-list">
+              {overloadedAgents.map((agent) => (
+                <article className="attention-card attention-warning" key={agent.agentId}>
+                  <div className="timeline-head">
+                    <strong>{agent.name}</strong>
+                    <span className="pill pill-warning">{agent.taskCount}</span>
+                  </div>
+                  <p>{agent.currentTask?.title ?? agent.responsibility}</p>
+                  <p>
+                    {copy.blocked} {agent.blockedTaskCount} · {copy.sessions} {agent.sessionCount}
+                  </p>
+                </article>
+              ))}
+              {overloadedAgents.length === 0 ? (
+                <p className="muted-text">{isEnglish ? "No overloaded agents right now." : "当前没有高负载 Agent。"}</p>
+              ) : null}
+            </div>
+          </article>
+
+          {health ? (
+            <article className="card">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">{copy.runtimeWatch}</p>
+                  <h3>{copy.serviceHealth}</h3>
+                </div>
+              </div>
+              <div className="agent-mini-list">
+                {health.services.map((service) => (
+                  <div key={service.name} className="agent-mini-card">
+                    <div>
+                      <strong>{service.name}</strong>
+                      <p>{service.detail}</p>
+                    </div>
+                    <span className={`status-badge status-${service.status === "healthy" ? "completed" : "paused"}`}>
+                      {service.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </article>
+          ) : null}
+
+          <article className="card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">{copy.governanceTitle}</p>
+                <h3>{copy.createAgent}</h3>
+              </div>
+            </div>
+            <p className="hero-copy">{copy.governanceCopy}</p>
+            {!hasJeremy ? (
+              <div className="attention-card attention-warning">
+                <strong>{copy.missingDesignLead}</strong>
+                <div className="action-row">
+                  <button className="button button-ghost inline-button" onClick={applyJeremyPreset} type="button">
+                    {copy.fillJeremy}
+                  </button>
+                </div>
+              </div>
+            ) : null}
+            <div className="form-grid">
+              <label className="form-field">
+                <span>{copy.agentId}</span>
+                <input value={newAgentId} onChange={(event) => setNewAgentId(event.target.value)} placeholder="design_lead" />
+              </label>
+              <label className="form-field">
+                <span>{copy.name}</span>
+                <input value={newAgentName} onChange={(event) => setNewAgentName(event.target.value)} placeholder="Jeremy" />
+              </label>
+              <label className="form-field">
+                <span>{copy.titleLabel}</span>
+                <input value={newAgentTitle} onChange={(event) => setNewAgentTitle(event.target.value)} placeholder={isEnglish ? "Design Director" : "设计总监"} />
+              </label>
+              <label className="form-field">
+                <span>{copy.modelLabel}</span>
+                <input value={newAgentModel} onChange={(event) => setNewAgentModel(event.target.value)} placeholder="gpt-5.2" />
+              </label>
+              <label className="form-field">
+                <span>{copy.introLabel}</span>
+                <input value={newAgentIntro} onChange={(event) => setNewAgentIntro(event.target.value)} placeholder={isEnglish ? "Design reviews, UI system, design quality." : "负责设计评审、界面系统和体验质量。"} />
+              </label>
+              <label className="form-field">
+                <span>{copy.responsibilityLabel}</span>
+                <input value={newAgentResponsibility} onChange={(event) => setNewAgentResponsibility(event.target.value)} placeholder={isEnglish ? "Lead product design and review visual consistency." : "负责产品设计统筹与视觉一致性把控。"} />
+              </label>
+              <label className="form-field">
+                <span>{copy.toolsLabel}</span>
+                <input value={newAgentTools} onChange={(event) => setNewAgentTools(event.target.value)} placeholder="openclaw, rg, pnpm" />
+              </label>
+              <label className="form-field">
+                <span>{copy.collaboratorsLabel}</span>
+                <input value={newAgentAllowedAgents} onChange={(event) => setNewAgentAllowedAgents(event.target.value)} placeholder="jeremy, product_owner" />
+              </label>
+            </div>
+            <div className="action-row">
+              <button className="button button-primary" onClick={() => void handleCreateAgent()} disabled={creating}>
+                {creating ? copy.creatingAgent : copy.createAgent}
+              </button>
+            </div>
+          </article>
+        </aside>
       </section>
     </div>
   );

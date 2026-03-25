@@ -472,6 +472,36 @@ input {
   gap: 20px;
 }
 
+.portfolio-shell,
+.agent-workbench,
+.operations-layout {
+  display: grid;
+  gap: 20px;
+}
+
+.portfolio-shell {
+  grid-template-columns: minmax(0, 1.45fr) minmax(300px, 0.72fr);
+}
+
+.agent-workbench {
+  grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.82fr);
+}
+
+.operations-layout {
+  grid-template-columns: minmax(0, 1.28fr) minmax(320px, 0.82fr);
+}
+
+.portfolio-main,
+.portfolio-sidebar,
+.agent-workbench-main,
+.agent-workbench-side,
+.operations-main,
+.operations-side {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
 .system-monitor-grid,
 .usage-tool-grid,
 .usage-kpi-grid {
@@ -896,6 +926,98 @@ input {
   gap: 16px;
 }
 
+.portfolio-roster-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.portfolio-list,
+.agent-roster-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-roster-list {
+  gap: 14px;
+}
+
+.portfolio-row,
+.agent-roster-row {
+  display: grid;
+  gap: 18px;
+  padding: 22px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.portfolio-row:first-child,
+.agent-roster-row:first-child {
+  border-top: none;
+}
+
+.portfolio-row {
+  grid-template-columns: minmax(0, 1.42fr) 280px;
+}
+
+.portfolio-row-main,
+.agent-roster-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.portfolio-row-head,
+.agent-roster-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.portfolio-row-title,
+.agent-roster-title {
+  margin: 10px 0 0;
+  font-size: 1.16rem;
+}
+
+.portfolio-row-summary {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.portfolio-progress-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.portfolio-progress-row strong {
+  display: block;
+  margin-top: 8px;
+}
+
+.portfolio-row-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+.portfolio-metric-stack {
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(51, 65, 85, 0.72);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.portfolio-metric-stack-warning {
+  border-color: rgba(255, 184, 77, 0.24);
+}
+
 .module-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1220,6 +1342,20 @@ input {
   display: flex;
   flex-direction: column;
   gap: 18px;
+}
+
+.agent-roster-row {
+  grid-template-columns: minmax(0, 1.4fr) 240px;
+  border-radius: 24px;
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(51, 65, 85, 0.72);
+  border-top: 1px solid rgba(51, 65, 85, 0.72);
+}
+
+.agent-roster-side {
+  display: grid;
+  gap: 12px;
+  align-content: start;
 }
 
 .agent-summary-grid {
@@ -1742,6 +1878,9 @@ input {
   .meta-strip-wide,
   .ops-grid,
   .agent-summary-grid,
+  .portfolio-shell,
+  .agent-workbench,
+  .operations-layout,
   .system-grid,
   .openclaw-grid,
   .commander-hero,
@@ -1796,7 +1935,11 @@ input {
   .usage-kpi-grid,
   .agent-kpi-grid,
   .form-grid,
-  .meta-strip-compact {
+  .meta-strip-compact,
+  .portfolio-row,
+  .agent-roster-row,
+  .portfolio-row-metrics,
+  .portfolio-progress-row {
     grid-template-columns: 1fr;
   }
 

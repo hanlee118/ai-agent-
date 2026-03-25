@@ -29,7 +29,7 @@ const EMPTY_USAGE: LocalAgentUsageSummary = {
 };
 
 export function SystemPage() {
-  const { isEnglish } = useLocale();
+  const { isEnglish, locale } = useLocale();
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [localAgentMonitor, setLocalAgentMonitor] = useState<LocalAgentMonitorOverview | null>(null);
@@ -82,7 +82,31 @@ export function SystemPage() {
         dbPath: "Database path",
         openclawConfig: "OpenClaw config",
         workspaceRoot: "Workspace root",
-        warnings: "Warnings"
+        warnings: "Warnings",
+        runModeLabel: "Runtime mode",
+        apiBaseLabel: "API Base URL",
+        modelNameLabel: "Model name",
+        apiKeyLabel: "API Key",
+        clearApiKeyLabel: "Clear current API key",
+        configSummary: "Current configuration snapshot",
+        apiKeyConfigured: "API Key configured",
+        updatedAt: "Last updated",
+        validatedAt: "Last validated",
+        validationResult: "Latest validation result",
+        notValidated: "Not validated yet",
+        releaseChecklist: "Release Checklist",
+        releaseChecklistCopy: "Use this rail like an operator cockpit before publishing or switching the runtime.",
+        databaseHealth: "Database health",
+        runtimeReady: "Runtime ready",
+        openclawReady: "OpenClaw connected",
+        taskObservability: "Task observability",
+        recentAudit: "Recent audit",
+        configuredPlaceholderPrefix: "Configured",
+        enterNewApiKey: "Enter a new API key",
+        pendingCheck: "Pending check",
+        connectedModel: "Connected model",
+        scriptedModeDetail: "The workspace is still using scripted fallback mode. Demo-safe, but not ideal for final production.",
+        noAudit: "No audit entries yet."
       }
     : {
         title: "运行配置、健康状态与发布前检查",
@@ -119,7 +143,31 @@ export function SystemPage() {
         dbPath: "数据库路径",
         openclawConfig: "OpenClaw 配置",
         workspaceRoot: "工作区根目录",
-        warnings: "风险提示"
+        warnings: "风险提示",
+        runModeLabel: "运行模式",
+        apiBaseLabel: "API Base URL",
+        modelNameLabel: "模型名称",
+        apiKeyLabel: "API Key",
+        clearApiKeyLabel: "清除当前 API Key",
+        configSummary: "当前配置摘要",
+        apiKeyConfigured: "已配置 API Key",
+        updatedAt: "最近更新时间",
+        validatedAt: "最近校验时间",
+        validationResult: "最近校验结果",
+        notValidated: "尚未校验",
+        releaseChecklist: "发布前检查",
+        releaseChecklistCopy: "把右侧栏当成运营驾驶舱，在发布或切换运行模式前快速确认关键依赖。",
+        databaseHealth: "数据库健康",
+        runtimeReady: "运行模式可用",
+        openclawReady: "OpenClaw 已接通",
+        taskObservability: "任务体系可观测",
+        recentAudit: "最近操作记录",
+        configuredPlaceholderPrefix: "已配置",
+        enterNewApiKey: "输入新的 API Key",
+        pendingCheck: "待检查",
+        connectedModel: "当前已连接真实模型",
+        scriptedModeDetail: "当前仍在脚本模式，可继续演示但不建议作为最终生产配置。",
+        noAudit: "当前还没有审计记录。"
       };
 
   const totalUsage = localAgentMonitor?.totals ?? EMPTY_USAGE;
@@ -283,125 +331,83 @@ export function SystemPage() {
         <MetricTile label={copy.validation} value={runtime?.lastValidationStatus ?? "unknown"} />
       </section>
 
-      <section className="system-grid">
-        <article className="card">
-          <div className="section-header">
+      <section className="operations-layout">
+        <div className="operations-main">
+          <article className="card">
+            <div className="section-header">
               <div>
                 <p className="eyebrow">Runtime Config</p>
                 <h3>{copy.runtimeConfig}</h3>
               </div>
             </div>
 
-          <div className="form-grid">
-            <label className="form-field">
-              <span>运行模式</span>
-              <select value={provider} onChange={(event) => setProvider(event.target.value as RuntimeMode)}>
-                <option value="scripted">scripted</option>
-                <option value="openai-compatible">openai-compatible</option>
-              </select>
-            </label>
+            <div className="form-grid">
+              <label className="form-field">
+                <span>{copy.runModeLabel}</span>
+                <select value={provider} onChange={(event) => setProvider(event.target.value as RuntimeMode)}>
+                  <option value="scripted">scripted</option>
+                  <option value="openai-compatible">openai-compatible</option>
+                </select>
+              </label>
 
-            <label className="form-field">
-              <span>API Base URL</span>
-              <input
-                value={apiBaseUrl}
-                onChange={(event) => setApiBaseUrl(event.target.value)}
-                placeholder="https://api.example.com/v1"
-              />
-            </label>
-
-            <label className="form-field">
-              <span>模型名称</span>
-              <input
-                value={modelName}
-                onChange={(event) => setModelName(event.target.value)}
-                placeholder="gpt-4.1 / qwen-max / deepseek-chat"
-              />
-            </label>
-
-            <label className="form-field">
-              <span>API Key</span>
-              <input
-                type="password"
-                value={apiKey}
-                onChange={(event) => {
-                  setApiKey(event.target.value);
-                  if (event.target.value) {
-                    setClearApiKey(false);
-                  }
-                }}
-                placeholder={settings?.apiKeyConfigured ? `已配置：${settings.apiKeyPreview}` : "输入新的 API Key"}
-              />
-            </label>
-          </div>
-
-          <label className="checkbox-row">
-            <input
-              type="checkbox"
-              checked={clearApiKey}
-              onChange={(event) => setClearApiKey(event.target.checked)}
-            />
-            <span>清除当前 API Key</span>
-          </label>
-
-          <div className="action-row action-row-wrap">
-            <button className="button button-primary" onClick={() => void handleSave()} disabled={saving}>
-              {saving ? (isEnglish ? "Saving..." : "保存中...") : copy.save}
-            </button>
-            <button className="button button-ghost" onClick={() => void handleValidate()} disabled={validating}>
-              {validating ? (isEnglish ? "Validating..." : "校验中...") : copy.validate}
-            </button>
-          </div>
-
-          <div className="sub-card">
-            <p className="group-title">当前配置摘要</p>
-            <p>已配置 API Key：{settings?.apiKeyConfigured ? settings.apiKeyPreview : "否"}</p>
-            <p>最近更新时间：{settings?.updatedAt ? formatTime(settings.updatedAt) : "暂无"}</p>
-            <p>最近校验时间：{settings?.lastValidatedAt ? formatTime(settings.lastValidatedAt) : "尚未校验"}</p>
-            <p>最近校验结果：{settings?.lastValidationError ?? settings?.lastValidationStatus ?? "unknown"}</p>
-          </div>
-        </article>
-
-        <div className="stack">
-          <article className="card">
-            <div className="section-header">
-              <div>
-                <p className="eyebrow">Readiness</p>
-                <h3>{copy.readiness}</h3>
-              </div>
-              <span className="pill">{readiness?.warnings.length ?? 0}</span>
-            </div>
-
-            <div className="stack tight">
-              <div className="meta-chip">
-                <span>{copy.dbPath}</span>
-                <strong>{readiness?.database.path || readiness?.database.url || "-"}</strong>
-              </div>
-              <div className="meta-chip">
-                <span>{copy.openclawConfig}</span>
-                <strong>{readiness?.openclaw.configPath ?? "-"}</strong>
-              </div>
-              <div className="meta-chip">
-                <span>{copy.workspaceRoot}</span>
-                <strong>{readiness?.openclaw.workspaceRoot ?? "-"}</strong>
-              </div>
-            </div>
-
-            <div className="metric-inline-grid">
-              <MetricInline label={isEnglish ? "Managed agents" : "受管 Agent"} value={String(readiness?.database.managedAgentCount ?? 0)} />
-              <MetricInline label={isEnglish ? "Memory rows" : "记忆条目"} value={String(readiness?.database.memoryEntryCount ?? 0)} />
-              <MetricInline label={isEnglish ? "Usage logs" : "调用日志"} value={String(readiness?.database.usageLogCount ?? 0)} />
-            </div>
-
-            <div className="attention-list">
-              {(readiness?.warnings.length ? readiness.warnings : [isEnglish ? "No readiness warnings were detected." : "当前没有发现新的平台就绪度风险。"]).map((item) => (
-                <ChecklistItem
-                  key={item}
-                  title={readiness?.warnings.length ? copy.warnings : (isEnglish ? "Ready" : "就绪")}
-                  detail={item}
-                  ok={!readiness?.warnings.length}
+              <label className="form-field">
+                <span>{copy.apiBaseLabel}</span>
+                <input
+                  value={apiBaseUrl}
+                  onChange={(event) => setApiBaseUrl(event.target.value)}
+                  placeholder="https://api.example.com/v1"
                 />
-              ))}
+              </label>
+
+              <label className="form-field">
+                <span>{copy.modelNameLabel}</span>
+                <input
+                  value={modelName}
+                  onChange={(event) => setModelName(event.target.value)}
+                  placeholder="gpt-4.1 / qwen-max / deepseek-chat"
+                />
+              </label>
+
+              <label className="form-field">
+                <span>{copy.apiKeyLabel}</span>
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(event) => {
+                    setApiKey(event.target.value);
+                    if (event.target.value) {
+                      setClearApiKey(false);
+                    }
+                  }}
+                  placeholder={settings?.apiKeyConfigured ? `${copy.configuredPlaceholderPrefix}: ${settings.apiKeyPreview}` : copy.enterNewApiKey}
+                />
+              </label>
+            </div>
+
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={clearApiKey}
+                onChange={(event) => setClearApiKey(event.target.checked)}
+              />
+              <span>{copy.clearApiKeyLabel}</span>
+            </label>
+
+            <div className="action-row action-row-wrap">
+              <button className="button button-primary" onClick={() => void handleSave()} disabled={saving}>
+                {saving ? (isEnglish ? "Saving..." : "保存中...") : copy.save}
+              </button>
+              <button className="button button-ghost" onClick={() => void handleValidate()} disabled={validating}>
+                {validating ? (isEnglish ? "Validating..." : "校验中...") : copy.validate}
+              </button>
+            </div>
+
+            <div className="sub-card">
+              <p className="group-title">{copy.configSummary}</p>
+              <p>{copy.apiKeyConfigured}: {settings?.apiKeyConfigured ? settings.apiKeyPreview : (isEnglish ? "No" : "否")}</p>
+              <p>{copy.updatedAt}: {settings?.updatedAt ? formatTime(settings.updatedAt, locale) : (isEnglish ? "n/a" : "暂无")}</p>
+              <p>{copy.validatedAt}: {settings?.lastValidatedAt ? formatTime(settings.lastValidatedAt, locale) : copy.notValidated}</p>
+              <p>{copy.validationResult}: {settings?.lastValidationError ?? settings?.lastValidationStatus ?? "unknown"}</p>
             </div>
           </article>
 
@@ -418,7 +424,7 @@ export function SystemPage() {
                 </span>
                 <p className="muted-text">
                   {localAgentMonitor?.scannedAt
-                    ? `${copy.localMonitorScannedAt} · ${formatTime(localAgentMonitor.scannedAt, isEnglish ? "en-US" : "zh-CN")}`
+                    ? `${copy.localMonitorScannedAt} · ${formatTime(localAgentMonitor.scannedAt, locale)}`
                     : copy.localMonitorPending}
                 </p>
               </div>
@@ -494,6 +500,79 @@ export function SystemPage() {
           <article className="card">
             <div className="section-header">
               <div>
+                <p className="eyebrow">Audit Trail</p>
+                <h3>{copy.recentAudit}</h3>
+              </div>
+            </div>
+
+            <div className="timeline-list">
+              {auditLogs.map((item) => (
+                <article key={item.id} className="timeline-item">
+                  <div className="timeline-time">{formatTime(item.createdAt, locale)}</div>
+                  <div>
+                    <div className="timeline-head">
+                      <strong>{item.summary}</strong>
+                      <span className="pill">{item.action}</span>
+                    </div>
+                    <p>
+                      {item.actorLabel} · {item.resourceType}
+                      {item.resourceId ? ` · ${item.resourceId}` : ""}
+                    </p>
+                    {item.detail ? <p>{item.detail}</p> : null}
+                  </div>
+                </article>
+              ))}
+              {auditLogs.length === 0 ? <p className="muted-text">{copy.noAudit}</p> : null}
+            </div>
+          </article>
+        </div>
+
+        <aside className="operations-side">
+          <article className="card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Readiness</p>
+                <h3>{copy.readiness}</h3>
+              </div>
+              <span className="pill">{readiness?.warnings.length ?? 0}</span>
+            </div>
+
+            <div className="stack tight">
+              <div className="meta-chip">
+                <span>{copy.dbPath}</span>
+                <strong>{readiness?.database.path || readiness?.database.url || "-"}</strong>
+              </div>
+              <div className="meta-chip">
+                <span>{copy.openclawConfig}</span>
+                <strong>{readiness?.openclaw.configPath ?? "-"}</strong>
+              </div>
+              <div className="meta-chip">
+                <span>{copy.workspaceRoot}</span>
+                <strong>{readiness?.openclaw.workspaceRoot ?? "-"}</strong>
+              </div>
+            </div>
+
+            <div className="metric-inline-grid">
+              <MetricInline label={isEnglish ? "Managed agents" : "受管 Agent"} value={String(readiness?.database.managedAgentCount ?? 0)} />
+              <MetricInline label={isEnglish ? "Memory rows" : "记忆条目"} value={String(readiness?.database.memoryEntryCount ?? 0)} />
+              <MetricInline label={isEnglish ? "Usage logs" : "调用日志"} value={String(readiness?.database.usageLogCount ?? 0)} />
+            </div>
+
+            <div className="attention-list">
+              {(readiness?.warnings.length ? readiness.warnings : [isEnglish ? "No readiness warnings were detected." : "当前没有发现新的平台就绪度风险。"]).map((item) => (
+                <ChecklistItem
+                  key={item}
+                  title={readiness?.warnings.length ? copy.warnings : (isEnglish ? "Ready" : "就绪")}
+                  detail={item}
+                  ok={!readiness?.warnings.length}
+                />
+              ))}
+            </div>
+          </article>
+
+          <article className="card">
+            <div className="section-header">
+              <div>
                 <p className="eyebrow">Service Health</p>
                 <h3>{copy.serviceHealth}</h3>
               </div>
@@ -518,67 +597,39 @@ export function SystemPage() {
             <div className="section-header">
               <div>
                 <p className="eyebrow">Release Checklist</p>
-                <h3>发布前检查</h3>
+                <h3>{copy.releaseChecklist}</h3>
               </div>
             </div>
+            <p className="hero-copy">{copy.releaseChecklistCopy}</p>
 
             <div className="attention-list">
               <ChecklistItem
-                title="数据库健康"
-                detail={`${health?.services.find((item) => item.name === "database")?.detail ?? "待检查"}${readiness?.database.path ? ` · ${readiness.database.path}` : ""}`}
+                title={copy.databaseHealth}
+                detail={`${health?.services.find((item) => item.name === "database")?.detail ?? copy.pendingCheck}${readiness?.database.path ? ` · ${readiness.database.path}` : ""}`}
                 ok={health?.services.find((item) => item.name === "database")?.status === "healthy" && Boolean(readiness?.database.exists)}
               />
               <ChecklistItem
-                title="运行模式可用"
+                title={copy.runtimeReady}
                 detail={
                   runtime?.mode === "openai-compatible"
-                    ? `当前已连接真实模型：${runtime.modelName}`
-                    : "当前仍在脚本模式，可继续演示但不建议作为最终生产配置。"
+                    ? `${copy.connectedModel}: ${runtime.modelName}`
+                    : copy.scriptedModeDetail
                 }
                 ok={runtime?.mode === "openai-compatible"}
               />
               <ChecklistItem
-                title="OpenClaw 已接通"
+                title={copy.openclawReady}
                 detail={`config=${readiness?.openclaw.configExists ? "ok" : "missing"} · workspace=${readiness?.openclaw.workspaceExists ? "ok" : "missing"} · agents=${readiness?.openclaw.liveWorkspaceAgentCount ?? 0}`}
                 ok={Boolean(readiness?.openclaw.configExists && readiness?.openclaw.workspaceExists && (readiness?.openclaw.liveWorkspaceAgentCount ?? 0) > 0)}
               />
               <ChecklistItem
-                title="任务体系可观测"
+                title={copy.taskObservability}
                 detail={`当前共有 ${health?.activeTasks ?? 0} 个活动任务，${health?.blockedTasks ?? 0} 个阻塞任务，OpenClaw 项目 ${readiness?.openclaw.liveWorkspaceProjectCount ?? 0} 个。`}
                 ok={(health?.blockedTasks ?? 0) === 0 && (readiness?.openclaw.liveWorkspaceProjectCount ?? 0) > 0}
               />
             </div>
           </article>
-
-          <article className="card">
-            <div className="section-header">
-              <div>
-                <p className="eyebrow">Audit Trail</p>
-                <h3>最近操作记录</h3>
-              </div>
-            </div>
-
-            <div className="timeline-list">
-              {auditLogs.map((item) => (
-                <article key={item.id} className="timeline-item">
-                  <div className="timeline-time">{formatTime(item.createdAt)}</div>
-                  <div>
-                    <div className="timeline-head">
-                      <strong>{item.summary}</strong>
-                      <span className="pill">{item.action}</span>
-                    </div>
-                    <p>
-                      {item.actorLabel} · {item.resourceType}
-                      {item.resourceId ? ` · ${item.resourceId}` : ""}
-                    </p>
-                    {item.detail ? <p>{item.detail}</p> : null}
-                  </div>
-                </article>
-              ))}
-              {auditLogs.length === 0 ? <p className="muted-text">当前还没有审计记录。</p> : null}
-            </div>
-          </article>
-        </div>
+        </aside>
       </section>
     </div>
   );
