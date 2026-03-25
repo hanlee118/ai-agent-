@@ -392,13 +392,12 @@ input {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(260px, 0.8fr);
   gap: 20px;
-  padding: 28px;
+  padding: 24px 26px;
   border-radius: var(--radius-lg);
   background:
-    linear-gradient(135deg, rgba(111, 228, 255, 0.18), transparent 45%),
-    linear-gradient(135deg, rgba(255, 191, 103, 0.08), transparent 58%),
-    linear-gradient(180deg, rgba(20, 34, 53, 0.96), rgba(12, 23, 38, 0.9));
-  border: 1px solid rgba(111, 228, 255, 0.18);
+    linear-gradient(180deg, rgba(20, 27, 36, 0.96), rgba(15, 23, 42, 0.88));
+  border: 1px solid rgba(51, 65, 85, 0.84);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .hero-inline-meta {
@@ -426,6 +425,9 @@ input {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  background: rgba(15, 23, 42, 0.76);
+  border-color: rgba(51, 65, 85, 0.82);
+  box-shadow: none;
 }
 
 .metric-inline-grid {
@@ -436,8 +438,9 @@ input {
 
 .metric-inline-card {
   padding: 14px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.03);
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.64);
+  border: 1px solid rgba(51, 65, 85, 0.78);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -902,11 +905,9 @@ input {
 .module-card,
 .demo-project-card {
   padding: 18px;
-  border-radius: 22px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background:
-    linear-gradient(180deg, rgba(111, 228, 255, 0.08), transparent 66%),
-    rgba(255, 255, 255, 0.03);
+  border-radius: 18px;
+  border: 1px solid rgba(51, 65, 85, 0.82);
+  background: rgba(15, 23, 42, 0.64);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -916,10 +917,8 @@ input {
 .module-card:hover,
 .demo-project-card:hover {
   transform: translateY(-2px);
-  border-color: rgba(111, 228, 255, 0.26);
-  background:
-    linear-gradient(180deg, rgba(111, 228, 255, 0.12), transparent 70%),
-    rgba(255, 255, 255, 0.04);
+  border-color: rgba(56, 189, 248, 0.28);
+  background: rgba(15, 23, 42, 0.82);
 }
 
 .module-card-head {
@@ -958,9 +957,9 @@ input {
 
 .task-board-card {
   padding: 18px;
-  border-radius: 20px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.56);
+  border: 1px solid rgba(51, 65, 85, 0.7);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -985,9 +984,9 @@ input {
 
 .attention-card {
   padding: 18px;
-  border-radius: 18px;
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(51, 65, 85, 0.72);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -1091,10 +1090,10 @@ input {
 
 .live-console {
   min-height: 340px;
-  border-radius: 20px;
+  border-radius: 18px;
   padding: 18px;
-  background: linear-gradient(180deg, rgba(4, 10, 20, 0.92), rgba(8, 17, 31, 0.82));
-  border: 1px solid rgba(81, 229, 255, 0.14);
+  background: linear-gradient(180deg, rgba(8, 11, 16, 0.98), rgba(15, 23, 42, 0.86));
+  border: 1px solid rgba(51, 65, 85, 0.82);
   overflow: auto;
 }
 
@@ -1121,7 +1120,8 @@ input {
 .deliverable-card {
   padding: 14px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(51, 65, 85, 0.64);
 }
 
 .task-list {
@@ -1133,7 +1133,8 @@ input {
 .task-card {
   padding: 14px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(51, 65, 85, 0.64);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1206,7 +1207,8 @@ input {
 .agent-mini-card {
   padding: 12px 14px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(51, 65, 85, 0.7);
 }
 
 .highlight-text {
@@ -1301,10 +1303,8 @@ input {
 .program-card {
   padding: 16px;
   border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(121, 224, 255, 0.06), transparent 60%),
-    rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(51, 65, 85, 0.74);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1321,10 +1321,8 @@ input {
 .doc-card {
   padding: 16px;
   border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(121, 224, 255, 0.06), transparent 72%),
-    rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(51, 65, 85, 0.74);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1361,10 +1359,8 @@ input {
   width: 100%;
   padding: 18px;
   border-radius: 20px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  background:
-    linear-gradient(180deg, rgba(121, 224, 255, 0.04), transparent 60%),
-    rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(51, 65, 85, 0.72);
+  background: rgba(15, 23, 42, 0.56);
   color: var(--text);
   text-align: left;
   cursor: pointer;
@@ -1377,8 +1373,8 @@ input {
 }
 
 .openclaw-card.is-selected {
-  border-color: rgba(81, 229, 255, 0.34);
-  background: rgba(81, 229, 255, 0.08);
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(14, 165, 233, 0.12);
 }
 
 .meta-strip-compact {
@@ -1394,7 +1390,8 @@ input {
   gap: 12px;
   padding: 14px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(15, 23, 42, 0.56);
+  border: 1px solid rgba(51, 65, 85, 0.72);
 }
 
 .task-row {
@@ -1406,8 +1403,8 @@ input {
 }
 
 .task-row.is-selected {
-  border-color: rgba(81, 229, 255, 0.28);
-  background: rgba(81, 229, 255, 0.08);
+  border-color: rgba(56, 189, 248, 0.32);
+  background: rgba(14, 165, 233, 0.12);
 }
 
 .task-row-button {
@@ -1523,9 +1520,8 @@ input {
   padding: 24px 26px;
   border-radius: var(--radius-lg);
   background:
-    radial-gradient(circle at top left, rgba(111, 228, 255, 0.16), transparent 24%),
-    linear-gradient(180deg, rgba(12, 22, 36, 0.98), rgba(10, 17, 29, 0.92));
-  border: 1px solid rgba(111, 228, 255, 0.16);
+    linear-gradient(180deg, rgba(20, 27, 36, 0.96), rgba(15, 23, 42, 0.9));
+  border: 1px solid rgba(51, 65, 85, 0.78);
   box-shadow: var(--shadow);
 }
 
@@ -1596,11 +1592,9 @@ input {
 .commander-model-card {
   width: 100%;
   text-align: left;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(51, 65, 85, 0.76);
   border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(121, 224, 255, 0.05), transparent 60%),
-    rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.58);
   color: var(--text);
   padding: 14px 16px;
   transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
@@ -1612,8 +1606,8 @@ input {
 }
 
 .commander-model-card.is-active {
-  border-color: rgba(81, 229, 255, 0.34);
-  background: rgba(81, 229, 255, 0.1);
+  border-color: rgba(56, 189, 248, 0.34);
+  background: rgba(14, 165, 233, 0.12);
 }
 
 .segmented {
