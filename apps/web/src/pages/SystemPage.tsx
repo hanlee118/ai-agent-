@@ -82,8 +82,18 @@ export function SystemPage() {
     void refresh();
   }, []);
 
-  async function refresh() {
-    setLoading(true);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void refresh({ silent: true });
+    }, 15000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  async function refresh(options?: { silent?: boolean }) {
+    if (!options?.silent) {
+      setLoading(true);
+    }
     try {
       const [healthInfo, runtimeInfo, settingsInfo, auditInfo, readinessInfo, monitorInfo] = await Promise.all([
         api.getSystemHealth(),
@@ -108,7 +118,9 @@ export function SystemPage() {
         message: requestError instanceof Error ? requestError.message : "系统配置加载失败"
       });
     } finally {
-      setLoading(false);
+      if (!options?.silent) {
+        setLoading(false);
+      }
     }
   }
 

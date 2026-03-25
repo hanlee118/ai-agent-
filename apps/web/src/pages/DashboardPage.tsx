@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
+  type LocalAgentMonitorOverview,
   ROLE_LABELS,
   STAGE_LABELS,
   type OpenClawProjectSummary,
@@ -38,6 +39,7 @@ export function DashboardPage() {
   const [agents, setAgents] = useState<OpenClawAgentSummary[]>([]);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [localMonitor, setLocalMonitor] = useState<LocalAgentMonitorOverview | null>(null);
   const [tasks, setTasks] = useState<TaskBoardItem[]>([]);
   const [workspace, setWorkspace] = useState<OpenClawWorkspaceOverview | null>(null);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
@@ -60,6 +62,9 @@ export function DashboardPage() {
         onlineAgents: "Online agents",
         modulesTitle: "Workspace Modules",
         modulesCopy: "Use the system like a SaaS operating platform: jump by module instead of hunting through raw pages.",
+        localMonitorTitle: "Local Agent Pulse",
+        localMonitorCopy: "A unified live summary for recent Codex, Claude Code, and OpenClaw sessions on this machine.",
+        openMonitor: "Open Operations",
         demoTitle: "Live Demo Project",
         demoEmpty: "The test demo project is still being prepared.",
         openDemo: "Open Team Workspace",
@@ -82,6 +87,9 @@ export function DashboardPage() {
         onlineAgents: "在线 Agent",
         modulesTitle: "工作区模块",
         modulesCopy: "按 SaaS 平台的方式进入系统，而不是自己在页面里找入口。",
+        localMonitorTitle: "本地 Agent 脉冲",
+        localMonitorCopy: "把这台机器上的 Codex、Claude Code、OpenClaw 最近会话和活跃状态统一压缩成一个首页摘要。",
+        openMonitor: "进入系统运营",
         demoTitle: "演示项目",
         demoEmpty: "test 演示项目正在准备中。",
         openDemo: "进入团队工作区",
@@ -113,19 +121,21 @@ export function DashboardPage() {
         setError(null);
       }
 
-      const [projectList, agentList, runtimeInfo, healthInfo, taskList, workspaceInfo] = await Promise.all([
+      const [projectList, agentList, runtimeInfo, healthInfo, taskList, workspaceInfo, monitorInfo] = await Promise.all([
         api.getProjects(),
         api.getOpenClawAgents(),
         api.getRuntime(),
         api.getSystemHealth(),
         api.getTasks(),
-        api.getOpenClawWorkspace()
+        api.getOpenClawWorkspace(),
+        api.getLocalAgentMonitor()
       ]);
 
       setProjects(projectList);
       setAgents(agentList);
       setRuntime(runtimeInfo);
       setHealth(healthInfo);
+      setLocalMonitor(monitorInfo);
       setTasks(taskList);
       setWorkspace(workspaceInfo);
       setLastSyncedAt(new Date().toISOString());
@@ -210,9 +220,28 @@ export function DashboardPage() {
         cta: copy.openSystem,
         to: "/system",
         metric: `${health?.services.length ?? 0}`
+      },
+      {
+        title: copy.localMonitorTitle,
+        description: copy.localMonitorCopy,
+        cta: copy.openMonitor,
+        to: "/system",
+        metric: `${localMonitor?.sessions.length ?? 0}`
       }
     ],
-    [copy.openAgents, copy.openProjects, copy.openSystem, health?.services.length, isEnglish, workspace?.agents.length, workspace?.projects.length]
+    [
+      copy.localMonitorCopy,
+      copy.localMonitorTitle,
+      copy.openAgents,
+      copy.openMonitor,
+      copy.openProjects,
+      copy.openSystem,
+      health?.services.length,
+      isEnglish,
+      localMonitor?.sessions.length,
+      workspace?.agents.length,
+      workspace?.projects.length
+    ]
   );
   const attentionItems = useMemo(() => {
     const items: Array<{
@@ -245,6 +274,16 @@ export function DashboardPage() {
       });
     }
 
+    if ((localMonitor?.tools.find((tool) => tool.tool === "codex")?.activeCount ?? 0) > 0) {
+      items.push({
+        title: isEnglish ? "Codex sessions are currently active" : "Codex 当前存在活跃会话",
+        detail: isEnglish
+          ? "The workstation is actively running Codex sessions, so operator coordination should stay tight."
+          : "这台工作站当前有 Codex 会话正在运行，建议把指挥与监控保持在同一节奏。",
+        tone: "default"
+      });
+    }
+
     if (items.length === 0) {
       items.push({
         title: "当前工作台运行平稳",
@@ -254,7 +293,7 @@ export function DashboardPage() {
     }
 
     return items;
-  }, [health?.blockedTasks, runtime, waitingProjects.length]);
+  }, [health?.blockedTasks, isEnglish, localMonitor?.tools, runtime, waitingProjects.length]);
 
   return (
     <div className="page">
@@ -395,6 +434,45 @@ export function DashboardPage() {
               </Link>
             </div>
           ) : null}
+
+          <div className="card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Local Agent Pulse</p>
+                <h3>{copy.localMonitorTitle}</h3>
+              </div>
+              <Link className="button button-ghost inline-button" to="/system">
+                {copy.openMonitor}
+              </Link>
+            </div>
+            <p className="muted-text">{copy.localMonitorCopy}</p>
+            <div className="metric-inline-grid">
+              {(localMonitor?.tools ?? []).map((tool) => (
+                <MetricInline
+                  key={tool.tool}
+                  label={tool.label}
+                  value={`${tool.sessionCount} · ${tool.activeCount}/${tool.idleCount}/${tool.staleCount}`}
+                />
+              ))}
+            </div>
+            <div className="timeline-list">
+              {(localMonitor?.sessions ?? []).slice(0, 4).map((session) => (
+                <article key={session.id} className="timeline-item">
+                  <div className="timeline-time">{formatTime(session.updatedAt, isEnglish ? "en-US" : "zh-CN")}</div>
+                  <div>
+                    <div className="timeline-head">
+                      <strong>{session.title}</strong>
+                      <span className="pill">{session.tool} · {session.status}</span>
+                    </div>
+                    <p>{session.projectLabel || session.path}</p>
+                  </div>
+                </article>
+              ))}
+              {(localMonitor?.sessions.length ?? 0) === 0 ? (
+                <p className="muted-text">{isEnglish ? "No recent local sessions were detected." : "当前还没有检测到最近的本地会话。"}</p>
+              ) : null}
+            </div>
+          </div>
 
           <div className="card">
             <div className="section-header">
