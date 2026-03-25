@@ -39,8 +39,10 @@
 
 - Run `pnpm typecheck`
 - Run `pnpm build`
-- Start the API with `node apps/api/dist/index.js`
 - Run `pnpm verify:local`
+- Start the API with `node apps/api/dist/index.js`
+- Run `pnpm verify:smoke`
+- Prefer `pnpm test:smoke` as the final release gate
 - Check `http://localhost:8787/health`
 - Check `http://localhost:8787/ready`
 - Log in to the web app and validate:
@@ -48,6 +50,8 @@
   - Agents page shows real OpenClaw agents
   - Agent Commander updates are persisted after refresh
   - System page shows no unresolved readiness warnings for your target environment
+  - System page local monitor receives realtime snapshots without manual refresh
+  - Cost governance cards show aggregated tokens and cost figures by tool
 
 ## 5. GitHub Publishing
 

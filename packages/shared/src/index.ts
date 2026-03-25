@@ -618,6 +618,17 @@ export interface SystemReadiness {
 
 export type LocalAgentTool = "claude" | "codex" | "openclaw";
 export type LocalAgentSessionState = "active" | "idle" | "stale";
+export type LocalAgentPricingMode = "known" | "estimated" | "unavailable";
+
+export interface LocalAgentUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  knownCostUsd: number;
+  estimatedCostUsd: number;
+  pricingMode: LocalAgentPricingMode;
+}
 
 export interface LocalAgentSessionItem {
   id: string;
@@ -630,6 +641,8 @@ export interface LocalAgentSessionItem {
   agentId?: string;
   projectLabel?: string;
   activeSignal?: string;
+  model?: string;
+  usage: LocalAgentUsageSummary;
 }
 
 export interface LocalAgentToolSummary {
@@ -642,12 +655,14 @@ export interface LocalAgentToolSummary {
   idleCount: number;
   staleCount: number;
   lastUpdatedAt?: string;
+  usage: LocalAgentUsageSummary;
 }
 
 export interface LocalAgentMonitorOverview {
   scannedAt: string;
   tools: LocalAgentToolSummary[];
   sessions: LocalAgentSessionItem[];
+  totals: LocalAgentUsageSummary;
 }
 
 export interface CreateProjectInput {

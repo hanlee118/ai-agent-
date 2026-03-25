@@ -10,6 +10,8 @@
     "start:prod": "./scripts/start-local-prod.sh",
     "backup:local": "./scripts/backup-local.sh",
     "verify:local": "node scripts/verify-local.mjs",
+    "verify:smoke": "bash scripts/verify-smoke.sh",
+    "test:smoke": "pnpm verify:local && pnpm verify:smoke",
     "daemon:start": "./scripts/daemon-start.sh",
     "daemon:stop": "./scripts/daemon-stop.sh",
     "daemon:status": "./scripts/daemon-status.sh",

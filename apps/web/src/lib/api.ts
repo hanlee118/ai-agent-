@@ -138,6 +138,7 @@ export const api = {
   getSystemHealth: () => request<SystemHealth>("/api/system/health"),
   getSystemReadiness: () => request<SystemReadiness>("/api/system/readiness"),
   getLocalAgentMonitor: () => request<LocalAgentMonitorOverview>("/api/system/local-agent-monitor"),
+  localAgentMonitorLiveUrl: () => `${API_BASE_URL}/api/system/local-agent-monitor/live`,
   getProject: (projectId: string) => request<ProjectDetail>(`/api/projects/${projectId}`),
   getProjectTasks: (projectId: string) => request<Task[]>(`/api/projects/${projectId}/tasks`),
   getTasks: () => request<TaskBoardItem[]>("/api/tasks"),

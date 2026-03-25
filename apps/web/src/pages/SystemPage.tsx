@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   AuditLogItem,
   LocalAgentMonitorOverview,
   LocalAgentSessionItem,
+  LocalAgentToolSummary,
+  LocalAgentUsageSummary,
   RuntimeMode,
   RuntimeSettings,
   RuntimeStatus,
@@ -14,12 +16,24 @@ import { api } from "../lib/api";
 import { useLocale } from "../lib/locale";
 
 type FlashState = { tone: "success" | "error"; message: string } | null;
+type StreamState = "connecting" | "live" | "reconnecting";
+
+const EMPTY_USAGE: LocalAgentUsageSummary = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cachedInputTokens: 0,
+  totalTokens: 0,
+  knownCostUsd: 0,
+  estimatedCostUsd: 0,
+  pricingMode: "unavailable"
+};
 
 export function SystemPage() {
   const { isEnglish } = useLocale();
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [localAgentMonitor, setLocalAgentMonitor] = useState<LocalAgentMonitorOverview | null>(null);
+  const [monitorStreamState, setMonitorStreamState] = useState<StreamState>("connecting");
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [readiness, setReadiness] = useState<SystemReadiness | null>(null);
   const [settings, setSettings] = useState<RuntimeSettings | null>(null);
@@ -48,8 +62,23 @@ export function SystemPage() {
         readiness: "Platform Readiness",
         localMonitor: "Local Agent Monitor",
         localMonitorCopy: "A Nexus-style observability layer for recent Codex, Claude Code, and OpenClaw sessions on this machine.",
+        localMonitorLive: "Realtime stream",
+        localMonitorPending: "Waiting for the next live snapshot...",
+        localMonitorReconnect: "Reconnecting",
+        localMonitorScannedAt: "Last snapshot",
         monitorRoots: "Monitor Roots",
+        governanceTitle: "Cost Governance",
+        governanceCopy: "Aggregate token usage and cost by tool so operators can catch spend spikes before they turn into surprises.",
         recentSessions: "Recent Sessions",
+        totalSessions: "Sessions",
+        activeSessions: "Active now",
+        totalTokens: "Total tokens",
+        knownCost: "Known cost",
+        estimatedCost: "Estimated cost",
+        inputTokens: "Input",
+        cachedTokens: "Cache",
+        outputTokens: "Output",
+        toolBreakdown: "Tool breakdown",
         dbPath: "Database path",
         openclawConfig: "OpenClaw config",
         workspaceRoot: "Workspace root",
@@ -70,24 +99,64 @@ export function SystemPage() {
         readiness: "平台就绪度",
         localMonitor: "本地 Agent 会话监控",
         localMonitorCopy: "借鉴 Nexus 的理念，把 Codex、Claude Code 与 OpenClaw 的最近会话、活跃状态和目录源头统一放到系统页里观测。",
+        localMonitorLive: "实时推送",
+        localMonitorPending: "正在等待新的实时快照...",
+        localMonitorReconnect: "重连中",
+        localMonitorScannedAt: "最近快照",
         monitorRoots: "监控根目录",
+        governanceTitle: "成本治理",
+        governanceCopy: "按工具聚合 token 与成本，让运营侧能提前发现异常消耗，而不是事后回看日志。",
         recentSessions: "最近会话",
+        totalSessions: "会话总数",
+        activeSessions: "当前活跃",
+        totalTokens: "总 Token",
+        knownCost: "已知成本",
+        estimatedCost: "估算成本",
+        inputTokens: "输入",
+        cachedTokens: "缓存",
+        outputTokens: "输出",
+        toolBreakdown: "工具分布",
         dbPath: "数据库路径",
         openclawConfig: "OpenClaw 配置",
         workspaceRoot: "工作区根目录",
         warnings: "风险提示"
       };
 
+  const totalUsage = localAgentMonitor?.totals ?? EMPTY_USAGE;
+  const monitorSessions = localAgentMonitor?.sessions ?? [];
+  const activeSessionCount = useMemo(
+    () => monitorSessions.filter((session) => session.status === "active").length,
+    [monitorSessions]
+  );
+
   useEffect(() => {
     void refresh();
   }, []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => {
-      void refresh({ silent: true });
-    }, 15000);
+    const source = new EventSource(api.localAgentMonitorLiveUrl(), { withCredentials: true });
 
-    return () => window.clearInterval(timer);
+    source.onopen = () => {
+      setMonitorStreamState("live");
+    };
+
+    source.onerror = () => {
+      setMonitorStreamState((current) => (current === "live" ? "reconnecting" : "connecting"));
+    };
+
+    source.addEventListener("snapshot", (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as LocalAgentMonitorOverview;
+        setLocalAgentMonitor(payload);
+        setMonitorStreamState("live");
+      } catch {
+        setMonitorStreamState("reconnecting");
+      }
+    });
+
+    return () => {
+      source.close();
+    };
   }, []);
 
   async function refresh(options?: { silent?: boolean }) {
@@ -95,13 +164,12 @@ export function SystemPage() {
       setLoading(true);
     }
     try {
-      const [healthInfo, runtimeInfo, settingsInfo, auditInfo, readinessInfo, monitorInfo] = await Promise.all([
+      const [healthInfo, runtimeInfo, settingsInfo, auditInfo, readinessInfo] = await Promise.all([
         api.getSystemHealth(),
         api.getRuntime(),
         api.getRuntimeSettings(),
         api.getAuditLogs(20),
-        api.getSystemReadiness(),
-        api.getLocalAgentMonitor()
+        api.getSystemReadiness()
       ]);
 
       setHealth(healthInfo);
@@ -109,7 +177,6 @@ export function SystemPage() {
       setSettings(settingsInfo);
       setAuditLogs(auditInfo);
       setReadiness(readinessInfo);
-      setLocalAgentMonitor(monitorInfo);
       syncForm(settingsInfo);
       setFlash(null);
     } catch (requestError) {
@@ -345,28 +412,71 @@ export function SystemPage() {
                 <h3>{copy.localMonitor}</h3>
                 <p className="hero-copy">{copy.localMonitorCopy}</p>
               </div>
+              <div className="stack tight">
+                <span className={`pill ${monitorStreamState === "live" ? "pill-primary" : ""}`}>
+                  {monitorStreamState === "live" ? copy.localMonitorLive : monitorStreamState === "reconnecting" ? copy.localMonitorReconnect : copy.localMonitorPending}
+                </span>
+                <p className="muted-text">
+                  {localAgentMonitor?.scannedAt
+                    ? `${copy.localMonitorScannedAt} · ${formatTime(localAgentMonitor.scannedAt, isEnglish ? "en-US" : "zh-CN")}`
+                    : copy.localMonitorPending}
+                </p>
+              </div>
             </div>
 
             <div className="metric-inline-grid">
-              {(localAgentMonitor?.tools ?? []).map((tool) => (
-                <MetricInline
-                  key={tool.tool}
-                  label={tool.label}
-                  value={`${tool.sessionCount} · ${tool.activeCount}/${tool.idleCount}/${tool.staleCount}`}
-                />
-              ))}
+              <MetricInline label={copy.totalSessions} value={formatNumber(monitorSessions.length)} />
+              <MetricInline label={copy.activeSessions} value={formatNumber(activeSessionCount)} />
+              <MetricInline label={copy.totalTokens} value={formatNumber(totalUsage.totalTokens)} />
+              <MetricInline label={copy.knownCost} value={formatUsd(totalUsage.knownCostUsd)} />
+              <MetricInline label={copy.estimatedCost} value={formatUsd(totalUsage.estimatedCostUsd)} />
             </div>
 
-            <div className="sub-card">
-              <p className="group-title">{copy.monitorRoots}</p>
-              <div className="stack tight">
-                {(localAgentMonitor?.tools ?? []).map((tool) => (
-                  <div key={tool.tool} className="meta-chip">
-                    <span>{tool.label}</span>
-                    <strong>{tool.rootPath}</strong>
+            <div className="system-monitor-grid">
+              <div className="sub-card">
+                <p className="group-title">{copy.governanceTitle}</p>
+                <p className="muted-text">{copy.governanceCopy}</p>
+                <div className="usage-kpi-grid">
+                  <UsageStat label={copy.inputTokens} value={formatNumber(totalUsage.inputTokens)} />
+                  <UsageStat label={copy.cachedTokens} value={formatNumber(totalUsage.cachedInputTokens)} />
+                  <UsageStat label={copy.outputTokens} value={formatNumber(totalUsage.outputTokens)} />
+                </div>
+                <div className="stack tight">
+                  <div className="meta-chip">
+                    <span>{copy.knownCost}</span>
+                    <strong>{formatUsd(totalUsage.knownCostUsd)}</strong>
                   </div>
+                  <div className="meta-chip">
+                    <span>{copy.estimatedCost}</span>
+                    <strong>{formatUsd(totalUsage.estimatedCostUsd)}</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div className="sub-card">
+                <p className="group-title">{copy.monitorRoots}</p>
+                <div className="stack tight">
+                  {(localAgentMonitor?.tools ?? []).map((tool) => (
+                    <div key={tool.tool} className="meta-chip">
+                      <span>{tool.label}</span>
+                      <strong>{tool.rootPath}</strong>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="stack tight">
+              <p className="group-title">{copy.toolBreakdown}</p>
+              <div className="usage-tool-grid">
+                {(localAgentMonitor?.tools ?? []).map((tool) => (
+                  <ToolUsageCard key={tool.tool} tool={tool} isEnglish={isEnglish} />
                 ))}
               </div>
+            </div>
+
+            <div className="stack tight">
+              <p className="group-title">{copy.recentSessions}</p>
             </div>
 
             <div className="timeline-list">
@@ -509,6 +619,43 @@ function ChecklistItem({ title, detail, ok }: { title: string; detail: string; o
   );
 }
 
+function UsageStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="attention-card">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function ToolUsageCard({
+  tool,
+  isEnglish
+}: {
+  tool: LocalAgentToolSummary;
+  isEnglish: boolean;
+}) {
+  return (
+    <article className="attention-card">
+      <div className="timeline-head">
+        <strong>{tool.label}</strong>
+        <span className={`pill ${tool.activeCount > 0 ? "pill-primary" : ""}`}>
+          {tool.sessionCount} · {tool.activeCount}/{tool.idleCount}/{tool.staleCount}
+        </span>
+      </div>
+      <div className="usage-kpi-grid">
+        <UsageStat label={isEnglish ? "Tokens" : "Token"} value={formatNumber(tool.usage.totalTokens)} />
+        <UsageStat label={isEnglish ? "Known" : "已知"} value={formatUsd(tool.usage.knownCostUsd)} />
+        <UsageStat label={isEnglish ? "Estimate" : "估算"} value={formatUsd(tool.usage.estimatedCostUsd)} />
+      </div>
+      <p className="muted-text">{tool.rootPath}</p>
+      <p className="muted-text">
+        {isEnglish ? "Last updated" : "最近更新"}: {tool.lastUpdatedAt ? formatTime(tool.lastUpdatedAt, isEnglish ? "en-US" : "zh-CN") : "-"}
+      </p>
+    </article>
+  );
+}
+
 function LocalSessionCard({
   session,
   isEnglish
@@ -528,27 +675,50 @@ function LocalSessionCard({
       : session.status === "idle"
         ? "空闲"
         : "静默";
+  const costLabel = session.usage.knownCostUsd > 0
+    ? formatUsd(session.usage.knownCostUsd)
+    : session.usage.estimatedCostUsd > 0
+      ? `~${formatUsd(session.usage.estimatedCostUsd)}`
+      : isEnglish
+        ? "No cost"
+        : "暂无成本";
 
   return (
     <article className="timeline-item">
-      <div className="timeline-time">{formatTime(session.updatedAt)}</div>
+      <div className="timeline-time">{formatTime(session.updatedAt, isEnglish ? "en-US" : "zh-CN")}</div>
       <div>
         <div className="timeline-head">
           <strong>{session.title}</strong>
           <span className={`pill ${session.status === "active" ? "pill-primary" : ""}`}>{toolLabel} · {statusLabel}</span>
         </div>
         <p>{session.projectLabel || session.path}</p>
+        <p>
+          {session.model || (isEnglish ? "Unknown model" : "未知模型")} · {formatNumber(session.usage.totalTokens)} token · {costLabel}
+        </p>
         {session.lastMessage ? <p>{session.lastMessage}</p> : null}
       </div>
     </article>
   );
 }
 
-function formatTime(timestamp: string) {
-  return new Date(timestamp).toLocaleString("zh-CN", {
+function formatTime(timestamp: string, locale = "zh-CN") {
+  return new Date(timestamp).toLocaleString(locale, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatUsd(value: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: value > 0 && value < 1 ? 4 : 2,
+    maximumFractionDigits: value > 0 && value < 1 ? 4 : 2
+  }).format(value);
 }

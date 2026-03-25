@@ -50,7 +50,11 @@ import {
 } from "./system/runtime-config.js";
 import { listAuditLogs, writeAuditLog } from "./system/audit-log.js";
 import { getSystemReadiness } from "./system/readiness.js";
-import { getLocalAgentMonitorOverview } from "./system/local-agent-monitor.js";
+import {
+  getCachedLocalAgentMonitorOverview,
+  subscribeLocalAgentMonitor,
+  ensureLocalAgentMonitorLive
+} from "./system/local-agent-monitor.js";
 import {
   clearSessionCookie,
   createSessionCookie,
@@ -272,7 +276,31 @@ app.get("/api/system/readiness", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/api/system/local-agent-monitor", asyncRoute(async (_req, res) => {
-  res.json(await getLocalAgentMonitorOverview());
+  res.json(await getCachedLocalAgentMonitorOverview());
+}));
+
+app.get("/api/system/local-agent-monitor/live", asyncRoute(async (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  const initial = await getCachedLocalAgentMonitorOverview();
+  sendEvent(res, "snapshot", initial);
+
+  const unsubscribe = subscribeLocalAgentMonitor((overview) => {
+    sendEvent(res, "snapshot", overview);
+  });
+
+  const heartbeat = setInterval(() => {
+    sendEvent(res, "heartbeat", { timestamp: new Date().toISOString() });
+  }, 20000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+    res.end();
+  });
 }));
 
 app.get("/api/system/audit-logs", asyncRoute(async (req, res) => {
@@ -944,6 +972,7 @@ function asyncRoute(
 
 async function start() {
   await ensureSeedData((await getRuntimeStatus()).mode);
+  ensureLocalAgentMonitorLive();
 
   app.listen(port, () => {
     console.log(

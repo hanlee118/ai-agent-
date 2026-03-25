@@ -221,7 +221,17 @@ pnpm start:prod
 pnpm typecheck
 pnpm build
 pnpm verify:local
+pnpm verify:smoke
+pnpm test:smoke
 ```
+
+其中 `pnpm verify:smoke` 会验证：
+
+- 公共健康接口
+- 受保护接口鉴权
+- OpenClaw 工作区核心 API
+- 本地会话监控聚合接口
+- 本地会话监控 SSE 首帧推送
 
 ## 当前版本说明
 

@@ -377,6 +377,22 @@ input {
   gap: 20px;
 }
 
+.system-monitor-grid,
+.usage-tool-grid,
+.usage-kpi-grid {
+  display: grid;
+  gap: 14px;
+}
+
+.system-monitor-grid,
+.usage-tool-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.usage-kpi-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .meta-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1492,6 +1508,11 @@ input {
   .hero-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .system-monitor-grid,
+  .usage-tool-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 720px) {
@@ -1504,6 +1525,7 @@ input {
   .hero-stats,
   .split-panels,
   .metric-inline-grid,
+  .usage-kpi-grid,
   .agent-kpi-grid,
   .form-grid,
   .meta-strip-compact {

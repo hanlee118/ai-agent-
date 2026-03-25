@@ -108,6 +108,23 @@ export function DashboardPage() {
   }, []);
 
   useEffect(() => {
+    const source = new EventSource(api.localAgentMonitorLiveUrl(), { withCredentials: true });
+
+    source.addEventListener("snapshot", (event) => {
+      try {
+        const payload = JSON.parse((event as MessageEvent<string>).data) as LocalAgentMonitorOverview;
+        setLocalMonitor(payload);
+      } catch {
+        // keep the last good snapshot until the next event arrives
+      }
+    });
+
+    return () => {
+      source.close();
+    };
+  }, []);
+
+  useEffect(() => {
     const timer = window.setInterval(() => {
       void refresh({ silent: true });
     }, 12000);
@@ -121,21 +138,19 @@ export function DashboardPage() {
         setError(null);
       }
 
-      const [projectList, agentList, runtimeInfo, healthInfo, taskList, workspaceInfo, monitorInfo] = await Promise.all([
+      const [projectList, agentList, runtimeInfo, healthInfo, taskList, workspaceInfo] = await Promise.all([
         api.getProjects(),
         api.getOpenClawAgents(),
         api.getRuntime(),
         api.getSystemHealth(),
         api.getTasks(),
-        api.getOpenClawWorkspace(),
-        api.getLocalAgentMonitor()
+        api.getOpenClawWorkspace()
       ]);
 
       setProjects(projectList);
       setAgents(agentList);
       setRuntime(runtimeInfo);
       setHealth(healthInfo);
-      setLocalMonitor(monitorInfo);
       setTasks(taskList);
       setWorkspace(workspaceInfo);
       setLastSyncedAt(new Date().toISOString());
