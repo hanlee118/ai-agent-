@@ -184,3 +184,9 @@ pnpm daemon:stop
 2. 不要提交真实模型 API Key
 3. 若要公开仓库，建议确认 `aistudio/` 中是否包含不适合公开的设计素材
 4. 发布前按 [docs/PRODUCTION_CHECKLIST.md](/Users/dalongxia/Documents/Playground/docs/PRODUCTION_CHECKLIST.md) 逐项核对
+
+## v1.0.0 正式文档
+
+- [产品说明文档](/Users/dalongxia/Documents/Playground/docs/V1_0_0_PRODUCT_OVERVIEW.md)
+- [需求文档](/Users/dalongxia/Documents/Playground/docs/V1_0_0_REQUIREMENTS_SPEC.md)
+- [技术文档](/Users/dalongxia/Documents/Playground/docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)
