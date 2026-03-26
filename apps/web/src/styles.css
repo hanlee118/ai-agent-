@@ -2969,6 +2969,76 @@ input {
   gap: 20px;
 }
 
+.workspace-command-grid {
+  align-items: start;
+}
+
+.workspace-toolbar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.workspace-select-card {
+  width: 100%;
+  padding: 0;
+  appearance: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.workspace-select-card.is-selected {
+  border-color: rgba(56, 189, 248, 0.4);
+  box-shadow: 0 16px 34px rgba(2, 6, 23, 0.22);
+  background: rgba(14, 165, 233, 0.08);
+}
+
+.workspace-select-card.is-selected .studio-catalog-accent {
+  filter: brightness(1.06);
+}
+
+.workspace-card-arrow {
+  pointer-events: none;
+}
+
+.workspace-detail-card,
+.workspace-agent-detail-card {
+  gap: 22px;
+  overflow: hidden;
+}
+
+.workspace-detail-hero,
+.workspace-agent-hero {
+  margin: -22px -22px 0;
+}
+
+.workspace-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.workspace-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(51, 65, 85, 0.72);
+}
+
+.workspace-span-full {
+  grid-column: 1 / -1;
+}
+
+.workspace-agent-grid {
+  align-items: start;
+}
+
 .program-board-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -3480,7 +3550,8 @@ input {
   .openclaw-grid,
   .commander-hero,
   .commander-grid,
-  .commander-preview-grid {
+  .commander-preview-grid,
+  .workspace-detail-grid {
     grid-template-columns: 1fr;
   }
 
@@ -3539,6 +3610,7 @@ input {
   .dashboard-hero-copy,
   .form-grid,
   .meta-strip-compact,
+  .workspace-detail-grid,
   .portfolio-row,
   .portfolio-panel-metrics,
   .agent-roster-row,

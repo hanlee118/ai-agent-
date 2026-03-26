@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { ArrowRight, BrainCircuit, FolderKanban, RefreshCw, Search, Sparkles } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
 import type {
   AuditLogItem,
   OpenClawBatchAgentCommandResult,
@@ -889,28 +890,27 @@ export function OpenClawPage() {
 
   return (
     <div className="page">
-      <header className="page-header">
+      <header className="page-header studio-page-header">
         <div>
           <p className="eyebrow">OpenClaw Team Console</p>
           <h2>{pageCopy.title}</h2>
           <p className="hero-copy">{pageCopy.hero}</p>
         </div>
-        <div className="hero-inline-meta">
+        <div className="studio-header-actions">
           <span className="muted-text">{pageCopy.lastSynced}: {lastSyncedAt ? formatTime(lastSyncedAt, locale) : "n/a"}</span>
           <button className="button button-ghost inline-button" onClick={() => void refresh()}>
+            <RefreshCw size={16} />
             {pageCopy.refresh}
           </button>
         </div>
       </header>
 
-      <section className="agent-summary-grid">
+      <section className="studio-kpi-grid">
         <MetricTile label={pageCopy.metricProjectCount} value={String(metrics.projectCount)} />
         <MetricTile label={pageCopy.metricActiveProjects} value={String(metrics.activeProjectCount)} />
         <MetricTile label={pageCopy.metricBlockedProjects} value={String(metrics.blockedProjectCount)} tone="warning" />
         <MetricTile label={pageCopy.metricActiveAgents} value={String(metrics.activeAgentCount)} />
-        <MetricTile label={pageCopy.metricBlockedTasks} value={String(metrics.blockedTaskCount)} tone="warning" />
-        <MetricTile label={pageCopy.metricCriticalAlerts} value={String(metrics.criticalFindingCount)} tone="warning" />
-        <MetricTile label={pageCopy.metricStaleAgents} value={String(metrics.staleAgentCount)} tone="warning" />
+        <MetricTile label={pageCopy.metricBlockedTasks} value={String(metrics.blockedTaskCount)} tone={metrics.blockedTaskCount > 0 ? "warning" : "default"} />
       </section>
 
       {flash ? (
@@ -920,195 +920,72 @@ export function OpenClawPage() {
         </section>
       ) : null}
 
-      <section className="card">
-        <div className="section-header">
-          <div>
-            <p className="eyebrow">Modules</p>
-            <h3>{pageCopy.moduleJump}</h3>
-          </div>
-        </div>
-        <div className="module-grid">
-          <a className="module-card" href="#programs-section">
-            <div className="module-card-head">
-              <strong>{pageCopy.modulePrograms}</strong>
-              <span className="pill">{projects.length}</span>
-            </div>
-            <p>{pageCopy.moduleProgramsCopy}</p>
-            <span className="module-link">{pageCopy.modulePrograms}</span>
-          </a>
-          <a className="module-card" href="#project-room-section">
-            <div className="module-card-head">
-              <strong>{pageCopy.moduleProjectRoom}</strong>
-              <span className="pill">{projectDetail?.tasks.length ?? 0}</span>
-            </div>
-            <p>{pageCopy.moduleProjectRoomCopy}</p>
-            <span className="module-link">{pageCopy.moduleProjectRoom}</span>
-          </a>
-          <a className="module-card" href="#agents-section">
-            <div className="module-card-head">
-              <strong>{pageCopy.moduleAgents}</strong>
-              <span className="pill">{visibleAgents.length}</span>
-            </div>
-            <p>{pageCopy.moduleAgentsCopy}</p>
-            <span className="module-link">{pageCopy.moduleAgents}</span>
-          </a>
-        </div>
-      </section>
-
-      <section className="openclaw-grid">
-        <div className="stack">
-          {statusSummary ? (
-            <section className="card">
-              <div className="section-header">
-                <div>
-                  <p className="eyebrow">{pageCopy.runtimeGuard}</p>
-                  <h3>{pageCopy.runtimeWatch}</h3>
-                </div>
-                <span className="muted-text">{pageCopy.versionLabel} {statusSummary.runtimeVersion}</span>
-              </div>
-              <div className="meta-strip meta-strip-compact">
-                <MiniMeta label={pageCopy.defaultAgent} value={statusSummary.defaultAgentId || pageCopy.unknown} />
-                <MiniMeta label={pageCopy.sessionCount} value={String(statusSummary.sessionCount)} />
-                <MiniMeta label={pageCopy.heartbeatAgents} value={String(statusSummary.heartbeatAgents.length)} />
-                <MiniMeta label={pageCopy.systemEvents} value={String(statusSummary.queuedSystemEventCount)} />
-              </div>
-              <div className="pill-row">
-                {statusSummary.configuredChannels.map((channel) => (
-                  <span className="pill" key={channel}>{channel}</span>
-                ))}
-              </div>
-              <div className="openclaw-session-list">
-                {statusSummary.findings.slice(0, 6).map((finding) => (
-                  <div key={finding.id} className={`finding-card finding-${finding.severity}`}>
-                    <strong>{finding.title}</strong>
-                    <p>{finding.detail}</p>
-                    {finding.remediation ? <p className="muted-text">{pageCopy.suggestedActionPrefix} {finding.remediation}</p> : null}
-                  </div>
-                ))}
-                {statusSummary.findings.length === 0 ? <p className="muted-text">{pageCopy.noRuntimeAlerts}</p> : null}
-              </div>
-            </section>
-          ) : null}
-
-          <section className="card" id="programs-section">
+      <section className="portfolio-command-grid workspace-command-grid">
+        <div className="portfolio-command-main">
+          <article className="card studio-command-card">
             <div className="section-header">
               <div>
-                <p className="eyebrow">SLA</p>
-                <h3>{pageCopy.slaTitle}</h3>
+                <p className="eyebrow">Workspace Modules</p>
+                <h3>{pageCopy.moduleJump}</h3>
+                <p className="hero-copy">
+                  {isEnglish
+                    ? "Jump between the live portfolio, project room, and agent control surfaces without leaving the real OpenClaw runtime."
+                    : "在真实 OpenClaw 运行态里，直接在项目组合、项目作战室和 Agent 控制面之间切换。"}
+                </p>
               </div>
-              <span className="muted-text">{pageCopy.memberCount(slaItems.length)}</span>
             </div>
-            <div className="openclaw-session-list">
-              {slaItems.slice(0, 8).map((item) => (
-                <div key={item.agentId} className="session-row">
-                  <div>
-                    <strong>{item.name}</strong>
-                    <p>
-                      {item.currentTaskTitle || pageCopy.noAssignedTask}
-                      {" · "}
-                      {item.minutesSinceActive !== undefined
-                        ? isEnglish
-                          ? pageCopy.minutesAgo(item.minutesSinceActive)
-                          : pageCopy.minutesAgo(item.minutesSinceActive)
-                        : pageCopy.noActivitySignal}
-                    </p>
-                  </div>
-                  <span className={`pill ${slaPillClassName(item.slaState)}`}>{slaStateLabel(item.slaState, isEnglish)}</span>
+            <div className="module-grid">
+              <a className="module-card" href="#programs-section">
+                <div className="module-card-head">
+                  <strong>{pageCopy.modulePrograms}</strong>
+                  <span className="pill">{projects.length}</span>
                 </div>
-              ))}
-              {slaItems.length === 0 ? <p className="muted-text">{pageCopy.slaEmpty}</p> : null}
+                <p>{pageCopy.moduleProgramsCopy}</p>
+                <span className="module-link">{pageCopy.modulePrograms}</span>
+              </a>
+              <a className="module-card" href="#project-room-section">
+                <div className="module-card-head">
+                  <strong>{pageCopy.moduleProjectRoom}</strong>
+                  <span className="pill">{projectDetail?.tasks.length ?? 0}</span>
+                </div>
+                <p>{pageCopy.moduleProjectRoomCopy}</p>
+                <span className="module-link">{pageCopy.moduleProjectRoom}</span>
+              </a>
+              <a className="module-card" href="#agents-section">
+                <div className="module-card-head">
+                  <strong>{pageCopy.moduleAgents}</strong>
+                  <span className="pill">{visibleAgents.length}</span>
+                </div>
+                <p>{pageCopy.moduleAgentsCopy}</p>
+                <span className="module-link">{pageCopy.moduleAgents}</span>
+              </a>
             </div>
-          </section>
+          </article>
 
-          <section className="card" id="project-room-section">
+          <article className="card studio-command-card studio-catalog-toolbar-card" id="programs-section">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Programs</p>
-                <h3>{pageCopy.teamPrograms}</h3>
+                <h3>{pageCopy.projectOverview}</h3>
+                <p className="hero-copy">
+                  {isEnglish
+                    ? "Use the same AI Studio catalog language here: fast scanning, visible status, and one-tap entry into the active workspace room."
+                    : "这里直接沿用 AI Studio 的 catalog card 语言，强调快速扫描、状态感知和一键进入当前工作区作战室。"}
+                </p>
               </div>
-              <span className="muted-text">{projects.length} / {agents.length}</span>
-            </div>
-            <p className="muted-text">{pageCopy.teamProgramsCopy}</p>
-            <div className="program-board-grid">
-              {projects.slice(0, 6).map((project) => (
-                <article key={project.id} className="program-card">
-                  <div className="section-header">
-                    <div>
-                      <strong>{project.name}</strong>
-                      <p className="muted-text">{project.relativePath}</p>
-                    </div>
-                    <StatusPill tone={project.status}>{projectStatusLabel(project.status, isEnglish)}</StatusPill>
-                  </div>
-                  <div className="pill-row">
-                    {project.agentIds.slice(0, 6).map((agentId) => {
-                      const agent = agents.find((item) => item.agentId === agentId);
-                      return (
-                        <span key={agentId} className="pill">
-                          {agent?.name || agentId}
-                        </span>
-                      );
-                    })}
-                    {project.agentIds.length === 0 ? (
-                      <span className="pill pill-warning">{pageCopy.platformSupport}</span>
-                    ) : null}
-                  </div>
-                </article>
-              ))}
+              <span className="pill pill-primary">{visibleProjects.length} {pageCopy.projectCountLabel}</span>
             </div>
 
-            <div className="sub-card">
-              <div className="section-header">
-                <div>
-                  <p className="group-title">{pageCopy.specialists}</p>
-                  <p className="muted-text">{pageCopy.teamProgramsCopy}</p>
-                </div>
-              </div>
-              <div className="pill-row">
-                {benchAgents.map((agent) => (
-                  <span key={agent.agentId} className="pill pill-warning">
-                    {agent.name} / {agent.agentId}
-                  </span>
-                ))}
-                {benchAgents.length === 0 ? <span className="muted-text">{pageCopy.specialistsEmpty}</span> : null}
-              </div>
-            </div>
-          </section>
-
-          <section className="card" id="agents-section">
-              <div className="section-header">
-                <div>
-                  <p className="eyebrow">Audit</p>
-                  <h3>{pageCopy.auditTitle}</h3>
-                </div>
-              </div>
-            <div className="openclaw-session-list">
-              {auditLogs.map((log) => (
-                <div key={log.id} className="session-row">
-                  <div>
-                    <strong>{log.summary}</strong>
-                    <p>{log.action} · {log.actorLabel}</p>
-                  </div>
-                  <span className="muted-text">{formatTime(log.createdAt)}</span>
-                </div>
-              ))}
-              {auditLogs.length === 0 ? <p className="muted-text">{pageCopy.auditEmpty}</p> : null}
-            </div>
-          </section>
-
-          <section className="card">
-              <div className="section-header">
-                <div>
-                  <p className="eyebrow">Projects</p>
-                  <h3>{pageCopy.projectOverview}</h3>
-                </div>
-              <div className="hero-inline-meta">
-                <span className="muted-text">{visibleProjects.length} {pageCopy.projectCountLabel}</span>
+            <div className="workspace-toolbar-row">
+              <label className="studio-search-field" aria-label={pageCopy.projectSearch}>
+                <Search size={16} />
                 <input
-                  className="composer-input toolbar-input"
                   value={projectQuery}
                   onChange={(event) => setProjectQuery(event.target.value)}
                   placeholder={pageCopy.projectSearch}
                 />
+              </label>
+              <div className="pill-row">
                 <button
                   className={agentProjectFilter === "all" ? "filter-pill filter-pill-active" : "filter-pill"}
                   onClick={() => setAgentProjectFilter("all")}
@@ -1124,83 +1001,82 @@ export function OpenClawPage() {
               </div>
             </div>
 
-            <div className="openclaw-list">
+            <div className="studio-catalog-grid">
               {visibleProjects.map((project) => (
-                <button
+                <WorkspaceProjectCard
                   key={project.id}
-                  className={project.id === selectedProjectId ? "openclaw-card is-selected" : "openclaw-card"}
-                  onClick={() => setSelectedProjectId(project.id)}
-                >
-                  <div className="section-header">
-                    <div>
-                      <h4>{project.name}</h4>
-                      <p className="muted-text">{project.relativePath}</p>
-                    </div>
-                    <StatusPill tone={project.status}>{projectStatusLabel(project.status, isEnglish)}</StatusPill>
-                  </div>
-                  <p className="project-summary">{project.description}</p>
-                  <div className="meta-strip meta-strip-compact">
-                    <MiniMeta label={pageCopy.progressLabel} value={`${project.progress}%`} />
-                    <MiniMeta label={pageCopy.taskCount} value={String(project.taskCount)} />
-                    <MiniMeta label={pageCopy.blockers} value={String(project.blockedTaskCount)} />
-                    <MiniMeta label={isEnglish ? "Agents" : "参与 Agent"} value={String(project.agentCount)} />
-                  </div>
-                  {project.currentFocus ? <p className="highlight-text">{isEnglish ? `Current focus: ${project.currentFocus}` : `当前焦点：${project.currentFocus}`}</p> : null}
-                </button>
+                  project={project}
+                  isEnglish={isEnglish}
+                  isSelected={project.id === selectedProjectId}
+                  onSelect={() => setSelectedProjectId(project.id)}
+                />
               ))}
-              {visibleProjects.length === 0 ? <p className="muted-text">{pageCopy.noProjects}</p> : null}
+              {visibleProjects.length === 0 ? <div className="empty-state">{pageCopy.noProjects}</div> : null}
             </div>
-          </section>
+          </article>
 
-          <section className="card">
-            <div className="section-header">
-              <div>
-                <p className="eyebrow">Project Room</p>
-                <h3>{projectDetail?.name ?? pageCopy.selectProject}</h3>
+          <article className="card studio-command-card workspace-detail-card" id="project-room-section">
+            <div className="project-room-hero workspace-detail-hero">
+              <div className="project-room-hero-main">
+                <div className="project-room-hero-topline">
+                  <span className="pill pill-success">{isEnglish ? "Live workspace" : "真实工作区"}</span>
+                  {projectDetail ? <StatusPill tone={projectDetail.status}>{projectStatusLabel(projectDetail.status, isEnglish)}</StatusPill> : null}
+                  {projectDetail ? (
+                    <span className={projectDetail.blockerCount > 0 ? "pill pill-danger" : "pill pill-primary"}>
+                      {pageCopy.blockers} · {projectDetail.blockerCount}
+                    </span>
+                  ) : null}
+                  {projectDetail ? <span className="pill">{projectDetail.agentIds.length} {isEnglish ? "agents" : "人"}</span> : null}
+                </div>
+
+                <div>
+                  <p className="eyebrow">Project Room</p>
+                  <h3>{projectDetail?.name ?? pageCopy.selectProject}</h3>
+                  <p className="hero-copy">{projectDetail?.description ?? pageCopy.selectProjectHint}</p>
+                </div>
+
+                {projectDetail ? (
+                  <div className="project-room-hero-meta">
+                    <div className="project-room-hero-stat">
+                      <span>{pageCopy.path}</span>
+                      <strong>{projectDetail.relativePath}</strong>
+                    </div>
+                    <div className="project-room-hero-stat">
+                      <span>{pageCopy.progressLabel}</span>
+                      <strong>{projectDetail.progress}%</strong>
+                    </div>
+                    <div className="project-room-hero-stat">
+                      <span>{pageCopy.updatedAt}</span>
+                      <strong>{formatTime(projectDetail.updatedAt, locale)}</strong>
+                    </div>
+                  </div>
+                ) : null}
               </div>
-              {projectDetail ? <StatusPill tone={projectDetail.status}>{projectStatusLabel(projectDetail.status, isEnglish)}</StatusPill> : null}
+
+              <div className="project-room-hero-actions">
+                <button className="button button-ghost" onClick={() => void refresh()}>
+                  {pageCopy.refresh}
+                </button>
+                <button className="button button-primary" onClick={() => void handleCopyReport()} disabled={!projectReport?.markdown}>
+                  {pageCopy.copyMarkdown}
+                </button>
+              </div>
             </div>
 
             {projectDetail ? (
-              <div className="stack">
-                <p className="project-summary">{projectDetail.description}</p>
-                <div className="meta-strip meta-strip-compact">
-                  <MiniMeta label={pageCopy.path} value={projectDetail.relativePath} />
-                  <MiniMeta label={pageCopy.updatedAt} value={formatTime(projectDetail.updatedAt, locale)} />
-                  <MiniMeta label={pageCopy.blockerCount} value={String(projectDetail.blockerCount)} />
-                  <MiniMeta label={pageCopy.docCount} value={String(projectDetail.docs.length)} />
-                </div>
-
-                <div className="doc-spotlight-grid">
-                  {projectDetail.readmeExcerpt ? (
-                    <div className="doc-spotlight-card">
-                      <p className="group-title">{pageCopy.overviewDoc}</p>
-                      <strong>{pageCopy.projectBrief}</strong>
-                      <p>{projectDetail.readmeExcerpt}</p>
-                    </div>
-                  ) : null}
-                  {projectDetail.requirementsExcerpt ? (
-                    <div className="doc-spotlight-card">
-                      <p className="group-title">{pageCopy.requirementsDoc}</p>
-                      <strong>{pageCopy.projectBrief}</strong>
-                      <p>{projectDetail.requirementsExcerpt}</p>
-                    </div>
-                  ) : null}
-                </div>
-
-                <div className="sub-card">
+              <div className="workspace-detail-grid">
+                <div className="workspace-panel">
                   <div className="section-header">
                     <div>
                       <p className="group-title">{pageCopy.projectReport}</p>
                       <p className="muted-text">
-                        {isEnglish ? "Auto-generated summary of progress, blockers, next actions, and participating agents." : "自动汇总当前进展、阻塞、下一步动作与参与 Agent 态势"}
+                        {isEnglish
+                          ? "Live summary of progress, blockers, next actions, and participating agents."
+                          : "实时汇总当前进展、阻塞、下一步动作与参与 Agent 态势。"}
                       </p>
                     </div>
-                    <button className="button button-ghost" onClick={() => void handleCopyReport()} disabled={!projectReport?.markdown}>
-                      {pageCopy.copyMarkdown}
-                    </button>
+                    {reportLoading ? <span className="muted-text">{pageCopy.generating}</span> : null}
                   </div>
-                  {reportLoading ? <p className="muted-text">{pageCopy.generating}</p> : null}
                   {projectReport ? (
                     <div className="stack tight">
                       <p>{projectReport.summary}</p>
@@ -1217,12 +1093,13 @@ export function OpenClawPage() {
                   )}
                 </div>
 
-                <div className="sub-card">
+                <div className="workspace-panel">
                   <div className="section-header">
                     <div>
                       <p className="group-title">{pageCopy.deliverablesTitle}</p>
                       <p className="muted-text">{pageCopy.deliverablesCopy}</p>
                     </div>
+                    <span className="pill">{projectDetail.docs.length}</span>
                   </div>
                   <div className="doc-grid">
                     {projectDetail.docs.map((doc) => (
@@ -1243,17 +1120,60 @@ export function OpenClawPage() {
                   </div>
                 </div>
 
-                {projectDetail.blockers.length > 0 ? (
-                  <div className="sub-card">
-                    <p className="group-title">{pageCopy.blockers}</p>
-                    {projectDetail.blockers.map((blocker) => (
-                      <p key={blocker}>{blocker}</p>
-                    ))}
+                {(projectDetail.readmeExcerpt || projectDetail.requirementsExcerpt) ? (
+                  <div className="workspace-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="group-title">{pageCopy.projectBrief}</p>
+                        <p className="muted-text">{pageCopy.projectBriefCopy}</p>
+                      </div>
+                    </div>
+                    <div className="doc-spotlight-grid">
+                      {projectDetail.readmeExcerpt ? (
+                        <div className="doc-spotlight-card">
+                          <p className="group-title">{pageCopy.overviewDoc}</p>
+                          <strong>{pageCopy.projectBrief}</strong>
+                          <p>{projectDetail.readmeExcerpt}</p>
+                        </div>
+                      ) : null}
+                      {projectDetail.requirementsExcerpt ? (
+                        <div className="doc-spotlight-card">
+                          <p className="group-title">{pageCopy.requirementsDoc}</p>
+                          <strong>{pageCopy.projectBrief}</strong>
+                          <p>{projectDetail.requirementsExcerpt}</p>
+                        </div>
+                      ) : null}
+                    </div>
                   </div>
                 ) : null}
 
-                <div className="sub-card">
-                  <p className="group-title">{pageCopy.taskBoard}</p>
+                {projectDetail.blockers.length > 0 ? (
+                  <div className="workspace-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="group-title">{pageCopy.blockers}</p>
+                      </div>
+                    </div>
+                    <div className="attention-list">
+                      {projectDetail.blockers.map((blocker) => (
+                        <article className="attention-card attention-danger" key={blocker}>
+                          <strong>{blocker}</strong>
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="workspace-panel workspace-span-full">
+                  <div className="section-header">
+                    <div>
+                      <p className="group-title">{pageCopy.taskBoard}</p>
+                      <p className="muted-text">
+                        {isEnglish ? "Select tasks for direct writeback or focus one task to edit in detail." : "选择任务直接批量回写，或聚焦单个任务进行详细编辑。"}
+                      </p>
+                    </div>
+                    <span className="pill">{projectDetail.tasks.length}</span>
+                  </div>
                   <div className="openclaw-task-list">
                     {projectDetail.tasks.map((task) => (
                       <div
@@ -1277,13 +1197,13 @@ export function OpenClawPage() {
                   </div>
                 </div>
 
-                <div className="sub-card">
+                <div className="workspace-panel">
                   <div className="section-header">
                     <div>
                       <p className="group-title">{pageCopy.taskBatch}</p>
                       <p className="muted-text">
                         {isEnglish
-                          ? `${selectedTaskIds.length} tasks selected for batch status or progress update`
+                          ? `${selectedTaskIds.length} tasks selected for batch status or progress update.`
                           : pageCopy.batchSelectionHint(selectedTaskIds.length)}
                       </p>
                     </div>
@@ -1327,7 +1247,7 @@ export function OpenClawPage() {
                   </div>
                 </div>
 
-                <div className="sub-card">
+                <div className="workspace-panel">
                   <div className="section-header">
                     <div>
                       <p className="group-title">{pageCopy.teamBroadcast}</p>
@@ -1372,7 +1292,7 @@ export function OpenClawPage() {
                 </div>
 
                 {selectedTask ? (
-                  <div className="sub-card">
+                  <div className="workspace-panel workspace-span-full">
                     <div className="section-header">
                       <div>
                         <p className="group-title">{pageCopy.taskEditor}</p>
@@ -1450,26 +1370,34 @@ export function OpenClawPage() {
                 ) : null}
               </div>
             ) : (
-              <p className="muted-text">{pageCopy.selectProjectHint}</p>
+              <div className="empty-state">{pageCopy.selectProjectHint}</div>
             )}
-          </section>
-        </div>
+          </article>
 
-        <div className="stack">
-          <section className="card">
+          <article className="card studio-command-card studio-catalog-toolbar-card" id="agents-section">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Agents</p>
                 <h3>{pageCopy.teamMembersTitle}</h3>
+                <p className="hero-copy">
+                  {isEnglish
+                    ? "The workspace roster should feel like a real operations roster: you can scan load, model, status, and open the right command surface instantly."
+                    : "团队名册要像真实运营面板一样可读，你应该能一眼看清负载、模型、状态，并直接进入正确的控制界面。"}
+                </p>
               </div>
-              <div className="hero-inline-meta">
-                <span className="muted-text">{visibleAgents.length} {pageCopy.agentCountLabel}</span>
+              <span className="pill pill-primary">{visibleAgents.length} {pageCopy.agentCountLabel}</span>
+            </div>
+
+            <div className="workspace-toolbar-row">
+              <label className="studio-search-field" aria-label={pageCopy.agentSearch}>
+                <Search size={16} />
                 <input
-                  className="composer-input toolbar-input"
                   value={agentQuery}
                   onChange={(event) => setAgentQuery(event.target.value)}
                   placeholder={pageCopy.agentSearch}
                 />
+              </label>
+              <div className="pill-row">
                 <button
                   className={projectAgentFilter === "all" ? "filter-pill filter-pill-active" : "filter-pill"}
                   onClick={() => setProjectAgentFilter("all")}
@@ -1485,203 +1413,423 @@ export function OpenClawPage() {
               </div>
             </div>
 
-            <div className="openclaw-list">
+            <div className="studio-catalog-grid">
               {visibleAgents.map((agent) => (
-                <button
+                <WorkspaceAgentCard
                   key={agent.agentId}
-                  className={agent.agentId === selectedAgentId ? "openclaw-card is-selected" : "openclaw-card"}
-                  onClick={() => setSelectedAgentId(agent.agentId)}
-                >
-                  <div className="section-header">
-                    <div>
-                      <p className="eyebrow">{agent.agentId}</p>
-                      <h4>{agent.emoji} {agent.name}</h4>
-                    </div>
-                    <StatusPill tone={agent.status}>{agentStatusLabel(agent.status, isEnglish)}</StatusPill>
-                  </div>
-                  <p className="highlight-text">{agent.title}</p>
-                  <p className="agent-description">{agent.intro}</p>
-                  <div className="pill-row">
-                    {(projectsByAgent.get(agent.agentId) ?? []).slice(0, 4).map((project) => (
-                      <span key={project.id} className="pill">
-                        {project.name}
-                      </span>
-                    ))}
-                    {(projectsByAgent.get(agent.agentId)?.length ?? 0) === 0 ? (
-                      <span className="pill pill-warning">
-                        {agent.agentId === "jeremy" ? "Jeremy / Design Director" : pageCopy.platformSupport}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="meta-strip meta-strip-compact">
-                    <MiniMeta label={pageCopy.model} value={agent.model} />
-                    <MiniMeta label={pageCopy.taskCount} value={String(agent.taskCount)} />
-                    <MiniMeta label={pageCopy.sessionCount} value={String(agent.sessionCount)} />
-                    <MiniMeta label={pageCopy.heartbeat} value={agent.heartbeatEnabled ? pageCopy.heartbeatOn : pageCopy.heartbeatOff} />
-                  </div>
-                  {agent.currentTask ? (
-                    <p className="muted-text">{pageCopy.currentTaskLabel}: {agent.currentTask.projectName} / {agent.currentTask.title}</p>
-                  ) : (
-                    <p className="muted-text">
-                      {(projectsByAgent.get(agent.agentId)?.length ?? 0) > 0
-                        ? pageCopy.noStructuredTask
-                        : pageCopy.specialistMode}
-                    </p>
-                  )}
-                </button>
+                  agent={agent}
+                  isEnglish={isEnglish}
+                  isSelected={agent.agentId === selectedAgentId}
+                  relatedProjects={projectsByAgent.get(agent.agentId) ?? []}
+                  onSelect={() => setSelectedAgentId(agent.agentId)}
+                />
               ))}
-              {visibleAgents.length === 0 ? <p className="muted-text">{pageCopy.noAgents}</p> : null}
+              {visibleAgents.length === 0 ? <div className="empty-state">{pageCopy.noAgents}</div> : null}
             </div>
-          </section>
+          </article>
 
-          <section className="card">
-            <div className="section-header">
-              <div>
-                <p className="eyebrow">Agent Editor</p>
-                <h3>{agentDetail ? `${agentDetail.emoji} ${agentDetail.name}` : pageCopy.selectAgent}</h3>
+          <article className="card studio-command-card workspace-agent-detail-card">
+            <div className="commander-hero workspace-agent-hero">
+              <div className="commander-hero-main">
+                <div className="commander-title-row">
+                  <div className="commander-title-block">
+                    <div className="commander-avatar">{agentDetail ? agentDetail.emoji || agentDetail.name.slice(0, 1) : "A"}</div>
+                    <div>
+                      <p className="eyebrow">Agent Console</p>
+                      <h3>{agentDetail ? `${agentDetail.name}` : pageCopy.selectAgent}</h3>
+                      <p className="hero-copy">
+                        {agentDetail
+                          ? `${agentDetail.title} · ${agentDetail.commander.selectedModel} · ${agentDetail.responsibility}`
+                          : pageCopy.selectAgentHint}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {agentDetail ? (
+                  <div className="commander-hero-copy">
+                    <div className="commander-hero-summary">
+                      <span>{pageCopy.currentTaskLabel}</span>
+                      <strong>{agentDetail.currentTask ? `${agentDetail.currentTask.projectName} / ${agentDetail.currentTask.title}` : pageCopy.noStructuredTask}</strong>
+                    </div>
+                    <div className="commander-hero-summary">
+                      <span>{pageCopy.model}</span>
+                      <strong>{agentDetail.commander.selectedModel}</strong>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+
+              <div className="commander-hero-aside">
+                {agentDetail ? (
+                  <>
+                    <div className="commander-status-stack">
+                      <span className={`status-badge status-${agentStatusTone(agentDetail.status)}`}>{agentStatusLabel(agentDetail.status, isEnglish)}</span>
+                      <span className={agentDetail.commander.executionMode === "autonomous" ? "pill pill-primary" : "pill"}>
+                        {agentDetail.commander.executionMode === "autonomous"
+                          ? (isEnglish ? "Autonomous" : "自主执行")
+                          : (isEnglish ? "Confirm first" : "执行前确认")}
+                      </span>
+                    </div>
+
+                    <div className="commander-hero-actions">
+                      <Link className="button button-ghost" to={`/agents/${agentDetail.agentId}`}>
+                        {isEnglish ? "Open commander" : "进入指挥页"}
+                      </Link>
+                      <button className="button button-primary" onClick={() => void handleSendAgentMessage()} disabled={messageSending}>
+                        {messageSending ? (isEnglish ? "Sending..." : "发送中...") : pageCopy.sendInstruction}
+                      </button>
+                    </div>
+
+                    <div className="meta-strip meta-strip-compact commander-kpis">
+                      <MiniMeta label={pageCopy.taskCount} value={String(agentDetail.taskCount)} />
+                      <MiniMeta label={pageCopy.sessionCount} value={String(agentDetail.sessionCount)} />
+                      <MiniMeta label={isEnglish ? "Memory" : "记忆"} value={String(agentDetail.memoryEntryCount)} />
+                      <MiniMeta label={isEnglish ? "Tools" : "工具"} value={String(agentDetail.tools.length)} />
+                    </div>
+                  </>
+                ) : null}
               </div>
             </div>
 
             {agentDetail ? (
-              <div className="stack">
-                <div className="meta-strip meta-strip-compact">
-                  <MiniMeta label={pageCopy.role} value={agentDetail.title} />
-                  <MiniMeta label={pageCopy.responsibility} value={agentDetail.responsibility} />
-                  <MiniMeta label={pageCopy.lastActive} value={agentDetail.lastActiveAt ? formatTime(agentDetail.lastActiveAt, locale) : pageCopy.unknown} />
-                  <MiniMeta label={pageCopy.openId} value={agentDetail.openId || pageCopy.notConfigured} />
-                </div>
-
-                <div className="sub-card">
-                  <p className="group-title">{pageCopy.currentTasks}</p>
-                  <div className="openclaw-task-list">
-                    {agentDetail.tasks.map((task) => (
-                      <TaskRow key={task.id} task={task} isEnglish={isEnglish} />
-                    ))}
-                    {agentDetail.tasks.length === 0 ? <p className="muted-text">{pageCopy.noAgentTasks}</p> : null}
-                  </div>
-                </div>
-
-                <div className="sub-card">
-                  <p className="group-title">{pageCopy.recentSessions}</p>
-                  <div className="openclaw-session-list">
-                    {agentDetail.sessions.map((session) => (
-                      <div key={session.key} className="session-row">
-                        <div>
-                          <strong>{session.label}</strong>
-                          <p>{session.channel || pageCopy.unknown} / {session.kind}</p>
-                        </div>
-                        <span className="muted-text">{formatTime(session.updatedAt, locale)}</span>
+              <div className="commander-grid workspace-agent-grid">
+                <aside className="commander-sidebar">
+                  <div className="card commander-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{pageCopy.currentTasks}</p>
+                        <h3>{agentDetail.tasks.length}</h3>
                       </div>
-                    ))}
-                    {agentDetail.sessions.length === 0 ? <p className="muted-text">{pageCopy.noSessions}</p> : null}
-                  </div>
-                </div>
-
-                <div className="sub-card">
-                  <div className="section-header">
-                    <div>
-                      <p className="group-title">{pageCopy.agentDesk}</p>
-                      <p className="muted-text">{pageCopy.agentDeskCopy.replace("{agentId}", agentDetail.agentId)}</p>
+                    </div>
+                    <div className="openclaw-task-list">
+                      {agentDetail.tasks.map((task) => (
+                        <div key={task.id} className="task-row">
+                          <TaskRow task={task} isEnglish={isEnglish} />
+                        </div>
+                      ))}
+                      {agentDetail.tasks.length === 0 ? <p className="muted-text">{pageCopy.noAgentTasks}</p> : null}
                     </div>
                   </div>
-                  <WorkbenchTemplateToolbar
-                    templates={agentTemplates}
-                    locale={locale}
-                    onUse={(template) => void handleUseTemplate(template, "agent")}
-                    onSaveProject={() => void handleSaveTemplate("agent", "project")}
-                    onSavePersonal={() => void handleSaveTemplate("agent", "personal")}
-                  />
 
-                  <textarea
-                    className="composer-textarea compact"
-                    value={agentMessage}
-                    onChange={(event) => setAgentMessage(event.target.value)}
-                    placeholder={pageCopy.agentInputPlaceholder}
-                  />
-                  <div className="action-row">
-                    <button className="button button-primary" onClick={() => void handleSendAgentMessage()} disabled={messageSending}>
-                      {messageSending ? (isEnglish ? "Sending..." : "发送中...") : pageCopy.sendInstruction}
-                    </button>
-                    <span className="muted-text">{pageCopy.agentDeskHint}</span>
+                  <div className="card commander-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{pageCopy.recentSessions}</p>
+                        <h3>{agentDetail.sessions.length}</h3>
+                      </div>
+                    </div>
+                    <div className="openclaw-session-list">
+                      {agentDetail.sessions.map((session) => (
+                        <div key={session.key} className="session-row">
+                          <div>
+                            <strong>{session.label}</strong>
+                            <p>{session.channel || pageCopy.unknown} / {session.kind}</p>
+                          </div>
+                          <span className="muted-text">{formatTime(session.updatedAt, locale)}</span>
+                        </div>
+                      ))}
+                      {agentDetail.sessions.length === 0 ? <p className="muted-text">{pageCopy.noSessions}</p> : null}
+                    </div>
+                  </div>
+                </aside>
+
+                <div className="commander-main">
+                  <div className="card commander-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{pageCopy.agentDesk}</p>
+                        <h3>{agentDetail.name}</h3>
+                      </div>
+                      <span className="muted-text">{pageCopy.agentDeskCopy.replace("{agentId}", agentDetail.agentId)}</span>
+                    </div>
+
+                    <WorkbenchTemplateToolbar
+                      templates={agentTemplates}
+                      locale={locale}
+                      onUse={(template) => void handleUseTemplate(template, "agent")}
+                      onSaveProject={() => void handleSaveTemplate("agent", "project")}
+                      onSavePersonal={() => void handleSaveTemplate("agent", "personal")}
+                    />
+
+                    <textarea
+                      className="composer-textarea commander-textarea"
+                      value={agentMessage}
+                      onChange={(event) => setAgentMessage(event.target.value)}
+                      placeholder={pageCopy.agentInputPlaceholder}
+                    />
+                    <div className="action-row">
+                      <button className="button button-primary" onClick={() => void handleSendAgentMessage()} disabled={messageSending}>
+                        {messageSending ? (isEnglish ? "Sending..." : "发送中...") : pageCopy.sendInstruction}
+                      </button>
+                      <span className="muted-text">{pageCopy.agentDeskHint}</span>
+                    </div>
                   </div>
 
                   {commandResult ? (
-                    <div className="sub-card">
-                      <p className="group-title">{pageCopy.latestReply}</p>
-                      <p><strong>{pageCopy.summary}:</strong> {commandResult.summary}</p>
-                      <p><strong>{pageCopy.model}:</strong> {commandResult.model || pageCopy.unknown} / {commandResult.provider || pageCopy.unknown}</p>
-                      <p><strong>{pageCopy.duration}:</strong> {commandResult.durationMs ? `${Math.round(commandResult.durationMs / 1000)}s` : pageCopy.unknown}</p>
+                    <div className="card commander-panel">
+                      <div className="section-header">
+                        <div>
+                          <p className="eyebrow">{pageCopy.latestReply}</p>
+                          <h3>{commandResult.summary}</h3>
+                        </div>
+                        <span className="muted-text">{commandResult.durationMs ? `${Math.round(commandResult.durationMs / 1000)}s` : pageCopy.unknown}</span>
+                      </div>
+                      <div className="meta-strip meta-strip-compact">
+                        <MiniMeta label={pageCopy.model} value={commandResult.model || pageCopy.unknown} />
+                        <MiniMeta label="Provider" value={commandResult.provider || pageCopy.unknown} />
+                        <MiniMeta label={pageCopy.duration} value={commandResult.durationMs ? `${Math.round(commandResult.durationMs / 1000)}s` : pageCopy.unknown} />
+                        <MiniMeta label={isEnglish ? "Execution" : "执行策略"} value={agentDetail.commander.executionMode} />
+                      </div>
                       <pre className="command-result">{commandResult.reply || pageCopy.noReply}</pre>
                     </div>
                   ) : null}
-                </div>
 
-                <div className="sub-card">
-                  <p className="group-title">{pageCopy.recentMessages}</p>
-                  <div className="openclaw-session-list">
-                    {agentDetail.recentMessages.map((message) => (
-                      <div key={message.id} className="session-row">
-                        <div>
-                          <strong>{message.role}</strong>
-                          <p>{message.text}</p>
-                        </div>
-                        <span className="muted-text">{formatTime(message.timestamp, locale)}</span>
+                  <div className="card commander-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{pageCopy.recentMessages}</p>
+                        <h3>{agentDetail.recentMessages.length}</h3>
                       </div>
-                    ))}
-                    {agentDetail.recentMessages.length === 0 ? <p className="muted-text">{pageCopy.noRecentMessages}</p> : null}
-                  </div>
-                </div>
-
-                <div className="editor-tabs">
-                  <button
-                    className={editorMode === "soul" ? "button button-primary" : "button button-ghost"}
-                    onClick={() => setEditorMode("soul")}
-                  >
-                    {isEnglish ? "Edit SOUL" : "编辑 SOUL"}
-                  </button>
-                  <button
-                    className={editorMode === "sop" ? "button button-primary" : "button button-ghost"}
-                    onClick={() => setEditorMode("sop")}
-                  >
-                    {isEnglish ? "Edit SOP" : "编辑 SOP"}
-                  </button>
-                </div>
-
-                <div className="sub-card">
-                  <div className="section-header">
-                    <div>
-                      <p className="group-title">{pageCopy.docPath}</p>
-                      <p className="muted-text">
-                        {editorMode === "soul" ? agentDetail.soul.path : agentDetail.sop.path}
-                      </p>
                     </div>
-                    <span className="pill">
-                      {editorMode === "soul"
-                        ? agentDetail.soul.exists ? pageCopy.exists : pageCopy.willCreate
-                        : agentDetail.sop.exists ? pageCopy.exists : pageCopy.willCreate}
-                    </span>
-                  </div>
-
-                  <textarea
-                    className="composer-textarea openclaw-editor"
-                    value={editorContent}
-                    onChange={(event) => setEditorContent(event.target.value)}
-                    placeholder={`${pageCopy.editorPlaceholder} ${editorMode.toUpperCase()} ${isEnglish ? "content" : "内容"}`}
-                  />
-
-                  <div className="action-row">
-                    <button className="button button-primary" onClick={() => void handleSaveDocument()} disabled={saving}>
-                      {saving ? (isEnglish ? "Saving..." : "保存中...") : `${pageCopy.saveSoul} ${editorMode.toUpperCase()}`}
-                    </button>
-                    <span className="muted-text">{pageCopy.saveDocHint}</span>
+                    <div className="openclaw-session-list">
+                      {agentDetail.recentMessages.map((message) => (
+                        <div key={message.id} className="session-row session-message-row">
+                          <div>
+                            <strong>{message.role}</strong>
+                            <p>{message.text}</p>
+                          </div>
+                          <span className="muted-text">{formatTime(message.timestamp, locale)}</span>
+                        </div>
+                      ))}
+                      {agentDetail.recentMessages.length === 0 ? <p className="muted-text">{pageCopy.noRecentMessages}</p> : null}
+                    </div>
                   </div>
                 </div>
+
+                <aside className="commander-rail">
+                  <div className="card commander-panel">
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{isEnglish ? "Governance snapshot" : "治理快照"}</p>
+                        <h3>{isEnglish ? "Governance snapshot" : "治理快照"}</h3>
+                      </div>
+                    </div>
+                    <div className="meta-strip meta-strip-compact">
+                      <MiniMeta label={pageCopy.role} value={agentDetail.title} />
+                      <MiniMeta label={pageCopy.lastActive} value={agentDetail.lastActiveAt ? formatTime(agentDetail.lastActiveAt, locale) : pageCopy.unknown} />
+                      <MiniMeta label={pageCopy.openId} value={agentDetail.openId || pageCopy.notConfigured} />
+                      <MiniMeta label={isEnglish ? "Memory" : "记忆"} value={agentDetail.commander.memoryEnabled ? (isEnglish ? "On" : "开") : (isEnglish ? "Off" : "关")} />
+                    </div>
+                    <div className="pill-row">
+                      {agentDetail.allowedAgentIds.map((allowed) => (
+                        <span className="pill pill-primary" key={allowed}>{allowed}</span>
+                      ))}
+                      {agentDetail.allowedAgentIds.length === 0 ? <span className="pill">{isEnglish ? "No collaborators" : "暂无协作对象"}</span> : null}
+                    </div>
+                    <div className="openclaw-session-list">
+                      {agentDetail.usageLogs.slice(0, 6).map((entry) => (
+                        <div key={entry.id} className="session-row">
+                          <div>
+                            <strong>{entry.commandType} · {entry.status}</strong>
+                            <p>{entry.model} · {entry.totalTokens} tokens</p>
+                          </div>
+                          <span className="muted-text">{formatTime(entry.createdAt, locale)}</span>
+                        </div>
+                      ))}
+                      {agentDetail.usageLogs.length === 0 ? <p className="muted-text">{isEnglish ? "No usage logs yet." : "还没有用量日志。"}</p> : null}
+                    </div>
+                  </div>
+
+                  <div className="card commander-panel">
+                    <div className="editor-tabs">
+                      <button
+                        className={editorMode === "soul" ? "button button-primary" : "button button-ghost"}
+                        onClick={() => setEditorMode("soul")}
+                      >
+                        {isEnglish ? "Edit SOUL" : "编辑 SOUL"}
+                      </button>
+                      <button
+                        className={editorMode === "sop" ? "button button-primary" : "button button-ghost"}
+                        onClick={() => setEditorMode("sop")}
+                      >
+                        {isEnglish ? "Edit SOP" : "编辑 SOP"}
+                      </button>
+                    </div>
+
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{pageCopy.docPath}</p>
+                        <h3>{editorMode === "soul" ? agentDetail.soul.path : agentDetail.sop.path}</h3>
+                      </div>
+                      <span className="pill">
+                        {editorMode === "soul"
+                          ? agentDetail.soul.exists ? pageCopy.exists : pageCopy.willCreate
+                          : agentDetail.sop.exists ? pageCopy.exists : pageCopy.willCreate}
+                      </span>
+                    </div>
+
+                    <textarea
+                      className="composer-textarea openclaw-editor"
+                      value={editorContent}
+                      onChange={(event) => setEditorContent(event.target.value)}
+                      placeholder={`${pageCopy.editorPlaceholder} ${editorMode.toUpperCase()} ${isEnglish ? "content" : "内容"}`}
+                    />
+
+                    <div className="action-row">
+                      <button className="button button-primary" onClick={() => void handleSaveDocument()} disabled={saving}>
+                        {saving ? (isEnglish ? "Saving..." : "保存中...") : `${pageCopy.saveSoul} ${editorMode.toUpperCase()}`}
+                      </button>
+                      <span className="muted-text">{pageCopy.saveDocHint}</span>
+                    </div>
+                  </div>
+                </aside>
               </div>
             ) : (
-              <p className="muted-text">{pageCopy.selectAgentHint}</p>
+              <div className="empty-state">{pageCopy.selectAgentHint}</div>
             )}
-          </section>
+          </article>
         </div>
+
+        <aside className="portfolio-command-rail">
+          {statusSummary ? (
+            <article className="card studio-side-card">
+              <div className="section-header">
+                <div>
+                  <p className="eyebrow">{pageCopy.runtimeGuard}</p>
+                  <h3>{pageCopy.runtimeWatch}</h3>
+                </div>
+                <span className="muted-text">{pageCopy.versionLabel} {statusSummary.runtimeVersion}</span>
+              </div>
+              <div className="meta-strip meta-strip-compact">
+                <MiniMeta label={pageCopy.defaultAgent} value={statusSummary.defaultAgentId || pageCopy.unknown} />
+                <MiniMeta label={pageCopy.sessionCount} value={String(statusSummary.sessionCount)} />
+                <MiniMeta label={pageCopy.heartbeatAgents} value={String(statusSummary.heartbeatAgents.length)} />
+                <MiniMeta label={pageCopy.systemEvents} value={String(statusSummary.queuedSystemEventCount)} />
+              </div>
+              <div className="pill-row">
+                {statusSummary.configuredChannels.map((channel) => (
+                  <span className="pill" key={channel}>{channel}</span>
+                ))}
+              </div>
+              <div className="openclaw-session-list">
+                {statusSummary.findings.slice(0, 6).map((finding) => (
+                  <div key={finding.id} className={`finding-card finding-${finding.severity}`}>
+                    <strong>{finding.title}</strong>
+                    <p>{finding.detail}</p>
+                    {finding.remediation ? <p className="muted-text">{pageCopy.suggestedActionPrefix} {finding.remediation}</p> : null}
+                  </div>
+                ))}
+                {statusSummary.findings.length === 0 ? <p className="muted-text">{pageCopy.noRuntimeAlerts}</p> : null}
+              </div>
+            </article>
+          ) : null}
+
+          <article className="card studio-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">SLA</p>
+                <h3>{pageCopy.slaTitle}</h3>
+              </div>
+              <span className="muted-text">{pageCopy.memberCount(slaItems.length)}</span>
+            </div>
+            <div className="openclaw-session-list">
+              {slaItems.slice(0, 8).map((item) => (
+                <div key={item.agentId} className="session-row">
+                  <div>
+                    <strong>{item.name}</strong>
+                    <p>
+                      {item.currentTaskTitle || pageCopy.noAssignedTask}
+                      {" · "}
+                      {item.minutesSinceActive !== undefined
+                        ? isEnglish
+                          ? pageCopy.minutesAgo(item.minutesSinceActive)
+                          : pageCopy.minutesAgo(item.minutesSinceActive)
+                        : pageCopy.noActivitySignal}
+                    </p>
+                  </div>
+                  <span className={`pill ${slaPillClassName(item.slaState)}`}>{slaStateLabel(item.slaState, isEnglish)}</span>
+                </div>
+              ))}
+              {slaItems.length === 0 ? <p className="muted-text">{pageCopy.slaEmpty}</p> : null}
+            </div>
+          </article>
+
+          <article className="card studio-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Programs</p>
+                <h3>{pageCopy.teamPrograms}</h3>
+              </div>
+              <span className="muted-text">{projects.length} / {agents.length}</span>
+            </div>
+            <p className="muted-text">{pageCopy.teamProgramsCopy}</p>
+            <div className="program-board-grid">
+              {projects.slice(0, 6).map((project) => (
+                <article key={project.id} className="program-card">
+                  <div className="section-header">
+                    <div>
+                      <strong>{project.name}</strong>
+                      <p className="muted-text">{project.relativePath}</p>
+                    </div>
+                    <StatusPill tone={project.status}>{projectStatusLabel(project.status, isEnglish)}</StatusPill>
+                  </div>
+                  <div className="pill-row">
+                    {project.agentIds.slice(0, 6).map((agentId) => {
+                      const agent = agents.find((item) => item.agentId === agentId);
+                      return (
+                        <span key={agentId} className="pill">
+                          {agent?.name || agentId}
+                        </span>
+                      );
+                    })}
+                    {project.agentIds.length === 0 ? (
+                      <span className="pill pill-warning">{pageCopy.platformSupport}</span>
+                    ) : null}
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="sub-card">
+              <div className="section-header">
+                <div>
+                  <p className="group-title">{pageCopy.specialists}</p>
+                  <p className="muted-text">{pageCopy.teamProgramsCopy}</p>
+                </div>
+              </div>
+              <div className="pill-row">
+                {benchAgents.map((agent) => (
+                  <span key={agent.agentId} className="pill pill-warning">
+                    {agent.name} / {agent.agentId}
+                  </span>
+                ))}
+                {benchAgents.length === 0 ? <span className="muted-text">{pageCopy.specialistsEmpty}</span> : null}
+              </div>
+            </div>
+          </article>
+
+          <article className="card studio-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Audit</p>
+                <h3>{pageCopy.auditTitle}</h3>
+              </div>
+            </div>
+            <div className="openclaw-session-list">
+              {auditLogs.map((log) => (
+                <div key={log.id} className="session-row">
+                  <div>
+                    <strong>{log.summary}</strong>
+                    <p>{log.action} · {log.actorLabel}</p>
+                  </div>
+                  <span className="muted-text">{formatTime(log.createdAt)}</span>
+                </div>
+              ))}
+              {auditLogs.length === 0 ? <p className="muted-text">{pageCopy.auditEmpty}</p> : null}
+            </div>
+          </article>
+        </aside>
       </section>
     </div>
   );
@@ -1700,6 +1848,148 @@ function TaskRow({ task, isEnglish }: { task: OpenClawTaskItem; isEnglish: boole
         <strong>{task.progress}%</strong>
       </div>
     </>
+  );
+}
+
+function WorkspaceProjectCard({
+  project,
+  isEnglish,
+  isSelected,
+  onSelect
+}: {
+  project: OpenClawWorkspaceOverview["projects"][number];
+  isEnglish: boolean;
+  isSelected: boolean;
+  onSelect: () => void;
+}) {
+  const tone = projectStatusTone(project.blockedTaskCount > 0 ? "blocked" : project.status);
+
+  return (
+    <button
+      type="button"
+      className={`studio-catalog-card workspace-select-card ${isSelected ? "is-selected" : ""} ${tone === "paused" ? "studio-catalog-card-warning" : tone === "completed" ? "studio-catalog-card-success" : ""}`}
+      onClick={onSelect}
+    >
+      <div className={`studio-catalog-accent studio-catalog-accent-${tone}`} />
+      <div className="studio-catalog-card-body">
+        <div className="studio-catalog-card-head">
+          <div className="studio-catalog-icon">
+            <FolderKanban size={24} />
+          </div>
+          <div className="studio-catalog-badges">
+            <span className={`status-badge status-${tone}`}>{projectStatusLabel(project.status, isEnglish)}</span>
+            {project.blockedTaskCount > 0 ? <span className="pill pill-danger">{isEnglish ? "Blocked" : "阻塞"}</span> : null}
+          </div>
+        </div>
+
+        <div className="studio-catalog-copy">
+          <p className="studio-catalog-subtitle">{project.relativePath}</p>
+          <h3>{project.name}</h3>
+          <p>{project.description}</p>
+        </div>
+
+        <div className="studio-catalog-focus">
+          <span>{isEnglish ? "Current focus" : "当前焦点"}</span>
+          <strong>{project.currentFocus || project.relativePath}</strong>
+        </div>
+
+        <div className="studio-catalog-inline-metrics">
+          <MiniMeta label={isEnglish ? "Progress" : "进度"} value={`${project.progress}%`} />
+          <MiniMeta label={isEnglish ? "Tasks" : "任务"} value={String(project.taskCount)} />
+          <MiniMeta label={isEnglish ? "Agents" : "成员"} value={String(project.agentCount)} />
+          <MiniMeta label={isEnglish ? "Blockers" : "阻塞"} value={String(project.blockedTaskCount)} />
+        </div>
+
+        <div className="studio-catalog-footer">
+          <div className="studio-catalog-team">
+            <div className="studio-mini-chip">
+              <Sparkles size={14} />
+              <span>{formatTime(project.updatedAt, isEnglish ? "en-US" : "zh-CN")}</span>
+            </div>
+          </div>
+          <span className="studio-card-arrow workspace-card-arrow">
+            <ArrowRight size={16} />
+          </span>
+        </div>
+      </div>
+    </button>
+  );
+}
+
+function WorkspaceAgentCard({
+  agent,
+  isEnglish,
+  isSelected,
+  relatedProjects,
+  onSelect
+}: {
+  agent: OpenClawAgentDetail | OpenClawWorkspaceOverview["agents"][number];
+  isEnglish: boolean;
+  isSelected: boolean;
+  relatedProjects: OpenClawWorkspaceOverview["projects"];
+  onSelect: () => void;
+}) {
+  const tone = agentStatusTone(agent.status);
+
+  return (
+    <button
+      type="button"
+      className={`studio-catalog-card workspace-select-card ${isSelected ? "is-selected" : ""} ${tone === "paused" ? "studio-catalog-card-warning" : tone === "completed" ? "studio-catalog-card-success" : ""}`}
+      onClick={onSelect}
+    >
+      <div className={`studio-catalog-accent studio-catalog-accent-${tone}`} />
+      <div className="studio-catalog-card-body">
+        <div className="studio-catalog-card-head">
+          <div className="studio-catalog-icon">
+            <BrainCircuit size={24} />
+          </div>
+          <div className="studio-catalog-badges">
+            <span className={`status-badge status-${tone}`}>{agentStatusLabel(agent.status, isEnglish)}</span>
+            <span className={agent.commander.executionMode === "autonomous" ? "pill pill-primary" : "pill"}>
+              {agent.commander.executionMode === "autonomous"
+                ? (isEnglish ? "Autonomous" : "自主执行")
+                : (isEnglish ? "Confirm" : "确认后执行")}
+            </span>
+          </div>
+        </div>
+
+        <div className="studio-catalog-copy">
+          <p className="studio-catalog-subtitle">{agent.agentId}</p>
+          <h3>{agent.emoji} {agent.name}</h3>
+          <p>{agent.intro}</p>
+        </div>
+
+        <div className="studio-catalog-focus">
+          <span>{isEnglish ? "Current task" : "当前任务"}</span>
+          <strong>{agent.currentTask ? `${agent.currentTask.projectName} / ${agent.currentTask.title}` : agent.responsibility}</strong>
+        </div>
+
+        <div className="studio-catalog-inline-metrics">
+          <MiniMeta label={isEnglish ? "Model" : "模型"} value={agent.commander.selectedModel} />
+          <MiniMeta label={isEnglish ? "Tasks" : "任务"} value={String(agent.taskCount)} />
+          <MiniMeta label={isEnglish ? "Sessions" : "会话"} value={String(agent.sessionCount)} />
+          <MiniMeta label={isEnglish ? "Heartbeat" : "心跳"} value={agent.heartbeatEnabled ? (isEnglish ? "On" : "开") : (isEnglish ? "Off" : "关")} />
+        </div>
+
+        <div className="studio-catalog-footer">
+          <div className="studio-catalog-team">
+            {relatedProjects.slice(0, 2).map((project) => (
+              <div className="studio-mini-chip" key={project.id}>
+                <span>{project.name}</span>
+              </div>
+            ))}
+            {relatedProjects.length === 0 ? (
+              <div className="studio-mini-chip">
+                <span>{agent.agentId === "jeremy" ? "Jeremy / Design Director" : (isEnglish ? "Bench / support" : "支援席位")}</span>
+              </div>
+            ) : null}
+          </div>
+          <span className="studio-card-arrow workspace-card-arrow">
+            <ArrowRight size={16} />
+          </span>
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -1753,6 +2043,30 @@ function pillClassName(tone: OpenClawProjectState | OpenClawAgentPresence | Open
   }
 
   return "pill-warning";
+}
+
+function projectStatusTone(status: OpenClawProjectState) {
+  if (status === "blocked") {
+    return "paused";
+  }
+
+  if (status === "completed") {
+    return "completed";
+  }
+
+  return "working";
+}
+
+function agentStatusTone(status: OpenClawAgentPresence) {
+  if (status === "attention" || status === "offline") {
+    return "paused";
+  }
+
+  if (status === "idle") {
+    return "completed";
+  }
+
+  return "working";
 }
 
 function slaPillClassName(state: OpenClawSlaState) {

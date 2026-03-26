@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
-API_BASE_URL="${OCC_BASE_URL:-http://localhost:8787}"
+API_BASE_URL="${OCC_BASE_URL:-}"
 TMP_DIR="$(mktemp -d)"
 SESSION_TOKEN=""
 
@@ -30,6 +30,31 @@ EOF
 
 trap cleanup EXIT
 
+resolve_api_base_url() {
+  local cookie_header="${1:-}"
+
+  for candidate in \
+    "http://127.0.0.1:8787" \
+    "http://127.0.0.1:8794" \
+    "http://localhost:8787" \
+    "http://localhost:8794"
+  do
+    if [[ -n "$cookie_header" ]]; then
+      local status
+      status="$(curl -s -o /dev/null -w "%{http_code}" -H "Cookie: $cookie_header" "$candidate/api/system/runtime" || true)"
+      if [[ "$status" == "200" ]]; then
+        echo "$candidate"
+        return 0
+      fi
+    elif curl -sf "$candidate/health" >/dev/null 2>&1; then
+      echo "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 assert_json() {
   local file_path="$1"
   local script="$2"
@@ -43,6 +68,32 @@ const assertion = new Function("payload", script);
 assertion(payload);
 EOF
 }
+
+echo "verify-smoke: creating temporary authenticated session"
+
+SESSION_TOKEN="$(node --input-type=module <<'EOF'
+import { prisma } from "./apps/api/dist/db.js";
+import { generateSessionToken, hashSessionToken } from "./apps/api/dist/security/secret-store.js";
+
+const sessionToken = generateSessionToken();
+await prisma.authSession.create({
+  data: {
+    tokenHash: hashSessionToken(sessionToken),
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000)
+  }
+});
+
+console.log(sessionToken);
+await prisma.$disconnect();
+EOF
+)"
+
+COOKIE_HEADER="occ_session=${SESSION_TOKEN}"
+
+if [[ -z "$API_BASE_URL" ]]; then
+  API_BASE_URL="$(resolve_api_base_url "$COOKIE_HEADER" || resolve_api_base_url || true)"
+  API_BASE_URL="${API_BASE_URL:-http://localhost:8787}"
+fi
 
 echo "verify-smoke: checking public endpoints"
 
@@ -69,27 +120,6 @@ if [[ "$UNAUTH_STATUS" != "401" ]]; then
   echo "Expected /api/system/runtime to reject anonymous access with 401, got $UNAUTH_STATUS" >&2
   exit 1
 fi
-
-echo "verify-smoke: creating temporary authenticated session"
-
-SESSION_TOKEN="$(node --input-type=module <<'EOF'
-import { prisma } from "./apps/api/dist/db.js";
-import { generateSessionToken, hashSessionToken } from "./apps/api/dist/security/secret-store.js";
-
-const sessionToken = generateSessionToken();
-await prisma.authSession.create({
-  data: {
-    tokenHash: hashSessionToken(sessionToken),
-    expiresAt: new Date(Date.now() + 10 * 60 * 1000)
-  }
-});
-
-console.log(sessionToken);
-await prisma.$disconnect();
-EOF
-)"
-
-COOKIE_HEADER="occ_session=${SESSION_TOKEN}"
 
 echo "verify-smoke: checking protected APIs"
 

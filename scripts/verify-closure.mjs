@@ -7,7 +7,7 @@ import {
   OPENCLAW_WORKSPACE_ROOT
 } from "../apps/api/dist/openclaw/paths.js";
 
-const API_BASE_URL = process.env.OCC_BASE_URL || "http://localhost:8787";
+let API_BASE_URL = process.env.OCC_BASE_URL || "";
 
 const state = {
   sessionToken: "",
@@ -26,6 +26,41 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+async function resolveApiBaseUrl() {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+
+  const candidates = [
+    "http://127.0.0.1:8787",
+    "http://127.0.0.1:8794",
+    "http://localhost:8787",
+    "http://localhost:8794"
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const response = await fetch(
+        state.sessionToken ? `${candidate}/api/system/runtime` : `${candidate}/health`,
+        state.sessionToken
+          ? {
+              headers: {
+                Cookie: `occ_session=${state.sessionToken}`
+              }
+            }
+          : undefined
+      );
+      if (response.ok) {
+        return candidate;
+      }
+    } catch {
+      // try the next candidate
+    }
+  }
+
+  return "http://localhost:8787";
 }
 
 async function request(pathname, init = {}) {
@@ -466,6 +501,7 @@ async function cleanup() {
 async function main() {
   const results = {};
   await createSession();
+  API_BASE_URL = await resolveApiBaseUrl();
 
   try {
     const auth = await request("/api/auth/status");
