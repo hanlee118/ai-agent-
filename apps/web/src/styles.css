@@ -1214,6 +1214,50 @@ input {
   gap: 20px;
 }
 
+.dashboard-hero-context {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.dashboard-hero-context-card,
+.dashboard-hero-side-card {
+  padding: 16px 18px;
+  border-radius: 16px;
+  background: rgba(15, 23, 42, 0.58);
+  border: 1px solid rgba(30, 41, 59, 1);
+}
+
+.dashboard-hero-context-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dashboard-hero-context-card span,
+.dashboard-hero-context-card strong,
+.dashboard-hero-context-card p {
+  margin: 0;
+}
+
+.dashboard-hero-context-card span {
+  color: #94a3b8;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.dashboard-hero-context-card strong {
+  font-size: 1.15rem;
+  line-height: 1.2;
+}
+
+.dashboard-hero-context-card p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
 .dashboard-zero-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
@@ -1272,6 +1316,12 @@ input {
 
 .dashboard-activity-copy p {
   margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.dashboard-rail-copy {
+  margin: -4px 0 0;
   color: var(--muted);
   line-height: 1.6;
 }
@@ -3600,6 +3650,7 @@ input {
   .portfolio-command-grid,
   .dashboard-studio-layout,
   .dashboard-hero-grid,
+  .dashboard-hero-context,
   .dashboard-ops-grid,
   .operations-layout,
   .system-grid,
@@ -3657,6 +3708,7 @@ input {
 
   .hero-stats,
   .split-panels,
+  .dashboard-hero-context,
   .metric-inline-grid,
   .project-room-hero-meta,
   .usage-kpi-grid,

@@ -435,6 +435,26 @@ export function DashboardPage() {
               </button>
             </div>
 
+            <div className="dashboard-hero-context">
+              <div className="dashboard-hero-context-card">
+                <span>{isEnglish ? "Runtime mode" : "运行模式"}</span>
+                <strong>{runtime?.mode ?? (isEnglish ? "Unknown" : "未知")}</strong>
+                <p>{runtime?.configured ? (runtime.modelName || (isEnglish ? "Model configured" : "模型已配置")) : (isEnglish ? "Fallback agent is currently active." : "当前由回退 Agent 承接执行。")}</p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{isEnglish ? "Workspace connected" : "工作区接入"}</span>
+                <strong>{workspace?.projects.length ?? 0} / {workspace?.agents.length ?? 0}</strong>
+                <p>{isEnglish ? "Live OpenClaw projects and managed agents are already synchronized." : "真实 OpenClaw 项目与受管 Agent 已处于同步状态。"}</p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{isEnglish ? "Approval pressure" : "审批压力"}</span>
+                <strong>{waitingProjects.length}</strong>
+                <p>{waitingProjects.length > 0
+                  ? (isEnglish ? "There are pending decisions blocking downstream execution." : "当前存在会阻断后续推进的待决策项目。")
+                  : (isEnglish ? "No approvals are currently blocking progress." : "当前没有审批闸口阻塞推进。")}</p>
+              </div>
+            </div>
+
             <div className="dashboard-hero-grid">
               <div className="dashboard-compose-stack">
                 <textarea
@@ -493,9 +513,20 @@ export function DashboardPage() {
                 )}
 
                 <div className="dashboard-signal-stack">
-                  {attentionItems.slice(0, 2).map((item) => (
-                    <AttentionCard key={item.title} title={item.title} detail={item.detail} tone={item.tone} />
-                  ))}
+                  <div className="dashboard-hero-side-card">
+                    <div className="section-header">
+                      <div>
+                        <p className="eyebrow">{isEnglish ? "Operator lane" : "指挥官情报"}</p>
+                        <h3>{isEnglish ? "What needs attention first" : "当前先处理什么"}</h3>
+                      </div>
+                      <span className="pill pill-warning">{attentionItems.length}</span>
+                    </div>
+                    <div className="attention-list">
+                      {attentionItems.slice(0, 2).map((item) => (
+                        <AttentionCard key={item.title} title={item.title} detail={item.detail} tone={item.tone} />
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
@@ -613,7 +644,9 @@ export function DashboardPage() {
                 <p className="eyebrow">Recent Activity</p>
                 <h3>{isEnglish ? "Operational timeline" : "运行时间线"}</h3>
               </div>
+              <span className="pill">{activityFeed.length}</span>
             </div>
+            <p className="dashboard-rail-copy">{isEnglish ? "Read this like an operator log so you can see project, workspace, and runtime changes in one stream." : "把这里当成运营时间线来看，就能在一条流里读到项目、工作区与运行态变化。"}</p>
             <div className="dashboard-activity-feed">
               {activityFeed.map((item) => (
                 <DashboardActivityItem key={item.key} title={item.title} detail={item.detail} stamp={item.stamp} tone={item.tone} />
@@ -628,8 +661,9 @@ export function DashboardPage() {
                 <p className="eyebrow">Modules</p>
                 <h3>{copy.modulesTitle}</h3>
               </div>
+              <span className="pill">{workspaceModuleCards.length}</span>
             </div>
-            <p className="muted-text">{copy.modulesCopy}</p>
+            <p className="dashboard-rail-copy">{copy.modulesCopy}</p>
             <div className="module-grid">
               {workspaceModuleCards.map((item) => (
                 <Link key={item.title} to={item.to} className="module-card">
@@ -654,7 +688,7 @@ export function DashboardPage() {
                 {copy.openMonitor}
               </Link>
             </div>
-            <p className="muted-text">{copy.localMonitorCopy}</p>
+            <p className="dashboard-rail-copy">{copy.localMonitorCopy}</p>
             <div className="dashboard-mini-grid">
               {(localMonitor?.tools ?? []).map((tool) => (
                 <MetricInline key={tool.tool} label={tool.label} value={`${tool.sessionCount} · ${tool.activeCount}/${tool.idleCount}/${tool.staleCount}`} />
@@ -676,7 +710,9 @@ export function DashboardPage() {
                 <p className="eyebrow">Approval Queue</p>
                 <h3>{isEnglish ? "Waiting For Decision" : "等待你确认"}</h3>
               </div>
+              <span className="pill pill-warning">{waitingProjects.length}</span>
             </div>
+            <p className="dashboard-rail-copy">{isEnglish ? "Projects landing here are paused on approval or rejection, so this queue acts like a real execution gate." : "进入这里的项目都卡在审批或驳回节点，所以这条队列本质上就是执行闸口。"}</p>
             <div className="dashboard-queue-list">
               {waitingProjects.map((project) => (
                 <DashboardQueueCard key={project.id} project={project} isEnglish={isEnglish} locale={locale} />
@@ -691,9 +727,13 @@ export function DashboardPage() {
                 <p className="eyebrow">System Health</p>
                 <h3>{isEnglish ? "Health Snapshot" : "系统健康快照"}</h3>
               </div>
+              <span className={health && health.blockedTasks > 0 ? "pill pill-warning" : "pill pill-success"}>
+                {health && health.blockedTasks > 0 ? (isEnglish ? "Attention" : "需关注") : (isEnglish ? "Healthy" : "健康")}
+              </span>
             </div>
             {health ? (
               <div className="stack tight">
+                <p className="dashboard-rail-copy">{isEnglish ? "This card compresses runtime health, stage rejection signals, and average team load into one fast operator view." : "这张卡把运行健康、阶段返工信号与团队平均负载压缩成一个快速运营视图。"}</p>
                 <div className="dashboard-mini-grid">
                   <MetricInline label={isEnglish ? "Blocked Tasks" : "阻塞任务"} value={String(health.blockedTasks)} />
                   <MetricInline label={isEnglish ? "Rejected Stages" : "返工阶段"} value={String(health.rejectedStages)} />
@@ -727,6 +767,7 @@ export function DashboardPage() {
                 </div>
                 <span className="pill pill-primary">{getStageLabel(spotlightProject.currentStage, locale)}</span>
               </div>
+              <p className="dashboard-rail-copy">{isEnglish ? "This spotlight keeps one high-value project visible so the dashboard always has a current command focal point." : "这里固定突出一个高价值项目，让首页始终保留一个当前指挥焦点。"}</p>
               <DashboardProjectCard project={spotlightProject} isEnglish={isEnglish} locale={locale} spotlight />
             </div>
           ) : null}
@@ -737,7 +778,9 @@ export function DashboardPage() {
                 <p className="eyebrow">Archive</p>
                 <h3>{isEnglish ? "Recent Archive" : "最近归档"}</h3>
               </div>
+              <span className="pill">{archivedProjects.length}</span>
             </div>
+            <p className="dashboard-rail-copy">{isEnglish ? "Keep recent closed work visible so teams can review what shipped and what patterns are becoming reusable." : "保留最近归档内容，方便团队回看已交付成果与可复用模式。"}</p>
             <div className="showcase-grid showcase-grid-compact">
               {archivedProjects.map((project) => (
                 <DashboardProjectCard key={project.id} project={project} isEnglish={isEnglish} locale={locale} archived />
