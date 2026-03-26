@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import type {
   AuditLogItem,
   LocalAgentMonitorOverview,
@@ -122,7 +123,9 @@ export function SystemPage() {
           stale: "Stale"
         } as Record<LocalAgentSessionItem["status"], string>,
         noCost: "No cost",
-        unknownModel: "Unknown model"
+        unknownModel: "Unknown model",
+        operatorSignals: "Operator signals",
+        operatorSignalsCopy: "Keep the same right-rail pattern used across the workbench so runtime risk, release readiness, and alert routing stay visible."
       }
     : {
         title: "运行配置、健康状态与发布前检查",
@@ -199,7 +202,9 @@ export function SystemPage() {
           stale: "静默"
         } as Record<LocalAgentSessionItem["status"], string>,
         noCost: "暂无成本",
-        unknownModel: "未知模型"
+        unknownModel: "未知模型",
+        operatorSignals: "运营信号",
+        operatorSignalsCopy: "统一使用工作台右侧情报栏模式，让运行风险、发布状态和通知入口始终可见。"
       };
 
   const totalUsage = localAgentMonitor?.totals ?? EMPTY_USAGE;
@@ -339,15 +344,25 @@ export function SystemPage() {
 
   return (
     <div className="page">
-      <header className="page-header">
+      <header className="page-header studio-page-header">
         <div>
           <p className="eyebrow">System Operations</p>
           <h2>{copy.title}</h2>
           <p className="hero-copy">{copy.hero}</p>
         </div>
-        <button className="button button-ghost" onClick={() => void refresh()}>
-          {copy.refresh}
-        </button>
+        <div className="studio-header-actions">
+          <span className="pill pill-success">
+            {runtime?.mode === "openai-compatible"
+              ? (isEnglish ? "Runtime Online" : "运行已在线")
+              : (isEnglish ? "Fallback Mode" : "回退模式")}
+          </span>
+          <Link className="button button-ghost inline-button" to="/notifications">
+            {isEnglish ? "Open notifications" : "进入通知中心"}
+          </Link>
+          <button className="button button-ghost" onClick={() => void refresh()}>
+            {copy.refresh}
+          </button>
+        </div>
       </header>
 
       {flash ? (
@@ -356,16 +371,16 @@ export function SystemPage() {
         </section>
       ) : null}
 
-      <section className="agent-summary-grid">
+      <section className="studio-kpi-grid">
         <MetricTile label={copy.mode} value={runtime?.mode ?? "unknown"} />
         <MetricTile label={copy.targetMode} value={runtime?.requestedMode ?? "unknown"} tone="warning" />
         <MetricTile label={copy.source} value={runtime?.configSource ?? "unknown"} />
         <MetricTile label={copy.validation} value={runtime?.lastValidationStatus ?? "unknown"} />
       </section>
 
-      <section className="operations-layout">
+      <section className="portfolio-command-grid">
         <div className="operations-main">
-          <article className="card">
+          <article className="card studio-command-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Runtime Config</p>
@@ -443,7 +458,7 @@ export function SystemPage() {
             </div>
           </article>
 
-          <article className="card">
+          <article className="card studio-command-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Local Monitor</p>
@@ -529,7 +544,7 @@ export function SystemPage() {
             </div>
           </article>
 
-          <article className="card">
+          <article className="card studio-command-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Audit Trail</p>
@@ -560,7 +575,7 @@ export function SystemPage() {
         </div>
 
         <aside className="operations-side">
-          <article className="card">
+          <article className="card studio-side-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Readiness</p>
@@ -602,7 +617,7 @@ export function SystemPage() {
             </div>
           </article>
 
-          <article className="card">
+          <article className="card studio-side-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Service Health</p>
@@ -625,7 +640,7 @@ export function SystemPage() {
             </div>
           </article>
 
-          <article className="card">
+          <article className="card studio-side-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Release Checklist</p>
@@ -663,6 +678,30 @@ export function SystemPage() {
                 )}
                 ok={(health?.blockedTasks ?? 0) === 0 && (readiness?.openclaw.liveWorkspaceProjectCount ?? 0) > 0}
               />
+            </div>
+          </article>
+
+          <article className="card studio-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">{copy.operatorSignals}</p>
+                <h3>{copy.operatorSignals}</h3>
+              </div>
+            </div>
+            <p className="hero-copy">{copy.operatorSignalsCopy}</p>
+            <div className="attention-list">
+              <article className={runtime?.mode === "scripted" ? "attention-card attention-warning" : "attention-card"}>
+                <strong>{copy.mode}</strong>
+                <p>{runtime?.mode ?? copy.noValue}</p>
+              </article>
+              <article className={(readiness?.warnings.length ?? 0) > 0 ? "attention-card attention-warning" : "attention-card"}>
+                <strong>{copy.warnings}</strong>
+                <p>{readiness?.warnings.length ?? 0}</p>
+              </article>
+              <Link className="attention-card attention-default" to="/notifications">
+                <strong>{isEnglish ? "Notification center" : "通知中心"}</strong>
+                <p>{isEnglish ? "Route critical signals into one operator inbox." : "把关键运营信号收敛到统一收件箱。"}</p>
+              </Link>
             </div>
           </article>
         </aside>

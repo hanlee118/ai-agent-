@@ -17,6 +17,9 @@ import type {
   InterventionInput,
   OpenClawDocumentUpdateInput,
   OpenClawTaskUpdateInput,
+  NotificationInboxUpdateInput,
+  PromptTemplateChannel,
+  PromptTemplateUpsertInput,
   ProjectMessageInput,
   RoleType,
   RuntimeSettingsInput,
@@ -49,6 +52,8 @@ import {
   updateRuntimeSettings
 } from "./system/runtime-config.js";
 import { listAuditLogs, writeAuditLog } from "./system/audit-log.js";
+import { listNotificationInbox, updateNotificationInboxState } from "./system/notifications.js";
+import { createPromptTemplate, listPromptTemplates, markPromptTemplateUsed } from "./system/prompt-templates.js";
 import { getSystemReadiness } from "./system/readiness.js";
 import {
   getCachedLocalAgentMonitorOverview,
@@ -307,6 +312,82 @@ app.get("/api/system/local-agent-monitor/live", asyncRoute(async (req, res) => {
 app.get("/api/system/audit-logs", asyncRoute(async (req, res) => {
   const limit = Number(req.query.limit ?? 50);
   res.json(await listAuditLogs(Number.isFinite(limit) ? limit : 50));
+}));
+
+app.get("/api/notifications", asyncRoute(async (req, res) => {
+  const locale = req.query.locale === "en-US" ? "en-US" : "zh-CN";
+  res.json(await listNotificationInbox(locale));
+}));
+
+app.patch("/api/notifications/:sourceKey", asyncRoute(async (req, res) => {
+  const payload = req.body as NotificationInboxUpdateInput;
+  const sourceKey = decodeURIComponent(String(req.params.sourceKey ?? "").trim());
+
+  if (!sourceKey) {
+    res.status(400).json({ message: "sourceKey is required" });
+    return;
+  }
+
+  const updated = await updateNotificationInboxState(sourceKey, payload);
+  if (!updated) {
+    res.status(404).json({ message: "notification not found" });
+    return;
+  }
+
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "notification.updated",
+    resourceType: "notification",
+    resourceId: sourceKey,
+    summary: `通知状态已更新：${updated.title}`,
+    detail: `read=${updated.read} assignedTo=${updated.assignedTo ?? ""} confirmedBy=${updated.confirmedBy ?? ""} workflowStatus=${updated.workflowStatus}`
+  });
+
+  res.json(updated);
+}));
+
+app.get("/api/prompt-templates", asyncRoute(async (req, res) => {
+  const channel = String(req.query.channel ?? "").trim() as PromptTemplateChannel;
+  const locale = req.query.locale === "en-US" ? "en-US" : "zh-CN";
+  const projectId = String(req.query.projectId ?? "").trim() || undefined;
+
+  if (!channel) {
+    res.status(400).json({ message: "channel is required" });
+    return;
+  }
+
+  res.json(await listPromptTemplates({ channel, locale, projectId }));
+}));
+
+app.post("/api/prompt-templates", asyncRoute(async (req, res) => {
+  const payload = req.body as PromptTemplateUpsertInput;
+  if (!payload?.title || !payload?.content || !payload?.channel) {
+    res.status(400).json({ message: "title, content, and channel are required" });
+    return;
+  }
+
+  const created = await createPromptTemplate(payload);
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: payload.ownerLabel || "管理员",
+    action: "prompt_template.created",
+    resourceType: "prompt_template",
+    resourceId: created.id,
+    summary: `已创建模板：${created.title}`,
+    detail: `${created.channel} / ${created.scope}`
+  });
+  res.status(201).json(created);
+}));
+
+app.post("/api/prompt-templates/:templateId/use", asyncRoute(async (req, res) => {
+  const templateId = String(req.params.templateId ?? "").trim();
+  if (!templateId) {
+    res.status(400).json({ message: "templateId is required" });
+    return;
+  }
+
+  res.json(await markPromptTemplateUsed(templateId));
 }));
 
 app.post("/api/projects/preview", asyncRoute(async (req, res) => {

@@ -1,8 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { BrainCircuit, ChevronRight, Plus, RefreshCw, Search } from "lucide-react";
 import type { OpenClawAgentSummary, SystemHealth } from "@occ/shared";
 import { api } from "../lib/api";
 import { useLocale } from "../lib/locale";
+
+type AgentFilter = "all" | "attention" | "autonomous" | "active";
 
 export function AgentsPage() {
   const { isEnglish } = useLocale();
@@ -10,6 +13,8 @@ export function AgentsPage() {
   const [health, setHealth] = useState<SystemHealth | null>(null);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<AgentFilter>("all");
   const [newAgentId, setNewAgentId] = useState("");
   const [newAgentName, setNewAgentName] = useState("");
   const [newAgentTitle, setNewAgentTitle] = useState("");
@@ -38,24 +43,22 @@ export function AgentsPage() {
         setError(null);
       }
 
-      const [agentList, healthInfo] = await Promise.all([
-        api.getOpenClawAgents(),
-        api.getSystemHealth()
-      ]);
+      const [agentList, healthInfo] = await Promise.all([api.getOpenClawAgents(), api.getSystemHealth()]);
       setAgents(agentList);
       setHealth(healthInfo);
       setLastSyncedAt(new Date().toISOString());
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "加载失败");
+      setError(requestError instanceof Error ? requestError.message : (isEnglish ? "Failed to load agents" : "加载 Agent 失败"));
     }
   }
 
   const sortedAgents = useMemo(
     () =>
       [...agents].sort((left, right) => {
-        const blockedDelta = right.blockedTaskCount - left.blockedTaskCount;
-        if (blockedDelta !== 0) {
-          return blockedDelta;
+        const rightAttention = scoreAgentAttention(right);
+        const leftAttention = scoreAgentAttention(left);
+        if (rightAttention !== leftAttention) {
+          return rightAttention - leftAttention;
         }
 
         return right.taskCount - left.taskCount;
@@ -63,13 +66,37 @@ export function AgentsPage() {
     [agents]
   );
 
+  const filteredAgents = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+
+    return sortedAgents
+      .filter((agent) => {
+        if (filter === "attention") {
+          return isAttentionAgent(agent);
+        }
+        if (filter === "autonomous") {
+          return agent.commander.executionMode === "autonomous";
+        }
+        if (filter === "active") {
+          return agent.status === "active";
+        }
+        return true;
+      })
+      .filter((agent) => {
+        if (!normalizedQuery) {
+          return true;
+        }
+
+        return `${agent.name} ${agent.title} ${agent.intro} ${agent.responsibility} ${agent.agentId}`.toLowerCase().includes(normalizedQuery);
+      });
+  }, [filter, query, sortedAgents]);
+
   const activeTaskTotal = agents.reduce((sum, agent) => sum + agent.taskCount, 0);
   const autonomousCount = agents.filter((agent) => agent.commander.executionMode === "autonomous").length;
-  const overloadedCount = agents.filter((agent) => agent.taskCount >= 3 || agent.blockedTaskCount > 0).length;
-  const overloadedAgents = useMemo(
-    () => sortedAgents.filter((agent) => agent.taskCount >= 3 || agent.blockedTaskCount > 0).slice(0, 5),
-    [sortedAgents]
-  );
+  const overloadedCount = agents.filter(isAttentionAgent).length;
+  const activeRosterCount = agents.filter((agent) => agent.status === "active").length;
+  const overloadedAgents = useMemo(() => sortedAgents.filter(isAttentionAgent).slice(0, 5), [sortedAgents]);
+
   const hasJeremy = agents.some((agent) => {
     const normalizedId = agent.agentId.toLowerCase();
     const normalizedName = agent.name.toLowerCase();
@@ -78,15 +105,17 @@ export function AgentsPage() {
   const copy = isEnglish
     ? {
         title: "Live OpenClaw agent roster",
-        hero: "Inspect the real agent team, spot overloaded specialists, and jump directly into a dedicated commander view for each role.",
+        hero: "The new AI Studio flow treats agents like a real operating roster: searchable, filterable, and always one click away from a dedicated command room.",
         lastSynced: "Last sync",
         refresh: "Refresh",
+        createWorkspace: "Create agent",
+        search: "Search agent, title, responsibility, or ID",
         activeTasks: "Structured tasks",
         autonomous: "Autonomous agents",
         overloaded: "Attention needed",
-        runtime: "Runtime mode",
-        runtimeWatch: "Runtime Watch",
-        serviceHealth: "Service Health",
+        liveNow: "Active right now",
+        runtimeWatch: "Runtime watch",
+        serviceHealth: "Service health",
         openCommander: "Open commander",
         createAgent: "Create agent",
         creatingAgent: "Creating...",
@@ -104,28 +133,36 @@ export function AgentsPage() {
         blocked: "Blocked",
         allowed: "Collaboration",
         rosterTitle: "Command-ready roster",
-        rosterCopy: "Review who is carrying load, who is blocked, and which specialist should receive the next instruction.",
+        rosterCopy: "Use cards instead of raw rows so you can immediately read role, model, execution mode, load, and the next best command entry point.",
+        orchestrationTitle: "Team orchestration",
+        orchestrationCopy: "See how the team is split between autonomous execution, confirm-first work, and attention-required roles.",
         governanceTitle: "Roster governance",
-        governanceCopy: "Create or patch team roles from here, then jump into the dedicated commander page for model switching and approvals.",
+        governanceCopy: "Create or patch team roles here, then open the dedicated commander page for model switching, confirmation mode, and memory setup.",
         workloadTitle: "Attention queue",
-        workloadCopy: "These agents are most likely to need reassignment, intervention, or a quick sync check.",
-        missingDesignLead: "Design Director Jeremy is not in the managed roster yet.",
+        workloadCopy: "These specialists are most likely to need reassignment, intervention, or a progress check.",
+        missingDesignLead: "Design Director Jeremy is still missing from the managed roster.",
         fillJeremy: "Fill Jeremy preset",
         currentModel: "Current model",
         executionMode: "Execution",
         confirmFirst: "Confirm first",
         tasksLabel: "Tasks",
-        updatedLabel: "Updated"
+        updatedLabel: "Updated",
+        all: "All",
+        attention: "Attention",
+        active: "Active",
+        rosterEmpty: "No agents match the current filters."
       }
     : {
         title: "真实 OpenClaw Agent 团队总览",
-        hero: "这里展示的是当前真实 Agent 团队，而不是静态画像。你可以快速看出谁在承压、谁可接单，并直接进入单独指挥页。",
+        hero: "新的 AI Studio 方案把 Agent 页当成真实团队名册来设计，需要支持搜索、筛选、负载识别，以及一键进入专属指挥页。",
         lastSynced: "最近同步",
         refresh: "刷新状态",
+        createWorkspace: "创建 Agent",
+        search: "搜索 Agent、职位、职责或 ID",
         activeTasks: "结构化任务",
         autonomous: "自主执行 Agent",
         overloaded: "需要关注",
-        runtime: "运行模式",
+        liveNow: "当前活跃",
         runtimeWatch: "运行观察",
         serviceHealth: "服务状态",
         openCommander: "进入指挥页",
@@ -145,19 +182,45 @@ export function AgentsPage() {
         blocked: "阻塞数",
         allowed: "协作范围",
         rosterTitle: "可指挥的团队名册",
-        rosterCopy: "快速识别谁在承压、谁已阻塞、谁适合接下一单，再直接跳转到专属指挥页。",
+        rosterCopy: "用卡片而不是死板列表来展示角色、模型、执行模式、负载和下一步入口，这样才更像真正的团队操作台。",
+        orchestrationTitle: "团队协作编排",
+        orchestrationCopy: "用一张视图看到团队当前如何分布在自主执行、确认优先和重点关注三条协作轨道上。",
         governanceTitle: "团队治理",
-        governanceCopy: "在这里补齐角色、创建 Agent，再进入单独指挥页切换模型和执行策略。",
+        governanceCopy: "在这里补齐角色、创建 Agent，再进入单独指挥页切换模型和确认策略。",
         workloadTitle: "重点关注队列",
-        workloadCopy: "这些 Agent 最可能需要改派、介入或被你优先询问进展。",
+        workloadCopy: "这些 Agent 最可能需要改派、介入或被优先询问进展。",
         missingDesignLead: "当前受管团队里还没有设计总监 Jeremy。",
         fillJeremy: "填入 Jeremy 模板",
         currentModel: "当前模型",
         executionMode: "执行方式",
         confirmFirst: "执行前确认",
         tasksLabel: "任务数",
-        updatedLabel: "最近更新"
+        updatedLabel: "最近更新",
+        all: "全部",
+        attention: "关注",
+        active: "活跃",
+        rosterEmpty: "当前筛选条件下没有 Agent。"
       };
+  const orchestrationLanes = useMemo(
+    () => [
+      {
+        key: "autonomous",
+        title: copy.autonomous,
+        agents: sortedAgents.filter((agent) => agent.commander.executionMode === "autonomous").slice(0, 4)
+      },
+      {
+        key: "confirm",
+        title: copy.confirmFirst,
+        agents: sortedAgents.filter((agent) => agent.commander.executionMode === "confirm_first").slice(0, 4)
+      },
+      {
+        key: "attention",
+        title: copy.attention,
+        agents: sortedAgents.filter(isAttentionAgent).slice(0, 4)
+      }
+    ],
+    [copy.attention, copy.autonomous, copy.confirmFirst, sortedAgents]
+  );
 
   if (error) {
     return <div className="card error-text">{error}</div>;
@@ -190,7 +253,7 @@ export function AgentsPage() {
       setNewAgentAllowedAgents("");
       await refresh();
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "创建失败");
+      setError(requestError instanceof Error ? requestError.message : (isEnglish ? "Failed to create agent" : "创建 Agent 失败"));
     } finally {
       setCreating(false);
     }
@@ -217,102 +280,104 @@ export function AgentsPage() {
 
   return (
     <div className="page">
-      <header className="page-header">
+      <header className="page-header studio-page-header">
         <div>
-          <p className="eyebrow">Agent Center</p>
+          <p className="eyebrow">Agent Studio</p>
           <h2>{copy.title}</h2>
           <p className="hero-copy">{copy.hero}</p>
         </div>
-        <div className="hero-inline-meta">
+        <div className="studio-header-actions">
+          <label className="studio-search-field" aria-label={copy.search}>
+            <Search size={16} />
+            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={copy.search} />
+          </label>
           <span className="muted-text">
-            {copy.lastSynced}：{lastSyncedAt ? formatTime(lastSyncedAt, isEnglish ? "en-US" : "zh-CN") : "n/a"}
+            {copy.lastSynced} {lastSyncedAt ? formatTime(lastSyncedAt, isEnglish ? "en-US" : "zh-CN") : "n/a"}
           </span>
           <button className="button button-ghost inline-button" onClick={() => void refresh()}>
+            <RefreshCw size={16} />
             {copy.refresh}
           </button>
         </div>
       </header>
 
-      <section className="agent-summary-grid">
+      <section className="studio-kpi-grid">
         <MetricTile label={copy.activeTasks} value={String(activeTaskTotal)} />
         <MetricTile label={copy.autonomous} value={String(autonomousCount)} />
         <MetricTile label={copy.overloaded} value={String(overloadedCount)} tone="warning" />
-        <MetricTile label={copy.runtime} value={health?.runtime.mode ?? "unknown"} />
+        <MetricTile label={copy.liveNow} value={String(activeRosterCount)} />
       </section>
 
-      <section className="agent-workbench">
-        <div className="agent-workbench-main">
-          <article className="card">
+      <section className="portfolio-command-grid">
+        <div className="portfolio-command-main">
+          <article className="card studio-command-card studio-catalog-toolbar-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.rosterTitle}</p>
                 <h3>{copy.rosterTitle}</h3>
                 <p className="hero-copy">{copy.rosterCopy}</p>
               </div>
-              <span className="pill">{sortedAgents.length}</span>
+              <span className="pill pill-primary">{filteredAgents.length}</span>
             </div>
 
-            <div className="agent-roster-list">
-              {sortedAgents.map((agent) => (
-                <article className="agent-roster-row" key={agent.agentId}>
-                  <div className="agent-roster-main">
-                    <div className="agent-roster-head">
-                      <div>
-                        <div className="pill-row">
-                          <span className={`status-badge status-${agent.status}`}>{agent.status}</span>
-                          {agent.commander.executionMode === "autonomous" ? (
-                            <span className="pill pill-primary">{copy.autonomous}</span>
-                          ) : (
-                            <span className="pill">{copy.confirmFirst}</span>
-                          )}
+            <div className="studio-filter-stack">
+              <div className="pill-row">
+                {(["all", "attention", "autonomous", "active"] as AgentFilter[]).map((item) => (
+                  <button
+                    key={item}
+                    className={filter === item ? "filter-pill filter-pill-active" : "filter-pill"}
+                    onClick={() => setFilter(item)}
+                  >
+                    {filterLabel(item, copy)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </article>
+
+          <div className="studio-catalog-grid">
+            {filteredAgents.map((agent) => (
+              <AgentStudioCard key={agent.agentId} agent={agent} copy={copy} isEnglish={isEnglish} />
+            ))}
+            {filteredAgents.length === 0 ? <div className="empty-state">{copy.rosterEmpty}</div> : null}
+          </div>
+        </div>
+
+        <aside className="portfolio-command-rail">
+          <article className="card studio-side-card">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">{copy.orchestrationTitle}</p>
+                <h3>{copy.orchestrationTitle}</h3>
+              </div>
+            </div>
+            <p className="hero-copy">{copy.orchestrationCopy}</p>
+            <div className="orchestration-lanes">
+              {orchestrationLanes.map((lane) => (
+                <div className="orchestration-lane" key={lane.key}>
+                  <div className="timeline-head">
+                    <strong>{lane.title}</strong>
+                    <span className="pill">{lane.agents.length}</span>
+                  </div>
+                  <div className="stack tight">
+                    {lane.agents.map((agent) => (
+                      <Link key={agent.agentId} to={`/agents/${agent.agentId}`} className="orchestration-lane-card">
+                        <div className="timeline-head">
+                          <strong>{agent.emoji} {agent.name}</strong>
+                          <span className={`status-badge status-${agent.status}`}>{presenceLabel(agent.status, isEnglish)}</span>
                         </div>
-                        <h3 className="agent-roster-title">{agent.emoji} {agent.name}</h3>
-                      </div>
-                      <Link className="button button-primary inline-button" to={`/agents/${agent.agentId}`}>
-                        {copy.openCommander}
+                        <p>{agent.currentTask?.title ?? agent.responsibility}</p>
+                        <span className="muted-text">{agent.commander.selectedModel}</span>
                       </Link>
-                    </div>
-
-                    <p className="highlight-text">{agent.title}</p>
-                    <p className="agent-description">{agent.intro}</p>
-
-                    <div className="agent-kpi-grid">
-                      <div className="agent-kpi-card">
-                        <span>{copy.currentTask}</span>
-                        <strong>{agent.currentTask ? agent.currentTask.title : copy.noTask}</strong>
-                        <span className="muted-text">{agent.currentTask ? agent.currentTask.projectName : agent.responsibility}</span>
-                      </div>
-                      <div className="agent-kpi-card">
-                        <span>{copy.sessions}</span>
-                        <strong>{agent.sessionCount}</strong>
-                        <span className="muted-text">{copy.blocked} {agent.blockedTaskCount}</span>
-                      </div>
-                    </div>
-
-                    <div className="pill-row">
-                      {agent.availableModels.slice(0, 3).map((model) => (
-                        <span className="pill" key={model.id}>
-                          {model.label}
-                        </span>
-                      ))}
-                    </div>
+                    ))}
+                    {lane.agents.length === 0 ? <p className="muted-text">{isEnglish ? "No agents in this lane." : "该轨道当前没有 Agent。"}</p> : null}
                   </div>
-
-                  <div className="agent-roster-side">
-                    <MiniMeta label={copy.currentModel} value={agent.commander.selectedModel} />
-                    <MiniMeta label={copy.executionMode} value={agent.commander.executionMode} />
-                    <MiniMeta label={copy.tasksLabel} value={String(agent.taskCount)} />
-                    <MiniMeta label={copy.allowed} value={String(agent.allowedAgentIds.length)} />
-                    <MiniMeta label={copy.updatedLabel} value={agent.lastActiveAt ? formatTime(agent.lastActiveAt, isEnglish ? "en-US" : "zh-CN") : "-"} />
-                  </div>
-                </article>
+                </div>
               ))}
             </div>
           </article>
-        </div>
 
-        <aside className="agent-workbench-side">
-          <article className="card">
+          <article className="card studio-side-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.workloadTitle}</p>
@@ -340,7 +405,7 @@ export function AgentsPage() {
           </article>
 
           {health ? (
-            <article className="card">
+            <article className="card studio-side-card">
               <div className="section-header">
                 <div>
                   <p className="eyebrow">{copy.runtimeWatch}</p>
@@ -363,7 +428,7 @@ export function AgentsPage() {
             </article>
           ) : null}
 
-          <article className="card">
+          <article className="card studio-side-card">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.governanceTitle}</p>
@@ -417,6 +482,7 @@ export function AgentsPage() {
             </div>
             <div className="action-row">
               <button className="button button-primary" onClick={() => void handleCreateAgent()} disabled={creating}>
+                <Plus size={16} />
                 {creating ? copy.creatingAgent : copy.createAgent}
               </button>
             </div>
@@ -424,6 +490,67 @@ export function AgentsPage() {
         </aside>
       </section>
     </div>
+  );
+}
+
+function AgentStudioCard({
+  agent,
+  copy,
+  isEnglish
+}: {
+  agent: OpenClawAgentSummary;
+  copy: Record<string, string>;
+  isEnglish: boolean;
+}) {
+  const attention = isAttentionAgent(agent);
+
+  return (
+    <article className={`studio-catalog-card ${attention ? "studio-catalog-card-warning" : ""}`}>
+      <div className={`studio-catalog-accent ${attention ? "studio-catalog-accent-paused" : "studio-catalog-accent-working"}`} />
+      <div className="studio-catalog-card-body">
+        <div className="studio-catalog-card-head">
+          <div className="studio-catalog-icon">
+            <BrainCircuit size={24} />
+          </div>
+          <div className="studio-catalog-badges">
+            <span className={`status-badge status-${agent.status}`}>{presenceLabel(agent.status, isEnglish)}</span>
+            {agent.commander.executionMode === "autonomous" ? <span className="pill pill-primary">{copy.autonomous}</span> : null}
+          </div>
+        </div>
+
+        <div className="studio-catalog-copy">
+          <p className="project-id">{agent.agentId}</p>
+          <h3>{agent.emoji} {agent.name}</h3>
+          <p className="studio-catalog-subtitle">{agent.title}</p>
+          <p>{agent.intro || agent.responsibility}</p>
+        </div>
+
+        <div className="studio-catalog-focus">
+          <span>{copy.currentTask}</span>
+          <strong>{agent.currentTask ? agent.currentTask.title : copy.noTask}</strong>
+          <span className="muted-text">{agent.currentTask ? agent.currentTask.projectName : agent.responsibility}</span>
+        </div>
+
+        <div className="studio-catalog-inline-metrics">
+          <MiniMeta label={copy.currentModel} value={agent.commander.selectedModel} />
+          <MiniMeta label={copy.tasksLabel} value={String(agent.taskCount)} />
+        </div>
+
+        <div className="studio-catalog-footer">
+          <div className="studio-catalog-team">
+            <div className="studio-mini-chip">
+              <span>{copy.sessions} {agent.sessionCount}</span>
+            </div>
+            <div className="studio-mini-chip">
+              <span>{copy.blocked} {agent.blockedTaskCount}</span>
+            </div>
+          </div>
+          <Link className="studio-card-arrow" to={`/agents/${agent.agentId}`}>
+            <ChevronRight size={18} />
+          </Link>
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -446,11 +573,25 @@ function MetricTile({
 
 function MiniMeta({ label, value }: { label: string; value: string }) {
   return (
-    <div className="meta-chip">
+    <div className="showcase-metric">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
   );
+}
+
+function filterLabel(filter: AgentFilter, copy: Record<string, string>) {
+  if (filter === "all") {
+    return copy.all;
+  }
+  if (filter === "attention") {
+    return copy.attention;
+  }
+  if (filter === "active") {
+    return copy.active;
+  }
+
+  return copy.autonomous;
 }
 
 function formatTime(timestamp: string, locale = "zh-CN") {
@@ -467,4 +608,20 @@ function splitCsv(value: string) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function isAttentionAgent(agent: OpenClawAgentSummary) {
+  return agent.status === "attention" || agent.taskCount >= 3 || agent.blockedTaskCount > 0;
+}
+
+function scoreAgentAttention(agent: OpenClawAgentSummary) {
+  return agent.blockedTaskCount * 10 + agent.taskCount + (agent.status === "attention" ? 5 : 0);
+}
+
+function presenceLabel(status: string, isEnglish: boolean) {
+  const labels = isEnglish
+    ? { active: "Active", idle: "Idle", offline: "Offline", attention: "Attention" }
+    : { active: "活跃", idle: "空闲", offline: "离线", attention: "关注" };
+
+  return labels[status as keyof typeof labels] ?? status;
 }

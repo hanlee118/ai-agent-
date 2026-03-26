@@ -17,6 +17,15 @@ export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
 export type TaskPriority = "low" | "normal" | "high";
 export type ServiceStatus = "healthy" | "degraded";
 export type RuntimeValidationStatus = "unknown" | "healthy" | "failed";
+export type NotificationSeverity = "critical" | "warning" | "info";
+export type NotificationWorkflowStatus = "open" | "acknowledged" | "resolved";
+export type PromptTemplateScope = "global" | "project" | "personal";
+export type PromptTemplateChannel =
+  | "project_room_guidance"
+  | "project_room_emergency"
+  | "project_room_deliverable"
+  | "openclaw_agent"
+  | "openclaw_batch";
 
 export interface ParsedIntent {
   keywords: string[];
@@ -206,6 +215,56 @@ export interface AuditLogItem {
   requestId?: string;
   ipAddress?: string;
   createdAt: string;
+}
+
+export interface NotificationInboxItem {
+  id: string;
+  sourceKey: string;
+  sourceType: string;
+  severity: NotificationSeverity;
+  category: string;
+  title: string;
+  detail: string;
+  actionLabel: string;
+  to: string;
+  timestamp?: string;
+  read: boolean;
+  assignedTo?: string;
+  confirmedBy?: string;
+  workflowStatus: NotificationWorkflowStatus;
+  updatedAt: string;
+}
+
+export interface NotificationInboxUpdateInput {
+  read?: boolean;
+  assignedTo?: string | null;
+  confirmedBy?: string | null;
+  workflowStatus?: NotificationWorkflowStatus;
+}
+
+export interface PromptTemplate {
+  id: string;
+  title: string;
+  content: string;
+  scope: PromptTemplateScope;
+  channel: PromptTemplateChannel;
+  locale: "zh-CN" | "en-US";
+  projectId?: string;
+  ownerLabel?: string;
+  usageCount: number;
+  lastUsedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PromptTemplateUpsertInput {
+  title: string;
+  content: string;
+  scope: PromptTemplateScope;
+  channel: PromptTemplateChannel;
+  locale: "zh-CN" | "en-US";
+  projectId?: string;
+  ownerLabel?: string;
 }
 
 export type OpenClawTaskState = "todo" | "in_progress" | "blocked" | "done" | "unknown";

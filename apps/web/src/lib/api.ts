@@ -36,6 +36,11 @@ import type {
   StageSubmissionInput,
   SystemHealth,
   LocalAgentMonitorOverview,
+  NotificationInboxItem,
+  NotificationInboxUpdateInput,
+  PromptTemplate,
+  PromptTemplateChannel,
+  PromptTemplateUpsertInput,
   Task,
   TaskBoardItem,
   TaskUpdateInput,
@@ -139,6 +144,23 @@ export const api = {
   getSystemReadiness: () => request<SystemReadiness>("/api/system/readiness"),
   getLocalAgentMonitor: () => request<LocalAgentMonitorOverview>("/api/system/local-agent-monitor"),
   localAgentMonitorLiveUrl: () => `${API_BASE_URL}/api/system/local-agent-monitor/live`,
+  getNotifications: (locale: "zh-CN" | "en-US") => request<NotificationInboxItem[]>(`/api/notifications?locale=${encodeURIComponent(locale)}`),
+  updateNotification: (sourceKey: string, payload: NotificationInboxUpdateInput) =>
+    request<NotificationInboxItem>(`/api/notifications/${encodeURIComponent(sourceKey)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  getPromptTemplates: (channel: PromptTemplateChannel, locale: "zh-CN" | "en-US", projectId?: string) =>
+    request<PromptTemplate[]>(`/api/prompt-templates?channel=${encodeURIComponent(channel)}&locale=${encodeURIComponent(locale)}${projectId ? `&projectId=${encodeURIComponent(projectId)}` : ""}`),
+  createPromptTemplate: (payload: PromptTemplateUpsertInput) =>
+    request<PromptTemplate>("/api/prompt-templates", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  markPromptTemplateUsed: (templateId: string) =>
+    request<PromptTemplate>(`/api/prompt-templates/${encodeURIComponent(templateId)}/use`, {
+      method: "POST"
+    }),
   getProject: (projectId: string) => request<ProjectDetail>(`/api/projects/${projectId}`),
   getProjectTasks: (projectId: string) => request<Task[]>(`/api/projects/${projectId}/tasks`),
   getTasks: () => request<TaskBoardItem[]>("/api/tasks"),

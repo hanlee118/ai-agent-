@@ -14,7 +14,8 @@ import type {
   OpenClawStatusSummary,
   OpenClawTaskItem,
   OpenClawTaskState,
-  OpenClawWorkspaceOverview
+  OpenClawWorkspaceOverview,
+  PromptTemplate
 } from "@occ/shared";
 import { api } from "../lib/api";
 import { useLocale } from "../lib/locale";
@@ -66,6 +67,8 @@ export function OpenClawPage() {
   const [batchTaskSaving, setBatchTaskSaving] = useState(false);
   const [agentMessage, setAgentMessage] = useState<string>(OPENCLAW_AGENT_MESSAGE_DEFAULTS[locale]);
   const [bulkMessage, setBulkMessage] = useState<string>(OPENCLAW_BULK_MESSAGE_DEFAULTS[locale]);
+  const [agentTemplates, setAgentTemplates] = useState<PromptTemplate[]>([]);
+  const [batchTemplates, setBatchTemplates] = useState<PromptTemplate[]>([]);
   const [messageSending, setMessageSending] = useState(false);
   const [commandResult, setCommandResult] = useState<OpenClawAgentCommandResult | null>(null);
   const [batchResult, setBatchResult] = useState<OpenClawBatchAgentCommandResult | null>(null);
@@ -393,6 +396,21 @@ export function OpenClawPage() {
         : current
     );
   }, [locale]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const [agentLibrary, batchLibrary] = await Promise.all([
+          api.getPromptTemplates("openclaw_agent", locale, selectedProjectId ?? undefined),
+          api.getPromptTemplates("openclaw_batch", locale, selectedProjectId ?? undefined)
+        ]);
+        setAgentTemplates(agentLibrary);
+        setBatchTemplates(batchLibrary);
+      } catch {
+        // keep console usable even if template library fails to load
+      }
+    })();
+  }, [locale, selectedProjectId]);
 
   useEffect(() => {
     void refresh();
@@ -742,6 +760,38 @@ export function OpenClawPage() {
     } finally {
       setBatchSending(false);
     }
+  }
+
+  async function handleUseTemplate(template: PromptTemplate, target: "agent" | "batch") {
+    await api.markPromptTemplateUsed(template.id);
+    if (target === "agent") {
+      setAgentMessage(template.content);
+      return;
+    }
+    setBulkMessage(template.content);
+  }
+
+  async function handleSaveTemplate(target: "agent" | "batch", scope: "project" | "personal") {
+    const content = (target === "agent" ? agentMessage : bulkMessage).trim();
+    if (!content) {
+      return;
+    }
+
+    const created = await api.createPromptTemplate({
+      title: buildWorkbenchTemplateTitle(content, target, locale),
+      content,
+      scope,
+      channel: target === "agent" ? "openclaw_agent" : "openclaw_batch",
+      locale,
+      projectId: scope === "project" ? selectedProjectId ?? undefined : undefined,
+      ownerLabel: "Commander"
+    });
+
+    if (target === "agent") {
+      setAgentTemplates((current) => [created, ...current]);
+      return;
+    }
+    setBatchTemplates((current) => [created, ...current]);
   }
 
   async function handleCopyReport() {
@@ -1285,6 +1335,13 @@ export function OpenClawPage() {
                     </div>
                     <span className="pill">{projectDetail.agentIds.length} {isEnglish ? "agents" : "人"}</span>
                   </div>
+                  <WorkbenchTemplateToolbar
+                    templates={batchTemplates}
+                    locale={locale}
+                    onUse={(template) => void handleUseTemplate(template, "batch")}
+                    onSaveProject={() => void handleSaveTemplate("batch", "project")}
+                    onSavePersonal={() => void handleSaveTemplate("batch", "personal")}
+                  />
                   <textarea
                     className="composer-textarea compact"
                     value={bulkMessage}
@@ -1527,6 +1584,13 @@ export function OpenClawPage() {
                       <p className="muted-text">{pageCopy.agentDeskCopy.replace("{agentId}", agentDetail.agentId)}</p>
                     </div>
                   </div>
+                  <WorkbenchTemplateToolbar
+                    templates={agentTemplates}
+                    locale={locale}
+                    onUse={(template) => void handleUseTemplate(template, "agent")}
+                    onSaveProject={() => void handleSaveTemplate("agent", "project")}
+                    onSavePersonal={() => void handleSaveTemplate("agent", "personal")}
+                  />
 
                   <textarea
                     className="composer-textarea compact"
@@ -1768,6 +1832,48 @@ function pickDefaultProjectId(projects: OpenClawWorkspaceOverview["projects"]) {
     projects[0];
 
   return preferred?.id ?? null;
+}
+
+function buildWorkbenchTemplateTitle(content: string, target: "agent" | "batch", locale: "zh-CN" | "en-US") {
+  const prefix = locale === "en-US"
+    ? target === "agent" ? "Agent command" : "Team broadcast"
+    : target === "agent" ? "Agent 指令" : "团队广播";
+  return `${prefix} · ${content.replace(/\s+/g, " ").slice(0, 24)}`;
+}
+
+function WorkbenchTemplateToolbar({
+  templates,
+  locale,
+  onUse,
+  onSaveProject,
+  onSavePersonal
+}: {
+  templates: PromptTemplate[];
+  locale: "zh-CN" | "en-US";
+  onUse: (template: PromptTemplate) => void;
+  onSaveProject: () => void;
+  onSavePersonal: () => void;
+}) {
+  const isEnglish = locale === "en-US";
+  return (
+    <div className="stack tight">
+      <div className="pill-row">
+        {templates.slice(0, 4).map((template) => (
+          <button key={template.id} className="filter-pill" type="button" onClick={() => onUse(template)}>
+            {template.title}
+          </button>
+        ))}
+      </div>
+      <div className="pill-row">
+        <button className="button button-ghost inline-button" type="button" onClick={onSaveProject}>
+          {isEnglish ? "Save as project template" : "存为项目模板"}
+        </button>
+        <button className="button button-ghost inline-button" type="button" onClick={onSavePersonal}>
+          {isEnglish ? "Save as personal phrase" : "存为个人常用语"}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function formatTime(timestamp: string, locale = "zh-CN") {

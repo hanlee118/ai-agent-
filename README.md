@@ -184,6 +184,10 @@ pnpm start:prod
 
 ## 文档索引
 
+- [最新版本对比说明](docs/LATEST_VERSION_COMPARISON.md)
+- [最新产品方案](docs/LATEST_PRODUCT_PROPOSAL.md)
+- [最新需求文档](docs/LATEST_REQUIREMENTS_SPEC.md)
+- [最新技术文档](docs/LATEST_TECHNICAL_DOCUMENTATION.md)
 - [产品说明文档](docs/V1_0_1_PRODUCT_OVERVIEW.md)
 - [需求文档](docs/V1_0_1_REQUIREMENTS_SPEC.md)
 - [技术文档](docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)

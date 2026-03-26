@@ -121,6 +121,48 @@ model AuditLog {
   @@index([action, createdAt])
 }
 
+model NotificationState {
+  id             String   @id @default(cuid())
+  sourceKey      String   @unique
+  sourceType     String
+  severity       String
+  category       String
+  title          String
+  detail         String
+  actionLabel    String
+  to             String
+  eventAt        DateTime?
+  isRead         Boolean  @default(false)
+  assignedTo     String?
+  confirmedBy    String?
+  workflowStatus String   @default("open")
+  lastSeenAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([workflowStatus, updatedAt])
+  @@index([severity, updatedAt])
+}
+
+model PromptTemplate {
+  id         String   @id @default(cuid())
+  title      String
+  content    String
+  scope      String
+  channel    String
+  locale     String
+  projectId  String?
+  ownerLabel String?
+  usageCount Int      @default(0)
+  lastUsedAt DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([channel, locale, updatedAt])
+  @@index([projectId, channel, locale])
+  @@index([scope, ownerLabel, updatedAt])
+}
+
 model Project {
   id                  String          @id
   name                String

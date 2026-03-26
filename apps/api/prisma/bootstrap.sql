@@ -146,6 +146,49 @@ CREATE TABLE IF NOT EXISTS "AuditLog" (
 CREATE INDEX IF NOT EXISTS "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");
 CREATE INDEX IF NOT EXISTS "AuditLog_action_createdAt_idx" ON "AuditLog"("action", "createdAt");
 
+CREATE TABLE IF NOT EXISTS "NotificationState" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "sourceKey" TEXT NOT NULL,
+    "sourceType" TEXT NOT NULL,
+    "severity" TEXT NOT NULL,
+    "category" TEXT NOT NULL,
+    "title" TEXT NOT NULL,
+    "detail" TEXT NOT NULL,
+    "actionLabel" TEXT NOT NULL,
+    "to" TEXT NOT NULL,
+    "eventAt" DATETIME,
+    "isRead" BOOLEAN NOT NULL DEFAULT false,
+    "assignedTo" TEXT,
+    "confirmedBy" TEXT,
+    "workflowStatus" TEXT NOT NULL DEFAULT 'open',
+    "lastSeenAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS "NotificationState_sourceKey_key" ON "NotificationState"("sourceKey");
+CREATE INDEX IF NOT EXISTS "NotificationState_workflowStatus_updatedAt_idx" ON "NotificationState"("workflowStatus", "updatedAt");
+CREATE INDEX IF NOT EXISTS "NotificationState_severity_updatedAt_idx" ON "NotificationState"("severity", "updatedAt");
+
+CREATE TABLE IF NOT EXISTS "PromptTemplate" (
+    "id" TEXT NOT NULL PRIMARY KEY,
+    "title" TEXT NOT NULL,
+    "content" TEXT NOT NULL,
+    "scope" TEXT NOT NULL,
+    "channel" TEXT NOT NULL,
+    "locale" TEXT NOT NULL,
+    "projectId" TEXT,
+    "ownerLabel" TEXT,
+    "usageCount" INTEGER NOT NULL DEFAULT 0,
+    "lastUsedAt" DATETIME,
+    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" DATETIME NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS "PromptTemplate_channel_locale_updatedAt_idx" ON "PromptTemplate"("channel", "locale", "updatedAt");
+CREATE INDEX IF NOT EXISTS "PromptTemplate_projectId_channel_locale_idx" ON "PromptTemplate"("projectId", "channel", "locale");
+CREATE INDEX IF NOT EXISTS "PromptTemplate_scope_ownerLabel_updatedAt_idx" ON "PromptTemplate"("scope", "ownerLabel", "updatedAt");
+
 CREATE TABLE IF NOT EXISTS "ManagedAgentConfig" (
     "agentId" TEXT NOT NULL PRIMARY KEY,
     "displayName" TEXT,

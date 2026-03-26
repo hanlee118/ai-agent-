@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
+  type PromptTemplate,
+  type PromptTemplateChannel,
   type ProjectDetail,
   type ProjectStatus,
   type RoleType,
@@ -59,6 +61,13 @@ export function ProjectRoomPage() {
   const [rejectReason, setRejectReason] = useState<string>(PROJECT_ROOM_DEFAULTS.rejectReason[locale]);
   const [deliverableTitle, setDeliverableTitle] = useState("");
   const [deliverableContent, setDeliverableContent] = useState<string>(PROJECT_ROOM_DEFAULTS.deliverableContent[locale]);
+  const [templates, setTemplates] = useState<Record<PromptTemplateChannel, PromptTemplate[]>>({
+    project_room_guidance: [],
+    project_room_emergency: [],
+    project_room_deliverable: [],
+    openclaw_agent: [],
+    openclaw_batch: []
+  });
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -125,6 +134,8 @@ export function ProjectRoomPage() {
         pausing: "Pausing...",
         resume: "Resume project",
         resuming: "Resuming...",
+        live: "Live",
+        risk: "Risk",
         timeline: "Ops timeline",
         projectApproved: "Current stage approved. The project has moved on.",
         projectPaused: "Project paused. The intervention command was recorded.",
@@ -200,6 +211,8 @@ export function ProjectRoomPage() {
         pausing: "暂停中...",
         resume: "恢复项目",
         resuming: "恢复中...",
+        live: "实时",
+        risk: "风险",
         timeline: "战情时间轴",
         projectApproved: "已批准当前阶段，项目已继续推进。",
         projectPaused: "项目已暂停，新的介入指令已经写入时间轴。",
@@ -238,6 +251,30 @@ export function ProjectRoomPage() {
         : current
     );
   }, [locale]);
+
+  useEffect(() => {
+    if (!projectId) {
+      return;
+    }
+
+    void (async () => {
+      try {
+        const [guidance, emergency, deliverable] = await Promise.all([
+          api.getPromptTemplates("project_room_guidance", locale, projectId),
+          api.getPromptTemplates("project_room_emergency", locale, projectId),
+          api.getPromptTemplates("project_room_deliverable", locale, projectId)
+        ]);
+        setTemplates((current) => ({
+          ...current,
+          project_room_guidance: guidance,
+          project_room_emergency: emergency,
+          project_room_deliverable: deliverable
+        }));
+      } catch {
+        // keep the room usable even if templates fail to load
+      }
+    })();
+  }, [locale, projectId]);
 
   async function refresh(options?: { resetStream?: boolean; silent?: boolean }) {
     if (!projectId) {
@@ -362,6 +399,19 @@ export function ProjectRoomPage() {
       done: items.filter((item) => item.status === "done").length
     };
   }, [project?.tasks]);
+
+  const projectRiskTone = useMemo(() => {
+    if (!project) {
+      return "low" as const;
+    }
+    if (project.pendingApproval || project.tasks.some((item) => item.status === "blocked")) {
+      return "high" as const;
+    }
+    if (project.tasks.some((item) => item.status === "in_progress")) {
+      return "medium" as const;
+    }
+    return "low" as const;
+  }, [project]);
 
   async function handleApprove() {
     if (!projectId) {
@@ -527,6 +577,46 @@ export function ProjectRoomPage() {
     }
   }
 
+  async function handleUseTemplate(channel: "project_room_guidance" | "project_room_emergency" | "project_room_deliverable", template: PromptTemplate) {
+    await api.markPromptTemplateUsed(template.id);
+    if (channel === "project_room_guidance") {
+      setMessage(template.content);
+      return;
+    }
+    if (channel === "project_room_deliverable") {
+      setDeliverableContent(template.content);
+      return;
+    }
+    setCommand(template.content);
+  }
+
+  async function handleSaveTemplate(channel: "project_room_guidance" | "project_room_emergency" | "project_room_deliverable", scope: "project" | "personal") {
+    const content = channel === "project_room_guidance"
+      ? message
+      : channel === "project_room_deliverable"
+        ? deliverableContent
+        : command;
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    const created = await api.createPromptTemplate({
+      title: buildTemplateTitle(trimmed, channel, locale),
+      content: trimmed,
+      scope,
+      channel,
+      locale,
+      projectId: scope === "project" ? projectId : undefined,
+      ownerLabel: "Commander"
+    });
+
+    setTemplates((current) => ({
+      ...current,
+      [channel]: [created, ...current[channel]]
+    }));
+  }
+
   if (loading) {
     return <div className="card">{copy.loading}</div>;
   }
@@ -537,19 +627,68 @@ export function ProjectRoomPage() {
 
   return (
     <div className="page project-room">
-      <header className="page-header">
-        <div>
-          <Link to="/" className="back-link">
-            {copy.back}
-          </Link>
-          <p className="eyebrow">{copy.eyebrow}</p>
-          <h2>{project.name}</h2>
-          <p className="hero-copy">{project.description}</p>
+      <section className="project-room-hero">
+        <div className="project-room-hero-main">
+          <div className="project-room-hero-topline">
+            <Link to="/" className="button button-ghost inline-button">
+              {copy.back}
+            </Link>
+            <span className="pill pill-success">{copy.live}</span>
+            <span className={project.pendingApproval ? "pill pill-warning" : "pill pill-primary"}>
+              {project.pendingApproval ? copy.waitingApproval : projectStatusLabel(project.status, isEnglish)}
+            </span>
+            <span className={projectRiskTone === "high" ? "pill pill-danger" : projectRiskTone === "medium" ? "pill pill-warning" : "pill pill-success"}>
+              {copy.risk} · {projectRiskTone}
+            </span>
+          </div>
+
+          <div>
+            <p className="eyebrow">{copy.eyebrow}</p>
+            <h2>{project.name}</h2>
+            <p className="hero-copy">{project.description}</p>
+          </div>
+
+          <div className="project-room-hero-meta">
+            <div className="project-room-hero-stat">
+              <span>{copy.currentRole}</span>
+              <strong>{getRoleLabel(project.currentRole, locale)}</strong>
+            </div>
+            <div className="project-room-hero-stat">
+              <span>{copy.progress}</span>
+              <strong>{project.progress}%</strong>
+            </div>
+            <div className="project-room-hero-stat">
+              <span>{copy.runtime}</span>
+              <strong>{liveMeta?.provider ?? project.liveSession.provider}</strong>
+            </div>
+          </div>
         </div>
-        <button className="button button-ghost" onClick={() => void refresh({ resetStream: true })}>
-          {copy.refresh}
-        </button>
-      </header>
+
+        <div className="project-room-hero-actions">
+          <button className="button button-ghost" onClick={() => void refresh({ resetStream: true })}>
+            {copy.refresh}
+          </button>
+          {project.pendingApproval ? (
+            <>
+              <button className="button button-primary" onClick={() => void handleApprove()} disabled={busyAction !== null}>
+                {busyAction === "approve" ? copy.approving : copy.approve}
+              </button>
+              <button className="button button-ghost" onClick={() => void handleReject()} disabled={busyAction !== null}>
+                {busyAction === "reject" ? copy.rejecting : copy.reject}
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="button button-danger" onClick={() => void handleIntervene()} disabled={busyAction !== null}>
+                {busyAction === "intervene" ? copy.pausing : copy.pauseAndCommand}
+              </button>
+              <button className="button button-ghost" onClick={() => void handleResume()} disabled={busyAction !== null}>
+                {busyAction === "resume" ? copy.resuming : copy.resume}
+              </button>
+            </>
+          )}
+        </div>
+      </section>
 
       {flash ? (
         <section className={flash.tone === "success" ? "flash-banner flash-success" : "flash-banner flash-error"}>
@@ -799,6 +938,13 @@ export function ProjectRoomPage() {
 
             <div className="intervention-panel">
               <p className="group-title">{copy.sendGuidance}</p>
+              <PromptTemplateToolbar
+                templates={templates.project_room_guidance}
+                locale={locale}
+                onUse={(template) => void handleUseTemplate("project_room_guidance", template)}
+                onSaveProject={() => void handleSaveTemplate("project_room_guidance", "project")}
+                onSavePersonal={() => void handleSaveTemplate("project_room_guidance", "personal")}
+              />
               <textarea
                 className="composer-textarea compact"
                 value={message}
@@ -816,6 +962,13 @@ export function ProjectRoomPage() {
             {!project.pendingApproval ? (
               <div className="intervention-panel">
                 <p className="group-title">{copy.submitStage}</p>
+                <PromptTemplateToolbar
+                  templates={templates.project_room_deliverable}
+                  locale={locale}
+                  onUse={(template) => void handleUseTemplate("project_room_deliverable", template)}
+                  onSaveProject={() => void handleSaveTemplate("project_room_deliverable", "project")}
+                  onSavePersonal={() => void handleSaveTemplate("project_room_deliverable", "personal")}
+                />
                 <input
                   className="composer-input"
                   value={deliverableTitle}
@@ -839,6 +992,13 @@ export function ProjectRoomPage() {
 
             <div className="intervention-panel">
               <p className="group-title">{copy.emergency}</p>
+              <PromptTemplateToolbar
+                templates={templates.project_room_emergency}
+                locale={locale}
+                onUse={(template) => void handleUseTemplate("project_room_emergency", template)}
+                onSaveProject={() => void handleSaveTemplate("project_room_emergency", "project")}
+                onSavePersonal={() => void handleSaveTemplate("project_room_emergency", "personal")}
+              />
               <textarea
                 className="composer-textarea compact"
                 value={command}
@@ -935,6 +1095,56 @@ function timelinePriorityLabel(priority: TimelineEvent["priority"], isEnglish: b
     ? { low: "Low", normal: "Normal", high: "High", urgent: "Urgent" }
     : { low: "低", normal: "普通", high: "高", urgent: "紧急" };
   return labels[priority];
+}
+
+function buildTemplateTitle(content: string, channel: string, locale: "zh-CN" | "en-US") {
+  const prefix = locale === "en-US"
+    ? channel === "project_room_deliverable"
+      ? "Deliverable"
+      : channel === "project_room_emergency"
+        ? "Emergency"
+        : "Guidance"
+    : channel === "project_room_deliverable"
+      ? "交付模板"
+      : channel === "project_room_emergency"
+        ? "紧急指令"
+        : "指导语";
+  return `${prefix} · ${content.replace(/\s+/g, " ").slice(0, 24)}`;
+}
+
+function PromptTemplateToolbar({
+  templates,
+  locale,
+  onUse,
+  onSaveProject,
+  onSavePersonal
+}: {
+  templates: PromptTemplate[];
+  locale: "zh-CN" | "en-US";
+  onUse: (template: PromptTemplate) => void;
+  onSaveProject: () => void;
+  onSavePersonal: () => void;
+}) {
+  const isEnglish = locale === "en-US";
+  return (
+    <div className="stack tight">
+      <div className="pill-row">
+        {templates.slice(0, 4).map((template) => (
+          <button key={template.id} className="filter-pill" onClick={() => onUse(template)} type="button">
+            {template.title}
+          </button>
+        ))}
+      </div>
+      <div className="pill-row">
+        <button className="button button-ghost inline-button" onClick={onSaveProject} type="button">
+          {isEnglish ? "Save as project template" : "存为项目模板"}
+        </button>
+        <button className="button button-ghost inline-button" onClick={onSavePersonal} type="button">
+          {isEnglish ? "Save as personal phrase" : "存为个人常用语"}
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function formatTime(timestamp: string, locale: string) {

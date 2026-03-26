@@ -104,6 +104,8 @@ export function AgentCommanderPage() {
         steps: "Steps",
         risks: "Risks",
         suggestion: "Suggestion",
+        decisionTitle: "Confirmation choices",
+        decisionHint: "Choose the next action from structured options instead of rewriting the request.",
         confirmExecute: "Confirm and execute",
         revise: "Revise request",
         analysisOnly: "Analysis only",
@@ -117,6 +119,9 @@ export function AgentCommanderPage() {
         noSessions: "No sessions detected yet.",
         recentMessages: "Recent messages",
         noMessages: "No recent messages detected.",
+        coordinationTitle: "Coordination map",
+        coordinationCopy: "Use this rail to see who this agent can collaborate with before you push multi-role execution.",
+        noCollaborators: "No collaborator rules are configured yet.",
         memoryTitle: "Long-term memory",
         addMemory: "Add memory",
         memorySummary: "Memory summary",
@@ -135,7 +140,11 @@ export function AgentCommanderPage() {
         saved: "Saved successfully",
         settingsSaved: "Commander settings updated",
         previewReady: "Understanding preview is ready",
-        instructionSent: "Instruction delivered to the agent"
+        instructionSent: "Instruction delivered to the agent",
+        switchedModel: "Switched to the next available model",
+        noAlternativeModel: "No alternative model is available",
+        analysisStored: "Analysis has been kept without execution",
+        emergencyAction: "Emergency intervene"
       }
     : {
         loading: "正在载入 Agent 指挥页...",
@@ -192,6 +201,8 @@ export function AgentCommanderPage() {
         steps: "执行步骤",
         risks: "风险提醒",
         suggestion: "建议路径",
+        decisionTitle: "确认选择项",
+        decisionHint: "优先通过结构化选项来确认，而不是重新手写指令。",
         confirmExecute: "确认并执行",
         revise: "修改后重来",
         analysisOnly: "仅分析不执行",
@@ -205,6 +216,9 @@ export function AgentCommanderPage() {
         noSessions: "暂未检测到会话记录。",
         recentMessages: "最近消息",
         noMessages: "暂未检测到最近消息。",
+        coordinationTitle: "协作地图",
+        coordinationCopy: "在多角色协作前，先从这里看清这个 Agent 可以和谁协作。",
+        noCollaborators: "当前还没有配置协作对象。",
         memoryTitle: "长期记忆",
         addMemory: "写入记忆",
         memorySummary: "记忆摘要",
@@ -223,7 +237,11 @@ export function AgentCommanderPage() {
         saved: "保存成功",
         settingsSaved: "指挥设置已更新",
         previewReady: "理解预览已生成",
-        instructionSent: "指令已发给该 Agent"
+        instructionSent: "指令已发给该 Agent",
+        switchedModel: "已切换到下一个可用模型",
+        noAlternativeModel: "当前没有其他可切换模型",
+        analysisStored: "已保留分析结果，暂不执行",
+        emergencyAction: "紧急介入"
       };
 
   async function refresh(options?: { silent?: boolean }) {
@@ -326,7 +344,7 @@ export function AgentCommanderPage() {
     memoryEnabled?: boolean;
   }) {
     if (!agent) {
-      return;
+      return null;
     }
 
     try {
@@ -334,11 +352,13 @@ export function AgentCommanderPage() {
       const updated = await api.updateOpenClawAgentSettings(agent.agentId, patch);
       setAgent(updated);
       setFlash({ tone: "success", message: copy.settingsSaved });
+      return updated;
     } catch (error) {
       setFlash({
         tone: "error",
         message: error instanceof Error ? error.message : copy.settingsFailed
       });
+      return null;
     } finally {
       setSavingSettings(false);
     }
@@ -408,6 +428,66 @@ export function AgentCommanderPage() {
     await handlePreview();
   }
 
+  async function handlePreviewOption(optionId: string) {
+    if (!agent || !preview) {
+      return;
+    }
+
+    if (optionId === "confirm_execute") {
+      await handleExecute(preview.message);
+      return;
+    }
+
+    if (optionId === "revise_instruction") {
+      setInstruction(preview.message);
+      setPreview(null);
+      return;
+    }
+
+    if (optionId === "analysis_only") {
+      setInstruction(preview.goal);
+      setLatestReply({
+        summary: preview.goal,
+        reply: [
+          `${copy.plan}:`,
+          ...preview.plan.map((item, index) => `${index + 1}. ${item}`),
+          "",
+          `${copy.steps}:`,
+          ...preview.steps.map((item, index) => `${index + 1}. ${item}`),
+          "",
+          `${copy.risks}:`,
+          ...(preview.risks.length > 0 ? preview.risks.map((item, index) => `${index + 1}. ${item}`) : ["-"]),
+          "",
+          `${copy.suggestion}: ${preview.suggestion}`
+        ].join("\n")
+      });
+      setPreview(null);
+      setFlash({ tone: "success", message: copy.analysisStored });
+      return;
+    }
+
+    if (optionId === "switch_model") {
+      const nextModel = agent.availableModels.find((model) => model.id !== agent.commander.selectedModel);
+      if (!nextModel) {
+        setFlash({ tone: "error", message: copy.noAlternativeModel });
+        return;
+      }
+
+      const updated = await updateSettings({ selectedModel: nextModel.id, defaultModel: nextModel.id });
+      if (!updated) {
+        return;
+      }
+
+      const rerunPreview = await api.previewOpenClawAgentInstruction(updated.agentId, {
+        message: preview.message,
+        preferAutonomous: updated.commander.executionMode === "autonomous"
+      });
+      setPreview(rerunPreview);
+      setFlash({ tone: "success", message: copy.switchedModel });
+      return;
+    }
+  }
+
   async function handleSaveDocument() {
     if (!agent) {
       return;
@@ -475,6 +555,14 @@ export function AgentCommanderPage() {
     }
   }
 
+  function handleEmergencyFill() {
+    setInstruction(
+      isEnglish
+        ? "Please immediately inspect the current blockers, explain the risk in one paragraph, and propose the safest next actions for my confirmation."
+        : "请立即检查当前阻塞点，用一段话说明风险，并给出最稳妥的下一步动作供我确认。"
+    );
+  }
+
   if (loading) {
     return <div className="card">{copy.loading}</div>;
   }
@@ -497,17 +585,30 @@ export function AgentCommanderPage() {
 
       <section className="commander-hero">
         <div className="commander-hero-main">
-          <Link className="button button-ghost inline-button" to="/agents">
-            {copy.back}
-          </Link>
-          <div className="commander-title-block">
-            <div className="commander-avatar">{agent.emoji || agent.name.slice(0, 1)}</div>
-            <div>
-              <p className="eyebrow">Agent Commander</p>
-              <h2>{agent.name}</h2>
-              <p className="hero-copy">
-                {agent.title} · {agent.model} · {agent.responsibility}
-              </p>
+          <div className="commander-title-row">
+            <Link className="button button-ghost inline-button" to="/agents">
+              {copy.back}
+            </Link>
+            <div className="commander-title-block">
+              <div className="commander-avatar">{agent.emoji || agent.name.slice(0, 1)}</div>
+              <div>
+                <p className="eyebrow">Agent Commander</p>
+                <h2>{agent.name}</h2>
+                <p className="hero-copy">
+                  {agent.title} · {agent.commander.selectedModel} · {agent.responsibility}
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="commander-hero-copy">
+            <div className="commander-hero-summary">
+              <span>{copy.currentTask}</span>
+              <strong>{agent.currentTask ? `${agent.currentTask.projectName} / ${agent.currentTask.title}` : copy.noTask}</strong>
+            </div>
+            <div className="commander-hero-summary">
+              <span>{copy.memorySwitch}</span>
+              <strong>{agent.commander.memoryEnabled ? (isEnglish ? "Enabled" : "已开启") : (isEnglish ? "Disabled" : "已关闭")}</strong>
             </div>
           </div>
         </div>
@@ -518,6 +619,20 @@ export function AgentCommanderPage() {
             <span className={agent.commander.executionMode === "autonomous" ? "pill pill-primary" : "pill"}>
               {agent.commander.executionMode === "autonomous" ? copy.autonomous : copy.confirmFirst}
             </span>
+          </div>
+
+          <div className="commander-hero-actions">
+            <button className="button button-ghost" type="button" onClick={handleEmergencyFill}>
+              {copy.emergencyAction}
+            </button>
+            <button
+              className="button button-primary"
+              type="button"
+              onClick={() => void handlePrimaryAction()}
+              disabled={sending || !instruction.trim()}
+            >
+              {sending ? copy.sending : agent.commander.executionMode === "autonomous" ? copy.sendNow : copy.previewAction}
+            </button>
           </div>
 
           <div className="meta-strip meta-strip-compact commander-kpis">
@@ -725,6 +840,21 @@ export function AgentCommanderPage() {
               <span className="muted-text">{copy.commandHint}</span>
             </div>
 
+            <div className="commander-decision-bar">
+              <div className="commander-decision-metric">
+                <span>{copy.executionStrategy}</span>
+                <strong>{agent.commander.executionMode === "autonomous" ? copy.autonomous : copy.confirmFirst}</strong>
+              </div>
+              <div className="commander-decision-metric">
+                <span>{copy.currentTask}</span>
+                <strong>{agent.currentTask?.title ?? copy.noTask}</strong>
+              </div>
+              <div className="commander-decision-metric">
+                <span>{copy.currentModel}</span>
+                <strong>{agent.commander.selectedModel}</strong>
+              </div>
+            </div>
+
             <textarea
               className="composer-textarea commander-textarea"
               value={instruction}
@@ -776,6 +906,39 @@ export function AgentCommanderPage() {
                 </div>
               </div>
 
+              <div className="commander-option-block">
+                <div className="section-header">
+                  <div>
+                    <p className="eyebrow">{copy.decisionTitle}</p>
+                    <h3>{copy.decisionTitle}</h3>
+                  </div>
+                </div>
+                <p className="muted-text">{copy.decisionHint}</p>
+                <div className="commander-option-grid">
+                  {preview.options.map((option) => (
+                    <button
+                      key={option.id}
+                      className={
+                        option.id === preview.recommendedAction
+                          ? "commander-option-card is-recommended"
+                          : `commander-option-card commander-option-${option.tone}`
+                      }
+                      onClick={() => void handlePreviewOption(option.id)}
+                      disabled={sending}
+                      type="button"
+                    >
+                      <div className="timeline-head">
+                        <strong>{previewOptionLabel(option.id, option.label, copy, isEnglish)}</strong>
+                        {option.recommended || option.id === preview.recommendedAction ? (
+                          <span className="pill pill-primary">{isEnglish ? "Recommended" : "推荐"}</span>
+                        ) : null}
+                      </div>
+                      <p>{previewOptionDescription(option.id, copy, isEnglish)}</p>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="action-row">
                 <button className="button button-primary" onClick={() => void handleExecute(preview.message)} disabled={sending}>
                   {copy.confirmExecute}
@@ -783,10 +946,10 @@ export function AgentCommanderPage() {
                 <button className="button button-ghost" onClick={() => setPreview(null)}>
                   {copy.revise}
                 </button>
-                <button className="button button-ghost" onClick={() => setInstruction(preview.goal)}>
+                <button className="button button-ghost" onClick={() => void handlePreviewOption("analysis_only")}>
                   {copy.analysisOnly}
                 </button>
-                <button className="button button-ghost" onClick={() => setPreview(null)}>
+                <button className="button button-ghost" onClick={() => void handlePreviewOption("switch_model")}>
                   {copy.switchModel}
                 </button>
               </div>
@@ -836,6 +999,28 @@ export function AgentCommanderPage() {
         </div>
 
         <aside className="commander-rail">
+          <div className="card commander-panel">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">{copy.coordinationTitle}</p>
+                <h3>{copy.coordinationTitle}</h3>
+              </div>
+            </div>
+            <p className="muted-text">{copy.coordinationCopy}</p>
+            <div className="pill-row">
+              {agent.allowedAgentIds.map((allowed) => (
+                <span key={allowed} className="pill pill-primary">{allowed}</span>
+              ))}
+              {agent.allowedAgentIds.length === 0 ? <span className="pill">{copy.noCollaborators}</span> : null}
+            </div>
+            <div className="meta-strip meta-strip-compact">
+              <MiniMeta label={copy.executionStrategy} value={agent.commander.executionMode} />
+              <MiniMeta label={copy.toolsLabel} value={String(agent.tools.length)} />
+              <MiniMeta label={copy.collaboratorsLabel} value={String(agent.allowedAgentIds.length)} />
+              <MiniMeta label={copy.currentTask} value={agent.currentTask ? agent.currentTask.projectName : copy.noTask} />
+            </div>
+          </div>
+
           <div className="card commander-panel">
             <p className="eyebrow">{copy.memoryTitle}</p>
             <div className="form-grid">
@@ -997,12 +1182,50 @@ function PreviewBlock({
     <div className={tone === "danger" ? "sub-card commander-preview-block is-danger" : "sub-card commander-preview-block"}>
       <p className="group-title">{title}</p>
       <div className="stack tight">
-        {items.map((item) => (
+        {items.length > 0 ? items.map((item) => (
           <p key={item}>{item}</p>
-        ))}
+        )) : <p className="muted-text">-</p>}
       </div>
     </div>
   );
+}
+
+function previewOptionLabel(
+  optionId: string,
+  fallback: string,
+  copy: { confirmExecute: string; revise: string; analysisOnly: string; switchModel: string },
+  isEnglish: boolean
+) {
+  const labels = {
+    confirm_execute: copy.confirmExecute,
+    revise_instruction: copy.revise,
+    analysis_only: copy.analysisOnly,
+    switch_model: copy.switchModel
+  } satisfies Record<"confirm_execute" | "revise_instruction" | "analysis_only" | "switch_model", string>;
+
+  if (optionId in labels) {
+    return labels[optionId as keyof typeof labels];
+  }
+
+  return isEnglish ? fallback : fallback;
+}
+
+function previewOptionDescription(optionId: string, copy: { suggestion: string }, isEnglish: boolean) {
+  const descriptions = isEnglish
+    ? {
+        confirm_execute: "Approve the agent's understanding and start execution immediately.",
+        revise_instruction: "Return to the draft, edit the request, then regenerate the understanding card.",
+        analysis_only: "Keep the plan for reference without sending the task to the agent yet.",
+        switch_model: "Move to another available model before retrying this instruction."
+      }
+    : {
+        confirm_execute: "确认该 Agent 的理解结果，并立即开始执行。",
+        revise_instruction: "回到草稿继续修改需求，再重新生成理解确认卡。",
+        analysis_only: "仅保留分析结果，不立即把任务真正下发给 Agent。",
+        switch_model: "先切换到其他可用模型，再重新尝试这条指令。"
+      };
+
+  return descriptions[optionId as keyof typeof descriptions] ?? copy.suggestion;
 }
 
 function MiniMeta({ label, value }: { label: string; value: string }) {
