@@ -184,8 +184,8 @@ pnpm start:prod
 
 ## 文档索引
 
-- [产品说明文档](docs/V1_0_0_PRODUCT_OVERVIEW.md)
-- [需求文档](docs/V1_0_0_REQUIREMENTS_SPEC.md)
+- [产品说明文档](docs/V1_0_1_PRODUCT_OVERVIEW.md)
+- [需求文档](docs/V1_0_1_REQUIREMENTS_SPEC.md)
 - [技术文档](docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)
 - [v1.0.1 发布说明](docs/RELEASE_NOTES_1.0.1.md)
 - [部署指南](docs/DEPLOYMENT_GUIDE.md)
