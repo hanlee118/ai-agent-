@@ -99,6 +99,7 @@ input {
   color: var(--muted);
   cursor: pointer;
   transition: 180ms ease;
+  position: relative;
 }
 
 .workspace-switcher-item:hover,
@@ -131,6 +132,38 @@ input {
 .workspace-switcher-add {
   border-style: dashed;
   background: transparent;
+}
+
+.workspace-switcher-item-muted {
+  opacity: 0.54;
+}
+
+.workspace-switcher-item-muted:hover {
+  opacity: 1;
+}
+
+.workspace-switcher-tooltip {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-6px);
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.96);
+  border: 1px solid rgba(30, 41, 59, 1);
+  color: var(--text);
+  font-size: 0.74rem;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: 160ms ease;
+  z-index: 20;
+}
+
+.workspace-switcher-item:hover .workspace-switcher-tooltip,
+.workspace-switcher-add:hover .workspace-switcher-tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
 }
 
 .shell-sidebar-v2 {
@@ -294,6 +327,23 @@ input {
 .shell-entity-row:hover,
 .shell-entity-row.active {
   background: rgba(30, 41, 59, 0.56);
+  color: var(--text);
+}
+
+.shell-entity-empty {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px dashed rgba(51, 65, 85, 0.78);
+  background: rgba(15, 23, 42, 0.4);
+  color: #94a3b8;
+  text-align: left;
+  cursor: pointer;
+  transition: 160ms ease;
+}
+
+.shell-entity-empty:hover {
+  border-color: rgba(56, 189, 248, 0.24);
   color: var(--text);
 }
 
@@ -2354,6 +2404,12 @@ input {
 
 .studio-topbar-logout {
   border-radius: 12px;
+}
+
+.studio-topbar-create {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .workspace-icon-dot {

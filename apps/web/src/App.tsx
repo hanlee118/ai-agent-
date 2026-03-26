@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { AuthStatus, OpenClawAgentSummary, ProjectSummary } from "@occ/shared";
 import {
@@ -45,6 +45,8 @@ export default function App() {
   const [sidebarAgents, setSidebarAgents] = useState<OpenClawAgentSummary[]>([]);
   const [globalSearch, setGlobalSearch] = useState("");
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const shellSearchRef = useRef<HTMLDivElement | null>(null);
+  const shortcutPopoverRef = useRef<HTMLDivElement | null>(null);
 
   const copy = isEnglish
     ? {
@@ -222,6 +224,34 @@ export default function App() {
     setGlobalSearch("");
   }, [location.pathname]);
 
+  useEffect(() => {
+    function handlePointerDown(event: MouseEvent) {
+      const target = event.target as Node;
+
+      if (shellSearchRef.current && !shellSearchRef.current.contains(target)) {
+        setGlobalSearch("");
+      }
+
+      if (shortcutPopoverRef.current && !shortcutPopoverRef.current.contains(target)) {
+        setNotificationsOpen(false);
+      }
+    }
+
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setGlobalSearch("");
+        setNotificationsOpen(false);
+      }
+    }
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
+
   async function handleLogout() {
     await api.logoutAuth();
     setAuthStatus(await api.getAuthStatus());
@@ -254,6 +284,18 @@ export default function App() {
     { id: "strategy", label: copy.workspaceSecondary, icon: ShieldCheck, tone: "workspace-switcher-strategy", to: "/system" },
     { id: "memory", label: copy.workspaceData, icon: Database, tone: "workspace-switcher-data", to: "/agents" }
   ], [copy.workspaceData, copy.workspacePrimary, copy.workspaceSecondary]);
+
+  const activeWorkspaceId = useMemo(() => {
+    if (location.pathname.startsWith("/system") || location.pathname.startsWith("/audit") || location.pathname.startsWith("/settings")) {
+      return "strategy";
+    }
+
+    if (location.pathname.startsWith("/agents")) {
+      return "memory";
+    }
+
+    return "openclaw";
+  }, [location.pathname]);
 
   const searchResults = useMemo(() => {
     const query = globalSearch.trim().toLowerCase();
@@ -363,17 +405,22 @@ export default function App() {
           {workspaceSwitchers.map((item) => (
             <button
               key={item.id}
-              className={`workspace-switcher-item ${item.tone}`}
+              className={item.id === activeWorkspaceId
+                ? `workspace-switcher-item ${item.tone}`
+                : "workspace-switcher-item workspace-switcher-item-muted"}
               type="button"
               aria-label={item.label}
+              title={item.label}
               onClick={() => navigate(item.to)}
             >
               <item.icon size={22} />
+              <span className="workspace-switcher-tooltip">{item.label}</span>
             </button>
           ))}
         </div>
-        <button className="workspace-switcher-add" type="button" aria-label={copy.workspaceTitle} onClick={() => navigate("/?compose=project")}>
+        <button className="workspace-switcher-add" type="button" aria-label={copy.workspaceTitle} title={copy.newProject} onClick={() => navigate("/?compose=project")}>
           <Plus size={22} />
+          <span className="workspace-switcher-tooltip">{copy.newProject}</span>
         </button>
       </aside>
 
@@ -415,11 +462,20 @@ export default function App() {
             </div>
             <div className="shell-entity-list">
               {sidebarProjects.map((project) => (
-                <NavLink key={project.id} to={`/projects/${project.id}`} className="shell-entity-row">
+                <NavLink
+                  key={project.id}
+                  to={`/projects/${project.id}`}
+                  className={({ isActive }) => isActive ? "shell-entity-row active" : "shell-entity-row"}
+                >
                   <Hash size={15} className="shell-entity-icon" />
                   <span className="shell-entity-name">{project.name}</span>
                 </NavLink>
               ))}
+              {sidebarProjects.length === 0 ? (
+                <button type="button" className="shell-entity-empty" onClick={() => navigate("/projects")}>
+                  {isEnglish ? "Open portfolio" : "进入项目组合"}
+                </button>
+              ) : null}
             </div>
           </section>
 
@@ -432,7 +488,11 @@ export default function App() {
             </div>
             <div className="shell-entity-list">
               {sidebarAgents.map((agent) => (
-                <NavLink key={agent.agentId} to={`/agents/${agent.agentId}`} className="shell-entity-row">
+                <NavLink
+                  key={agent.agentId}
+                  to={`/agents/${agent.agentId}`}
+                  className={({ isActive }) => isActive ? "shell-entity-row active" : "shell-entity-row"}
+                >
                   <span className="shell-agent-avatar">{agent.emoji || agent.name.slice(0, 1).toUpperCase()}</span>
                   <span className="shell-entity-name">{agent.name}</span>
                   <Circle
@@ -442,6 +502,11 @@ export default function App() {
                   />
                 </NavLink>
               ))}
+              {sidebarAgents.length === 0 ? (
+                <button type="button" className="shell-entity-empty" onClick={() => navigate("/agents")}>
+                  {isEnglish ? "Open roster" : "进入 Agent 名册"}
+                </button>
+              ) : null}
             </div>
           </section>
         </div>
@@ -458,7 +523,7 @@ export default function App() {
 
       <div className="shell-main-v2 studio-shell-main">
         <header className="shell-topbar-v2 studio-topbar">
-          <div className="shell-topbar-search studio-topbar-search">
+          <div className="shell-topbar-search studio-topbar-search" ref={shellSearchRef}>
             <Search size={16} />
             <input
               value={globalSearch}
@@ -496,7 +561,7 @@ export default function App() {
                 <small>{copy.statusCopy}</small>
               </div>
             </div>
-            <div className="shell-topbar-popover">
+            <div className="shell-topbar-popover" ref={shortcutPopoverRef}>
               <button
                 className="workspace-icon-button"
                 type="button"
@@ -530,6 +595,11 @@ export default function App() {
             </div>
 
             <div className="studio-topbar-divider" />
+
+            <button className="button button-primary inline-button studio-topbar-create" type="button" onClick={() => navigate("/?compose=project")}>
+              <Plus size={16} />
+              {copy.newProject}
+            </button>
 
             <div className="locale-switcher" aria-label={copy.languageLabel}>
               <button
