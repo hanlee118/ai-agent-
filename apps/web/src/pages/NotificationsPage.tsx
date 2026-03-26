@@ -177,6 +177,25 @@ export function NotificationsPage() {
               </div>
               <span className="pill pill-primary">{filteredItems.length}</span>
             </div>
+            <div className="dashboard-hero-context notifications-context-grid">
+              <div className="dashboard-hero-context-card">
+                <span>{copy.criticalCount}</span>
+                <strong>{counts.critical}</strong>
+                <p>{counts.critical > 0
+                  ? (isEnglish ? "These items need immediate operator attention or escalation." : "这些通知需要优先处理或立即升级。")
+                  : (isEnglish ? "No severe notification is currently blocking the platform." : "当前没有严重通知在阻断平台运行。")}</p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.approvals}</span>
+                <strong>{counts.approvals}</strong>
+                <p>{isEnglish ? "Approval-related notifications act as execution gates for downstream work." : "审批相关通知本质上是下游执行链路的闸口。"} </p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{isEnglish ? "Governance" : "治理信号"}</span>
+                <strong>{auditLogs.length}</strong>
+                <p>{isEnglish ? "Recent audit events are folded into the same operator surface so action and evidence stay together." : "最近治理记录被折叠进同一运营界面，保证行动与证据保持在一起。"}</p>
+              </div>
+            </div>
             <div className="pill-row">
               {(["all", "critical", "warning", "info"] as SeverityFilter[]).map((item) => (
                 <button
@@ -237,8 +256,9 @@ export function NotificationsPage() {
                 <p className="eyebrow">{copy.summaryTitle}</p>
                 <h3>{copy.summaryTitle}</h3>
               </div>
+              <span className="pill">{items.length}</span>
             </div>
-            <p className="hero-copy">{copy.summaryCopy}</p>
+            <p className="dashboard-rail-copy">{copy.summaryCopy}</p>
             <div className="attention-list">
               <article className={counts.critical > 0 ? "attention-card attention-danger" : "attention-card"}>
                 <strong>{copy.criticalCount}</strong>
@@ -265,7 +285,13 @@ export function NotificationsPage() {
                 <p className="eyebrow">{copy.latestAudit}</p>
                 <h3>{copy.latestAudit}</h3>
               </div>
+              <span className="pill">{auditLogs.slice(0, 6).length}</span>
             </div>
+            <p className="dashboard-rail-copy">
+              {isEnglish
+                ? "This lane gives you the latest governance evidence behind the alerts, so every notification can be traced back to a real action."
+                : "这条情报栏用于补足告警背后的治理证据，让每条通知都能回溯到真实动作。"}
+            </p>
             <div className="timeline-list">
               {auditLogs.slice(0, 6).map((item) => (
                 <article key={item.id} className="timeline-item">
@@ -290,7 +316,15 @@ export function NotificationsPage() {
                   <p className="eyebrow">{isEnglish ? "Platform" : "平台"}</p>
                   <h3>{isEnglish ? "Live platform snapshot" : "实时平台快照"}</h3>
                 </div>
+                <span className={health.blockedTasks > 0 ? "pill pill-warning" : "pill pill-success"}>
+                  {health.blockedTasks > 0 ? (isEnglish ? "Attention" : "需关注") : (isEnglish ? "Stable" : "稳定")}
+                </span>
               </div>
+              <p className="dashboard-rail-copy">
+                {isEnglish
+                  ? "A compact operational summary of blocked work, active work, and approval pressure."
+                  : "这里压缩展示阻塞任务、活动任务和审批压力的实时运营摘要。"}
+              </p>
               <div className="metric-inline-grid">
                 <MetricInline label={isEnglish ? "Active tasks" : "活动任务"} value={String(health.activeTasks)} />
                 <MetricInline label={isEnglish ? "Blocked tasks" : "阻塞任务"} value={String(health.blockedTasks)} />

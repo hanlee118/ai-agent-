@@ -388,6 +388,26 @@ export function SystemPage() {
               </div>
             </div>
 
+            <div className="dashboard-hero-context system-context-grid">
+              <div className="dashboard-hero-context-card">
+                <span>{copy.mode}</span>
+                <strong>{runtime?.mode ?? copy.noValue}</strong>
+                <p>{runtime?.mode === "openai-compatible" ? copy.connectedModel : copy.scriptedModeDetail}</p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.readiness}</span>
+                <strong>{readiness?.warnings.length ?? 0}</strong>
+                <p>{(readiness?.warnings.length ?? 0) > 0
+                  ? (isEnglish ? "There are readiness warnings worth clearing before production changes." : "当前存在值得在生产变更前清除的就绪度风险。")
+                  : (isEnglish ? "No major readiness warning is currently open." : "当前没有主要平台就绪度风险。")}</p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.knownCost}</span>
+                <strong>{formatUsd(totalUsage.knownCostUsd)}</strong>
+                <p>{isEnglish ? "Tool-level aggregation keeps model usage and operating cost visible in the same command surface." : "通过按工具聚合展示，让模型用量和运营成本始终处在同一张指挥面板里。"} </p>
+              </div>
+            </div>
+
             <div className="form-grid">
               <label className="form-field">
                 <span>{copy.runModeLabel}</span>
@@ -477,6 +497,24 @@ export function SystemPage() {
               </div>
             </div>
 
+            <div className="dashboard-hero-context system-context-grid">
+              <div className="dashboard-hero-context-card">
+                <span>{copy.totalSessions}</span>
+                <strong>{formatNumber(monitorSessions.length)}</strong>
+                <p>{isEnglish ? "Total recent local sessions detected under the configured monitor roots." : "监控根目录下最近识别到的本地会话总数。"} </p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.activeSessions}</span>
+                <strong>{formatNumber(activeSessionCount)}</strong>
+                <p>{isEnglish ? "Sessions still producing or receiving updates right now." : "当前仍在持续产出或接收更新的会话数量。"} </p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.totalTokens}</span>
+                <strong>{formatNumber(totalUsage.totalTokens)}</strong>
+                <p>{isEnglish ? "Aggregated token usage across Codex, Claude Code, and OpenClaw for the monitored window." : "监控窗口内 Codex、Claude Code 与 OpenClaw 的总 token 使用量。"} </p>
+              </div>
+            </div>
+
             <div className="metric-inline-grid">
               <MetricInline label={copy.totalSessions} value={formatNumber(monitorSessions.length)} />
               <MetricInline label={copy.activeSessions} value={formatNumber(activeSessionCount)} />
@@ -550,7 +588,13 @@ export function SystemPage() {
                 <p className="eyebrow">Audit Trail</p>
                 <h3>{copy.recentAudit}</h3>
               </div>
+              <span className="pill">{auditLogs.length}</span>
             </div>
+            <p className="dashboard-rail-copy">
+              {isEnglish
+                ? "Keep recent system and runtime actions on the same page so operators do not have to switch into a separate governance view just to confirm a change."
+                : "最近的系统和运行配置动作直接保留在本页，避免运营人员为了确认变更再单独切到治理页。"}
+            </p>
 
             <div className="timeline-list">
               {auditLogs.map((item) => (
@@ -583,6 +627,11 @@ export function SystemPage() {
               </div>
               <span className="pill">{readiness?.warnings.length ?? 0}</span>
             </div>
+            <p className="dashboard-rail-copy">
+              {isEnglish
+                ? "Think of readiness as the preflight layer: database health, workspace presence, and OpenClaw connectivity in one view."
+                : "把就绪度理解成起飞前检查层：数据库健康、工作区存在性和 OpenClaw 连通性在一处完成判断。"}
+            </p>
 
             <div className="stack tight">
               <div className="meta-chip">
@@ -623,7 +672,13 @@ export function SystemPage() {
                 <p className="eyebrow">Service Health</p>
                 <h3>{copy.serviceHealth}</h3>
               </div>
+              <span className="pill">{health?.services.length ?? 0}</span>
             </div>
+            <p className="dashboard-rail-copy">
+              {isEnglish
+                ? "This keeps raw service health visible without leaving the operator cockpit."
+                : "在不离开运营驾驶舱的情况下，持续保留底层服务健康状态。"}
+            </p>
 
             <div className="agent-mini-list">
               {health?.services.map((service) => (
@@ -646,8 +701,11 @@ export function SystemPage() {
                 <p className="eyebrow">Release Checklist</p>
                 <h3>{copy.releaseChecklist}</h3>
               </div>
+              <span className={runtime?.mode === "openai-compatible" ? "pill pill-success" : "pill pill-warning"}>
+                {runtime?.mode === "openai-compatible" ? copy.readinessOk : copy.pendingCheck}
+              </span>
             </div>
-            <p className="hero-copy">{copy.releaseChecklistCopy}</p>
+            <p className="dashboard-rail-copy">{copy.releaseChecklistCopy}</p>
 
             <div className="attention-list">
               <ChecklistItem
@@ -687,8 +745,9 @@ export function SystemPage() {
                 <p className="eyebrow">{copy.operatorSignals}</p>
                 <h3>{copy.operatorSignals}</h3>
               </div>
+              <span className="pill">{(readiness?.warnings.length ?? 0) + (runtime?.mode === "scripted" ? 1 : 0)}</span>
             </div>
-            <p className="hero-copy">{copy.operatorSignalsCopy}</p>
+            <p className="dashboard-rail-copy">{copy.operatorSignalsCopy}</p>
             <div className="attention-list">
               <article className={runtime?.mode === "scripted" ? "attention-card attention-warning" : "attention-card"}>
                 <strong>{copy.mode}</strong>

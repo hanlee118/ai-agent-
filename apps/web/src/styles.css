@@ -1220,6 +1220,12 @@ input {
   gap: 14px;
 }
 
+.notifications-context-grid,
+.system-context-grid,
+.audit-context-grid {
+  margin-top: 2px;
+}
+
 .dashboard-hero-context-card,
 .dashboard-hero-side-card {
   padding: 16px 18px;

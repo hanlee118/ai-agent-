@@ -195,6 +195,23 @@ export function AuditPage() {
                 <h3>{copy.title}</h3>
               </div>
             </div>
+            <div className="dashboard-hero-context audit-context-grid">
+              <div className="dashboard-hero-context-card">
+                <span>{copy.totalLogs}</span>
+                <strong>{summary.total}</strong>
+                <p>{isEnglish ? "A single governance stream for auth, runtime, project, and workspace operations." : "把认证、运行配置、项目流和工作区操作汇总成一条统一治理轨迹。"} </p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.openclawLogs}</span>
+                <strong>{summary.openclaw}</strong>
+                <p>{isEnglish ? "Workspace events help explain what actually happened inside live OpenClaw operations." : "工作区事件用于解释真实 OpenClaw 运行过程里到底发生了什么。"} </p>
+              </div>
+              <div className="dashboard-hero-context-card">
+                <span>{copy.systemLogs}</span>
+                <strong>{summary.system}</strong>
+                <p>{isEnglish ? "System actions show runtime, settings, and infrastructure-facing changes." : "系统类动作用于呈现运行模式、配置和基础设施相关变更。"} </p>
+              </div>
+            </div>
             <label className="studio-search-field" aria-label={copy.search}>
               <Search size={16} />
               <input
@@ -265,8 +282,9 @@ export function AuditPage() {
                 <p className="eyebrow">{copy.railTitle}</p>
                 <h3>{copy.railTitle}</h3>
               </div>
+              <span className="pill">{visibleLogs.length}</span>
             </div>
-            <p className="hero-copy">{copy.railCopy}</p>
+            <p className="dashboard-rail-copy">{copy.railCopy}</p>
             <div className="stack tight">
               <Link className="button button-ghost inline-button" to="/notifications">
                 {copy.quickNotifications}
@@ -286,7 +304,13 @@ export function AuditPage() {
                 <p className="eyebrow">{copy.action}</p>
                 <h3>{isEnglish ? "Latest critical flow" : "最近关键链路"}</h3>
               </div>
+              <span className="pill">{logs.slice(0, 6).length}</span>
             </div>
+            <p className="dashboard-rail-copy">
+              {isEnglish
+                ? "This right rail keeps the most recent governance chain visible, so you can inspect flow before jumping into another module."
+                : "右侧栏保留最近关键治理链路，让你在跳转其他模块前先读清楚上下文。"}
+            </p>
             <div className="timeline-list">
               {logs.slice(0, 6).map((item) => (
                 <article key={item.id} className="timeline-item">
