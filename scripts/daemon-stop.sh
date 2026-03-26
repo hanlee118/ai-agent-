@@ -15,6 +15,17 @@ PID="$(cat "$PID_FILE")"
 
 if kill -0 "$PID" 2>/dev/null; then
   kill "$PID"
+  for _ in $(seq 1 10); do
+    if ! kill -0 "$PID" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  if kill -0 "$PID" 2>/dev/null; then
+    kill -9 "$PID" >/dev/null 2>&1 || true
+  fi
+
   echo "Stopped OpenClaw PID $PID"
 else
   echo "Stale PID file found for $PID"

@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hanlee118/ai-agent-/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlee118/ai-agent-/actions/workflows/ci.yml)
 [![Pages](https://github.com/hanlee118/ai-agent-/actions/workflows/pages.yml/badge.svg)](https://github.com/hanlee118/ai-agent-/actions/workflows/pages.yml)
-[![Version](https://img.shields.io/badge/version-1.0.0-0f172a.svg)](https://github.com/hanlee118/ai-agent-/releases)
+[![Version](https://img.shields.io/badge/version-1.0.1-0f172a.svg)](https://github.com/hanlee118/ai-agent-/releases)
 
 一个面向真实 OpenClaw 团队协作的 Agent 工作台。它把项目管理、Agent 指挥、任务治理、SOUL/SOP 配置、长期记忆、审计追踪和系统运行检查收敛到一个更接近 SaaS 管理后台的工作平台中。
 
@@ -18,7 +18,7 @@
 - 不是纯演示页面，而是可连接真实 OpenClaw 工作区的运行平台
 - 不是只看结果，而是能管理模型、执行策略、审批机制、Token 上限、长期记忆和审计日志
 
-## v1.0.0 已实现能力
+## v1.0.1 当前已实现能力
 
 - 自然语言创建项目，并生成理解确认卡
 - 统一查看 `Dashboard`、`Projects`、`Project Room`、`OpenClaw Workspace`、`Agents`、`Agent Commander`、`System`、`Audit`、`Settings`
@@ -31,6 +31,8 @@
 - 支持系统健康检查、平台就绪度检查、运行配置校验和审计日志查询
 - 新增本地多工具会话监控，统一观察 Codex、Claude Code 与 OpenClaw 的最近会话和活跃状态
 - 支持中文 / 英文双语切换
+- 已接入新的 Slack / AI Studio 风格工作台壳层，当前运行实例不再使用旧版页面骨架
+- 新增“闭环验收”自动化脚本，可实际验证项目流、OpenClaw 团队流、Agent 指挥流、运行配置流与任务回写流
 
 ## 产品结构
 
@@ -117,6 +119,7 @@ pnpm start:prod
 - `OPENCLAW_AGENT_ROOT`
 - `APP_SECRET`
 - `PORT`
+- `HOST`
 
 其中：
 
@@ -184,6 +187,7 @@ pnpm start:prod
 - [产品说明文档](docs/V1_0_0_PRODUCT_OVERVIEW.md)
 - [需求文档](docs/V1_0_0_REQUIREMENTS_SPEC.md)
 - [技术文档](docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)
+- [v1.0.1 发布说明](docs/RELEASE_NOTES_1.0.1.md)
 - [部署指南](docs/DEPLOYMENT_GUIDE.md)
 - [操作手册](docs/OPERATION_MANUAL.md)
 - [生产检查清单](docs/PRODUCTION_CHECKLIST.md)
@@ -222,7 +226,9 @@ pnpm typecheck
 pnpm build
 pnpm verify:local
 pnpm verify:smoke
+pnpm verify:closure
 pnpm test:smoke
+pnpm test:acceptance
 ```
 
 其中 `pnpm verify:smoke` 会验证：
@@ -233,9 +239,18 @@ pnpm test:smoke
 - 本地会话监控聚合接口
 - 本地会话监控 SSE 首帧推送
 
+`pnpm verify:closure` 会进一步验证：
+
+- 项目创建、消息、介入、恢复、阶段提交、驳回、再提交、审批推进
+- 普通任务状态更新
+- 运行配置保存与校验
+- OpenClaw 工作区读取、项目报告生成、任务回写与批量回写
+- Agent 创建、理解预览、治理设置、SOUL / SOP 保存、长期记忆写入、单发与批量指令
+- 测试后自动清理临时项目、临时 Agent、测试记忆和回写改动
+
 ## 当前版本说明
 
-v1.0.0 已经是一个真实可用的本地生产版本，不再是单纯演示工程。它适合作为：
+v1.0.1 是在 v1.0.0 基础上的闭环验收补丁版本。它已经通过自动化主链路验证，不再只是“页面可看”的版本，而是能对关键操作进行真实回路校验的本地生产版本。它适合作为：
 
 - 企业 Agent 协作平台原型
 - 私有化部署的本地工作台

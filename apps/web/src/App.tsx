@@ -1,15 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import type { AuthStatus, OpenClawAgentSummary, ProjectSummary } from "@occ/shared";
 import {
   Activity,
   Bell,
   Bot,
-  ChevronRight,
+  ChevronDown,
+  Circle,
+  Database,
   FolderKanban,
-  Globe,
+  Hash,
   History,
   LayoutDashboard,
+  Plus,
   Search,
   Settings,
   ShieldCheck,
@@ -30,6 +33,7 @@ import { useLocale } from "./lib/locale";
 
 export default function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const { locale, setLocale, isEnglish } = useLocale();
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -55,8 +59,12 @@ export default function App() {
         workspaceTitle: "Workspace",
         workspaceCopy: "Manage a live AI team through portfolio, delivery, and runtime modules.",
         shellSearch: "Search projects, agents, memory, or logs",
+        workspaceSearchHint: "Search",
         recentProjects: "Live Projects",
         recentAgents: "Agent Roster",
+        workspaceMenu: "OpenClaw Workspace",
+        newProject: "New project",
+        addAgent: "Add agent",
         commanderName: "Commander",
         commanderLevel: "Level 4 Access",
         workspaces: "Workspaces",
@@ -111,8 +119,12 @@ export default function App() {
         workspaceTitle: "工作区",
         workspaceCopy: "面向真实协作团队的项目组合、交付跟踪和运行管理入口。",
         shellSearch: "搜索项目、Agent、记忆或日志",
+        workspaceSearchHint: "搜索",
         recentProjects: "在线项目",
         recentAgents: "Agent 名册",
+        workspaceMenu: "OpenClaw 工作区",
+        newProject: "新建项目",
+        addAgent: "新增 Agent",
         commanderName: "Commander",
         commanderLevel: "四级指挥权限",
         workspaces: "工作域",
@@ -206,6 +218,12 @@ export default function App() {
     { to: "/settings", label: copy.settings, description: isEnglish ? "Preferences and workspace defaults." : "偏好与工作区默认配置。", icon: Settings }
   ], [copy.agents, copy.audit, copy.dashboard, copy.openclaw, copy.projects, copy.settings, copy.system, isEnglish]);
 
+  const workspaceSwitchers = useMemo(() => [
+    { id: "openclaw", label: copy.workspacePrimary, icon: TerminalSquare, tone: "workspace-switcher-active" },
+    { id: "strategy", label: copy.workspaceSecondary, icon: ShieldCheck, tone: "workspace-switcher-strategy" },
+    { id: "memory", label: copy.workspaceData, icon: Database, tone: "workspace-switcher-data" }
+  ], [copy.workspaceData, copy.workspacePrimary, copy.workspaceSecondary]);
+
   if (authLoading) {
     return <div className="card">{copy.checking}</div>;
   }
@@ -223,37 +241,29 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell app-shell-modern">
-      <aside className="workspace-rail">
-        <div className="workspace-rail-group">
-          <button className="workspace-rail-item workspace-rail-item-active" type="button" aria-label={copy.workspacePrimary}>
-            <TerminalSquare size={22} />
-          </button>
-          <button className="workspace-rail-item" type="button" aria-label={copy.workspaceSecondary}>
-            <ShieldCheck size={22} />
-          </button>
-          <button className="workspace-rail-item" type="button" aria-label={copy.workspaceData}>
-            <Globe size={22} />
-          </button>
+    <div className="shell-v2">
+      <aside className="workspace-switcher">
+        <div className="workspace-switcher-stack">
+          {workspaceSwitchers.map((item) => (
+            <button key={item.id} className={`workspace-switcher-item ${item.tone}`} type="button" aria-label={item.label}>
+              <item.icon size={22} />
+            </button>
+          ))}
         </div>
-        <div className="workspace-rail-footer">
-          <button className="workspace-rail-item workspace-rail-item-muted" type="button" aria-label={copy.settings}>
-            <Settings size={20} />
-          </button>
-        </div>
+        <button className="workspace-switcher-add" type="button" aria-label={copy.workspaceTitle}>
+          <Plus size={22} />
+        </button>
       </aside>
 
-      <aside className="sidebar sidebar-modern">
-        <div className="stack shell-stack">
-          <div className="sidebar-brand sidebar-brand-modern">
-            <p className="eyebrow">{copy.shellEyebrow}</p>
-            <h1>{copy.title}</h1>
-            <p className="sidebar-copy">{copy.subtitle}</p>
-          </div>
+      <aside className="shell-sidebar-v2">
+        <div className="shell-sidebar-header">
+          <strong>{copy.workspaceMenu}</strong>
+          <ChevronDown size={16} />
+        </div>
 
-          <div className="nav-group nav-group-modern">
-            <p className="group-title">{copy.navigation}</p>
-            <nav className="nav-list">
+        <div className="shell-sidebar-scroll">
+          <section className="shell-nav-block">
+            <nav className="shell-nav-list-v2">
               {navItems.map((item) => (
                 <NavItem
                   key={item.to}
@@ -261,78 +271,74 @@ export default function App() {
                   label={item.label}
                   description={item.description}
                   icon={item.icon}
+                  compact
                 />
               ))}
             </nav>
-          </div>
+          </section>
 
-          <div className="nav-group nav-group-modern">
-            <div className="section-title-row">
-              <p className="group-title">{copy.recentProjects}</p>
+          <section className="shell-entity-block">
+            <div className="shell-block-header">
+              <span>{copy.recentProjects}</span>
+              <button type="button" onClick={() => navigate("/")}>
+                <Plus size={14} />
+              </button>
             </div>
-            <div className="sidebar-mini-list">
+            <div className="shell-entity-list">
               {sidebarProjects.map((project) => (
-                <NavLink key={project.id} to={`/projects/${project.id}`} className="sidebar-mini-link">
-                  <div className="sidebar-mini-icon">{project.name.slice(0, 1).toUpperCase()}</div>
-                  <div className="sidebar-mini-copy">
-                    <span className="sidebar-mini-title">{project.name}</span>
-                    <span className="sidebar-mini-subtitle">{project.currentStage} · {project.progress}%</span>
-                  </div>
-                  <ChevronRight size={16} />
+                <NavLink key={project.id} to={`/projects/${project.id}`} className="shell-entity-row">
+                  <Hash size={15} className="shell-entity-icon" />
+                  <span className="shell-entity-name">{project.name}</span>
                 </NavLink>
               ))}
             </div>
-          </div>
+          </section>
 
-          <div className="nav-group nav-group-modern">
-            <div className="section-title-row">
-              <p className="group-title">{copy.recentAgents}</p>
+          <section className="shell-entity-block">
+            <div className="shell-block-header">
+              <span>{copy.recentAgents}</span>
+              <button type="button" onClick={() => navigate("/agents")}>
+                <Plus size={14} />
+              </button>
             </div>
-            <div className="sidebar-mini-list">
+            <div className="shell-entity-list">
               {sidebarAgents.map((agent) => (
-                <NavLink key={agent.agentId} to={`/agents/${agent.agentId}`} className="sidebar-mini-link">
-                  <div className="sidebar-mini-icon">{agent.emoji || agent.name.slice(0, 1).toUpperCase()}</div>
-                  <div className="sidebar-mini-copy">
-                    <span className="sidebar-mini-title">{agent.name}</span>
-                    <span className="sidebar-mini-subtitle">{agent.model} · {agent.status}</span>
-                  </div>
-                  <span className={agent.status === "active" ? "shell-presence shell-presence-active" : "shell-presence"} />
+                <NavLink key={agent.agentId} to={`/agents/${agent.agentId}`} className="shell-entity-row">
+                  <span className="shell-agent-avatar">{agent.emoji || agent.name.slice(0, 1).toUpperCase()}</span>
+                  <span className="shell-entity-name">{agent.name}</span>
+                  <Circle
+                    size={10}
+                    fill="currentColor"
+                    className={agent.status === "active" ? "shell-agent-dot shell-agent-dot-active" : "shell-agent-dot"}
+                  />
                 </NavLink>
               ))}
             </div>
-          </div>
+          </section>
         </div>
 
-        <section className="sidebar-card sidebar-status-card commander-card">
-          <div className="commander-avatar-shell">{copy.commanderName.slice(0, 1)}</div>
-          <div className="commander-copy">
+        <button className="shell-commander-v2" type="button" onClick={() => navigate("/settings")}>
+          <span className="shell-commander-avatar">{copy.commanderName.slice(0, 1)}</span>
+          <span className="shell-commander-copy">
             <strong>{copy.commanderName}</strong>
-            <p>{copy.commanderLevel}</p>
-            <span className="status-inline">
-              <span className="status-live" />
-              {copy.statusTitle}
-            </span>
-          </div>
-        </section>
+            <small>{copy.commanderLevel}</small>
+          </span>
+          <Settings size={16} />
+        </button>
       </aside>
 
-      <div className="workspace-shell workspace-shell-modern">
-        <header className="workspace-header workspace-header-modern">
-          <div className="workspace-header-main">
-            <div className="pill-row pill-row-modern">
-              <span className="pill pill-primary">{copy.workspacePrimary}</span>
-              <span className="pill">{copy.topbarBadge}</span>
-              <span className="pill">{copy.workspaceTitle}</span>
-            </div>
-            <h2 className="workspace-title">{topbarCopy.title}</h2>
-            <p className="workspace-subtitle">{topbarCopy.description}</p>
+      <div className="shell-main-v2">
+        <header className="shell-topbar-v2">
+          <div className="shell-topbar-search">
+            <Search size={16} />
+            <input placeholder={copy.shellSearch} aria-label={copy.workspaceSearchHint} />
           </div>
 
-          <div className="workspace-actions workspace-actions-modern">
-            <label className="shell-search">
-              <Search size={17} />
-              <input placeholder={copy.shellSearch} />
-            </label>
+          <div className="shell-topbar-meta">
+            <div className="shell-page-summary">
+              <span className="pill pill-primary">{copy.topbarBadge}</span>
+              <span className="shell-page-title">{topbarCopy.title}</span>
+            </div>
 
             <button className="workspace-icon-button" type="button" aria-label="notifications">
               <Bell size={18} />
@@ -360,7 +366,7 @@ export default function App() {
           </div>
         </header>
 
-        <main className="main-content main-content-modern">
+        <main className="shell-content-v2">
           <Routes>
             <Route path="/" element={<DashboardPage />} />
             <Route path="/projects" element={<ProjectsPage />} />
@@ -382,22 +388,26 @@ function NavItem({
   to,
   label,
   description,
-  icon: Icon
+  icon: Icon,
+  compact = false
 }: {
   to: string;
   label: string;
   description: string;
   icon: typeof LayoutDashboard;
+  compact?: boolean;
 }) {
   return (
     <NavLink
       to={to}
-      className={({ isActive }) => (isActive ? "nav-link nav-link-active" : "nav-link")}
+      className={({ isActive }) => compact
+        ? (isActive ? "shell-nav-item-v2 shell-nav-item-v2-active" : "shell-nav-item-v2")
+        : (isActive ? "nav-link nav-link-active" : "nav-link")}
     >
-      <span className="nav-icon"><Icon size={18} /></span>
-      <span className="nav-copy">
-        <span className="nav-label">{label}</span>
-        <span className="nav-description">{description}</span>
+      <span className={compact ? "shell-nav-icon-v2" : "nav-icon"}><Icon size={18} /></span>
+      <span className={compact ? "shell-nav-copy-v2" : "nav-copy"}>
+        <span className={compact ? "shell-nav-label-v2" : "nav-label"}>{label}</span>
+        <span className={compact ? "shell-nav-description-v2" : "nav-description"}>{description}</span>
       </span>
     </NavLink>
   );

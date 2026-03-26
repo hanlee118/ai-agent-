@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import {
-  ROLE_LABELS,
-  STAGE_LABELS,
   type ProjectDetail,
   type ProjectStatus,
+  type RoleType,
   type RuntimeMode,
   type StageStatus,
   type StageType,
@@ -14,10 +13,11 @@ import {
 } from "@occ/shared";
 import { api } from "../lib/api";
 import { useLocale } from "../lib/locale";
+import { getRoleLabel, getStageLabel } from "../lib/uiLabels";
 
 type LiveMeta = {
   title: string;
-  activeRole: string;
+  activeRole: RoleType;
   startedAt: string;
   provider: RuntimeMode;
 };
@@ -25,6 +25,25 @@ type LiveMeta = {
 type BusyAction = "approve" | "reject" | "intervene" | "resume" | "message" | "submit" | "task" | null;
 type FlashState = { tone: "success" | "error"; message: string } | null;
 type TaskStageFilter = "ALL" | StageType;
+
+const PROJECT_ROOM_DEFAULTS = {
+  command: {
+    "zh-CN": "调整方向：先做单用户 MVP，再逐步接数据库与真实 Agent。",
+    "en-US": "Adjust direction: start with a single-user MVP, then connect the database and real agents step by step."
+  },
+  message: {
+    "zh-CN": "请继续推进，但把交付物写得更便于我快速审批。",
+    "en-US": "Please keep moving, but write the deliverables in a way that makes approval faster for me."
+  },
+  rejectReason: {
+    "zh-CN": "请补充更清晰的阶段输入输出、验收标准与下一阶段依赖。",
+    "en-US": "Please add clearer stage inputs and outputs, acceptance criteria, and next-stage dependencies."
+  },
+  deliverableContent: {
+    "zh-CN": "## 当前阶段交付物\n\n- 已完成本阶段关键分析\n- 已补齐可执行建议\n- 建议进入下一阶段继续推进",
+    "en-US": "## Current Stage Deliverable\n\n- Key analysis for this stage is complete\n- Actionable recommendations have been added\n- Recommend moving to the next stage"
+  }
+} as const;
 
 export function ProjectRoomPage() {
   const { projectId = "" } = useParams();
@@ -35,13 +54,11 @@ export function ProjectRoomPage() {
   const [notes, setNotes] = useState<TimelineEvent[]>([]);
   const [taskStageFilter, setTaskStageFilter] = useState<TaskStageFilter>("ALL");
   const [updatingTaskId, setUpdatingTaskId] = useState<string | null>(null);
-  const [command, setCommand] = useState("调整方向：先做单用户 MVP，再逐步接数据库与真实 Agent。");
-  const [message, setMessage] = useState("请继续推进，但把交付物写得更便于我快速审批。");
-  const [rejectReason, setRejectReason] = useState("请补充更清晰的阶段输入输出、验收标准与下一阶段依赖。");
+  const [command, setCommand] = useState<string>(PROJECT_ROOM_DEFAULTS.command[locale]);
+  const [message, setMessage] = useState<string>(PROJECT_ROOM_DEFAULTS.message[locale]);
+  const [rejectReason, setRejectReason] = useState<string>(PROJECT_ROOM_DEFAULTS.rejectReason[locale]);
   const [deliverableTitle, setDeliverableTitle] = useState("");
-  const [deliverableContent, setDeliverableContent] = useState(
-    "## 当前阶段交付物\n\n- 已完成本阶段关键分析\n- 已补齐可执行建议\n- 建议进入下一阶段继续推进"
-  );
+  const [deliverableContent, setDeliverableContent] = useState<string>(PROJECT_ROOM_DEFAULTS.deliverableContent[locale]);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [loading, setLoading] = useState(true);
   const [pageError, setPageError] = useState<string | null>(null);
@@ -135,7 +152,7 @@ export function ProjectRoomPage() {
         messageFailed: "发送消息失败",
         submitFailed: "提交失败",
         back: "返回仪表盘",
-        eyebrow: "Project Room",
+        eyebrow: "项目作战室",
         refresh: "刷新状态",
         currentRole: "当前角色",
         progress: "进度",
@@ -164,7 +181,7 @@ export function ProjectRoomPage() {
         constraints: "约束",
         risks: "风险",
         keywords: "关键词",
-        gate: "Gate",
+        gate: "审批闸口",
         controlArea: "控制区",
         approvalTitle: "当前阶段已完成，等待你的批准。",
         approve: "批准进入下一阶段",
@@ -198,6 +215,29 @@ export function ProjectRoomPage() {
           done: "完成"
         } as Record<TaskStatus, string>
       };
+
+  useEffect(() => {
+    setCommand((current) =>
+      Object.values(PROJECT_ROOM_DEFAULTS.command).includes(current as (typeof PROJECT_ROOM_DEFAULTS.command)[keyof typeof PROJECT_ROOM_DEFAULTS.command])
+        ? PROJECT_ROOM_DEFAULTS.command[locale]
+        : current
+    );
+    setMessage((current) =>
+      Object.values(PROJECT_ROOM_DEFAULTS.message).includes(current as (typeof PROJECT_ROOM_DEFAULTS.message)[keyof typeof PROJECT_ROOM_DEFAULTS.message])
+        ? PROJECT_ROOM_DEFAULTS.message[locale]
+        : current
+    );
+    setRejectReason((current) =>
+      Object.values(PROJECT_ROOM_DEFAULTS.rejectReason).includes(current as (typeof PROJECT_ROOM_DEFAULTS.rejectReason)[keyof typeof PROJECT_ROOM_DEFAULTS.rejectReason])
+        ? PROJECT_ROOM_DEFAULTS.rejectReason[locale]
+        : current
+    );
+    setDeliverableContent((current) =>
+      Object.values(PROJECT_ROOM_DEFAULTS.deliverableContent).includes(current as (typeof PROJECT_ROOM_DEFAULTS.deliverableContent)[keyof typeof PROJECT_ROOM_DEFAULTS.deliverableContent])
+        ? PROJECT_ROOM_DEFAULTS.deliverableContent[locale]
+        : current
+    );
+  }, [locale]);
 
   async function refresh(options?: { resetStream?: boolean; silent?: boolean }) {
     if (!projectId) {
@@ -520,7 +560,7 @@ export function ProjectRoomPage() {
       <section className="meta-strip meta-strip-wide">
         <div className="meta-chip">
           <span className="eyebrow">{copy.currentRole}</span>
-          <strong>{ROLE_LABELS[project.currentRole]}</strong>
+          <strong>{getRoleLabel(project.currentRole, locale)}</strong>
         </div>
         <div className="meta-chip">
           <span className="eyebrow">{copy.progress}</span>
@@ -557,8 +597,8 @@ export function ProjectRoomPage() {
                 className={stage.type === project.currentStage ? "stage-item stage-item-active" : "stage-item"}
               >
                 <div>
-                  <strong>{stage.label}</strong>
-                  <p>{ROLE_LABELS[stage.assignee]}</p>
+                  <strong>{getStageLabel(stage.type, locale)}</strong>
+                  <p>{getRoleLabel(stage.assignee, locale)}</p>
                 </div>
                 <span className={`pill pill-${stage.status}`}>{stageStatusLabel(stage.status, isEnglish)}</span>
               </div>
@@ -569,7 +609,7 @@ export function ProjectRoomPage() {
             <p className="group-title">{copy.teamRelay}</p>
             {project.team.map((role) => (
               <div key={role} className="agent-mini-card">
-                <strong>{ROLE_LABELS[role]}</strong>
+                <strong>{getRoleLabel(role, locale)}</strong>
                 <span className={role === project.currentRole ? "pill pill-primary" : "pill"}>{copy.onStage}</span>
               </div>
             ))}
@@ -593,7 +633,7 @@ export function ProjectRoomPage() {
             </div>
             <div className="live-status">
               <span className="status-dot status-live" />
-              {ROLE_LABELS[(liveMeta?.activeRole as keyof typeof ROLE_LABELS) ?? project.currentRole]}
+              {getRoleLabel(liveMeta?.activeRole ?? project.currentRole, locale)}
             </div>
           </div>
 
@@ -614,7 +654,7 @@ export function ProjectRoomPage() {
                   </div>
                   <div className="deliverable-meta">
                     <span className="pill">{deliverableStatusLabel(deliverable.status, isEnglish)}</span>
-                    <span className="pill">{ROLE_LABELS[deliverable.createdBy]}</span>
+                    <span className="pill">{getRoleLabel(deliverable.createdBy, locale)}</span>
                   </div>
                   <p>{deliverable.content}</p>
                 </article>
@@ -642,7 +682,7 @@ export function ProjectRoomPage() {
                     className={taskStageFilter === stage.type ? "filter-pill filter-pill-active" : "filter-pill"}
                     onClick={() => setTaskStageFilter(stage.type)}
                   >
-                    {STAGE_LABELS[stage.type]}
+                    {getStageLabel(stage.type, locale)}
                   </button>
                 ))}
               </div>
@@ -658,13 +698,13 @@ export function ProjectRoomPage() {
                     <div className="deliverable-head">
                       <div>
                         <strong>{task.title}</strong>
-                        <p className="muted-text">{STAGE_LABELS[task.stageType]}</p>
+                        <p className="muted-text">{getStageLabel(task.stageType, locale)}</p>
                       </div>
                       <span className={`pill pill-task-${task.status}`}>{copy.taskStatus[task.status]}</span>
                     </div>
                     <p>{task.description}</p>
                     <div className="task-meta">
-                      <span className="pill">{ROLE_LABELS[task.assignee]}</span>
+                      <span className="pill">{getRoleLabel(task.assignee, locale)}</span>
                       <span className={task.priority === "high" ? "pill pill-warning" : "pill"}>
                         {taskPriorityLabel(task.priority, isEnglish)}
                       </span>

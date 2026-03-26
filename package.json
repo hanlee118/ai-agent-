@@ -1,7 +1,7 @@
 {
   "name": "occ-workspace",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.1",
   "packageManager": "pnpm@10.32.1",
   "scripts": {
     "dev:web": "pnpm --filter @occ/web dev",
@@ -11,7 +11,9 @@
     "backup:local": "./scripts/backup-local.sh",
     "verify:local": "node scripts/verify-local.mjs",
     "verify:smoke": "bash scripts/verify-smoke.sh",
+    "verify:closure": "node --input-type=module -e \"import('./scripts/verify-closure.mjs')\"",
     "test:smoke": "pnpm verify:local && pnpm verify:smoke",
+    "test:acceptance": "pnpm verify:local && pnpm verify:smoke && pnpm verify:closure",
     "daemon:start": "./scripts/daemon-start.sh",
     "daemon:stop": "./scripts/daemon-stop.sh",
     "daemon:status": "./scripts/daemon-status.sh",

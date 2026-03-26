@@ -88,6 +88,7 @@ import {
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
+const host = String(process.env.HOST ?? "127.0.0.1").trim() || "127.0.0.1";
 const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
 
 app.use(cors({
@@ -974,9 +975,9 @@ async function start() {
   await ensureSeedData((await getRuntimeStatus()).mode);
   ensureLocalAgentMonitorLive();
 
-  app.listen(port, () => {
+  app.listen(port, host, () => {
     console.log(
-      `OCC API listening on http://localhost:${port}${existsSync(webDistPath) ? " (serving web dist)" : ""}`
+      `OCC API listening on http://${host}:${port}${existsSync(webDistPath) ? " (serving web dist)" : ""}`
     );
   });
 }

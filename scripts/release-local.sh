@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$ROOT_DIR/.cache}"
+export HOST="${HOST:-127.0.0.1}"
 mkdir -p "$XDG_CACHE_HOME"
 
 API_PID=""
@@ -42,7 +43,7 @@ if curl -sf http://127.0.0.1:8787/health >/dev/null 2>&1; then
   echo "Existing API detected on :8787, reusing it for smoke test"
 else
   echo "Starting temporary production API for smoke test"
-  PORT=8787 NODE_ENV=production node apps/api/dist/index.js > /tmp/occ-release-api.log 2>&1 &
+  PORT=8787 HOST="$HOST" NODE_ENV=production node apps/api/dist/index.js > /tmp/occ-release-api.log 2>&1 &
   API_PID=$!
 
   for attempt in $(seq 1 30); do

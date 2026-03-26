@@ -2,8 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   type LocalAgentMonitorOverview,
-  ROLE_LABELS,
-  STAGE_LABELS,
   type OpenClawProjectSummary,
   type OpenClawAgentSummary,
   type OpenClawWorkspaceOverview,
@@ -16,24 +14,16 @@ import {
 } from "@occ/shared";
 import { api } from "../lib/api";
 import { useLocale } from "../lib/locale";
+import { getOpenClawProjectStateLabel, getRoleLabel, getStageLabel, getTaskPriorityLabel, getTaskStatusLabel } from "../lib/uiLabels";
 
 type TaskFilter = "all" | TaskStatus;
-
-const taskStatusLabels: Record<TaskStatus, string> = {
-  todo: "待开始",
-  in_progress: "进行中",
-  blocked: "已阻塞",
-  done: "已完成"
-};
-
-const priorityLabels = {
-  low: "低优先级",
-  normal: "正常优先级",
-  high: "高优先级"
+const DASHBOARD_DESCRIPTION_DEFAULTS = {
+  "zh-CN": "请根据我已有的想法，设计并研发一个 AI 协作工作台 MVP，先把项目创建、实时观测、审批和紧急介入做出来。",
+  "en-US": "Design and build an AI collaboration workspace MVP based on my current ideas. Start with project creation, live observation, approvals, and emergency intervention."
 } as const;
 
 export function DashboardPage() {
-  const { isEnglish } = useLocale();
+  const { isEnglish, locale } = useLocale();
   const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [agents, setAgents] = useState<OpenClawAgentSummary[]>([]);
@@ -44,9 +34,7 @@ export function DashboardPage() {
   const [workspace, setWorkspace] = useState<OpenClawWorkspaceOverview | null>(null);
   const [taskFilter, setTaskFilter] = useState<TaskFilter>("all");
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
-  const [description, setDescription] = useState(
-    "请根据我已有的想法，设计并研发一个 AI 协作工作台 MVP，先把项目创建、实时观测、审批和紧急介入做出来。"
-  );
+  const [description, setDescription] = useState<string>(DASHBOARD_DESCRIPTION_DEFAULTS[locale]);
   const [preview, setPreview] = useState<ParsedIntent | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -104,6 +92,14 @@ export function DashboardPage() {
       };
 
   useEffect(() => {
+    setDescription((current) =>
+      Object.values(DASHBOARD_DESCRIPTION_DEFAULTS).includes(current as (typeof DASHBOARD_DESCRIPTION_DEFAULTS)[keyof typeof DASHBOARD_DESCRIPTION_DEFAULTS])
+        ? DASHBOARD_DESCRIPTION_DEFAULTS[locale]
+        : current
+    );
+  }, [locale]);
+
+  useEffect(() => {
     void refresh();
   }, []);
 
@@ -155,7 +151,7 @@ export function DashboardPage() {
       setWorkspace(workspaceInfo);
       setLastSyncedAt(new Date().toISOString());
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "加载失败");
+      setError(requestError instanceof Error ? requestError.message : (isEnglish ? "Failed to load dashboard data" : "加载失败"));
     }
   }
 
@@ -165,7 +161,7 @@ export function DashboardPage() {
     try {
       setPreview(await api.previewProject(description));
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "解析失败");
+      setError(requestError instanceof Error ? requestError.message : (isEnglish ? "Failed to analyze request" : "解析失败"));
     } finally {
       setLoadingPreview(false);
     }
@@ -177,13 +173,13 @@ export function DashboardPage() {
     try {
       const project = await api.createProject({
         description,
-        name: preview?.keywords[0] ? `${preview.keywords[0]} 项目` : undefined,
+        name: preview?.keywords[0] ? `${preview.keywords[0]} ${isEnglish ? "Project" : "项目"}` : undefined,
         team: preview?.suggestedTeam
       });
       await refresh();
       navigate(`/projects/${project.id}`);
     } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : "创建失败");
+      setError(requestError instanceof Error ? requestError.message : (isEnglish ? "Failed to create project" : "创建失败"));
     } finally {
       setCreating(false);
     }
@@ -267,24 +263,30 @@ export function DashboardPage() {
 
     if (runtime && runtime.mode === "scripted") {
       items.push({
-        title: "模型运行仍在脚本回退模式",
-        detail: "当前主流程可用，但真实模型编排能力尚未接入生产配置。",
+        title: isEnglish ? "Runtime is still using scripted fallback mode" : "模型运行仍在脚本回退模式",
+        detail: isEnglish
+          ? "The core workflow is usable, but real model orchestration has not been connected to the production runtime yet."
+          : "当前主流程可用，但真实模型编排能力尚未接入生产配置。",
         tone: "warning"
       });
     }
 
     if ((health?.blockedTasks ?? 0) > 0) {
       items.push({
-        title: `${health?.blockedTasks ?? 0} 个任务已阻塞`,
-        detail: "建议优先进入项目观测室，手动介入或改派阶段任务。",
+        title: isEnglish ? `${health?.blockedTasks ?? 0} tasks are blocked` : `${health?.blockedTasks ?? 0} 个任务已阻塞`,
+        detail: isEnglish
+          ? "Open the project room first so you can intervene or reassign the stage tasks."
+          : "建议优先进入项目观测室，手动介入或改派阶段任务。",
         tone: "danger"
       });
     }
 
     if (waitingProjects.length > 0) {
       items.push({
-        title: `${waitingProjects.length} 个项目等待审批`,
-        detail: "审批队列已形成闸口，尽快决策可避免后续阶段空转。",
+        title: isEnglish ? `${waitingProjects.length} projects are waiting for approval` : `${waitingProjects.length} 个项目等待审批`,
+        detail: isEnglish
+          ? "The approval queue has become a gate. Clearing it quickly prevents downstream idle time."
+          : "审批队列已形成闸口，尽快决策可避免后续阶段空转。",
         tone: "warning"
       });
     }
@@ -301,8 +303,10 @@ export function DashboardPage() {
 
     if (items.length === 0) {
       items.push({
-        title: "当前工作台运行平稳",
-        detail: "没有发现新的阻塞或审批堆积，可以继续推进活跃项目。",
+        title: isEnglish ? "The workspace is running smoothly" : "当前工作台运行平稳",
+        detail: isEnglish
+          ? "No new blockers or approval backlogs were detected, so active projects can keep moving."
+          : "没有发现新的阻塞或审批堆积，可以继续推进活跃项目。",
         tone: "default"
       });
     }
@@ -321,13 +325,14 @@ export function DashboardPage() {
             <div className="runtime-banner">
               <span className="pill pill-primary">{runtime.mode}</span>
               <span className="muted-text">
-                当前执行模式：{runtime.configured ? runtime.modelName : "未配置模型，自动回退脚本 Agent"}
+                {isEnglish ? "Current runtime:" : "当前执行模式："}
+                {runtime.configured ? runtime.modelName : (isEnglish ? "Model not configured, falling back to scripted agent" : "未配置模型，自动回退脚本 Agent")}
               </span>
             </div>
           ) : null}
           <div className="hero-inline-meta">
             <span className="muted-text">
-              {isEnglish ? "Last sync:" : "最近同步："}{lastSyncedAt ? formatTime(lastSyncedAt, isEnglish ? "en-US" : "zh-CN") : (isEnglish ? "Not yet" : "尚未同步")}
+              {isEnglish ? "Last sync:" : "最近同步："}{lastSyncedAt ? formatTime(lastSyncedAt, locale) : (isEnglish ? "Not yet" : "尚未同步")}
             </span>
             <button className="button button-ghost inline-button" onClick={() => void refresh()}>
               {copy.refresh}
@@ -358,7 +363,7 @@ export function DashboardPage() {
             className="composer-textarea"
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            placeholder="描述你想做什么、希望达到什么结果、有哪些约束"
+            placeholder={isEnglish ? "Describe what you want to build, the outcome you expect, and any constraints." : "描述你想做什么、希望达到什么结果、有哪些约束"}
           />
 
           {preview ? (
@@ -372,7 +377,7 @@ export function DashboardPage() {
               <IntentGroup title={isEnglish ? "Risks" : "风险"} items={preview.risks} danger />
               <IntentGroup
                 title={isEnglish ? "Suggested Team" : "建议团队"}
-                items={preview.suggestedTeam.map((role) => ROLE_LABELS[role])}
+                items={preview.suggestedTeam.map((role) => getRoleLabel(role, locale))}
               />
 
               <div className="action-row">
@@ -423,7 +428,7 @@ export function DashboardPage() {
               </div>
             </div>
             {demoWorkspaceProject ? (
-              <DemoProjectCard project={demoWorkspaceProject} cta={copy.openDemo} isEnglish={isEnglish} />
+              <DemoProjectCard project={demoWorkspaceProject} cta={copy.openDemo} isEnglish={isEnglish} locale={locale} />
             ) : (
               <p className="muted-text">{copy.demoEmpty}</p>
             )}
@@ -436,12 +441,12 @@ export function DashboardPage() {
                 <p className="eyebrow">Spotlight</p>
                   <h3>{isEnglish ? "Project To Watch" : "当前最值得盯住的项目"}</h3>
                 </div>
-                <span className="pill pill-primary">{STAGE_LABELS[spotlightProject.currentStage]}</span>
+                <span className="pill pill-primary">{getStageLabel(spotlightProject.currentStage, locale)}</span>
               </div>
               <h4>{spotlightProject.name}</h4>
               <p className="project-summary">{spotlightProject.summary}</p>
               <div className="project-meta">
-                <span>{ROLE_LABELS[spotlightProject.currentRole]}</span>
+                <span>{getRoleLabel(spotlightProject.currentRole, locale)}</span>
                 <span>{spotlightProject.progress}%</span>
               </div>
               <Link className="button button-primary inline-button" to={`/projects/${spotlightProject.id}`}>
@@ -473,7 +478,7 @@ export function DashboardPage() {
             <div className="timeline-list">
               {(localMonitor?.sessions ?? []).slice(0, 4).map((session) => (
                 <article key={session.id} className="timeline-item">
-                  <div className="timeline-time">{formatTime(session.updatedAt, isEnglish ? "en-US" : "zh-CN")}</div>
+                  <div className="timeline-time">{formatTime(session.updatedAt, locale)}</div>
                   <div>
                     <div className="timeline-head">
                       <strong>{session.title}</strong>
@@ -498,7 +503,7 @@ export function DashboardPage() {
             </div>
             <div className="card-list">
               {waitingProjects.map((project) => (
-                <ProjectSummaryCard key={project.id} project={project} isEnglish={isEnglish} />
+                <ProjectSummaryCard key={project.id} project={project} isEnglish={isEnglish} locale={locale} />
               ))}
               {waitingProjects.length === 0 ? <p className="muted-text">{isEnglish ? "No projects are waiting for approval." : "当前没有待审批项目。"}</p> : null}
             </div>
@@ -578,7 +583,7 @@ export function DashboardPage() {
 
           <div className="task-monitor-grid">
             {visibleTasks.map((task) => (
-              <TaskBoardCard key={task.id} task={task} />
+              <TaskBoardCard key={task.id} task={task} locale={locale} isEnglish={isEnglish} />
             ))}
             {visibleTasks.length === 0 ? (
               <div className="empty-state">
@@ -600,7 +605,7 @@ export function DashboardPage() {
 
         <div className="project-grid">
           {activeProjects.map((project) => (
-            <ProjectSummaryCard key={project.id} project={project} isEnglish={isEnglish} />
+            <ProjectSummaryCard key={project.id} project={project} isEnglish={isEnglish} locale={locale} />
           ))}
           {activeProjects.length === 0 ? <p className="muted-text">{isEnglish ? "There are no active projects." : "当前没有活跃项目。"}</p> : null}
         </div>
@@ -615,7 +620,7 @@ export function DashboardPage() {
         </div>
         <div className="project-grid">
           {archivedProjects.map((project) => (
-            <ProjectSummaryCard key={project.id} project={project} isEnglish={isEnglish} />
+            <ProjectSummaryCard key={project.id} project={project} isEnglish={isEnglish} locale={locale} />
           ))}
           {archivedProjects.length === 0 ? <p className="muted-text">{isEnglish ? "No archived projects yet." : "还没有归档项目。"}</p> : null}
         </div>
@@ -664,7 +669,7 @@ function IntentGroup({
   );
 }
 
-function ProjectSummaryCard({ project, isEnglish }: { project: ProjectSummary; isEnglish: boolean }) {
+function ProjectSummaryCard({ project, isEnglish, locale }: { project: ProjectSummary; isEnglish: boolean; locale: "zh-CN" | "en-US" }) {
   return (
     <Link to={`/projects/${project.id}`} className="project-card">
       <div className="project-card-head">
@@ -684,8 +689,8 @@ function ProjectSummaryCard({ project, isEnglish }: { project: ProjectSummary; i
         <span>{project.progress}%</span>
       </div>
       <div className="project-meta">
-        <span>{STAGE_LABELS[project.currentStage]}</span>
-        <span>{ROLE_LABELS[project.currentRole]}</span>
+        <span>{getStageLabel(project.currentStage, locale)}</span>
+        <span>{getRoleLabel(project.currentRole, locale)}</span>
         <span>{isEnglish ? `${project.openTaskCount} tasks` : `${project.openTaskCount} 个任务`}</span>
       </div>
     </Link>
@@ -704,11 +709,13 @@ function MetricInline({ label, value }: { label: string; value: string }) {
 function DemoProjectCard({
   project,
   cta,
-  isEnglish
+  isEnglish,
+  locale
 }: {
   project: OpenClawProjectSummary;
   cta: string;
   isEnglish: boolean;
+  locale: "zh-CN" | "en-US";
 }) {
   return (
     <Link to={`/openclaw?projectId=${encodeURIComponent(project.id)}`} className="demo-project-card">
@@ -718,21 +725,7 @@ function DemoProjectCard({
           <h4>{project.name}</h4>
         </div>
         <span className={project.status === "blocked" ? "pill pill-danger" : project.status === "completed" ? "pill pill-success" : "pill pill-primary"}>
-          {isEnglish
-            ? project.status === "completed"
-              ? "Completed"
-              : project.status === "blocked"
-                ? "Blocked"
-                : project.status === "planned"
-                  ? "Planned"
-                  : "Active"
-            : project.status === "completed"
-              ? "已完成"
-              : project.status === "blocked"
-                ? "阻塞"
-                : project.status === "planned"
-                  ? "规划中"
-                  : "进行中"}
+          {getOpenClawProjectStateLabel(project.status, locale)}
         </span>
       </div>
       <p className="project-summary">{project.description}</p>
@@ -781,7 +774,15 @@ function AttentionCard({
   );
 }
 
-function TaskBoardCard({ task }: { task: TaskBoardItem }) {
+function TaskBoardCard({
+  task,
+  locale,
+  isEnglish
+}: {
+  task: TaskBoardItem;
+  locale: "zh-CN" | "en-US";
+  isEnglish: boolean;
+}) {
   return (
     <Link to={`/projects/${task.projectId}`} className="task-board-card">
       <div className="deliverable-head">
@@ -789,20 +790,20 @@ function TaskBoardCard({ task }: { task: TaskBoardItem }) {
           <span className="project-id">{task.projectId}</span>
           <strong>{task.title}</strong>
         </div>
-        <span className={`pill pill-task-${task.status}`}>{taskStatusLabels[task.status]}</span>
+        <span className={`pill pill-task-${task.status}`}>{getTaskStatusLabel(task.status, locale)}</span>
       </div>
       <p className="project-summary">{task.description}</p>
       <div className="task-card-meta">
         <span className="pill">{task.projectName}</span>
-        <span className="pill">{STAGE_LABELS[task.stageType]}</span>
-        <span className="pill">{ROLE_LABELS[task.assignee]}</span>
+        <span className="pill">{getStageLabel(task.stageType, locale)}</span>
+        <span className="pill">{getRoleLabel(task.assignee, locale)}</span>
       </div>
       <div className="task-card-meta">
         <span className={task.priority === "high" ? "pill pill-warning" : "pill"}>
-          {priorityLabels[task.priority]}
+          {getTaskPriorityLabel(task.priority, locale)}
         </span>
-        {task.projectPendingApproval ? <span className="pill pill-warning">项目待审批</span> : null}
-        <span className="muted-text">更新于 {formatTime(task.updatedAt, "zh-CN")}</span>
+        {task.projectPendingApproval ? <span className="pill pill-warning">{isEnglish ? "Project waiting approval" : "项目待审批"}</span> : null}
+        <span className="muted-text">{isEnglish ? "Updated" : "更新于"} {formatTime(task.updatedAt, locale)}</span>
       </div>
     </Link>
   );

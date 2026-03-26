@@ -23,6 +23,16 @@ type EditorMode = "soul" | "sop";
 type FlashState = { tone: "success" | "error"; message: string } | null;
 type BatchTaskStatusDraft = OpenClawTaskState | "keep";
 
+const OPENCLAW_AGENT_MESSAGE_DEFAULTS = {
+  "zh-CN": "请汇报你当前手上的任务、阻塞点和下一步计划。",
+  "en-US": "Report the tasks you own right now, your blockers, and the next step you will take."
+} as const;
+
+const OPENCLAW_BULK_MESSAGE_DEFAULTS = {
+  "zh-CN": "请同步当前进展、阻塞点和下一步计划，30分钟内回复。",
+  "en-US": "Share your current progress, blockers, and next step. Please reply within 30 minutes."
+} as const;
+
 export function OpenClawPage() {
   const { locale, isEnglish } = useLocale();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -54,8 +64,8 @@ export function OpenClawPage() {
   const [batchTaskStatusDraft, setBatchTaskStatusDraft] = useState<BatchTaskStatusDraft>("keep");
   const [batchTaskProgressDraft, setBatchTaskProgressDraft] = useState("");
   const [batchTaskSaving, setBatchTaskSaving] = useState(false);
-  const [agentMessage, setAgentMessage] = useState("请汇报你当前手上的任务、阻塞点和下一步计划。");
-  const [bulkMessage, setBulkMessage] = useState("请同步当前进展、阻塞点和下一步计划，30分钟内回复。");
+  const [agentMessage, setAgentMessage] = useState<string>(OPENCLAW_AGENT_MESSAGE_DEFAULTS[locale]);
+  const [bulkMessage, setBulkMessage] = useState<string>(OPENCLAW_BULK_MESSAGE_DEFAULTS[locale]);
   const [messageSending, setMessageSending] = useState(false);
   const [commandResult, setCommandResult] = useState<OpenClawAgentCommandResult | null>(null);
   const [batchResult, setBatchResult] = useState<OpenClawBatchAgentCommandResult | null>(null);
@@ -195,7 +205,29 @@ export function OpenClawPage() {
         moduleJump: "Jump by module",
         modulePrograms: "Programs",
         moduleProjectRoom: "Project Room",
-        moduleAgents: "Agents"
+        moduleAgents: "Agents",
+        loadProjectDetailFailed: "Failed to load OpenClaw project detail",
+        loadProjectReportFailed: "Failed to load project report",
+        loadAgentDetailFailed: "Failed to load OpenClaw agent detail",
+        loadWorkbenchFailed: "Failed to load the OpenClaw workbench",
+        documentSaved: (agentName: string, mode: EditorMode) => `${agentName}'s ${mode.toUpperCase()} was saved back to the OpenClaw workspace.`,
+        taskSaved: (taskTitle: string) => `Task "${taskTitle}" was written back to the OpenClaw project task file.`,
+        batchRequiresChange: "Set at least one batch update field.",
+        batchSaved: (count: number) => `Wrote back ${count} tasks in batch.`,
+        batchSelectionHint: (count: number) => `${count} tasks selected. This is ideal for bulk status or progress updates.`,
+        instructionSent: (agentName: string) => `Instruction sent to ${agentName} and a reply was received.`,
+        batchBroadcastSent: (count: number) => `Broadcast was sent to ${count} project agents.`,
+        reportCopied: "Project report Markdown copied to clipboard.",
+        reportCopyFailed: "Copy failed. Please select the report manually.",
+        versionLabel: "Version",
+        suggestedActionPrefix: "Suggested action:",
+        memberCount: (count: number) => `${count} members`,
+        minutesAgo: (minutes: number) => `${minutes} min ago`,
+        noAssignedTask: "No clearly assigned task",
+        noActivitySignal: "No activity signal yet",
+        moduleProgramsCopy: "Structured project portfolio, demo workspaces, and specialist bench.",
+        moduleProjectRoomCopy: "Task editing, reports, deliverables, and project broadcast control.",
+        moduleAgentsCopy: "SOUL / SOP management, sessions, and direct agent command delivery."
       }
     : {
         title: "把 OpenClaw 团队当成一个真正的运营中台来管理",
@@ -324,8 +356,43 @@ export function OpenClawPage() {
         moduleJump: "模块跳转",
         modulePrograms: "项目组合",
         moduleProjectRoom: "项目作战室",
-        moduleAgents: "Agent 面板"
+        moduleAgents: "Agent 面板",
+        loadProjectDetailFailed: "加载 OpenClaw 项目详情失败",
+        loadProjectReportFailed: "加载项目报告失败",
+        loadAgentDetailFailed: "加载 OpenClaw Agent 详情失败",
+        loadWorkbenchFailed: "OpenClaw 工作台加载失败",
+        documentSaved: (agentName: string, mode: EditorMode) => `${agentName} 的 ${mode.toUpperCase()} 已保存到 OpenClaw 工作区。`,
+        taskSaved: (taskTitle: string) => `任务“${taskTitle}”已回写到 OpenClaw 项目任务文件。`,
+        batchRequiresChange: "请至少设置一个批量更新字段。",
+        batchSaved: (count: number) => `已批量回写 ${count} 个任务。`,
+        batchSelectionHint: (count: number) => `已选择 ${count} 个任务，适合批量切换状态或推进进度`,
+        instructionSent: (agentName: string) => `已向 ${agentName} 下发指令，并收到回复。`,
+        batchBroadcastSent: (count: number) => `已向 ${count} 个项目相关 Agent 发出批量指令。`,
+        reportCopied: "项目报告 Markdown 已复制到剪贴板。",
+        reportCopyFailed: "复制失败，请手动选中报告内容。",
+        versionLabel: "版本",
+        suggestedActionPrefix: "建议：",
+        memberCount: (count: number) => `${count} 个成员`,
+        minutesAgo: (minutes: number) => `${minutes} 分钟前活跃`,
+        noAssignedTask: "当前无明确任务",
+        noActivitySignal: "暂无活跃记录",
+        moduleProgramsCopy: "结构化项目组合、演示项目和专家支援席位。",
+        moduleProjectRoomCopy: "任务编辑、项目报告、交付物和团队催办入口。",
+        moduleAgentsCopy: "SOUL / SOP 管理、会话轨迹和 Agent 直接指令控制。"
       };
+
+  useEffect(() => {
+    setAgentMessage((current) =>
+      Object.values(OPENCLAW_AGENT_MESSAGE_DEFAULTS).includes(current as (typeof OPENCLAW_AGENT_MESSAGE_DEFAULTS)[keyof typeof OPENCLAW_AGENT_MESSAGE_DEFAULTS])
+        ? OPENCLAW_AGENT_MESSAGE_DEFAULTS[locale]
+        : current
+    );
+    setBulkMessage((current) =>
+      Object.values(OPENCLAW_BULK_MESSAGE_DEFAULTS).includes(current as (typeof OPENCLAW_BULK_MESSAGE_DEFAULTS)[keyof typeof OPENCLAW_BULK_MESSAGE_DEFAULTS])
+        ? OPENCLAW_BULK_MESSAGE_DEFAULTS[locale]
+        : current
+    );
+  }, [locale]);
 
   useEffect(() => {
     void refresh();
@@ -352,7 +419,7 @@ export function OpenClawPage() {
       .catch((requestError) => {
         setFlash({
           tone: "error",
-          message: requestError instanceof Error ? requestError.message : "加载 OpenClaw 项目详情失败"
+          message: requestError instanceof Error ? requestError.message : pageCopy.loadProjectDetailFailed
         });
       });
   }, [selectedProjectId]);
@@ -387,7 +454,7 @@ export function OpenClawPage() {
       .catch((requestError) => {
         setFlash({
           tone: "error",
-          message: requestError instanceof Error ? requestError.message : "加载项目报告失败"
+          message: requestError instanceof Error ? requestError.message : pageCopy.loadProjectReportFailed
         });
       })
       .finally(() => {
@@ -407,7 +474,7 @@ export function OpenClawPage() {
       .catch((requestError) => {
         setFlash({
           tone: "error",
-          message: requestError instanceof Error ? requestError.message : "加载 OpenClaw Agent 详情失败"
+          message: requestError instanceof Error ? requestError.message : pageCopy.loadAgentDetailFailed
         });
       });
   }, [selectedAgentId]);
@@ -492,7 +559,7 @@ export function OpenClawPage() {
             : overview.agents[0]?.agentId ?? null
       );
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : "OpenClaw 工作台加载失败";
+      const message = requestError instanceof Error ? requestError.message : pageCopy.loadWorkbenchFailed;
       setError(message);
       setFlash({ tone: "error", message });
     } finally {
@@ -519,12 +586,12 @@ export function OpenClawPage() {
       await refresh({ silent: true });
       setFlash({
         tone: "success",
-        message: `${agentDetail.name} 的 ${editorMode.toUpperCase()} 已保存到 OpenClaw 工作区。`
+        message: pageCopy.documentSaved(agentDetail.name, editorMode)
       });
     } catch (requestError) {
       setFlash({
         tone: "error",
-        message: requestError instanceof Error ? requestError.message : "保存失败"
+        message: requestError instanceof Error ? requestError.message : pageCopy.failure
       });
     } finally {
       setSaving(false);
@@ -555,12 +622,12 @@ export function OpenClawPage() {
       await refresh({ silent: true });
       setFlash({
         tone: "success",
-        message: `任务“${task.title}”已回写到 OpenClaw 项目任务文件。`
+        message: pageCopy.taskSaved(task.title)
       });
     } catch (requestError) {
       setFlash({
         tone: "error",
-        message: requestError instanceof Error ? requestError.message : "任务保存失败"
+        message: requestError instanceof Error ? requestError.message : (isEnglish ? "Task save failed" : "任务保存失败")
       });
     } finally {
       setTaskSaving(false);
@@ -584,7 +651,7 @@ export function OpenClawPage() {
     if (!("status" in patch) && !("progress" in patch)) {
       setFlash({
         tone: "error",
-        message: isEnglish ? "Set at least one batch update field." : "请至少设置一个批量更新字段。"
+        message: pageCopy.batchRequiresChange
       });
       return;
     }
@@ -610,9 +677,7 @@ export function OpenClawPage() {
       await refresh({ silent: true });
       setFlash({
         tone: "success",
-        message: isEnglish
-          ? `Wrote back ${selectedTaskIds.length} tasks in batch.`
-          : `已批量回写 ${selectedTaskIds.length} 个任务。`
+        message: pageCopy.batchSaved(selectedTaskIds.length)
       });
     } catch (requestError) {
       setFlash({
@@ -639,12 +704,12 @@ export function OpenClawPage() {
       await refresh({ silent: true });
       setFlash({
         tone: "success",
-        message: `已向 ${agentDetail.name} 下发指令，并收到回复。`
+        message: pageCopy.instructionSent(agentDetail.name)
       });
     } catch (requestError) {
       setFlash({
         tone: "error",
-        message: requestError instanceof Error ? requestError.message : "Agent 指令发送失败"
+        message: requestError instanceof Error ? requestError.message : (isEnglish ? "Agent instruction failed" : "Agent 指令发送失败")
       });
     } finally {
       setMessageSending(false);
@@ -667,9 +732,7 @@ export function OpenClawPage() {
       await refresh({ silent: true });
       setFlash({
         tone: result.ok ? "success" : "error",
-        message: isEnglish
-          ? `Broadcast was sent to ${result.requestedAgentIds.length} project agents.`
-          : `已向 ${result.requestedAgentIds.length} 个项目相关 Agent 发出批量指令。`
+        message: pageCopy.batchBroadcastSent(result.requestedAgentIds.length)
       });
     } catch (requestError) {
       setFlash({
@@ -690,12 +753,12 @@ export function OpenClawPage() {
       await navigator.clipboard.writeText(projectReport.markdown);
       setFlash({
         tone: "success",
-        message: isEnglish ? "Project report Markdown copied to clipboard." : "项目报告 Markdown 已复制到剪贴板。"
+        message: pageCopy.reportCopied
       });
     } catch {
       setFlash({
         tone: "error",
-        message: isEnglish ? "Copy failed. Please select the report manually." : "复制失败，请手动选中报告内容。"
+        message: pageCopy.reportCopyFailed
       });
     }
   }
@@ -820,7 +883,7 @@ export function OpenClawPage() {
               <strong>{pageCopy.modulePrograms}</strong>
               <span className="pill">{projects.length}</span>
             </div>
-            <p>{isEnglish ? "Structured project portfolio, demo workspaces, and specialist bench." : "结构化项目组合、演示项目和专家支援席位。"}</p>
+            <p>{pageCopy.moduleProgramsCopy}</p>
             <span className="module-link">{pageCopy.modulePrograms}</span>
           </a>
           <a className="module-card" href="#project-room-section">
@@ -828,7 +891,7 @@ export function OpenClawPage() {
               <strong>{pageCopy.moduleProjectRoom}</strong>
               <span className="pill">{projectDetail?.tasks.length ?? 0}</span>
             </div>
-            <p>{isEnglish ? "Task editing, reports, deliverables, and project broadcast control." : "任务编辑、项目报告、交付物和团队催办入口。"}</p>
+            <p>{pageCopy.moduleProjectRoomCopy}</p>
             <span className="module-link">{pageCopy.moduleProjectRoom}</span>
           </a>
           <a className="module-card" href="#agents-section">
@@ -836,7 +899,7 @@ export function OpenClawPage() {
               <strong>{pageCopy.moduleAgents}</strong>
               <span className="pill">{visibleAgents.length}</span>
             </div>
-            <p>{isEnglish ? "SOUL / SOP management, sessions, and direct agent command delivery." : "SOUL / SOP 管理、会话轨迹和 Agent 直接指令控制。"}</p>
+            <p>{pageCopy.moduleAgentsCopy}</p>
             <span className="module-link">{pageCopy.moduleAgents}</span>
           </a>
         </div>
@@ -851,7 +914,7 @@ export function OpenClawPage() {
                   <p className="eyebrow">{pageCopy.runtimeGuard}</p>
                   <h3>{pageCopy.runtimeWatch}</h3>
                 </div>
-                <span className="muted-text">{isEnglish ? "Version" : "版本"} {statusSummary.runtimeVersion}</span>
+                <span className="muted-text">{pageCopy.versionLabel} {statusSummary.runtimeVersion}</span>
               </div>
               <div className="meta-strip meta-strip-compact">
                 <MiniMeta label={pageCopy.defaultAgent} value={statusSummary.defaultAgentId || pageCopy.unknown} />
@@ -869,7 +932,7 @@ export function OpenClawPage() {
                   <div key={finding.id} className={`finding-card finding-${finding.severity}`}>
                     <strong>{finding.title}</strong>
                     <p>{finding.detail}</p>
-                    {finding.remediation ? <p className="muted-text">{isEnglish ? `Suggested action: ${finding.remediation}` : `建议：${finding.remediation}`}</p> : null}
+                    {finding.remediation ? <p className="muted-text">{pageCopy.suggestedActionPrefix} {finding.remediation}</p> : null}
                   </div>
                 ))}
                 {statusSummary.findings.length === 0 ? <p className="muted-text">{pageCopy.noRuntimeAlerts}</p> : null}
@@ -883,7 +946,7 @@ export function OpenClawPage() {
                 <p className="eyebrow">SLA</p>
                 <h3>{pageCopy.slaTitle}</h3>
               </div>
-              <span className="muted-text">{slaItems.length} 个成员</span>
+              <span className="muted-text">{pageCopy.memberCount(slaItems.length)}</span>
             </div>
             <div className="openclaw-session-list">
               {slaItems.slice(0, 8).map((item) => (
@@ -891,15 +954,13 @@ export function OpenClawPage() {
                   <div>
                     <strong>{item.name}</strong>
                     <p>
-                      {item.currentTaskTitle || (isEnglish ? "No clearly assigned task" : "当前无明确任务")}
+                      {item.currentTaskTitle || pageCopy.noAssignedTask}
                       {" · "}
                       {item.minutesSinceActive !== undefined
                         ? isEnglish
-                          ? `${item.minutesSinceActive} min ago`
-                          : `${item.minutesSinceActive} 分钟前活跃`
-                        : isEnglish
-                          ? "No activity signal yet"
-                          : "暂无活跃记录"}
+                          ? pageCopy.minutesAgo(item.minutesSinceActive)
+                          : pageCopy.minutesAgo(item.minutesSinceActive)
+                        : pageCopy.noActivitySignal}
                     </p>
                   </div>
                   <span className={`pill ${slaPillClassName(item.slaState)}`}>{slaStateLabel(item.slaState, isEnglish)}</span>
@@ -1173,7 +1234,7 @@ export function OpenClawPage() {
                       <p className="muted-text">
                         {isEnglish
                           ? `${selectedTaskIds.length} tasks selected for batch status or progress update`
-                          : `已选择 ${selectedTaskIds.length} 个任务，适合批量切换状态或推进进度`}
+                          : pageCopy.batchSelectionHint(selectedTaskIds.length)}
                       </p>
                     </div>
                     <span className="pill">{selectedTaskIds.length} {pageCopy.batchSelected}</span>

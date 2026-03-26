@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PORT="${PORT:-8787}"
+HOST="${HOST:-127.0.0.1}"
 export NODE_ENV="${NODE_ENV:-production}"
 export PORT
+export HOST
 
 exec node apps/api/dist/index.js

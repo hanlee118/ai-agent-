@@ -106,7 +106,23 @@ export function SystemPage() {
         pendingCheck: "Pending check",
         connectedModel: "Connected model",
         scriptedModeDetail: "The workspace is still using scripted fallback mode. Demo-safe, but not ideal for final production.",
-        noAudit: "No audit entries yet."
+        noAudit: "No audit entries yet.",
+        loadFailed: "Failed to load system operations data",
+        saveSuccess: "Runtime configuration saved.",
+        saveFailed: "Failed to save runtime configuration",
+        validateFailed: "Runtime validation failed",
+        loading: "Loading system operations...",
+        readinessOk: "Ready",
+        noValue: "n/a",
+        observabilityDetail: (activeTasks: number, blockedTasks: number, projectCount: number) =>
+          `${activeTasks} active tasks, ${blockedTasks} blocked tasks, ${projectCount} OpenClaw projects in scope.`,
+        sessionStatus: {
+          active: "Active",
+          idle: "Idle",
+          stale: "Stale"
+        } as Record<LocalAgentSessionItem["status"], string>,
+        noCost: "No cost",
+        unknownModel: "Unknown model"
       }
     : {
         title: "运行配置、健康状态与发布前检查",
@@ -167,7 +183,23 @@ export function SystemPage() {
         pendingCheck: "待检查",
         connectedModel: "当前已连接真实模型",
         scriptedModeDetail: "当前仍在脚本模式，可继续演示但不建议作为最终生产配置。",
-        noAudit: "当前还没有审计记录。"
+        noAudit: "当前还没有审计记录。",
+        loadFailed: "系统配置加载失败",
+        saveSuccess: "运行配置已保存。",
+        saveFailed: "保存配置失败",
+        validateFailed: "运行配置校验失败",
+        loading: "正在加载系统运营页...",
+        readinessOk: "就绪",
+        noValue: "暂无",
+        observabilityDetail: (activeTasks: number, blockedTasks: number, projectCount: number) =>
+          `当前共有 ${activeTasks} 个活动任务，${blockedTasks} 个阻塞任务，OpenClaw 项目 ${projectCount} 个。`,
+        sessionStatus: {
+          active: "活跃",
+          idle: "空闲",
+          stale: "静默"
+        } as Record<LocalAgentSessionItem["status"], string>,
+        noCost: "暂无成本",
+        unknownModel: "未知模型"
       };
 
   const totalUsage = localAgentMonitor?.totals ?? EMPTY_USAGE;
@@ -230,7 +262,7 @@ export function SystemPage() {
     } catch (requestError) {
       setFlash({
         tone: "error",
-        message: requestError instanceof Error ? requestError.message : "系统配置加载失败"
+        message: requestError instanceof Error ? requestError.message : copy.loadFailed
       });
     } finally {
       if (!options?.silent) {
@@ -262,11 +294,11 @@ export function SystemPage() {
       setSettings(updated);
       setRuntime(await api.getRuntime());
       syncForm(updated);
-      setFlash({ tone: "success", message: "运行配置已保存。" });
+      setFlash({ tone: "success", message: copy.saveSuccess });
     } catch (requestError) {
       setFlash({
         tone: "error",
-        message: requestError instanceof Error ? requestError.message : "保存配置失败"
+        message: requestError instanceof Error ? requestError.message : copy.saveFailed
       });
     } finally {
       setSaving(false);
@@ -282,7 +314,7 @@ export function SystemPage() {
     } catch (requestError) {
       setFlash({
         tone: "error",
-        message: requestError instanceof Error ? requestError.message : "运行配置校验失败"
+        message: requestError instanceof Error ? requestError.message : copy.validateFailed
       });
       await refresh();
     } finally {
@@ -302,7 +334,7 @@ export function SystemPage() {
   }
 
   if (loading) {
-    return <div className="card">正在加载系统运营页...</div>;
+    return <div className="card">{copy.loading}</div>;
   }
 
   return (
@@ -405,7 +437,7 @@ export function SystemPage() {
             <div className="sub-card">
               <p className="group-title">{copy.configSummary}</p>
               <p>{copy.apiKeyConfigured}: {settings?.apiKeyConfigured ? settings.apiKeyPreview : (isEnglish ? "No" : "否")}</p>
-              <p>{copy.updatedAt}: {settings?.updatedAt ? formatTime(settings.updatedAt, locale) : (isEnglish ? "n/a" : "暂无")}</p>
+              <p>{copy.updatedAt}: {settings?.updatedAt ? formatTime(settings.updatedAt, locale) : copy.noValue}</p>
               <p>{copy.validatedAt}: {settings?.lastValidatedAt ? formatTime(settings.lastValidatedAt, locale) : copy.notValidated}</p>
               <p>{copy.validationResult}: {settings?.lastValidationError ?? settings?.lastValidationStatus ?? "unknown"}</p>
             </div>
@@ -487,7 +519,7 @@ export function SystemPage() {
 
             <div className="timeline-list">
               {(localAgentMonitor?.sessions ?? []).slice(0, 8).map((session) => (
-                <LocalSessionCard key={session.id} session={session} isEnglish={isEnglish} />
+                <LocalSessionCard key={session.id} session={session} isEnglish={isEnglish} copy={copy} />
               ))}
               {(localAgentMonitor?.sessions.length ?? 0) === 0 ? (
                 <p className="muted-text">
@@ -562,7 +594,7 @@ export function SystemPage() {
               {(readiness?.warnings.length ? readiness.warnings : [isEnglish ? "No readiness warnings were detected." : "当前没有发现新的平台就绪度风险。"]).map((item) => (
                 <ChecklistItem
                   key={item}
-                  title={readiness?.warnings.length ? copy.warnings : (isEnglish ? "Ready" : "就绪")}
+                  title={readiness?.warnings.length ? copy.warnings : copy.readinessOk}
                   detail={item}
                   ok={!readiness?.warnings.length}
                 />
@@ -624,7 +656,11 @@ export function SystemPage() {
               />
               <ChecklistItem
                 title={copy.taskObservability}
-                detail={`当前共有 ${health?.activeTasks ?? 0} 个活动任务，${health?.blockedTasks ?? 0} 个阻塞任务，OpenClaw 项目 ${readiness?.openclaw.liveWorkspaceProjectCount ?? 0} 个。`}
+                detail={copy.observabilityDetail(
+                  health?.activeTasks ?? 0,
+                  health?.blockedTasks ?? 0,
+                  readiness?.openclaw.liveWorkspaceProjectCount ?? 0
+                )}
                 ok={(health?.blockedTasks ?? 0) === 0 && (readiness?.openclaw.liveWorkspaceProjectCount ?? 0) > 0}
               />
             </div>
@@ -709,30 +745,28 @@ function ToolUsageCard({
 
 function LocalSessionCard({
   session,
-  isEnglish
+  isEnglish,
+  copy
 }: {
   session: LocalAgentSessionItem;
   isEnglish: boolean;
+  copy: {
+    sessionStatus: Record<LocalAgentSessionItem["status"], string>;
+    noCost: string;
+    unknownModel: string;
+  };
 }) {
   const toolLabel = session.tool === "claude"
     ? "Claude"
     : session.tool === "codex"
       ? "Codex"
       : "OpenClaw";
-  const statusLabel = isEnglish
-    ? session.status
-    : session.status === "active"
-      ? "活跃"
-      : session.status === "idle"
-        ? "空闲"
-        : "静默";
+  const statusLabel = copy.sessionStatus[session.status];
   const costLabel = session.usage.knownCostUsd > 0
     ? formatUsd(session.usage.knownCostUsd)
     : session.usage.estimatedCostUsd > 0
       ? `~${formatUsd(session.usage.estimatedCostUsd)}`
-      : isEnglish
-        ? "No cost"
-        : "暂无成本";
+      : copy.noCost;
 
   return (
     <article className="timeline-item">
@@ -744,7 +778,7 @@ function LocalSessionCard({
         </div>
         <p>{session.projectLabel || session.path}</p>
         <p>
-          {session.model || (isEnglish ? "Unknown model" : "未知模型")} · {formatNumber(session.usage.totalTokens)} token · {costLabel}
+          {session.model || copy.unknownModel} · {formatNumber(session.usage.totalTokens)} {isEnglish ? "tokens" : "token"} · {costLabel}
         </p>
         {session.lastMessage ? <p>{session.lastMessage}</p> : null}
       </div>
