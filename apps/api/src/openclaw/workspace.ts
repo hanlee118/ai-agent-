@@ -738,6 +738,10 @@ export async function sendOpenClawAgentMessage(
     throw new Error("message is required");
   }
 
+  // 安全验证：命令注入防护
+  validateCommandInput(message);
+  validateCommandInput(agentId);
+
   const agent = await findOpenClawAgent(agentId);
   if (!agent) {
     throw new Error(`OpenClaw agent ${agentId} not found`);
@@ -1972,7 +1976,19 @@ function decodeProjectId(value: string) {
 }
 
 function resolveProjectDir(projectId: string) {
-  return path.join(OPENCLAW_WORKSPACE_ROOT, ...decodeProjectId(projectId).split("/"));
+  const decodedPath = decodeProjectId(projectId);
+
+  // 安全验证：防止路径遍历攻击
+  validateProjectPath(decodedPath);
+
+  const resolvedPath = path.resolve(OPENCLAW_WORKSPACE_ROOT, ...decodedPath.split("/"));
+
+  // 确保解析后的路径仍在工作区目录内
+  if (!resolvedPath.startsWith(path.resolve(OPENCLAW_WORKSPACE_ROOT))) {
+    throw new Error("路径遍历攻击检测：尝试访问工作区外部路径");
+  }
+
+  return resolvedPath;
 }
 
 function decodeTaskId(taskId: string) {
@@ -2495,6 +2511,16 @@ async function readLastChunk(filePath: string, maxBytes: number) {
 }
 
 function parseOpenClawJson(raw: string) {
+  // 安全验证输入
+  if (!raw || raw.length > 10 * 1024 * 1024) { // 限制最大10MB
+    throw new Error("OpenClaw command returned invalid or too large payload");
+  }
+
+  // 验证JSON结构的合法性
+  if (!isValidJsonStructure(raw)) {
+    throw new Error("OpenClaw command returned malformed JSON structure");
+  }
+
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
 
@@ -2502,21 +2528,39 @@ function parseOpenClawJson(raw: string) {
     throw new Error("OpenClaw command returned no JSON payload");
   }
 
-  return JSON.parse(raw.slice(start, end + 1)) as {
-    status?: string;
-    summary?: string;
-    result?: {
-      payloads?: Array<{ text?: string }>;
-      meta?: {
-        durationMs?: number;
-        agentMeta?: {
-          sessionId?: string;
-          provider?: string;
-          model?: string;
+  const jsonStr = raw.slice(start, end + 1);
+
+  // 验证提取的JSON长度合理性
+  if (jsonStr.length > 5 * 1024 * 1024) { // 限制JSON最大5MB
+    throw new Error("Extracted JSON payload is too large");
+  }
+
+  try {
+    const parsed = JSON.parse(jsonStr);
+
+    // 验证解析后的对象结构
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new Error("Invalid JSON object structure");
+    }
+
+    return parsed as {
+      status?: string;
+      summary?: string;
+      result?: {
+        payloads?: Array<{ text?: string }>;
+        meta?: {
+          durationMs?: number;
+          agentMeta?: {
+            sessionId?: string;
+            provider?: string;
+            model?: string;
+          };
         };
       };
     };
-  };
+  } catch (error) {
+    throw new Error(`Failed to parse OpenClaw JSON: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
 function extractAgentReplyFromRaw(raw: string) {
@@ -2580,4 +2624,126 @@ function parseOpenClawStatusJson(raw: string) {
     };
     secretDiagnostics?: unknown[];
   };
+}
+
+/**
+ * 验证命令输入参数，防止命令注入攻击
+ */
+function validateCommandInput(input: string) {
+  if (!input) {
+    throw new Error("输入参数不能为空");
+  }
+
+  // 长度限制
+  if (input.length > 50000) {
+    throw new Error("输入参数长度超过限制 (50000 字符)");
+  }
+
+  // 检查危险字符
+  const dangerousChars = [';', '&', '|', '$', '`', '(', ')', '{', '}', '[', ']', '<', '>', '\n', '\r'];
+  for (const char of dangerousChars) {
+    if (input.includes(char)) {
+      throw new Error(`输入参数不能包含危险字符: ${char}`);
+    }
+  }
+
+  // 检查危险模式
+  const dangerousPatterns = [
+    /\$\(/,           // 命令替换 $()
+    /`.*`/,           // 反引号命令执行
+    /\|\s*\w+/,       // 管道命令
+    /;\s*\w+/,        // 分号分隔的命令
+    /&&\s*\w+/,       // AND 连接的命令
+    /\|\|\s*\w+/,     // OR 连接的命令
+    />\s*\/|>\s*\w/,  // 重定向
+    /<\s*\/|<\s*\w/   // 输入重定向
+  ];
+
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(input)) {
+      throw new Error("输入参数包含可疑的命令注入模式");
+    }
+  }
+}
+
+/**
+ * 验证项目路径，防止路径遍历攻击
+ */
+function validateProjectPath(projectPath: string) {
+  if (!projectPath) {
+    throw new Error("项目路径不能为空");
+  }
+
+  // 长度限制
+  if (projectPath.length > 500) {
+    throw new Error("项目路径长度超过限制 (500 字符)");
+  }
+
+  // 检查路径遍历模式
+  const dangerousPatterns = [
+    /\.\./,           // 相对路径遍历
+    /\/\./,           // 当前目录引用
+    /^\//,            // 绝对路径
+    /^~/,             // 用户目录
+    /\0/,             // 空字节
+    /[<>"|*?]/,       // 特殊字符
+    /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i  // Windows 保留名称
+  ];
+
+  for (const pattern of dangerousPatterns) {
+    if (pattern.test(projectPath)) {
+      throw new Error("项目路径包含不安全的模式");
+    }
+  }
+
+  // 检查路径组件
+  const pathComponents = projectPath.split(/[/\\]/);
+  for (const component of pathComponents) {
+    if (component === '' || component === '.' || component === '..') {
+      throw new Error("项目路径包含不安全的路径组件");
+    }
+  }
+}
+
+/**
+ * 验证JSON结构的基本合法性
+ */
+function isValidJsonStructure(raw: string): boolean {
+  // 基本长度检查
+  if (raw.length < 2) {
+    return false;
+  }
+
+  // 检查是否包含基本的JSON结构字符
+  const hasOpenBrace = raw.includes("{");
+  const hasCloseBrace = raw.includes("}");
+
+  if (!hasOpenBrace || !hasCloseBrace) {
+    return false;
+  }
+
+  // 验证大括号数量平衡（简单检查）
+  let braceCount = 0;
+  for (const char of raw) {
+    if (char === '{') braceCount++;
+    if (char === '}') braceCount--;
+    if (braceCount < 0) return false; // 出现多余的结束括号
+  }
+
+  // 最终括号数量应该平衡
+  if (braceCount !== 0) {
+    return false;
+  }
+
+  // 检查是否包含可疑的脚本标签或函数调用
+  const suspiciousPatterns = [
+    /<script/i,
+    /javascript:/i,
+    /eval\s*\(/i,
+    /function\s*\(/i,
+    /__proto__/i,
+    /constructor/i
+  ];
+
+  return !suspiciousPatterns.some(pattern => pattern.test(raw));
 }

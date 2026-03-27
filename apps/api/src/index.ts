@@ -1,5 +1,6 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -96,9 +97,45 @@ const port = Number(process.env.PORT ?? 8787);
 const host = String(process.env.HOST ?? "127.0.0.1").trim() || "127.0.0.1";
 const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
 
+// CORS 配置 - 生产环境禁止通配符
+const corsOrigin = process.env.NODE_ENV === "production"
+  ? (process.env.ALLOWED_ORIGINS?.split(",").map(origin => origin.trim()).filter(Boolean) || [])
+  : true; // 开发环境允许任意源
+
+if (process.env.NODE_ENV === "production" && !process.env.ALLOWED_ORIGINS) {
+  throw new Error("生产环境必须设置 ALLOWED_ORIGINS 环境变量，不允许使用通配符");
+}
+
 app.use(cors({
-  origin: true,
+  origin: corsOrigin,
   credentials: true
+}));
+
+// 安全 Headers
+app.use(helmet({
+  strictTransportSecurity: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true
+  },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"]
+    }
+  },
+  xFrameOptions: { action: "deny" },
+  xContentTypeOptions: true,
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  xDownloadOptions: false,
+  xPermittedCrossDomainPolicies: false
 }));
 app.use(express.json({ limit: "1mb" }));
 app.use((req, res, next) => {

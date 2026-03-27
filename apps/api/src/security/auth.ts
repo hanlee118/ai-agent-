@@ -29,6 +29,9 @@ export async function setupAdmin(password: string) {
     throw new Error("管理员密码已配置");
   }
 
+  // 密码强度验证
+  validatePasswordStrength(password);
+
   const salt = createSalt();
   const passwordHash = hashPassword(password, salt);
 
@@ -64,7 +67,7 @@ export async function logoutAdmin(sessionToken?: string | null) {
 
   await prisma.authSession.deleteMany({
     where: {
-      tokenHash: hashSessionToken(sessionToken)
+      tokenHash: await hashSessionToken(sessionToken)
     }
   });
 }
@@ -74,7 +77,7 @@ export async function validateSession(sessionToken?: string | null) {
     return false;
   }
 
-  const tokenHash = hashSessionToken(sessionToken);
+  const tokenHash = await hashSessionToken(sessionToken);
   const session = await prisma.authSession.findUnique({
     where: { tokenHash }
   });
@@ -115,23 +118,39 @@ export function parseSessionToken(cookieHeader?: string | null) {
 }
 
 export function createSessionCookie(token: string) {
-  return [
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieParts = [
     `${SESSION_COOKIE}=${encodeURIComponent(token)}`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    "SameSite=Strict",
     `Max-Age=${Math.floor(SESSION_DURATION_MS / 1000)}`
-  ].join("; ");
+  ];
+
+  // 生产环境必须使用 Secure 标志
+  if (isProduction) {
+    cookieParts.push("Secure");
+  }
+
+  return cookieParts.join("; ");
 }
 
 export function clearSessionCookie() {
-  return [
+  const isProduction = process.env.NODE_ENV === "production";
+  const cookieParts = [
     `${SESSION_COOKIE}=`,
     "Path=/",
     "HttpOnly",
-    "SameSite=Lax",
+    "SameSite=Strict",
     "Max-Age=0"
-  ].join("; ");
+  ];
+
+  // 生产环境必须使用 Secure 标志
+  if (isProduction) {
+    cookieParts.push("Secure");
+  }
+
+  return cookieParts.join("; ");
 }
 
 async function createSession() {
@@ -140,7 +159,7 @@ async function createSession() {
 
   await prisma.authSession.create({
     data: {
-      tokenHash: hashSessionToken(token),
+      tokenHash: await hashSessionToken(token),
       expiresAt
     }
   });
@@ -149,4 +168,61 @@ async function createSession() {
     token,
     expiresAt
   };
+}
+
+/**
+ * 验证密码强度
+ */
+function validatePasswordStrength(password: string) {
+  const errors: string[] = [];
+
+  // 最小长度检查
+  if (password.length < 8) {
+    errors.push("密码长度至少需要8个字符");
+  }
+
+  // 最大长度检查（防止DOS）
+  if (password.length > 128) {
+    errors.push("密码长度不能超过128个字符");
+  }
+
+  // 大写字母检查
+  if (!/[A-Z]/.test(password)) {
+    errors.push("密码必须包含至少1个大写字母");
+  }
+
+  // 小写字母检查
+  if (!/[a-z]/.test(password)) {
+    errors.push("密码必须包含至少1个小写字母");
+  }
+
+  // 数字检查
+  if (!/\d/.test(password)) {
+    errors.push("密码必须包含至少1个数字");
+  }
+
+  // 特殊字符检查
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]/.test(password)) {
+    errors.push("密码必须包含至少1个特殊字符");
+  }
+
+  // 常见密码检查
+  const commonPasswords = [
+    "password", "123456", "123456789", "qwerty", "abc123",
+    "password123", "admin", "administrator", "root", "user",
+    "12345678", "1234567890", "Pass@word1", "Welcome1"
+  ];
+
+  if (commonPasswords.includes(password.toLowerCase())) {
+    errors.push("不能使用常见的弱密码");
+  }
+
+  // 重复字符检查
+  if (/(.)\1{2,}/.test(password)) {
+    errors.push("密码不能包含连续3个相同字符");
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`密码不符合安全要求：${errors.join(', ')}`);
+  }
 }

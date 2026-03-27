@@ -8,6 +8,7 @@ import type {
 } from "@occ/shared";
 import { prisma } from "../db.js";
 import { decryptSecret, encryptSecret } from "../security/secret-store.js";
+import { URL } from "node:url";
 
 const SYSTEM_CONFIG_ID = "default";
 
@@ -250,11 +251,78 @@ async function probeModelEndpoint(config: SystemConfigRecord) {
 }
 
 function buildModelsUrl(apiBaseUrl: string) {
-  return `${sanitizeUrl(apiBaseUrl).replace(/\/$/, "")}/models`;
+  const sanitizedBaseUrl = sanitizeUrl(apiBaseUrl);
+  if (!sanitizedBaseUrl) {
+    throw new Error("API Base URL 不能为空");
+  }
+  return `${sanitizedBaseUrl}/models`;
 }
 
 function sanitizeUrl(value: string) {
-  return value.trim().replace(/\/$/, "");
+  const trimmed = value.trim().replace(/\/$/, "");
+  if (!trimmed) {
+    return "";
+  }
+
+  // 验证URL安全性
+  validateUrlSafety(trimmed);
+  return trimmed;
+}
+
+function validateUrlSafety(urlString: string) {
+  if (!urlString) {
+    return;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(urlString);
+  } catch (error) {
+    throw new Error("无效的URL格式");
+  }
+
+  // 仅允许 http 和 https 协议
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("仅允许 HTTP 和 HTTPS 协议");
+  }
+
+  // 检查是否为内网 IP
+  const hostname = url.hostname;
+  if (isPrivateIP(hostname)) {
+    throw new Error("不允许访问内网地址");
+  }
+}
+
+function isPrivateIP(hostname: string): boolean {
+  // IPv4 私有网段
+  const ipv4Patterns = [
+    /^127\./,                    // 127.0.0.0/8 (localhost)
+    /^10\./,                     // 10.0.0.0/8
+    /^172\.(1[6-9]|2[0-9]|3[0-1])\./, // 172.16.0.0/12
+    /^192\.168\./,               // 192.168.0.0/16
+    /^169\.254\./,               // 169.254.0.0/16 (link-local)
+    /^0\./                       // 0.0.0.0/8
+  ];
+
+  // 检查 IPv4
+  for (const pattern of ipv4Patterns) {
+    if (pattern.test(hostname)) {
+      return true;
+    }
+  }
+
+  // 检查本地主机名
+  const forbiddenHosts = ["localhost", "0.0.0.0"];
+  if (forbiddenHosts.includes(hostname.toLowerCase())) {
+    return true;
+  }
+
+  // 检查 IPv6 本地地址
+  if (hostname === "::1" || hostname.startsWith("::ffff:127.") || hostname.startsWith("fe80:")) {
+    return true;
+  }
+
+  return false;
 }
 
 function maskApiKey(value: string) {

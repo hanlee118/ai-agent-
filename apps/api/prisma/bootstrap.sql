@@ -244,3 +244,8 @@ CREATE TABLE IF NOT EXISTS "AgentUsageLog" (
 );
 
 CREATE INDEX IF NOT EXISTS "AgentUsageLog_agentId_createdAt_idx" ON "AgentUsageLog"("agentId", "createdAt");
+
+-- 新增性能优化索引
+CREATE INDEX IF NOT EXISTS "Project_status_idx" ON "Project"("status");
+CREATE INDEX IF NOT EXISTS "Project_currentStage_idx" ON "Project"("currentStage");
+CREATE INDEX IF NOT EXISTS "Task_assignee_idx" ON "Task"("assignee");

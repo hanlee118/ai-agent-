@@ -16,7 +16,8 @@
     "@occ/shared": "workspace:*",
     "@prisma/client": "^6.6.0",
     "cors": "^2.8.5",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "helmet": "^8.0.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -24,6 +25,7 @@
     "@types/node": "^24.0.1",
     "prisma": "^6.6.0",
     "tsx": "^4.20.3",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "@types/helmet": "^4.0.0"
   }
 }

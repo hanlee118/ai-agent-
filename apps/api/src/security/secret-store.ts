@@ -98,8 +98,11 @@ export function generateSessionToken() {
   return randomBytes(32).toString("hex");
 }
 
-export function hashSessionToken(token: string) {
-  return createHash("sha256").update(token).digest("hex");
+export async function hashSessionToken(token: string) {
+  // 使用应用密钥作为盐值的一部分，确保一致性
+  const appSecret = await getAppSecret();
+  const salt = `session:${appSecret}`;
+  return scryptSync(token, salt, 32).toString("hex");
 }
 
 async function deriveEncryptionKey() {
