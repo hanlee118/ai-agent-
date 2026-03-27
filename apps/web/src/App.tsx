@@ -59,7 +59,7 @@ import {
 import { cn } from './lib/utils';
 import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from './types';
 import { useRealData } from './useRealData';
-import { projectsApi } from './lib/api';
+import { modelsApi, projectsApi } from './lib/api';
 
 // --- Mock Data ---
 
@@ -113,42 +113,11 @@ const DEFAULT_MODELS: Model[] = [
   },
 ];
 
-const DEFAULT_AGENTS: Agent[] = [
-  { id: '1', name: '需求分析师', role: '高级需求分析师', status: 'Thinking', load: 85, currentModelId: 'm1', tasks: 3, memoryCount: 124, tokensUsed: 45000, tokenLimit: 100000, sessionCount: 12 },
-  { id: '2', name: 'Jeremy', role: '设计总监', status: 'Idle', load: 0, currentModelId: 'm2', tasks: 0, memoryCount: 89, tokensUsed: 12000, tokenLimit: 50000, sessionCount: 5 },
-  { id: '3', name: '产品经理', role: '产品经理', status: 'Executing', load: 45, currentModelId: 'm1', tasks: 2, memoryCount: 210, tokensUsed: 67000, tokenLimit: 150000, sessionCount: 18 },
-  { id: '4', name: '架构师', role: '系统架构师', status: 'Idle', load: 10, currentModelId: 'm1', tasks: 1, memoryCount: 156, tokensUsed: 34000, tokenLimit: 100000, sessionCount: 8 },
-  { id: '5', name: '研发经理', role: '研发经理', status: 'Executing', load: 60, currentModelId: 'm1', tasks: 4, memoryCount: 178, tokensUsed: 89000, tokenLimit: 200000, sessionCount: 24 },
-  { id: '6', name: '工程师', role: '软件工程师', status: 'Executing', load: 92, currentModelId: 'm2', tasks: 6, memoryCount: 45, tokensUsed: 120000, tokenLimit: 250000, sessionCount: 42 },
-  { id: '7', name: '测试工程师', status: 'Idle', role: '测试工程师', load: 0, currentModelId: 'm2', tasks: 0, memoryCount: 32, tokensUsed: 5000, tokenLimit: 50000, sessionCount: 3 },
-];
-
-const DEFAULT_SESSIONS: Session[] = [
-  { id: 's1', agentId: '1', modelId: 'm1', projectId: 'p1', startTime: '2026-03-26T07:10:00Z', duration: '12m', tokens: 1200, cost: 0.012, status: 'completed' },
-  { id: 's2', agentId: '5', modelId: 'm1', projectId: 'p1', startTime: '2026-03-26T07:15:00Z', duration: '45m', tokens: 8500, cost: 0.085, status: 'active' },
-  { id: 's3', agentId: '6', modelId: 'm2', projectId: 'p3', startTime: '2026-03-26T07:20:00Z', duration: '5m', tokens: 450, cost: 0.004, status: 'completed' },
-  { id: 's4', agentId: '3', modelId: 'm1', projectId: 'p1', startTime: '2026-03-26T07:25:00Z', duration: '18m', tokens: 3200, cost: 0.032, status: 'active' },
-  { id: 's5', agentId: '1', modelId: 'm3', projectId: 'p2', startTime: '2026-03-26T07:28:00Z', duration: '2m', tokens: 150, cost: 0.001, status: 'completed' },
-];
-
-const DEFAULT_PROJECTS: Project[] = [
-  { id: 'p1', name: 'SaaS 管理工作台演示', description: 'Agent 团队从需求、设计、架构、研发到测试闭环的真实项目', status: 'Development', phase: '开发中', progress: 45, owner: '研发经理', agents: ['1', '2', '5', '7'] },
-  { id: 'p2', name: 'OpenClaw 核心', description: 'OpenClaw 核心框架升级与优化', status: 'Planning', phase: '规划中', progress: 15, owner: '架构师', agents: ['1', '4'] },
-  { id: 'p3', name: 'Aegis OS UI', description: 'Aegis Agent OS 界面重构与体验优化', status: 'Development', phase: '设计中', progress: 60, owner: 'Jeremy', agents: ['2', '6'] },
-];
-
-const DEFAULT_TASKS: Task[] = [
-  { id: 't1', title: '实现 RBAC 中间件', agent: '研发经理', status: 'In Progress', progress: 65 },
-  { id: 't2', title: '设计系统审计', agent: 'Jeremy', status: 'Blocked', progress: 20 },
-  { id: 't3', title: 'API 文档更新', agent: '需求分析师', status: 'Completed', progress: 100 },
-  { id: 't4', title: '单元测试覆盖', agent: '测试工程师', status: 'Pending', progress: 0 },
-];
-
 let models: Model[] = DEFAULT_MODELS;
-let agents: Agent[] = DEFAULT_AGENTS;
-let sessions: Session[] = DEFAULT_SESSIONS;
-let projects: Project[] = DEFAULT_PROJECTS;
-let tasks: Task[] = DEFAULT_TASKS;
+let agents: Agent[] = [];
+let sessions: Session[] = [];
+let projects: Project[] = [];
+let tasks: Task[] = [];
 
 const syncRuntimeCollections = (payload: {
   models: Model[];
@@ -491,7 +460,19 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
 };
 
 const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
-  const agent = agents.find(a => a.id === agentId) || agents[0];
+  const agent = agents.find(a => a.id === agentId) || agents[0] || {
+    id: '',
+    name: '未选择 Agent',
+    role: '待配置角色',
+    status: 'Idle' as AgentStatus,
+    load: 0,
+    currentModelId: '',
+    tasks: 0,
+    memoryCount: 0,
+    tokensUsed: 0,
+    tokenLimit: 100000,
+    sessionCount: 0,
+  };
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={`配置 Agent: ${agent.name}`}>
       <div className="space-y-6">
@@ -540,52 +521,109 @@ const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
 };
 
 const TeamTopologyModal = ({ isOpen, onClose }: any) => {
+  const topLevelAgents = agents.filter((agent) => {
+    const role = (agent.role || '').toLowerCase();
+    return role.includes('director') || role.includes('lead') || /总监|负责人|架构/.test(agent.role || '');
+  });
+  const midLevelAgents = agents.filter((agent) => {
+    const role = (agent.role || '').toLowerCase();
+    return role.includes('manager') || role.includes('analyst') || /经理|分析|产品/.test(agent.role || '');
+  });
+  const execAgents = agents.filter((agent) => {
+    const role = (agent.role || '').toLowerCase();
+    return role.includes('engineer') || role.includes('qa') || /工程|研发|测试/.test(agent.role || '');
+  });
+  const activeConnections = agents.length > 0 ? agents.length * 2 : 0;
+  const syncLatency = agents.length > 0 ? '12-20ms' : '-';
+
+  const topologyAgents = agents.slice(0, 5);
+  const positionedNodes = topologyAgents.map((agent, index) => {
+    const total = Math.max(topologyAgents.length - 1, 1);
+    const x = topologyAgents.length === 1 ? 200 : 60 + Math.round((index * 280) / total);
+    const isTop = topLevelAgents.some((item) => item.id === agent.id);
+    const isMid = midLevelAgents.some((item) => item.id === agent.id);
+    const isExec = execAgents.some((item) => item.id === agent.id);
+    const level: 'top' | 'mid' | 'exec' = isTop ? 'top' : isMid ? 'mid' : isExec ? 'exec' : 'exec';
+    const y = level === 'top' ? 60 : level === 'mid' ? 150 : 240;
+    const fill = level === 'top' ? '#10b981' : level === 'mid' ? '#8b5cf6' : '#64748b';
+    const label = agent.name.length > 8 ? `${agent.name.slice(0, 8)}...` : agent.name;
+    return { ...agent, x, y, fill, level, label };
+  });
+  const topNodes = positionedNodes.filter((node) => node.level === 'top');
+  const fallbackTopNode = positionedNodes[0];
+  const nodeLinks = positionedNodes
+    .filter((node) => node.level !== 'top')
+    .map((node, index) => {
+      const from = topNodes[index % Math.max(topNodes.length, 1)] || fallbackTopNode;
+      return from ? { from, to: node } : null;
+    })
+    .filter(Boolean) as Array<{
+      from: { x: number; y: number };
+      to: { x: number; y: number };
+    }>;
+
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="团队拓扑图谱">
       <div className="space-y-6">
         <div className="h-[400px] w-full bg-surface-muted rounded-2xl border border-border-subtle relative overflow-hidden flex items-center justify-center bg-[radial-gradient(circle_at_50%_50%,rgba(16,185,129,0.05),transparent_70%)]">
           <div className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'radial-gradient(#10b981 1px, transparent 1px)', backgroundSize: '20px 20px' }} />
           <svg className="w-full h-full relative z-10" viewBox="0 0 400 300">
-            {/* Connections with glow */}
             <defs>
               <filter id="glow">
-                <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+                <feGaussianBlur stdDeviation="2" result="coloredBlur" />
                 <feMerge>
-                  <feMergeNode in="coloredBlur"/>
-                  <feMergeNode in="SourceGraphic"/>
+                  <feMergeNode in="coloredBlur" />
+                  <feMergeNode in="SourceGraphic" />
                 </feMerge>
               </filter>
             </defs>
-            
+
             <g stroke="rgba(16, 185, 129, 0.3)" strokeWidth="1.5" filter="url(#glow)">
-              <line x1="200" y1="50" x2="100" y2="150" />
-              <line x1="200" y1="50" x2="300" y2="150" />
-              <line x1="100" y1="150" x2="100" y2="250" />
-              <line x1="300" y1="150" x2="300" y2="250" />
-              <line x1="100" y1="150" x2="300" y2="150" strokeDasharray="4 4" />
+              {nodeLinks.map((link, index) => (
+                <line
+                  key={`line-${index}`}
+                  x1={link.from.x}
+                  y1={link.from.y}
+                  x2={link.to.x}
+                  y2={link.to.y}
+                />
+              ))}
             </g>
-            
-            {/* Nodes */}
-            <motion.circle 
-              cx="200" cy="50" r="22" fill="#10b981" 
-              animate={{ r: [22, 24, 22] }}
-              transition={{ duration: 2, repeat: Infinity }}
-            />
-            <text x="200" y="85" textAnchor="middle" fill="white" fontSize="10" fontWeight="bold" className="uppercase tracking-widest">首席架构师</text>
-            
-            <circle cx="100" cy="150" r="18" fill="#8b5cf6" />
-            <text x="100" y="185" textAnchor="middle" fill="white" fontSize="9" fontWeight="medium">数据分析师</text>
-            
-            <circle cx="300" cy="150" r="18" fill="#8b5cf6" />
-            <text x="300" y="185" textAnchor="middle" fill="white" fontSize="9" fontWeight="medium">代码审计员</text>
-            
-            <circle cx="100" cy="250" r="12" fill="#64748b" />
-            <text x="100" y="275" textAnchor="middle" fill="slate-500" fontSize="8">执行单元 A</text>
-            
-            <circle cx="300" cy="250" r="12" fill="#64748b" />
-            <text x="300" y="275" textAnchor="middle" fill="slate-500" fontSize="8">执行单元 B</text>
+
+            {positionedNodes.map((node) => (
+              <g key={node.id}>
+                {node.level === 'top' ? (
+                  <motion.circle
+                    cx={node.x}
+                    cy={node.y}
+                    r="22"
+                    fill={node.fill}
+                    animate={{ r: [22, 24, 22] }}
+                    transition={{ duration: 2, repeat: Infinity }}
+                  />
+                ) : (
+                  <circle cx={node.x} cy={node.y} r={node.level === 'mid' ? 18 : 12} fill={node.fill} />
+                )}
+                <text
+                  x={node.x}
+                  y={node.y + (node.level === 'exec' ? 24 : 35)}
+                  textAnchor="middle"
+                  fill={node.level === 'exec' ? '#94a3b8' : 'white'}
+                  fontSize={node.level === 'exec' ? '8' : '9'}
+                  fontWeight={node.level === 'top' ? 'bold' : 'medium'}
+                >
+                  {node.label}
+                </text>
+              </g>
+            ))}
+
+            {positionedNodes.length === 0 && (
+              <text x="200" y="160" textAnchor="middle" fill="#94a3b8" fontSize="12">
+                暂无 Agent 数据
+              </text>
+            )}
           </svg>
-          
+
           <div className="absolute bottom-4 left-4 p-3 bg-surface/80 backdrop-blur-md border border-border-subtle rounded-xl space-y-2">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-primary" />
@@ -601,19 +639,21 @@ const TeamTopologyModal = ({ isOpen, onClose }: any) => {
             </div>
           </div>
         </div>
-        
+
         <div className="grid grid-cols-2 gap-4">
           <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
             <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">活跃连接</h4>
-            <p className="text-xl font-bold text-white">12 <span className="text-xs font-normal text-slate-500">个通道</span></p>
+            <p className="text-xl font-bold text-white">{activeConnections} <span className="text-xs font-normal text-slate-500">个通道</span></p>
           </div>
           <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
             <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">同步延迟</h4>
-            <p className="text-xl font-bold text-primary">14ms</p>
+            <p className="text-xl font-bold text-primary">{syncLatency}</p>
           </div>
         </div>
         <p className="text-xs text-slate-400 leading-relaxed">
-          当前拓扑显示了 Agent 之间的协作关系。首席架构师负责任务分解，并将其分配给分析师和审计员进行并行处理。
+          {agents.length > 0
+            ? `当前拓扑显示了 ${agents.length} 个 Agent 之间的协作关系。`
+            : '暂无 Agent 数据'}
         </p>
       </div>
     </Modal>
@@ -623,6 +663,22 @@ const TeamTopologyModal = ({ isOpen, onClose }: any) => {
 const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [isCustom, setIsCustom] = useState(false);
+  const uniqueRoles = useMemo(() => {
+    const seen = new Set<string>();
+    const roles: Array<{ id: string; name: string; desc: string }> = [];
+    agents.forEach((agent) => {
+      const role = agent.role || agent.name;
+      if (!seen.has(role)) {
+        seen.add(role);
+        roles.push({
+          id: agent.id,
+          name: agent.name,
+          desc: role,
+        });
+      }
+    });
+    return roles.slice(0, 6);
+  }, [agents]);
   
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="部署新 Agent">
@@ -640,12 +696,7 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
           
           {!isCustom ? (
             <div className="grid grid-cols-2 gap-3">
-              {[
-                { id: 'researcher', name: '研究员', desc: '擅长信息检索与总结' },
-                { id: 'coder', name: '程序员', desc: '精通多种编程语言与架构' },
-                { id: 'writer', name: '文案策划', desc: '创意写作与内容营销' },
-                { id: 'analyst', name: '分析师', desc: '数据洞察与逻辑推理' },
-              ].map((t) => (
+              {uniqueRoles.length > 0 ? uniqueRoles.map((t) => (
                 <button 
                   key={t.id}
                   onClick={() => setSelectedTemplate(t.id)}
@@ -657,7 +708,9 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
                   <p className={cn("font-bold text-sm", selectedTemplate === t.id ? "text-primary" : "text-white")}>{t.name}</p>
                   <p className="text-[10px] text-slate-500 mt-1">{t.desc}</p>
                 </button>
-              ))}
+              )) : (
+                <p className="col-span-2 text-center text-slate-500 py-8">暂无可用 Agent 角色</p>
+              )}
             </div>
           ) : (
             <div className="space-y-4 p-4 bg-white/5 border border-dashed border-border-subtle rounded-2xl">
@@ -794,7 +847,7 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
         if (trimmed.includes(agent.name) || trimmed.includes(agent.role)) {
           return true;
         }
-        if (/(设计|ui|体验|视觉)/.test(lower) && /(设计|jeremy)/.test(profile)) {
+        if (/(设计|ui|体验|视觉)/.test(lower) && /(设计|设计)/.test(profile)) {
           return true;
         }
         if (/(研发|开发|编码|工程|技术)/.test(lower) && /(研发|工程|架构)/.test(profile)) {
@@ -952,7 +1005,7 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
                     rows={5}
                     value={rawInput}
                     onChange={(event) => setRawInput(event.target.value)}
-                    placeholder="例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由需求分析师、产品和研发推进。"
+                    placeholder="例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。"
                     className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
                   />
                 </div>
@@ -1164,66 +1217,89 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
 const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
   const [selectedDecision, setSelectedDecision] = useState<any>(null);
   const [viewMode, setViewMode] = useState<'list' | 'details' | 'plan'>('list');
+  const formatDecisionTime = (date: string | Date | null | undefined) => {
+    if (!date) {
+      return new Date().toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
 
-  const decisions = [
-    { 
-      id: 1, 
-      title: '模型切换建议', 
-      desc: 'Agent 建议将当前任务切换至 Gemini 3.1 Pro 以获得更高精度。', 
-      impact: '成本增加 15%', 
-      type: 'warning',
-      judgment: '当前任务涉及复杂的逻辑推理和长上下文处理，Gemini 3.1 Flash 的准确率下降至 82%，低于系统阈值 (85%)。建议升级模型以确保输出质量。',
-      events: [
-        { time: '09:12:05', content: '检测到逻辑推理错误率上升' },
-        { time: '09:12:10', content: '上下文窗口利用率达到 95%' },
-        { time: '09:12:15', content: 'Agent 发起模型升级评估请求' }
-      ],
-      plan: [
-        '1. 评估当前任务复杂度',
-        '2. 切换 API 端点至 Pro 版本',
-        '3. 重新运行失败的测试用例',
-        '4. 监控响应延迟与成本变化'
-      ]
-    },
-    { 
-      id: 2, 
-      title: 'API 额度预警', 
-      desc: '项目 "Aegis-X" 的 OpenAI 额度已消耗 90%。', 
-      impact: '可能导致服务中断', 
-      type: 'danger',
-      judgment: '根据过去 24 小时的消耗速率，剩余额度预计将在 3 小时内耗尽。系统已自动识别出非核心任务，建议立即执行限流策略。',
-      events: [
-        { time: '08:45:00', content: '额度消耗达到 80% 阈值' },
-        { time: '09:00:00', content: '额度消耗达到 90% 预警线' },
-        { time: '09:05:00', content: '系统自动标记 12 个非核心任务为可降级' }
-      ],
-      plan: [
-        '1. 立即限制非核心 Agent 的并发请求',
-        '2. 启用备用模型 (Mistral 7B) 处理低优先级任务',
-        '3. 申请增加 API 额度',
-        '4. 优化 Prompt 以减少 Token 消耗'
-      ]
-    },
-    { 
-      id: 3, 
-      title: '新任务授权', 
-      desc: 'Agent 识别到一个潜在的优化路径，需要访问生产数据库只读权限。', 
-      impact: '安全风险: 低', 
-      type: 'info',
-      judgment: 'Agent 在执行性能调优任务时，发现慢查询日志指向了生产环境的特定索引。为了验证优化方案，需要对该索引进行 EXPLAIN 分析。',
-      events: [
-        { time: '09:20:00', content: '识别到慢查询瓶颈' },
-        { time: '09:22:00', content: '生成优化建议草案' },
-        { time: '09:25:00', content: 'Agent 申请临时只读权限以验证方案' }
-      ],
-      plan: [
-        '1. 创建受限的只读数据库凭据',
-        '2. 配置 Agent 环境变量',
-        '3. 审计 Agent 的 SQL 查询日志',
-        '4. 任务完成后撤销权限'
-      ]
-    },
-  ];
+    const normalized = new Date(date);
+    if (Number.isNaN(normalized.getTime())) {
+      return new Date().toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
+
+    return normalized.toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  };
+  const getTaskDate = (task: Task) => {
+    const taskRecord = task as Task & { createdAt?: string; updatedAt?: string };
+    return taskRecord.updatedAt || taskRecord.createdAt || new Date().toISOString();
+  };
+  const decisions = useMemo(() => {
+    const items: Array<{
+      id: string;
+      title: string;
+      desc: string;
+      impact: string;
+      type: 'warning' | 'danger' | 'info';
+      judgment: string;
+      events: Array<{ time: string; content: string }>;
+      plan: string[];
+    }> = [];
+
+    tasks
+      .filter((task) => task.status === 'Blocked')
+      .slice(0, 2)
+      .forEach((task) => {
+        const createdAt = getTaskDate(task);
+        const updatedAt = getTaskDate(task);
+        items.push({
+          id: `blocked-${task.id}`,
+          title: `任务阻塞: ${task.title}`,
+          desc: `任务 "${task.title}" 已被阻塞，等待 ${task.agent || '负责人'} 处理`,
+          impact: '进度延迟',
+          type: 'warning',
+          judgment: `任务在 ${task.agent || '未知Agent'} 执行期间被阻塞，需人工介入或等待资源释放。`,
+          events: [
+            { time: formatDecisionTime(createdAt), content: '任务创建' },
+            { time: formatDecisionTime(updatedAt), content: '任务被阻塞' },
+          ],
+          plan: ['1. 检查 Agent 资源状态', '2. 确认阻塞依赖', '3. 重新分配或继续等待'],
+        });
+      });
+
+    agents
+      .filter((agent) => agent.load >= 80)
+      .slice(0, 2)
+      .forEach((agent) => {
+        const now = new Date().toISOString();
+        items.push({
+          id: `overload-${agent.id}`,
+          title: `Agent 负载过高: ${agent.name}`,
+          desc: `${agent.name} 当前负载 ${agent.load}%，建议分流任务`,
+          impact: `负载: ${agent.load}%`,
+          type: 'warning',
+          judgment: `${agent.name} (${agent.role || '未知角色'}) 负载持续过高，可能影响任务处理效率。`,
+          events: [
+            { time: formatDecisionTime(now), content: `当前负载: ${agent.load}%` },
+            { time: formatDecisionTime(now), content: `任务数: ${agent.tasks}` },
+          ],
+          plan: ['1. 检查任务队列', '2. 分流到空闲Agent', '3. 监控负载变化'],
+        });
+      });
+
+    return items.slice(0, 5);
+  }, [tasks, agents]);
 
   const handleClose = () => {
     setSelectedDecision(null);
@@ -1288,6 +1364,11 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
         </div>
       ) : (
         <div className="space-y-4">
+          {decisions.length === 0 && (
+            <div className="p-5 bg-white/5 border border-border-subtle rounded-2xl">
+              <p className="text-xs text-slate-400">暂无待处理决策</p>
+            </div>
+          )}
           {decisions.map((d) => (
             <div key={d.id} className="p-5 bg-white/5 border border-border-subtle rounded-2xl space-y-4 hover:border-white/20 transition-all">
               <div className="flex justify-between items-start">
@@ -1327,9 +1408,91 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
 };
 
 const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpenNewProject, onOpenDecisionCenter }: any) => {
-  const handleConfirmAction = () => {
-    addToast("已确认所有待处理决策", "success");
-  };
+  const averageAgentLoad = agents.length > 0
+    ? Math.round(agents.reduce((sum, agent) => sum + (agent.load || 0), 0) / agents.length)
+    : 0;
+  const highLoadAgents = agents.filter((agent) => (agent.load || 0) > 80);
+  const blockedTasks = tasks.filter((task) => task.status === 'Blocked');
+  const atRiskProjects = projects.filter(
+    (project) => (project.status as string) === 'At Risk' || project.phase === '风险阶段',
+  );
+  const pendingDecisions = [
+    ...blockedTasks,
+    ...atRiskProjects,
+    ...highLoadAgents,
+  ].length;
+
+  const systemAlerts: Array<{
+    type: 'warning' | 'danger';
+    agent: string;
+    project: string;
+    title: string;
+    message: string;
+  }> = [];
+
+  highLoadAgents.forEach((agent) => {
+    systemAlerts.push({
+      type: 'warning',
+      agent: agent.name,
+      project: projects.find((project) => project.agents.includes(agent.id))?.name || '未关联项目',
+      title: 'Agent负载过高',
+      message: '建议分流任务到空闲Agent',
+    });
+  });
+
+  blockedTasks.forEach((task) => {
+    systemAlerts.push({
+      type: 'danger',
+      agent: task.agent,
+      project: atRiskProjects[0]?.name || projects[0]?.name || '当前项目',
+      title: '任务已阻塞',
+      message: task.title,
+    });
+  });
+
+  const stats = [
+    {
+      label: '活跃项目',
+      value: projects.length.toString(),
+      icon: Briefcase,
+      color: 'text-accent',
+      trend: projects.length > 0 ? `${projects.length} 个进行中` : undefined,
+      tab: 'projects',
+    },
+    {
+      label: 'Agent 负载',
+      value: agents.length > 0
+        ? `${Math.round(agents.reduce((sum, agent) => sum + (agent.load || 0), 0) / agents.length)}%`
+        : '0%',
+      icon: Cpu,
+      color: 'text-primary',
+      trend: averageAgentLoad > 80 ? '高负载' : averageAgentLoad > 40 ? '稳定' : '空闲',
+      tab: 'agents',
+    },
+    {
+      label: '待处理决策',
+      value: pendingDecisions.toString(),
+      icon: Zap,
+      color: 'text-warning',
+      trend: pendingDecisions > 0 ? '需要关注' : '运行正常',
+      tab: 'dashboard',
+    },
+    {
+      label: '每日成本',
+      value: `$${models.reduce((acc, model) => acc + model.dailyTokens * 0.00001, 0).toFixed(2)}`,
+      icon: Activity,
+      color: 'text-danger',
+      tab: 'model-nexus',
+    },
+  ];
+  const totalTokenUsed = agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0);
+  const totalTokenLimit = Math.max(agents.reduce((sum, agent) => sum + (agent.tokenLimit || 0), 0), 1);
+  const systemHealth = [
+    { label: 'API 网关', status: '健康', icon: Globe },
+    { label: '数据库', status: projects.length > 0 ? '健康' : '离线', icon: Database },
+    { label: 'Agent 集群', status: agents.length > 0 ? '健康' : '离线', icon: Workflow },
+  ];
+  const allHealthy = systemHealth.every((item) => item.status === '健康');
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -1357,12 +1520,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        {[
-          { label: '活跃项目', value: projects.length.toString(), icon: Briefcase, color: 'text-accent', trend: '本周 +1', tab: 'projects' },
-          { label: 'Agent 负载', value: '78%', icon: Cpu, color: 'text-primary', trend: '稳定', tab: 'agents' },
-          { label: '待处理决策', value: '2', icon: Zap, color: 'text-warning', trend: '需要关注', tab: 'dashboard' },
-          { label: '每日成本', value: `$${models.reduce((acc, m) => acc + m.dailyTokens * 0.00001, 0).toFixed(2)}`, icon: Activity, color: 'text-danger', trend: '较昨日 -5%', tab: 'model-nexus' },
-        ].map((stat, i) => (
+        {stats.map((stat, i) => (
           <div 
             key={i} 
             onClick={() => onNavigate(stat.tab)}
@@ -1372,7 +1530,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <div className={cn("p-2 rounded-lg bg-white/5 group-hover:scale-110 transition-transform", stat.color)}>
                 <stat.icon size={20} />
               </div>
-              <span className="text-[10px] text-slate-500 font-medium">{stat.trend}</span>
+              {stat.trend && <span className="text-[10px] text-slate-500 font-medium">{stat.trend}</span>}
             </div>
             <div>
               <p className="text-sm text-slate-400 font-medium">{stat.label}</p>
@@ -1393,49 +1551,57 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <button className="text-xs text-primary hover:underline" onClick={() => onOpenDecisionCenter()}>查看全部</button>
             </div>
             <div className="p-6 space-y-4">
-              <div className="p-4 bg-warning/5 border border-warning/20 rounded-xl space-y-3">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h4 className="font-semibold text-white text-sm">需求分析师: 理解确认</h4>
-                    <p className="text-xs text-slate-400 mt-1">项目: SaaS 管理工作台演示</p>
+              {systemAlerts.length === 0 && (
+                <div className="p-5 bg-primary/5 border border-primary/20 rounded-xl space-y-2">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-semibold text-white text-sm">系统运行正常</h4>
+                    <Badge variant="primary">健康</Badge>
                   </div>
-                  <Badge variant="warning">紧急</Badge>
+                  <p className="text-xs text-slate-400">当前未检测到高负载 Agent 或阻塞任务。</p>
                 </div>
-                <p className="text-sm text-slate-300">“我已经分析了‘多用户 RBAC’的新功能请求。我起草了一个 4 步执行计划。请确认我是否应该开始架构设计。”</p>
-                <div className="flex gap-2 pt-2">
-                  <button 
-                    onClick={() => onOpenDecisionCenter(null, 'details')}
-                    className="px-3 py-1.5 bg-warning text-surface text-xs font-bold rounded-lg shadow-lg shadow-warning/20 hover:bg-warning/90 transition-colors"
-                  >
-                    查看详情
-                  </button>
-                  <button 
-                    onClick={() => onOpenDecisionCenter(null, 'plan')}
-                    className="px-3 py-1.5 bg-white/5 border border-border-subtle text-xs font-bold rounded-lg hover:bg-white/10 transition-colors"
-                  >
-                    查看计划
-                  </button>
-                </div>
-              </div>
-              
-              <div className="p-4 bg-accent/5 border border-accent/20 rounded-xl space-y-3">
-                <div className="flex justify-between items-start">
-                  <div>
-                    <h4 className="font-semibold text-white text-sm">Jeremy: 主题选择</h4>
-                    <p className="text-xs text-slate-400 mt-1">项目: Aegis OS UI</p>
+              )}
+
+              {systemAlerts.slice(0, 6).map((alert, index) => (
+                <div
+                  key={`${alert.agent}-${alert.title}-${index}`}
+                  className={cn(
+                    "p-4 rounded-xl space-y-3",
+                    alert.type === 'danger'
+                      ? "bg-danger/5 border border-danger/20"
+                      : "bg-warning/5 border border-warning/20",
+                  )}
+                >
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <h4 className="font-semibold text-white text-sm">{alert.agent}: {alert.title}</h4>
+                      <p className="text-xs text-slate-400 mt-1">项目: {alert.project}</p>
+                    </div>
+                    <Badge variant={alert.type === 'danger' ? 'danger' : 'warning'}>
+                      {alert.type === 'danger' ? '阻塞' : '预警'}
+                    </Badge>
                   </div>
-                  <Badge variant="accent">决策</Badge>
+                  <p className="text-sm text-slate-300">{alert.message}</p>
+                  <div className="flex gap-2 pt-2">
+                    <button
+                      onClick={() => onOpenDecisionCenter()}
+                      className={cn(
+                        "px-3 py-1.5 text-xs font-bold rounded-lg transition-colors",
+                        alert.type === 'danger'
+                          ? "bg-danger text-white hover:bg-danger/90"
+                          : "bg-warning text-surface hover:bg-warning/90",
+                      )}
+                    >
+                      查看详情
+                    </button>
+                    <button
+                      onClick={() => onNavigate('agents')}
+                      className="px-3 py-1.5 bg-white/5 border border-border-subtle text-xs font-bold rounded-lg hover:bg-white/10 transition-colors"
+                    >
+                      查看 Agent
+                    </button>
+                  </div>
                 </div>
-                <p className="text-sm text-slate-300">“我为 Aegis OS 主题准备了三个设计方向：‘赛博指挥部’、‘极简石板’和‘极光玻璃’。我们应该采用哪一个？”</p>
-                <div className="flex gap-2 pt-2">
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); onNavigate('agents', '2'); }}
-                    className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-xl shadow-lg shadow-accent/20 hover:bg-accent/90 transition-all active:scale-95"
-                  >
-                    选择方向
-                  </button>
-                </div>
-              </div>
+              ))}
             </div>
           </div>
 
@@ -1451,14 +1617,16 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <div className="flex justify-between items-end mb-4">
                 <div>
                   <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">24小时消耗趋势</p>
-                  <h3 className="text-xl font-bold text-white mt-1">124.5k <span className="text-xs text-slate-500 font-normal">/ 500k</span></h3>
+                  <h3 className="text-xl font-bold text-white mt-1">
+                    {(totalTokenUsed / 1000).toFixed(1)}k <span className="text-xs text-slate-500 font-normal">/ {(totalTokenLimit / 1000).toFixed(0)}k</span>
+                  </h3>
                 </div>
                 <div className="text-right">
                   <p className="text-[10px] text-slate-500 font-bold uppercase tracking-widest">当前负载</p>
-                  <p className="text-xs text-primary font-bold">78%</p>
+                  <p className="text-xs text-primary font-bold">{averageAgentLoad}%</p>
                 </div>
               </div>
-              <TokenUsageTrendChart limit={500000} />
+              <TokenUsageTrendChart limit={totalTokenLimit} />
             </div>
           </div>
 
@@ -1539,21 +1707,28 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
           </div>
 
           <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6">
-            <h2 className="font-semibold text-white mb-4">系统健康状况</h2>
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="font-semibold text-white">系统健康状况</h2>
+              <Badge variant={allHealthy ? 'primary' : 'warning'}>
+                {allHealthy ? '正常' : '异常'}
+              </Badge>
+            </div>
             <div className="space-y-4">
-              {[
-                { label: 'API 网关', status: '健康', icon: Globe },
-                { label: '数据库', status: '健康', icon: Database },
-                { label: 'OpenClaw', status: '健康', icon: Workflow },
-              ].map((item, i) => (
+              {systemHealth.map((item, i) => (
                 <div key={i} className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <item.icon size={14} className="text-slate-500" />
                     <span className="text-xs text-slate-400">{item.label}</span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <div className="w-1.5 h-1.5 rounded-full bg-primary" />
-                    <span className="text-[10px] text-primary font-bold uppercase">{item.status}</span>
+                    <div className={cn(
+                      "w-1.5 h-1.5 rounded-full",
+                      item.status === '健康' ? 'bg-primary' : 'bg-warning',
+                    )} />
+                    <span className={cn(
+                      "text-[10px] font-bold uppercase",
+                      item.status === '健康' ? 'text-primary' : 'text-warning',
+                    )}>{item.status}</span>
                   </div>
                 </div>
               ))}
@@ -1570,8 +1745,86 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
 
 const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToast: any }) => {
   const project = useMemo(() => 
-    projects.find(p => p.id === projectId) || projects[0], 
+    projects.find(p => p.id === projectId) || projects[0] || {
+      id: '',
+      name: '暂无项目',
+      description: '',
+      status: 'Planning' as ProjectStatus,
+      phase: '待开始',
+      progress: 0,
+      owner: '',
+      agents: [],
+    }, 
   [projectId, projects]);
+  const formatProjectLogTime = (date: string | Date | null | undefined) => {
+    if (!date) {
+      return new Date().toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
+    const normalized = new Date(date);
+    if (Number.isNaN(normalized.getTime())) {
+      return new Date().toLocaleTimeString('zh-CN', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      });
+    }
+    return normalized.toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  };
+  const getTaskTimestamp = (task: Task) => {
+    const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
+    const rawDate = taskRecord.updatedAt || taskRecord.createdAt || new Date().toISOString();
+    const date = new Date(rawDate);
+    return Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
+  };
+  const recentLogs = useMemo(() => {
+    const logs: Array<{
+      time: string;
+      actor: string;
+      message: string;
+      type: 'danger' | 'accent' | 'primary';
+      timestamp: number;
+    }> = [];
+
+    tasks
+      .filter((task) => task.status === 'Blocked')
+      .slice(0, 2)
+      .forEach((task) => {
+        const agent = agents.find((candidate) => candidate.name === task.agent);
+        const timestamp = getTaskTimestamp(task);
+        logs.push({
+          time: formatProjectLogTime(new Date(timestamp)),
+          actor: agent?.name || task.agent || '系统',
+          message: `任务"${task.title}"被阻塞`,
+          type: 'danger',
+          timestamp,
+        });
+      });
+
+    tasks
+      .filter((task) => task.status === 'In Progress')
+      .slice(0, 3)
+      .forEach((task) => {
+        const agent = agents.find((candidate) => candidate.name === task.agent);
+        const timestamp = getTaskTimestamp(task);
+        logs.push({
+          time: formatProjectLogTime(new Date(timestamp)),
+          actor: agent?.name || task.agent || '系统',
+          message: `正在执行: ${task.title}`,
+          type: 'accent',
+          timestamp,
+        });
+      });
+
+    return logs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 6);
+  }, [tasks, agents]);
 
   return (
     <div className="h-full flex flex-col">
@@ -1677,12 +1930,18 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               </div>
             </div>
             <div className="bg-surface-muted border border-border-subtle rounded-2xl p-6 font-mono text-xs space-y-2 max-h-96 overflow-y-auto scrollbar-hide">
-              <p className="text-slate-500"><span className="text-slate-600">[04:43:15]</span> <span className="text-accent">研发经理:</span> 开始实现 RBAC 中间件...</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:43:22]</span> <span className="text-primary">系统:</span> 成功更新 architecture.md</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:43:45]</span> <span className="text-danger">Jeremy:</span> 因缺少‘Aegis OS’主题的设计确认而阻塞。</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:44:10]</span> <span className="text-warning">需求分析师:</span> 正在起草‘多用户 RBAC’的理解确认...</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:45:05]</span> <span className="text-accent">研发经理:</span> 正在分析 `server.ts` 中现有的认证逻辑...</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:45:30]</span> <span className="text-primary">系统:</span> 快照已创建: `backup_v1.0.1_pre_rbac`</p>
+              {recentLogs.map((log, i) => (
+                <p key={i} className="text-slate-500">
+                  <span className="text-slate-600">[{log.time}]</span>{' '}
+                  <span className={log.type === 'danger' ? 'text-danger' : log.type === 'accent' ? 'text-accent' : 'text-primary'}>
+                    {log.actor}:
+                  </span>{' '}
+                  {log.message}
+                </p>
+              ))}
+              {recentLogs.length === 0 && (
+                <p className="text-slate-600">暂无实时日志</p>
+              )}
               <div className="w-1 h-4 bg-primary animate-pulse inline-block align-middle ml-1" />
             </div>
           </section>
@@ -1844,16 +2103,85 @@ const TokenThroughputChart = () => {
   );
 };
 
-const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToast: (msg: string, type?: any) => void }) => {
+type CommandUnderstandingCard = {
+  raw: string;
+  summary: string;
+  goal: string;
+  project: string;
+  involvedAgent: string;
+  eta: string;
+  warning?: string;
+};
+
+const AgentCommander = ({
+  agentId,
+  addToast,
+  sendCommand,
+}: {
+  agentId: string | null;
+  addToast: (msg: string, type?: any) => void;
+  sendCommand?: (agentId: string, message: string) => Promise<unknown>;
+}) => {
   const [mode, setMode] = useState('confirm'); // 'confirm' | 'auto'
-  const activeAgent = useMemo(() => 
-    agents.find(a => a.id === agentId) || agents[0], 
-  [agentId, agents]);
-  
-  const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit);
+  const fallbackAgent: Agent = {
+    id: '',
+    name: '未选择 Agent',
+    role: '待分配',
+    status: 'Idle',
+    load: 0,
+    currentModelId: models[0]?.id || 'runtime',
+    tasks: 0,
+    memoryCount: 0,
+    tokensUsed: 0,
+    tokenLimit: 100000,
+    sessionCount: 0,
+  };
+  const activeAgent = agents.find((agent) => agent.id === agentId) || agents[0] || fallbackAgent;
+
+  const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit || 100000);
   const [dailyUsage, setDailyUsage] = useState(12450);
-  const [currentModelId, setCurrentModelId] = useState(activeAgent.currentModelId);
-  const agentSessions = useMemo(() => sessions.filter(s => s.agentId === activeAgent.id), [activeAgent.id, sessions]);
+  const [currentModelId, setCurrentModelId] = useState(activeAgent.currentModelId || models[0]?.id || '');
+  const [commandInput, setCommandInput] = useState('');
+  const [isUnderstanding, setIsUnderstanding] = useState(false);
+  const [confirmCard, setConfirmCard] = useState<CommandUnderstandingCard | null>(null);
+  const [isSendingCommand, setIsSendingCommand] = useState(false);
+  const agentSessions = sessions.filter((session) => session.agentId === activeAgent.id);
+
+  useEffect(() => {
+    setTokenLimit(activeAgent.tokenLimit || 100000);
+    setCurrentModelId(activeAgent.currentModelId || models[0]?.id || '');
+  }, [activeAgent.id]);
+
+  const buildCommandUnderstanding = (input: string): CommandUnderstandingCard => {
+    const normalized = input.trim();
+    const linkedProject = projects.find((project) => normalized.includes(project.name));
+    const commandAgent = agents.find((agent) => normalized.includes(agent.name)) || activeAgent;
+    const concise = normalized.length > 40 ? `${normalized.slice(0, 40)}...` : normalized;
+    const warning = normalized.length < 8
+      ? '指令较短，建议补充项目名称或交付目标。'
+      : !linkedProject
+        ? '未识别到项目名称，将按当前上下文执行。'
+        : undefined;
+
+    let eta = '2小时内';
+    if (/(今天|立即|尽快|asap|urgent)/i.test(normalized)) {
+      eta = '30分钟内';
+    } else if (/(本周|迭代|阶段)/i.test(normalized)) {
+      eta = '1个迭代内';
+    }
+
+    return {
+      raw: normalized,
+      summary: linkedProject
+        ? `为“${linkedProject.name}”执行“${concise}”`
+        : `执行指令“${concise}”`,
+      goal: normalized,
+      project: linkedProject?.name || '当前工作上下文',
+      involvedAgent: commandAgent?.name || '待分配 Agent',
+      eta,
+      warning,
+    };
+  };
 
   const handleModelChange = (modelId: string) => {
     setCurrentModelId(modelId);
@@ -1866,9 +2194,46 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
   };
 
   const handleTokenLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = parseInt(e.target.value);
+    const val = Math.max(parseInt(e.target.value) || 0, 1);
     setTokenLimit(val);
     addToast(`Token 限制已更新为 ${val.toLocaleString()}`, "success");
+  };
+
+  const handleTrySend = () => {
+    if (!activeAgent.id) {
+      addToast('请先选择一个 Agent 再发送指令', 'error');
+      return;
+    }
+    if (!commandInput.trim()) {
+      addToast('请输入指令内容', 'error');
+      return;
+    }
+    setIsUnderstanding(true);
+    setTimeout(() => {
+      setConfirmCard(buildCommandUnderstanding(commandInput));
+      setIsUnderstanding(false);
+    }, 550);
+  };
+
+  const handleConfirmExecute = async () => {
+    if (!confirmCard || !activeAgent.id) {
+      addToast('未找到可执行的指令', 'error');
+      return;
+    }
+
+    setIsSendingCommand(true);
+    try {
+      if (sendCommand) {
+        await sendCommand(activeAgent.id, confirmCard.raw);
+      }
+      addToast(`已向 ${activeAgent.name} 发送任务`, 'success');
+      setConfirmCard(null);
+      setCommandInput('');
+    } catch (error: any) {
+      addToast(`发送失败: ${error?.message || '未知错误'}`, 'error');
+    } finally {
+      setIsSendingCommand(false);
+    }
   };
 
   return (
@@ -2145,7 +2510,7 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
                               '识别核心角色（管理员、经理、用户）',
                               '为每个角色映射权限',
                               '起草 architecture.md 更新',
-                              '请求研发经理审查'
+                              '请求负责人审查'
                             ].map((step, i) => (
                               <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
                                 <div className="w-1.5 h-1.5 rounded-full bg-primary mt-1.5 shrink-0" />
@@ -2192,17 +2557,35 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
             <div className="max-w-4xl mx-auto relative group">
               <textarea 
                 placeholder="输入命令或提出问题..."
+                value={commandInput}
+                onChange={(e) => setCommandInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handleTrySend();
+                  }
+                }}
                 className="w-full bg-surface-muted border border-border-subtle rounded-2xl px-5 py-4 pr-24 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all resize-none h-28 shadow-inner"
               />
               <div className="absolute right-4 bottom-4 flex items-center gap-3">
                 <button className="p-2 text-slate-500 hover:text-white transition-colors">
                   <Globe size={18} />
                 </button>
-                <button className="bg-primary text-surface p-3 rounded-xl shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all">
+                <button
+                  onClick={handleTrySend}
+                  disabled={isUnderstanding || isSendingCommand}
+                  className="bg-primary text-surface p-3 rounded-xl shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all disabled:opacity-60 disabled:hover:scale-100"
+                >
                   <ChevronRight size={20} />
                 </button>
               </div>
             </div>
+            {isUnderstanding && (
+              <div className="max-w-4xl mx-auto mt-3 p-3 bg-warning/10 border border-warning/30 rounded-xl flex items-center gap-2 text-warning text-xs font-medium">
+                <Zap size={14} />
+                AI 正在理解指令...
+              </div>
+            )}
             <div className="max-w-4xl mx-auto mt-4 flex justify-between items-center px-2">
               <div className="flex gap-4">
                 <button className="px-3 py-1.5 bg-white/5 border border-border-subtle rounded-lg text-[10px] font-bold text-slate-400 hover:text-white hover:bg-white/10 hover:border-white/20 flex items-center gap-2 transition-all shadow-sm">
@@ -2223,6 +2606,89 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               </p>
             </div>
           </div>
+
+          <AnimatePresence>
+            {confirmCard && (
+              <>
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40"
+                  onClick={() => setConfirmCard(null)}
+                />
+                <motion.div
+                  initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                  className="fixed inset-0 z-50 flex items-center justify-center p-6"
+                >
+                  <div className="w-full max-w-2xl bg-surface-soft border border-border-subtle rounded-3xl shadow-2xl overflow-hidden">
+                    <div className="px-6 py-4 border-b border-border-subtle bg-white/5 flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-warning">
+                        <BrainCircuit size={16} />
+                        <h3 className="text-sm font-bold text-white">AI理解确认卡</h3>
+                      </div>
+                      <Badge variant="warning">发送前确认</Badge>
+                    </div>
+                    <div className="p-6 space-y-5">
+                      <div>
+                        <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">我理解你要</p>
+                        <p className="text-sm text-white mt-2">{confirmCard.summary}</p>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">目标</p>
+                          <p className="text-xs text-slate-200 mt-1 leading-relaxed">{confirmCard.goal}</p>
+                        </div>
+                        <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">涉及 Agent</p>
+                          <p className="text-xs text-slate-200 mt-1">{confirmCard.involvedAgent}</p>
+                        </div>
+                        <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">项目上下文</p>
+                          <p className="text-xs text-slate-200 mt-1">{confirmCard.project}</p>
+                        </div>
+                        <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">预计完成</p>
+                          <p className="text-xs text-slate-200 mt-1">{confirmCard.eta}</p>
+                        </div>
+                      </div>
+                      {confirmCard.warning && (
+                        <div className="p-3 rounded-xl bg-warning/10 border border-warning/30 text-xs text-warning">
+                          {confirmCard.warning}
+                        </div>
+                      )}
+                    </div>
+                    <div className="px-6 py-4 border-t border-border-subtle bg-white/5 flex flex-wrap gap-3 justify-end">
+                      <button
+                        onClick={handleConfirmExecute}
+                        disabled={isSendingCommand}
+                        className="px-4 py-2 bg-primary text-surface text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-60"
+                      >
+                        {isSendingCommand ? '执行中...' : '确认执行'}
+                      </button>
+                      <button
+                        onClick={() => setConfirmCard(null)}
+                        className="px-4 py-2 bg-white/5 border border-border-subtle text-xs font-bold rounded-lg hover:bg-white/10 transition-colors"
+                      >
+                        修改指令
+                      </button>
+                      <button
+                        onClick={() => {
+                          setConfirmCard(null);
+                          setCommandInput('');
+                        }}
+                        className="px-4 py-2 bg-danger/15 border border-danger/30 text-danger text-xs font-bold rounded-lg hover:bg-danger/25 transition-colors"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
+                </motion.div>
+              </>
+            )}
+          </AnimatePresence>
         </main>
       </div>
     </div>
@@ -2232,6 +2698,14 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
 const SystemOperations = ({ onNavigate, addToast }: any) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+  const [optimizationError, setOptimizationError] = useState<string | null>(null);
+  const [selectedAction, setSelectedAction] = useState<string | null>(null);
+  const [optimizationSuggestion, setOptimizationSuggestion] = useState<{
+    loadInsights: string[];
+    blockerInsights: string[];
+    actions: Array<{ id: string; title: string; desc: string }>;
+  } | null>(null);
 
   const handleRefresh = () => {
     setIsRefreshing(true);
@@ -2254,6 +2728,80 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
   const topConsumers = useMemo(() => 
     [...agents].sort((a, b) => b.tokensUsed - a.tokensUsed).slice(0, 5),
   [agents]);
+  const avgLoad = agents.length > 0
+    ? Math.round(agents.reduce((sum, agent) => sum + (agent.load || 0), 0) / agents.length)
+    : 0;
+  const efficiencyScore = Math.max(0, 100 - avgLoad);
+  const systemStatus = [
+    { label: 'API 网关', status: '健康', latency: '42ms', uptime: '99.9%' },
+    { label: 'OpenClaw 连接器', status: agents.length > 0 ? '健康' : '离线', latency: '12ms', uptime: '100%' },
+    { label: 'Agent 集群', status: agents.length > 0 ? '健康' : '离线', latency: '-', uptime: agents.length > 0 ? '100%' : '0%' },
+    { label: '模型服务', status: models.length > 0 ? '健康' : '离线', latency: '-', uptime: models.length > 0 ? '99.5%' : '0%' },
+  ];
+  const allHealthy = systemStatus.every((service) => service.status === '健康');
+  const modelCosts = models.slice(0, 4).map((model) => ({
+    label: model.name,
+    cost: `$${(model.totalTokens * 0.000002).toFixed(2)}`,
+    usage: Math.min(100, Math.max(0, Math.round((model.dailyTokens / 200000) * 100))),
+    color: model.status === 'Healthy' ? 'bg-primary' : 'bg-warning',
+  }));
+
+  const buildOptimizationSuggestion = () => {
+    const overloadedAgents = agents.filter((agent) => agent.load >= 80);
+    const idleAgents = agents.filter((agent) => agent.load <= 30);
+    const blockedTasks = tasks.filter((task) => task.status === 'Blocked');
+    const blockedProjects = projects.filter((project) => project.status === 'Blocked' || /阻塞/i.test(project.phase));
+
+    const loadInsights = overloadedAgents.length > 0
+      ? overloadedAgents.map((agent) => `• ${agent.name} 负载 ${agent.load}% - 建议分流任务`)
+      : ['• 负载均衡，无需调整'];
+
+    const blockerInsights = blockedTasks.length > 0 || blockedProjects.length > 0
+      ? [
+          ...blockedProjects.map((project) => `• ${project.name} - 阶段状态: ${project.phase}`),
+          ...blockedTasks.slice(0, 3).map((task) => `• ${task.title} - 等待 ${task.agent} 处理`),
+        ]
+      : ['• 所有项目正常'];
+
+    const actions = [
+      overloadedAgents.length > 0 && idleAgents.length > 0
+        ? { id: 'rebalance', title: '分流任务到空闲Agent', desc: `将高负载 Agent 的任务分配给 ${idleAgents.slice(0, 2).map((agent) => agent.name).join('、') || '空闲 Agent'}` }
+        : { id: 'rebalance', title: '保持当前负载策略', desc: '当前负载均衡，建议继续观察波动。' },
+      { id: 'priority', title: '调整项目优先级', desc: '先处理阻塞任务所在项目，降低等待链条长度。' },
+      { id: 'notify', title: '提醒阻塞节点负责人', desc: '自动通知阻塞任务负责人并附带上下文。' },
+    ];
+
+    return { loadInsights, blockerInsights, actions };
+  };
+
+  const handleOptimizeStrategy = () => {
+    setIsOptimizing(true);
+    setOptimizationError(null);
+    setOptimizationSuggestion(null);
+    setSelectedAction(null);
+    addToast('正在分析...', 'info');
+
+    setTimeout(() => {
+      try {
+        setOptimizationSuggestion(buildOptimizationSuggestion());
+        addToast('优化建议已生成', 'success');
+      } catch {
+        setOptimizationError('数据加载失败，请重试');
+        addToast('数据加载失败，请重试', 'error');
+      } finally {
+        setIsOptimizing(false);
+      }
+    }, 700);
+  };
+
+  const handleApplySuggestion = () => {
+    if (!optimizationSuggestion || !selectedAction) {
+      addToast('请先选择建议操作', 'error');
+      return;
+    }
+    const action = optimizationSuggestion.actions.find((item) => item.id === selectedAction);
+    addToast(`已执行: ${action?.title || '优化策略'}`, 'success');
+  };
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2280,15 +2828,12 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                 <Activity size={18} className="text-primary" />
                 运行时健康状况
               </h2>
-              <Badge variant="primary">所有系统正常</Badge>
+              <Badge variant={allHealthy ? 'primary' : 'warning'}>
+                {allHealthy ? '所有系统正常' : '部分服务异常'}
+              </Badge>
             </div>
             <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-              {[
-                { label: 'API 网关', status: '健康', latency: '42ms', uptime: '99.9%' },
-                { label: 'OpenClaw 连接器', status: '健康', latency: '12ms', uptime: '100%' },
-                { label: 'Gemini 3.1 Pro', status: '健康', latency: '1.2s', uptime: '99.8%' },
-                { label: 'Prisma 引擎', status: '健康', latency: '8ms', uptime: '100%' },
-              ].map((service, i) => (
+              {systemStatus.map((service, i) => (
                 <div key={i} className="flex justify-between items-center p-4 bg-surface-muted rounded-xl border border-border-subtle hover:border-white/20 transition-colors group">
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-white group-hover:text-primary transition-colors">{service.label}</p>
@@ -2298,8 +2843,16 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <div className="w-2 h-2 rounded-full bg-primary shadow-[0_0_8px_rgba(16,185,129,0.5)]" />
-                    <span className="text-xs text-primary font-bold">{service.status}</span>
+                    <div className={cn(
+                      "w-2 h-2 rounded-full",
+                      service.status === '健康'
+                        ? "bg-primary shadow-[0_0_8px_rgba(16,185,129,0.5)]"
+                        : "bg-warning shadow-[0_0_8px_rgba(245,158,11,0.45)]",
+                    )} />
+                    <span className={cn(
+                      "text-xs font-bold",
+                      service.status === '健康' ? "text-primary" : "text-warning",
+                    )}>{service.status}</span>
                   </div>
                 </div>
               ))}
@@ -2349,11 +2902,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
             </div>
             <div className="p-6 space-y-8">
               <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-                {[
-                  { label: 'Gemini 3.1 Pro', cost: '$8.45', usage: 65, color: 'bg-accent' },
-                  { label: 'Gemini 3.1 Flash', cost: '$2.10', usage: 25, color: 'bg-primary' },
-                  { label: '存储及其他', cost: '$1.85', usage: 10, color: 'bg-slate-500' },
-                ].map((item, i) => (
+                {modelCosts.map((item, i) => (
                   <div key={i} className="space-y-3">
                     <div className="flex justify-between items-end">
                       <div>
@@ -2372,6 +2921,11 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                   </div>
                 ))}
               </div>
+              {modelCosts.length === 0 && (
+                <div className="p-4 bg-white/5 border border-border-subtle rounded-xl text-xs text-slate-400">
+                  暂无模型成本数据
+                </div>
+              )}
               
               <div className="p-4 bg-white/5 rounded-xl border border-border-subtle flex items-center justify-between">
                 <div className="flex items-center gap-4">
@@ -2379,12 +2933,77 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                     <Zap size={20} />
                   </div>
                   <div>
-                    <p className="text-sm font-semibold text-white">效率评分: 92/100</p>
+                    <p className="text-sm font-semibold text-white">效率评分: {efficiencyScore}/100</p>
                     <p className="text-xs text-slate-500">您的 Agent 团队正在最佳成本参数内运行。</p>
                   </div>
                 </div>
-                <button className="px-4 py-2 bg-primary text-surface text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors">优化策略</button>
+                <button
+                  onClick={handleOptimizeStrategy}
+                  disabled={isOptimizing}
+                  className="px-4 py-2 bg-primary text-surface text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-60"
+                >
+                  {isOptimizing ? '正在分析...' : '优化策略'}
+                </button>
               </div>
+
+              {isOptimizing && (
+                <div className="p-4 bg-white/5 border border-border-subtle rounded-xl text-xs text-slate-300">
+                  正在分析 Agent 负载与项目阻塞情况...
+                </div>
+              )}
+
+              {optimizationError && (
+                <div className="p-4 bg-danger/10 border border-danger/30 rounded-xl text-xs text-danger">
+                  {optimizationError}
+                </div>
+              )}
+
+              {optimizationSuggestion && (
+                <div className="p-5 bg-surface-muted border border-border-subtle rounded-2xl space-y-5">
+                  <div className="flex items-center gap-2">
+                    <BarChart3 size={16} className="text-accent" />
+                    <h3 className="text-sm font-semibold text-white">优化策略建议</h3>
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Agent负载分析</p>
+                    {optimizationSuggestion.loadInsights.map((item, idx) => (
+                      <p key={`load-${idx}`} className="text-xs text-slate-300">{item}</p>
+                    ))}
+                  </div>
+                  <div className="space-y-2">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">项目阻塞分析</p>
+                    {optimizationSuggestion.blockerInsights.map((item, idx) => (
+                      <p key={`block-${idx}`} className="text-xs text-slate-300">{item}</p>
+                    ))}
+                  </div>
+                  <div className="space-y-3">
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">建议操作</p>
+                    <div className="space-y-2">
+                      {optimizationSuggestion.actions.map((action) => (
+                        <button
+                          key={action.id}
+                          onClick={() => setSelectedAction(action.id)}
+                          className={cn(
+                            "w-full text-left p-3 rounded-xl border transition-colors",
+                            selectedAction === action.id
+                              ? "bg-primary/10 border-primary/40"
+                              : "bg-white/5 border-border-subtle hover:border-white/20",
+                          )}
+                        >
+                          <p className="text-xs font-semibold text-white">{action.title}</p>
+                          <p className="text-[10px] text-slate-500 mt-1">{action.desc}</p>
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={handleApplySuggestion}
+                      className="w-full py-2.5 bg-primary text-surface text-xs font-bold rounded-xl hover:bg-primary/90 transition-colors"
+                    >
+                      执行所选建议
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 
@@ -2512,7 +3131,20 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
   );
 };
 
-const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any) => (
+const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any) => {
+  const avgProgress = projects.length > 0
+    ? Math.round(projects.reduce((sum, project) => sum + (project.progress || 0), 0) / projects.length)
+    : 0;
+  const activeRisks = projects.filter(
+    (project) => (project.status as string) === 'At Risk' || project.status === 'Blocked',
+  ).length;
+  const stats = [
+    { label: '项目总数', value: projects.length.toString(), icon: Briefcase, color: 'text-accent' },
+    { label: '平均进度', value: `${avgProgress}%`, icon: BarChart3, color: 'text-primary' },
+    { label: '活跃风险', value: activeRisks.toString(), icon: AlertCircle, color: 'text-danger' },
+  ];
+
+  return (
   <div className="p-8 space-y-8 max-w-7xl mx-auto">
     <header className="flex justify-between items-end">
       <div>
@@ -2544,11 +3176,7 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
     </header>
 
     <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-      {[
-        { label: '项目总数', value: '12', icon: Briefcase, color: 'text-accent' },
-        { label: '平均进度', value: '64%', icon: BarChart3, color: 'text-primary' },
-        { label: '活跃风险', value: '3', icon: AlertCircle, color: 'text-danger' },
-      ].map((stat, i) => (
+      {stats.map((stat, i) => (
         <div key={i} className="bg-surface-soft border border-border-subtle p-6 rounded-2xl flex items-center gap-4">
           <div className={cn("p-3 rounded-xl bg-white/5", stat.color)}>
             <stat.icon size={24} />
@@ -2625,7 +3253,8 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, onOpenConfig }: any) => (
   <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2729,7 +3358,54 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
   </div>
 );
 
-const OpenClawWorkspace = ({ addToast }: any) => (
+const OpenClawWorkspace = ({ addToast }: any) => {
+  const getRelativeTime = (date: string | Date | null | undefined) => {
+    if (!date) {
+      return '暂无活动';
+    }
+
+    const target = new Date(date);
+    if (Number.isNaN(target.getTime())) {
+      return '暂无活动';
+    }
+
+    const diff = Date.now() - target.getTime();
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return '刚刚';
+    if (minutes < 60) return `${minutes} 分钟前`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} 小时前`;
+    return `${Math.floor(hours / 24)} 天前`;
+  };
+
+  const healthChecks = [
+    { label: 'Agent 连接', ok: agents.length > 0 },
+    { label: '项目活跃', ok: projects.length > 0 },
+    { label: 'API 服务', ok: true },
+  ];
+
+  const getProjectLastActivity = (projectId: string) => {
+    const latestSession = sessions
+      .filter((session) => session.projectId === projectId)
+      .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())[0];
+    return getRelativeTime(latestSession?.startTime);
+  };
+
+  const recentReports = sessions
+    .slice()
+    .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime())
+    .slice(0, 4)
+    .map((session) => {
+      const agentName = agents.find((agent) => agent.id === session.agentId)?.name || 'Agent 会话';
+      const projectName = projects.find((project) => project.id === session.projectId)?.name || '未命名项目';
+      return {
+        title: `${agentName} · ${projectName}`,
+        date: getRelativeTime(session.startTime),
+        type: '会话',
+      };
+    });
+
+  return (
   <div className="p-8 space-y-8 max-w-7xl mx-auto">
     <header className="flex justify-between items-end">
       <div>
@@ -2790,12 +3466,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
         <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-4">
           <h2 className="font-semibold text-white text-sm">工作区健康状况</h2>
           <div className="space-y-4">
-            {[
-              { label: '文件系统访问', ok: true },
-              { label: '配置同步', ok: true },
-              { label: 'Agent 连接', ok: true },
-              { label: 'Git 集成', ok: false },
-            ].map((item, i) => (
+            {healthChecks.map((item, i) => (
               <div key={i} className="flex items-center justify-between">
                 <span className="text-xs text-slate-400">{item.label}</span>
                 {item.ok ? (
@@ -2813,7 +3484,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
         <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
           <div className="px-6 py-4 border-b border-border-subtle flex justify-between items-center bg-white/5">
             <h2 className="font-semibold text-white">工作区项目</h2>
-            <Badge variant="primary">7 个活跃</Badge>
+            <Badge variant="primary">{projects.length} 个活跃</Badge>
           </div>
           <div className="p-6 space-y-4">
             {projects.map((p, i) => (
@@ -2830,7 +3501,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
                 <div className="flex items-center gap-4">
                   <div className="text-right">
                     <p className="text-[10px] text-slate-500 font-bold uppercase">最后消息</p>
-                    <p className="text-xs text-slate-300">2 分钟前</p>
+                    <p className="text-xs text-slate-300">{getProjectLastActivity(p.id)}</p>
                   </div>
                   <ChevronRight size={16} className="text-slate-600 group-hover:text-white transition-colors" />
                 </div>
@@ -2845,12 +3516,12 @@ const OpenClawWorkspace = ({ addToast }: any) => (
             <button className="text-xs text-primary hover:underline">查看全部</button>
           </div>
           <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-            {[
-              { title: 'Sprint 12 总结', date: '昨天', type: '项目' },
-              { title: '安全审计 v1.4', date: '2 天前', type: '系统' },
-              { title: '架构审查', date: '3月24日', type: '设计' },
-              { title: 'QA 测试结果', date: '3月23日', type: '测试' },
-            ].map((report, i) => (
+            {recentReports.length === 0 && (
+              <div className="md:col-span-2 p-4 bg-white/5 rounded-xl border border-border-subtle">
+                <p className="text-sm text-slate-300">暂无报告</p>
+              </div>
+            )}
+            {recentReports.map((report, i) => (
               <div key={i} className="p-4 bg-white/5 rounded-xl border border-border-subtle hover:bg-white/10 transition-colors cursor-pointer flex items-center gap-4">
                 <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center text-slate-500">
                   <FileText size={20} />
@@ -2866,7 +3537,8 @@ const OpenClawWorkspace = ({ addToast }: any) => (
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const RealTimeMonitoring = ({ addToast }: any) => {
   const sessionList = sessions;
@@ -3006,23 +3678,67 @@ const RealTimeMonitoring = ({ addToast }: any) => {
 };
 
 const ModelTerminal = ({ model }: { model: Model }) => {
-  const [logs, setLogs] = useState(model.logs);
+  const [logs, setLogs] = useState<Array<{
+    timestamp: string;
+    type: 'bash' | 'assistant' | 'json' | 'system';
+    content: string;
+    label?: string;
+  }>>(model.logs || []);
+  const [isConnected, setIsConnected] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      const newLog = {
-        timestamp: new Date().toLocaleTimeString(),
-        type: Math.random() > 0.5 ? 'bash' : 'assistant',
-        content: Math.random() > 0.5 
-          ? `Executing task: ${model.currentTask}... [OK]` 
-          : `Processing token stream... ${Math.floor(Math.random() * 1000)} tokens generated.`,
-      };
-      setLogs(prev => [...prev.slice(-19), newLog]);
-    }, 3000);
+    setLogs(model.logs || []);
+  }, [model.id, model.logs]);
 
-    return () => clearInterval(interval);
-  }, [model]);
+  useEffect(() => {
+    if (!model.id) {
+      setLogs([]);
+      setIsConnected(false);
+      return;
+    }
+
+    let active = true;
+
+    const fetchLogs = async () => {
+      try {
+        const data = await modelsApi.getLogs(model.id, undefined, 50);
+        if (!active) {
+          return;
+        }
+
+        const normalizedLogs = (data || [])
+          .map((item) => ({
+            timestamp: item.timestamp,
+            type: item.type,
+            content: item.content,
+            label: item.label,
+          }))
+          .sort(
+            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+          );
+
+        setLogs(normalizedLogs);
+        setIsConnected(true);
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setIsConnected(false);
+        console.error('Failed to fetch logs:', error);
+      }
+    };
+
+    void fetchLogs();
+    const interval = window.setInterval(() => {
+      void fetchLogs();
+    }, 5000);
+
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [model.id]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -3034,7 +3750,10 @@ const ModelTerminal = ({ model }: { model: Model }) => {
     <div className="bg-surface-muted border border-border-subtle rounded-2xl overflow-hidden flex flex-col h-[500px] shadow-inner font-mono">
       <div className="px-4 py-2 bg-black/40 border-b border-border-subtle flex justify-between items-center">
         <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
+          <div className={cn(
+            "w-2 h-2 rounded-full",
+            isConnected ? "bg-primary animate-pulse" : "bg-slate-500",
+          )} />
           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">{model.name} @ aegis-os</span>
         </div>
         <div className="flex gap-1.5">
@@ -3280,90 +3999,197 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
   );
 };
 
-const AuditLogs = () => (
-  <div className="p-8 space-y-8 max-w-7xl mx-auto">
-    <header className="flex justify-between items-end">
-      <div>
-        <h1 className="text-3xl font-bold tracking-tight text-white">审计追踪</h1>
-        <p className="text-slate-400 mt-1">所有系统操作和 Agent 活动的全面日志。</p>
-      </div>
-      <div className="flex gap-3">
-        <div className="relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <input 
-            type="text" 
-            placeholder="搜索日志..."
-            className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 w-64"
-          />
-        </div>
-        <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
-          <BarChart3 size={16} />
-          分析
-        </button>
-      </div>
-    </header>
+const AuditLogs = () => {
+  const formatLogTime = (value: string | Date | null | undefined) => {
+    if (!value) {
+      return '--:--:--';
+    }
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      return '--:--:--';
+    }
+    return date.toLocaleTimeString('zh-CN', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+  };
 
-    <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full text-left border-collapse">
-          <thead>
-            <tr className="bg-white/5 border-b border-border-subtle">
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">时间戳</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">执行者</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">操作</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">资源</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">状态</th>
-              <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">详情</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-border-subtle">
-            {[
-              { time: '04:58:22', actor: '管理员', action: '更新配置', resource: '系统', status: '成功' },
-              { time: '04:55:10', actor: '研发经理', action: '提交任务', resource: '任务 #t1', status: '成功' },
-              { time: '04:52:45', actor: '管理员', action: '部署 Agent', resource: '测试工程师', status: '成功' },
-              { time: '04:50:12', actor: 'Jeremy', action: '阻塞任务', resource: '任务 #t2', status: '警告' },
-              { time: '04:48:30', actor: '系统', action: '自动备份', resource: '数据库', status: '成功' },
-              { time: '04:45:00', actor: '管理员', action: '登录', resource: '会话', status: '成功' },
-              { time: '04:42:15', actor: '需求分析师', action: '分析规范', resource: '项目 #p1', status: '成功' },
-              { time: '04:40:05', actor: '系统', action: '健康检查', resource: 'API 网关', status: '成功' },
-              { time: '04:38:50', actor: '管理员', action: '修改 SOP', resource: 'Agent #1', status: '成功' },
-            ].map((log, i) => (
-              <tr key={i} className="hover:bg-white/5 transition-colors group">
-                <td className="px-6 py-4 text-xs text-slate-500 font-mono">{log.time}</td>
-                <td className="px-6 py-4">
-                  <span className="text-xs font-bold text-white">{log.actor}</span>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="text-xs text-slate-300">{log.action}</span>
-                </td>
-                <td className="px-6 py-4">
-                  <span className="text-xs text-slate-400 font-mono">{log.resource}</span>
-                </td>
-                <td className="px-6 py-4">
-                  <div className="flex items-center gap-1.5">
-                    <div className={cn(
-                      "w-1.5 h-1.5 rounded-full", 
-                      log.status === '成功' ? 'bg-primary' : 
-                      log.status === '警告' ? 'bg-warning' : 'bg-danger'
-                    )} />
-                    <span className={cn(
-                      "text-[10px] font-bold uppercase", 
-                      log.status === '成功' ? 'text-primary' : 
-                      log.status === '警告' ? 'text-warning' : 'text-danger'
-                    )}>{log.status}</span>
-                  </div>
-                </td>
-                <td className="px-6 py-4 text-right">
-                  <button className="text-[10px] text-primary hover:underline">查看 JSON</button>
-                </td>
+  const extractEntityDate = (entity: unknown): string | null => {
+    if (!entity || typeof entity !== 'object') {
+      return null;
+    }
+
+    const record = entity as Record<string, unknown>;
+    const rawDate = record.updatedAt ?? record.createdAt ?? record.startTime ?? null;
+    if (!rawDate) {
+      return null;
+    }
+
+    if (typeof rawDate === 'string') {
+      return rawDate;
+    }
+
+    if (rawDate instanceof Date) {
+      return rawDate.toISOString();
+    }
+
+    return null;
+  };
+
+  const auditLogs = useMemo(() => {
+    const logs: Array<{
+      time: string;
+      actor: string;
+      action: string;
+      resource: string;
+      status: '成功' | '警告' | '进行中';
+      sortValue: number;
+    }> = [];
+
+    const recentSessions = sessions
+      .slice()
+      .sort(
+        (a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime(),
+      )
+      .slice(0, 5);
+
+    recentSessions.forEach((session) => {
+      const agent = agents.find((candidate) => candidate.id === session.agentId);
+      const project = projects.find((candidate) => candidate.id === session.projectId);
+      if (!agent && !project) {
+        return;
+      }
+
+      const eventDate = extractEntityDate(session) ?? session.startTime;
+      const timestamp = new Date(eventDate).getTime();
+
+      logs.push({
+        time: formatLogTime(eventDate),
+        actor: agent?.name || 'Agent',
+        action: session.status === 'active' ? '进行中任务' : '完成任务',
+        resource: project?.name || '项目',
+        status: session.status === 'active' ? '进行中' : '成功',
+        sortValue: Number.isFinite(timestamp) ? timestamp : 0,
+      });
+    });
+
+    projects
+      .filter((project) => project.status === 'Blocked')
+      .slice(0, 2)
+      .forEach((project) => {
+        const eventDate = extractEntityDate(project) ?? new Date().toISOString();
+        const timestamp = new Date(eventDate).getTime();
+        logs.push({
+          time: formatLogTime(eventDate),
+          actor: '系统',
+          action: '项目阻塞',
+          resource: project.name,
+          status: '警告',
+          sortValue: Number.isFinite(timestamp) ? timestamp : 0,
+        });
+      });
+
+    tasks
+      .filter((task) => task.status === 'Blocked')
+      .slice(0, 2)
+      .forEach((task) => {
+        const eventDate = extractEntityDate(task) ?? new Date().toISOString();
+        const timestamp = new Date(eventDate).getTime();
+        logs.push({
+          time: formatLogTime(eventDate),
+          actor: task.agent || '系统',
+          action: '任务阻塞',
+          resource: task.title,
+          status: '警告',
+          sortValue: Number.isFinite(timestamp) ? timestamp : 0,
+        });
+      });
+
+    return logs.sort((a, b) => b.sortValue - a.sortValue).slice(0, 10);
+  }, [sessions, agents, projects, tasks]);
+
+  return (
+    <div className="p-8 space-y-8 max-w-7xl mx-auto">
+      <header className="flex justify-between items-end">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight text-white">审计追踪</h1>
+          <p className="text-slate-400 mt-1">所有系统操作和 Agent 活动的全面日志。</p>
+        </div>
+        <div className="flex gap-3">
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+            <input 
+              type="text" 
+              placeholder="搜索日志..."
+              className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 w-64"
+            />
+          </div>
+          <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
+            <BarChart3 size={16} />
+            分析
+          </button>
+        </div>
+      </header>
+
+      <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left border-collapse">
+            <thead>
+              <tr className="bg-white/5 border-b border-border-subtle">
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">时间戳</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">执行者</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">操作</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">资源</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest">状态</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest text-right">详情</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody className="divide-y divide-border-subtle">
+              {auditLogs.length > 0 ? auditLogs.map((log, i) => (
+                <tr key={i} className="hover:bg-white/5 transition-colors group">
+                  <td className="px-6 py-4 text-xs text-slate-500 font-mono">{log.time}</td>
+                  <td className="px-6 py-4">
+                    <span className="text-xs font-bold text-white">{log.actor}</span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className="text-xs text-slate-300">{log.action}</span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <span className="text-xs text-slate-400 font-mono">{log.resource}</span>
+                  </td>
+                  <td className="px-6 py-4">
+                    <div className="flex items-center gap-1.5">
+                      <div className={cn(
+                        "w-1.5 h-1.5 rounded-full", 
+                        log.status === '成功' ? 'bg-primary' :
+                        log.status === '进行中' ? 'bg-accent' :
+                        'bg-warning'
+                      )} />
+                      <span className={cn(
+                        "text-[10px] font-bold uppercase",
+                        log.status === '成功' ? 'text-primary' :
+                        log.status === '进行中' ? 'text-accent' :
+                        'text-warning'
+                      )}>{log.status}</span>
+                    </div>
+                  </td>
+                  <td className="px-6 py-4 text-right">
+                    <button className="text-[10px] text-primary hover:underline">查看 JSON</button>
+                  </td>
+                </tr>
+              )) : (
+                <tr>
+                  <td colSpan={6} className="px-6 py-8 text-center text-slate-500">暂无审计日志</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
+};
 
 const SettingsPage = ({ addToast }: any) => {
   const [language, setLanguage] = useState('zh');
@@ -3644,7 +4470,7 @@ export default function App() {
   const [isDecisionCenterOpen, setIsDecisionCenterOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const { agents, projects, tasks, sessions, runtime, refresh } = useRealData();
+  const { agents, projects, tasks, sessions, runtime, refresh, sendAgentMessage } = useRealData();
 
   const runtimeModels = useMemo(
     () => buildRuntimeModels(runtime, agents, projects, tasks, sessions),
@@ -3653,15 +4479,18 @@ export default function App() {
 
   syncRuntimeCollections({
     models: runtimeModels,
-    agents: agents.length > 0 ? agents : DEFAULT_AGENTS,
-    projects: projects.length > 0 ? projects : DEFAULT_PROJECTS,
+    agents,
+    projects,
     tasks,
     sessions,
   });
 
+  const highlightedAgentName = agents.find((agent) => agent.status !== 'Offline')?.name || '某个 Agent';
+  const highlightedProjectName = projects[0]?.name || '当前项目';
+
   const notifications = [
     { id: 1, title: '系统更新', content: 'Aegis OS 已升级至 v2.4.0，新增了拓扑图谱实时同步功能。', time: '2小时前', type: 'info' },
-    { id: 2, title: '任务完成', content: 'Agent "Jeremy" 已完成 Aegis OS UI 的初步设计方案。', time: '5小时前', type: 'success' },
+    { id: 2, title: '任务完成', content: `Agent "${highlightedAgentName}" 已完成 ${highlightedProjectName} 的阶段性方案。`, time: '5小时前', type: 'success' },
     { id: 3, title: '安全警报', content: '检测到异常 API 调用尝试，已自动拦截并记录。', time: '1天前', type: 'warning' },
   ];
 
@@ -4000,7 +4829,7 @@ export default function App() {
               className="h-full"
             >
               {activeTab === 'dashboard' && <Dashboard onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
-              {activeTab === 'agent-commander' && <AgentCommander agentId={selectedAgentId} addToast={addToast} />}
+              {activeTab === 'agent-commander' && <AgentCommander agentId={selectedAgentId} addToast={addToast} sendCommand={sendAgentMessage} />}
               {activeTab === 'project-room' && <ProjectRoom projectId={selectedProjectId} addToast={addToast} />}
               {activeTab === 'system-health' && <SystemOperations onNavigate={handleNavigate} addToast={addToast} />}
               {activeTab === 'model-nexus' && <ModelNexus addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} />}
