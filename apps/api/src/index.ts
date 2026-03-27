@@ -173,16 +173,22 @@ app.post("/api/auth/setup", asyncRoute(async (req, res) => {
     return;
   }
 
-  const session = await setupAdmin(password);
-  res.setHeader("Set-Cookie", createSessionCookie(session.token));
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "auth.setup",
-    resourceType: "system",
-    summary: "已完成管理员初始化"
-  });
-  res.status(201).json(await getAuthStatus(session.token));
+  try {
+    const session = await setupAdmin(password);
+    res.setHeader("Set-Cookie", createSessionCookie(session.token));
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "auth.setup",
+      resourceType: "system",
+      summary: "已完成管理员初始化"
+    });
+    res.status(201).json(await getAuthStatus(session.token));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "初始化失败";
+    const statusCode = message.includes("已配置") ? 409 : 400;
+    res.status(statusCode).json({ message });
+  }
 }));
 
 app.post("/api/auth/login", asyncRoute(async (req, res) => {
@@ -194,16 +200,22 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
     return;
   }
 
-  const session = await loginAdmin(password);
-  res.setHeader("Set-Cookie", createSessionCookie(session.token));
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "auth.login",
-    resourceType: "system",
-    summary: "管理员已登录"
-  });
-  res.json(await getAuthStatus(session.token));
+  try {
+    const session = await loginAdmin(password);
+    res.setHeader("Set-Cookie", createSessionCookie(session.token));
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "auth.login",
+      resourceType: "system",
+      summary: "管理员已登录"
+    });
+    res.json(await getAuthStatus(session.token));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "登录失败";
+    const statusCode = message.includes("尚未完成初始化") ? 428 : 401;
+    res.status(statusCode).json({ message });
+  }
 }));
 
 app.post("/api/auth/logout", asyncRoute(async (req, res) => {

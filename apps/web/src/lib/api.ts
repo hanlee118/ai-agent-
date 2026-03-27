@@ -12,6 +12,10 @@ interface ApiResponse<T> {
   };
 }
 
+function isApiEnvelope<T>(value: unknown): value is ApiResponse<T> {
+  return Boolean(value) && typeof value === 'object' && 'success' in (value as Record<string, unknown>);
+}
+
 async function request<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -29,13 +33,33 @@ async function request<T>(
 
   try {
     const response = await fetch(url, config);
-    const data: ApiResponse<T> = await response.json();
-    
-    if (!data.success) {
-      throw new Error(data.error?.message || 'Request failed');
+    const rawText = await response.text();
+    let payload: unknown = null;
+
+    if (rawText) {
+      try {
+        payload = JSON.parse(rawText) as unknown;
+      } catch {
+        payload = rawText;
+      }
     }
-    
-    return data.data as T;
+
+    if (isApiEnvelope<T>(payload)) {
+      if (!payload.success) {
+        throw new Error(payload.error?.message || 'Request failed');
+      }
+      return payload.data as T;
+    }
+
+    if (!response.ok) {
+      const message =
+        typeof payload === 'object' && payload && 'message' in payload
+          ? String((payload as { message?: string }).message || 'Request failed')
+          : `Request failed (${response.status})`;
+      throw new Error(message);
+    }
+
+    return payload as T;
   } catch (error) {
     console.error(`API Error [${endpoint}]:`, error);
     throw error;
@@ -52,10 +76,23 @@ export const authApi = {
     }>('/auth/status');
   },
 
-  async login(email: string, password: string) {
-    return request('/auth/login', {
+  async setup(password: string) {
+    return request<{
+      setupComplete: boolean;
+      authenticated: boolean;
+    }>('/auth/setup', {
       method: 'POST',
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ password }),
+    });
+  },
+
+  async login(password: string) {
+    return request<{
+      setupComplete: boolean;
+      authenticated: boolean;
+    }>('/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
     });
   },
 
@@ -233,6 +270,19 @@ export const projectsApi = {
       body: JSON.stringify(data),
     });
   },
+
+  async intervene(id: string, command: string) {
+    return request(`/projects/${id}/intervene`, {
+      method: 'POST',
+      body: JSON.stringify({ command }),
+    });
+  },
+
+  async resume(id: string) {
+    return request(`/projects/${id}/resume`, {
+      method: 'POST',
+    });
+  },
 };
 
 // ============ Tasks API ============
@@ -304,6 +354,12 @@ export const notificationsApi = {
     return request<Notification[]>(`/notifications${query ? `?${query}` : ''}`);
   },
 
+  async listInbox(locale: 'zh-CN' | 'en-US' = 'zh-CN') {
+    const searchParams = new URLSearchParams();
+    searchParams.set('locale', locale);
+    return request<NotificationInboxItem[]>(`/notifications?${searchParams.toString()}`);
+  },
+
   async update(id: string, status: string) {
     return request(`/notifications/${id}`, {
       method: 'PATCH',
@@ -311,8 +367,30 @@ export const notificationsApi = {
     });
   },
 
+  async updateInbox(sourceKey: string, data: {
+    read?: boolean;
+    assignedTo?: string;
+    confirmedBy?: string;
+    workflowStatus?: 'open' | 'acknowledged' | 'resolved';
+  }) {
+    return request<NotificationInboxItem>(`/notifications/${encodeURIComponent(sourceKey)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  },
+
   async markAllRead() {
-    return request('/notifications/read-all', { method: 'POST' });
+    const list = await notificationsApi.listInbox('zh-CN');
+    const pending = list.filter((item) => !item.read);
+    await Promise.all(
+      pending.map((item) =>
+        notificationsApi.updateInbox(item.sourceKey, {
+          read: true,
+          workflowStatus: 'acknowledged',
+        }),
+      ),
+    );
+    return { updated: pending.length };
   },
 };
 
@@ -323,14 +401,18 @@ export const auditApi = {
     endTime?: string;
     action?: string;
     userId?: string;
+    limit?: number;
   }) {
     const searchParams = new URLSearchParams();
-    if (params?.startTime) searchParams.set('startTime', params.startTime);
-    if (params?.endTime) searchParams.set('endTime', params.endTime);
-    if (params?.action) searchParams.set('action', params.action);
-    if (params?.userId) searchParams.set('userId', params.userId);
+    if (params?.limit) searchParams.set('limit', params.limit.toString());
     const query = searchParams.toString();
-    return request<AuditLog[]>(`/audit-logs${query ? `?${query}` : ''}`);
+    return request<SystemAuditLog[]>(`/system/audit-logs${query ? `?${query}` : ''}`);
+  },
+
+  async listSystem(limit = 50) {
+    const searchParams = new URLSearchParams();
+    searchParams.set('limit', limit.toString());
+    return request<SystemAuditLog[]>(`/system/audit-logs?${searchParams.toString()}`);
   },
 };
 
@@ -342,6 +424,27 @@ export const systemApi = {
 
   async getRuntime() {
     return request<SystemRuntime>('/system/runtime');
+  },
+
+  async getRuntimeConfig() {
+    return request<SystemRuntimeConfig>('/system/runtime/config');
+  },
+
+  async updateRuntimeConfig(data: SystemRuntimeConfigInput) {
+    return request<SystemRuntimeConfig>('/system/runtime/config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getReadiness() {
+    return request<Record<string, unknown>>('/system/readiness');
+  },
+
+  async validateRuntime() {
+    return request<{ ok: boolean; message: string }>('/system/runtime/validate', {
+      method: 'POST',
+    });
   },
 };
 
@@ -485,23 +588,83 @@ export interface AuditLog {
   timestamp: string;
 }
 
+export interface NotificationInboxItem {
+  id: string;
+  sourceKey: string;
+  sourceType: string;
+  severity: 'critical' | 'warning' | 'info';
+  category: string;
+  title: string;
+  detail: string;
+  actionLabel: string;
+  to: string;
+  timestamp?: string;
+  read: boolean;
+  assignedTo?: string;
+  confirmedBy?: string;
+  workflowStatus: 'open' | 'acknowledged' | 'resolved';
+  updatedAt: string;
+}
+
+export interface SystemAuditLog {
+  id: string;
+  actorType: 'admin' | 'agent' | 'system';
+  actorLabel: string;
+  action: string;
+  resourceType: string;
+  resourceId?: string;
+  summary: string;
+  detail?: string;
+  requestId?: string;
+  ipAddress?: string;
+  createdAt: string;
+}
+
 export interface SystemHealth {
-  status: 'healthy' | 'degraded' | 'unhealthy';
-  uptime: number;
-  memory: { used: number; total: number };
-  cpu: { load: number };
-  database: 'connected' | 'disconnected';
-  openclaw: 'connected' | 'disconnected';
+  totalProjects: number;
+  activeProjects: number;
+  pendingApprovals: number;
+  activeTasks: number;
+  blockedTasks: number;
+  rejectedStages: number;
+  averageAgentWorkload: number;
+  runtime?: Record<string, unknown>;
+  services: Array<{
+    name: string;
+    status: string;
+    detail: string;
+  }>;
 }
 
 export interface SystemRuntime {
-  mode: string;
-  version: string;
-  features: {
-    sse: boolean;
-    websocket: boolean;
-    auth: boolean;
-  };
+  mode?: string;
+  requestedMode?: string;
+  configured?: boolean;
+  provider?: string;
+  modelName?: string;
+  version?: string;
+  lastValidationStatus?: string;
+  features?: Record<string, unknown>;
+}
+
+export interface SystemRuntimeConfig {
+  provider: 'scripted' | 'openai-compatible';
+  apiBaseUrl: string;
+  modelName: string;
+  apiKeyConfigured: boolean;
+  apiKeyPreview?: string;
+  updatedAt: string;
+  lastValidatedAt?: string;
+  lastValidationStatus?: string;
+  lastValidationError?: string | null;
+}
+
+export interface SystemRuntimeConfigInput {
+  provider: 'scripted' | 'openai-compatible';
+  apiBaseUrl?: string;
+  modelName?: string;
+  apiKey?: string;
+  clearApiKey?: boolean;
 }
 
 export interface Pagination {

@@ -19,5 +19,8 @@
     "daemon:status": "./scripts/daemon-status.sh",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.3"
   }
 }

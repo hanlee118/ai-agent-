@@ -34,6 +34,7 @@ export interface Agent {
   tokensUsed: number;
   tokenLimit: number; // 用户定义的 Token 限制
   sessionCount: number;
+  lastActiveAt?: string;
 }
 
 export interface Session {
@@ -46,6 +47,8 @@ export interface Session {
   tokens: number;
   cost: number;
   status: 'active' | 'completed' | 'failed';
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Project {
@@ -57,6 +60,8 @@ export interface Project {
   progress: number;
   owner: string;
   agents: string[];
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface Task {
@@ -65,4 +70,7 @@ export interface Task {
   agent: string;
   status: 'Pending' | 'In Progress' | 'Completed' | 'Blocked';
   progress: number;
+  projectId?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }

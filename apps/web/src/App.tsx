@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { 
   LayoutDashboard, 
   Briefcase, 
@@ -59,61 +59,21 @@ import {
 import { cn } from './lib/utils';
 import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from './types';
 import { useRealData } from './useRealData';
-import { modelsApi, projectsApi } from './lib/api';
+import {
+  agentsApi,
+  auditApi,
+  authApi,
+  modelsApi,
+  notificationsApi,
+  projectsApi,
+  systemApi,
+  type Model as ApiModel,
+  type NotificationInboxItem,
+  type SystemAuditLog,
+} from './lib/api';
+import { fetchOpenClawAgentDetail, sendBatchAgentMessage } from './lib/adapters';
 
-// --- Mock Data ---
-
-const DEFAULT_MODELS: Model[] = [
-  { 
-    id: 'm1', 
-    name: 'Codex-4.0', 
-    provider: 'OpenAI', 
-    status: 'Healthy', 
-    totalTokens: 1250000, 
-    dailyTokens: 45000, 
-    currentTask: '代码重构分析', 
-    latency: '120ms',
-    throughput: '45.2 t/s',
-    logs: [
-      { timestamp: '2026-03-26 08:10:12', type: 'bash', content: 'cd /Users/aegis/workspace\nnpm run analyze' },
-      { timestamp: '2026-03-26 08:10:15', type: 'json', label: 'Sender (untrusted metadata)', content: '{\n  "label": "Zeno Rho (6063813870)",\n  "id": "6063813870",\n  "name": "Zeno Rho",\n  "username": "ZenoRho"\n}' },
-      { timestamp: '2026-03-26 08:10:20', type: 'assistant', content: '正在分析项目结构，识别潜在的循环依赖...' }
-    ]
-  },
-  { 
-    id: 'm2', 
-    name: 'MiniMax-6.5', 
-    provider: 'MiniMax', 
-    status: 'Healthy', 
-    totalTokens: 890000, 
-    dailyTokens: 32000, 
-    currentTask: '多轮对话生成', 
-    latency: '150ms',
-    throughput: '32.8 t/s',
-    logs: [
-      { timestamp: '2026-03-26 08:12:05', type: 'bash', content: 'python3 scripts/chat_gen.py --model minimax-6.5' },
-      { timestamp: '2026-03-26 08:12:10', type: 'assistant', content: '我是 MiniMax 助手，很高兴为您服务。' }
-    ]
-  },
-  { 
-    id: 'm3', 
-    name: 'Kimi-Long', 
-    provider: 'Moonshot', 
-    status: 'Degraded', 
-    totalTokens: 2100000, 
-    dailyTokens: 120000, 
-    currentTask: '超长文档摘要', 
-    latency: '450ms',
-    throughput: '12.5 t/s',
-    logs: [
-      { timestamp: '2026-03-26 08:15:30', type: 'bash', content: 'cat docs/huge_spec.pdf | kimi-summarize' },
-      { timestamp: '2026-03-26 08:15:45', type: 'system', content: '警告: 检测到高延迟 (450ms)' },
-      { timestamp: '2026-03-26 08:16:00', type: 'assistant', content: '正在处理 500 页文档，请稍候...' }
-    ]
-  },
-];
-
-let models: Model[] = DEFAULT_MODELS;
+let models: Model[] = [];
 let agents: Agent[] = [];
 let sessions: Session[] = [];
 let projects: Project[] = [];
@@ -166,8 +126,6 @@ function buildRuntimeModels(
       ? 'Offline'
       : 'Healthy';
 
-  const sharedLogs = DEFAULT_MODELS.flatMap((model) => model.logs).slice(0, 3);
-
   return [
     {
       id: 'runtime',
@@ -179,33 +137,34 @@ function buildRuntimeModels(
       currentTask: projects[0]?.name ? `推进项目: ${projects[0].name}` : '等待任务分配',
       latency: `${latencyBase + Math.min(activeSessions * 8, 220)}ms`,
       throughput: `${throughputBase.toFixed(1)} t/s`,
-      logs: sharedLogs,
-    },
-    {
-      id: 'planning',
-      name: 'Planning Assist',
-      provider: 'Synthetic',
-      status: 'Healthy',
-      totalTokens: Math.max(Math.round(totalTokens * 0.45), 1),
-      dailyTokens: Math.max(Math.round(dailyTokens * 0.5), 1),
-      currentTask: `处理 ${tasks.length} 条任务编排`,
-      latency: `${latencyBase + 35}ms`,
-      throughput: `${Math.max(throughputBase * 0.75, 6).toFixed(1)} t/s`,
-      logs: DEFAULT_MODELS[0].logs,
-    },
-    {
-      id: 'qa',
-      name: 'QA Sentinel',
-      provider: 'Synthetic',
-      status: activeSessions > 4 ? 'Degraded' : 'Healthy',
-      totalTokens: Math.max(Math.round(totalTokens * 0.3), 1),
-      dailyTokens: Math.max(Math.round(dailyTokens * 0.35), 1),
-      currentTask: `巡检 ${projects.length} 个项目`,
-      latency: `${latencyBase + 55}ms`,
-      throughput: `${Math.max(throughputBase * 0.55, 5).toFixed(1)} t/s`,
-      logs: DEFAULT_MODELS[1]?.logs ?? sharedLogs,
+      logs: [],
     },
   ];
+}
+
+function toUiModel(model: ApiModel): Model {
+  const normalizedStatus: Model['status'] =
+    model.status === 'Offline'
+      ? 'Offline'
+      : model.status === 'Degraded'
+        ? 'Degraded'
+        : 'Healthy';
+
+  const currentTask = model.currentTask?.trim()
+    || '待分配任务';
+
+  return {
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    status: normalizedStatus,
+    totalTokens: Number(model.totalTokens || 0),
+    dailyTokens: Number(model.dailyTokens || 0),
+    currentTask,
+    latency: model.latency || 'N/A',
+    throughput: model.throughput || 'N/A',
+    logs: [],
+  };
 }
 
 // --- Components ---
@@ -288,11 +247,14 @@ const ToastContainer = ({ toasts }: { toasts: any[] }) => (
 );
 
 const ModelUsageChart = () => {
-  const data = useMemo(() => models.map(m => ({
-    name: m.name,
-    value: m.dailyTokens,
-    color: m.id === 'm1' ? '#00f2ff' : m.id === 'm2' ? '#f2ff00' : '#ff00f2'
-  })), [models]);
+  const data = useMemo(() => {
+    const palette = ['#00f2ff', '#f2ff00', '#ff00f2', '#10b981', '#f97316', '#60a5fa'];
+    return models.map((model, index) => ({
+      name: model.name,
+      value: model.dailyTokens,
+      color: palette[index % palette.length],
+    }));
+  }, [models]);
 
   return (
     <div className="h-[280px] w-full flex flex-col items-center justify-center">
@@ -363,10 +325,89 @@ const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose:
   );
 };
 
-const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
+const NewModelModal = ({
+  isOpen,
+  onClose,
+  addToast,
+  onCreated,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onCreated?: () => Promise<void> | void;
+}) => {
   const [step, setStep] = useState(1);
+  const [provider, setProvider] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [apiBaseUrl, setApiBaseUrl] = useState('');
+  const [modelName, setModelName] = useState('');
+  const [tokenLimit, setTokenLimit] = useState('1000000');
+  const [submitting, setSubmitting] = useState(false);
+
+  const resetForm = () => {
+    setStep(1);
+    setProvider('');
+    setApiKey('');
+    setApiBaseUrl('');
+    setModelName('');
+    setTokenLimit('1000000');
+    setSubmitting(false);
+  };
+
+  const handleClose = () => {
+    resetForm();
+    onClose();
+  };
+
+  const handleCreateModel = async () => {
+    const normalizedProvider = provider.trim();
+    const normalizedName = modelName.trim();
+    const normalizedLimit = Number(tokenLimit);
+
+    if (!normalizedProvider) {
+      addToast('请先选择模型提供商', 'error');
+      setStep(1);
+      return;
+    }
+    if (!normalizedName) {
+      addToast('请输入模型名称', 'error');
+      return;
+    }
+    if (!Number.isFinite(normalizedLimit) || normalizedLimit <= 0) {
+      addToast('请输入有效的每日 Token 限额', 'error');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const created = await modelsApi.create({
+        name: normalizedName,
+        provider: normalizedProvider,
+        apiKey: apiKey.trim() || undefined,
+        apiBaseUrl: apiBaseUrl.trim() || undefined,
+        tokenLimit: Math.floor(normalizedLimit),
+      });
+
+      try {
+        await modelsApi.healthCheck(created.id);
+      } catch {
+        // Health check is optional for initial creation; ignore transient failures.
+      }
+
+      if (onCreated) {
+        await onCreated();
+      }
+      addToast('模型接入成功！', 'success');
+      handleClose();
+    } catch (error) {
+      addToast(`模型接入失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="接入新计算模型">
+    <Modal isOpen={isOpen} onClose={handleClose} title="接入新计算模型">
       <div className="space-y-8">
         <div className="flex items-center gap-4 mb-8">
           {[1, 2, 3].map((s) => (
@@ -386,13 +427,21 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
           <div className="space-y-6">
             <h3 className="text-lg font-bold text-white">选择模型提供商</h3>
             <div className="grid grid-cols-2 gap-4">
-              {['OpenAI', 'Anthropic', 'Google Gemini', 'Meta Llama', 'Mistral AI', '本地部署'].map((provider) => (
+              {['OpenAI', 'Anthropic', 'Google Gemini', 'Meta Llama', 'Mistral AI', '本地部署'].map((providerOption) => (
                 <button 
-                  key={provider}
-                  onClick={() => setStep(2)}
-                  className="p-4 bg-white/5 border border-border-subtle rounded-2xl text-left hover:border-primary/50 hover:bg-primary/5 transition-all group"
+                  key={providerOption}
+                  onClick={() => {
+                    setProvider(providerOption);
+                    setStep(2);
+                  }}
+                  className={cn(
+                    "p-4 border rounded-2xl text-left transition-all group",
+                    provider === providerOption
+                      ? "bg-primary/10 border-primary/40"
+                      : "bg-white/5 border-border-subtle hover:border-primary/50 hover:bg-primary/5",
+                  )}
                 >
-                  <p className="font-bold text-white group-hover:text-primary transition-colors">{provider}</p>
+                  <p className="font-bold text-white group-hover:text-primary transition-colors">{providerOption}</p>
                   <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">点击选择并继续</p>
                 </button>
               ))}
@@ -406,11 +455,23 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
             <div className="space-y-4">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">API 密钥</label>
-                <input type="password" placeholder="sk-..." className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                <input
+                  type="password"
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  placeholder="sk-..."
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">自定义端点 (可选)</label>
-                <input type="text" placeholder="https://api.example.com/v1" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                <input
+                  type="text"
+                  value={apiBaseUrl}
+                  onChange={(e) => setApiBaseUrl(e.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
               </div>
             </div>
             <div className="flex gap-4 pt-4">
@@ -427,11 +488,23 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">模型名称</label>
-                  <input type="text" placeholder="gpt-4o" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                  <input
+                    type="text"
+                    value={modelName}
+                    onChange={(e) => setModelName(e.target.value)}
+                    placeholder="gpt-4o"
+                    className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">每日 Token 限额</label>
-                  <input type="number" placeholder="1000000" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                  <input
+                    type="number"
+                    value={tokenLimit}
+                    onChange={(e) => setTokenLimit(e.target.value)}
+                    placeholder="1000000"
+                    className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
                 </div>
               </div>
               <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl flex items-center gap-3">
@@ -442,14 +515,11 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
             <div className="flex gap-4 pt-4">
               <button onClick={() => setStep(2)} className="flex-1 py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all">返回</button>
               <button 
-                onClick={() => {
-                  addToast("模型接入成功！", "success");
-                  onClose();
-                  setStep(1);
-                }} 
-                className="flex-1 py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all"
+                onClick={() => void handleCreateModel()}
+                disabled={submitting}
+                className="flex-1 py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-60"
               >
-                完成接入
+                {submitting ? '接入中...' : '完成接入'}
               </button>
             </div>
           </div>
@@ -459,8 +529,20 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
   );
 };
 
-const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
-  const agent = agents.find(a => a.id === agentId) || agents[0] || {
+const AgentConfigModal = ({
+  isOpen,
+  onClose,
+  agentId,
+  addToast,
+  onUpdated,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  agentId?: string | null;
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onUpdated?: () => Promise<void> | void;
+}) => {
+  const fallbackAgent = agents.find((item) => item.id === agentId) || agents[0] || {
     id: '',
     name: '未选择 Agent',
     role: '待配置角色',
@@ -473,47 +555,195 @@ const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
     tokenLimit: 100000,
     sessionCount: 0,
   };
+  const [agentName, setAgentName] = useState(fallbackAgent.name);
+  const [agentRole, setAgentRole] = useState(fallbackAgent.role);
+  const [selectedModelId, setSelectedModelId] = useState(fallbackAgent.currentModelId || models[0]?.id || '');
+  const [loadedModelId, setLoadedModelId] = useState(fallbackAgent.currentModelId || '');
+  const [soulInput, setSoulInput] = useState('');
+  const [loadedSoul, setLoadedSoul] = useState('');
+  const [sopInput, setSopInput] = useState('');
+  const [loadedSop, setLoadedSop] = useState<string[]>([]);
+  const [isLoadingDetail, setIsLoadingDetail] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setAgentName(fallbackAgent.name);
+    setAgentRole(fallbackAgent.role);
+    setSelectedModelId(fallbackAgent.currentModelId || models[0]?.id || '');
+    setLoadedModelId(fallbackAgent.currentModelId || '');
+    setSoulInput('');
+    setLoadedSoul('');
+    setSopInput('');
+    setLoadedSop([]);
+  }, [fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || !fallbackAgent.id) {
+      return;
+    }
+
+    let active = true;
+    const loadDetail = async () => {
+      setIsLoadingDetail(true);
+      try {
+        const detail = await agentsApi.get(fallbackAgent.id);
+        if (!active) {
+          return;
+        }
+        const detailSoul = detail.soul?.trim?.() || '';
+        const detailSop = Array.isArray(detail.sop) ? detail.sop.map((step) => String(step).trim()).filter(Boolean) : [];
+        setAgentName(detail.name || fallbackAgent.name);
+        setAgentRole(detail.role || fallbackAgent.role);
+        setSelectedModelId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || '');
+        setLoadedModelId(detail.currentModelId || fallbackAgent.currentModelId || '');
+        setSoulInput(detailSoul);
+        setLoadedSoul(detailSoul);
+        setSopInput(detailSop.join('\n'));
+        setLoadedSop(detailSop);
+      } catch (error) {
+        addToast(`加载 Agent 配置失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      } finally {
+        if (active) {
+          setIsLoadingDetail(false);
+        }
+      }
+    };
+
+    void loadDetail();
+    return () => {
+      active = false;
+    };
+  }, [isOpen, fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, addToast]);
+
+  const parseSopInput = () =>
+    sopInput
+      .split('\n')
+      .map((line) => line.replace(/^\d+\.\s*/, '').replace(/^[-*]\s*/, '').trim())
+      .filter(Boolean);
+
+  const isSameStringArray = (left: string[], right: string[]) => {
+    if (left.length !== right.length) {
+      return false;
+    }
+    return left.every((item, index) => item === right[index]);
+  };
+
+  const handleSave = async () => {
+    if (!fallbackAgent.id) {
+      addToast('未选择可配置的 Agent', 'error');
+      return;
+    }
+
+    const nextSoul = soulInput.trim();
+    if (loadedSoul.trim() && !nextSoul) {
+      addToast('SOUL 内容不能为空', 'error');
+      return;
+    }
+
+    const nextSop = parseSopInput();
+    const hasModelChange = Boolean(selectedModelId) && selectedModelId !== loadedModelId;
+    const hasSoulChange = nextSoul !== loadedSoul.trim();
+    const hasSopChange = !isSameStringArray(nextSop, loadedSop);
+
+    if (!hasModelChange && !hasSoulChange && !hasSopChange) {
+      addToast('未检测到配置变更', 'info');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      if (hasModelChange && selectedModelId) {
+        await agentsApi.switchModel(fallbackAgent.id, selectedModelId);
+      }
+      if (hasSoulChange && nextSoul) {
+        await agentsApi.updateSoul(fallbackAgent.id, nextSoul);
+      }
+      if (hasSopChange) {
+        await agentsApi.updateSop(fallbackAgent.id, nextSop);
+      }
+
+      if (onUpdated) {
+        await onUpdated();
+      }
+      addToast('Agent 配置已更新', 'success');
+      onClose();
+    } catch (error) {
+      addToast(`保存失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title={`配置 Agent: ${agent.name}`}>
+    <Modal isOpen={isOpen} onClose={onClose} title={`配置 Agent: ${agentName || fallbackAgent.name}`}>
       <div className="space-y-6">
+        {isLoadingDetail && (
+          <div className="p-3 bg-white/5 border border-border-subtle rounded-xl text-xs text-slate-400">
+            正在加载 Agent 配置...
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-6">
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Agent 名称</label>
-            <input type="text" defaultValue={agent.name} className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+            <input
+              type="text"
+              value={agentName}
+              onChange={(event) => setAgentName(event.target.value)}
+              readOnly
+              className="w-full bg-surface-muted/70 border border-border-subtle rounded-xl px-4 py-3 text-sm text-slate-300 focus:outline-none cursor-not-allowed"
+            />
           </div>
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">核心角色</label>
-            <input type="text" defaultValue={agent.role} className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+            <input
+              type="text"
+              value={agentRole}
+              onChange={(event) => setAgentRole(event.target.value)}
+              readOnly
+              className="w-full bg-surface-muted/70 border border-border-subtle rounded-xl px-4 py-3 text-sm text-slate-300 focus:outline-none cursor-not-allowed"
+            />
           </div>
+        </div>
+        <p className="text-[10px] text-slate-500 -mt-3">名称与角色当前为只读，支持在线修改 SOUL、SOP 和模型。</p>
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">运行模型</label>
+          <select
+            value={selectedModelId}
+            onChange={(event) => setSelectedModelId(event.target.value)}
+            className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+          >
+            <option value="">未选择模型</option>
+            {models.map((model) => (
+              <option key={model.id} value={model.id}>{model.name}</option>
+            ))}
+          </select>
         </div>
         <div className="space-y-2">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">核心身份 (SOUL)</label>
-          <textarea 
-            rows={3} 
+          <textarea
+            rows={4}
             className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-            defaultValue="你是一个细致入微的分析师，视清晰度为生命。你从不主观臆断，总是先行确认。"
+            value={soulInput}
+            onChange={(event) => setSoulInput(event.target.value)}
+            placeholder="输入 Agent 的核心身份描述..."
           />
         </div>
         <div className="space-y-2">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">标准操作程序 (SOP)</label>
-          <div className="space-y-2">
-            {['分析需求', '识别模糊点', '起草卡片'].map((step, i) => (
-              <div key={i} className="flex gap-2">
-                <input type="text" defaultValue={step} className="flex-1 bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-primary/50" />
-                <button className="p-2 text-danger hover:bg-danger/10 rounded-lg transition-colors"><Trash2 size={14} /></button>
-              </div>
-            ))}
-            <button className="w-full py-2 border border-dashed border-border-subtle rounded-xl text-[10px] font-bold text-slate-500 hover:border-primary hover:text-primary transition-all">+ 添加步骤</button>
-          </div>
+          <textarea
+            rows={5}
+            className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+            value={sopInput}
+            onChange={(event) => setSopInput(event.target.value)}
+            placeholder={'每行一步，例如：\n1. 分析需求\n2. 识别模糊点\n3. 输出确认卡'}
+          />
         </div>
-        <button 
-          onClick={() => {
-            addToast("Agent 配置已更新", "success");
-            onClose();
-          }} 
-          className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4"
+        <button
+          onClick={() => void handleSave()}
+          disabled={isSaving || isLoadingDetail}
+          className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4 disabled:opacity-60"
         >
-          保存配置
+          {isSaving ? '保存中...' : '保存配置'}
         </button>
       </div>
     </Modal>
@@ -660,53 +890,157 @@ const TeamTopologyModal = ({ isOpen, onClose }: any) => {
   );
 };
 
-const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
+const DeployAgentModal = ({
+  isOpen,
+  onClose,
+  addToast,
+  onDeployed,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onDeployed?: () => Promise<void> | void;
+}) => {
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [isCustom, setIsCustom] = useState(false);
+  const [customTemplateRaw, setCustomTemplateRaw] = useState('');
+  const [agentName, setAgentName] = useState('');
+  const [selectedProjectId, setSelectedProjectId] = useState('');
+  const [isDeploying, setIsDeploying] = useState(false);
+
   const uniqueRoles = useMemo(() => {
     const seen = new Set<string>();
-    const roles: Array<{ id: string; name: string; desc: string }> = [];
+    const roles: Array<{ id: string; name: string; desc: string; role: string; modelId?: string }> = [];
     agents.forEach((agent) => {
-      const role = agent.role || agent.name;
+      const role = (agent.role || '').trim() || '通用 Agent';
       if (!seen.has(role)) {
         seen.add(role);
         roles.push({
-          id: agent.id,
-          name: agent.name,
-          desc: role,
+          id: `role:${role}`,
+          name: role,
+          desc: `参考 ${agent.name} 的配置`,
+          role,
+          modelId: agent.currentModelId || '',
         });
       }
     });
     return roles.slice(0, 6);
   }, [agents]);
-  
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    setSelectedProjectId(projects[0]?.id || '');
+    setAgentName('');
+    setSelectedTemplate(null);
+    setIsCustom(false);
+    setCustomTemplateRaw('');
+  }, [isOpen]);
+
+  const selectedTemplateConfig = uniqueRoles.find((item) => item.id === selectedTemplate);
+
+  const parseCustomTemplate = () => {
+    const trimmed = customTemplateRaw.trim();
+    if (!trimmed) {
+      return {
+        role: '',
+        soul: '',
+        sop: [] as string[],
+        modelId: '',
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(trimmed) as {
+        role?: unknown;
+        soul?: unknown;
+        sop?: unknown;
+        capabilities?: unknown;
+        modelId?: unknown;
+      };
+      const role = String(parsed.role ?? '').trim();
+      const soul = String(parsed.soul ?? '').trim();
+      const modelId = String(parsed.modelId ?? '').trim();
+      const rawSop = Array.isArray(parsed.sop) ? parsed.sop : Array.isArray(parsed.capabilities) ? parsed.capabilities : [];
+      const sop = rawSop.map((item) => String(item ?? '').trim()).filter(Boolean);
+      return { role, soul, sop, modelId };
+    } catch {
+      return null;
+    }
+  };
+
+  const handleDeploy = async () => {
+    const safeName = agentName.trim();
+    if (!safeName) {
+      addToast('请输入 Agent 名称', 'error');
+      return;
+    }
+
+    const parsedCustom = parseCustomTemplate();
+    if (parsedCustom === null) {
+      addToast('自定义模板 JSON 解析失败，请检查格式', 'error');
+      return;
+    }
+
+    const role = selectedTemplateConfig?.role || parsedCustom.role || 'Custom Agent';
+    const modelId = selectedTemplateConfig?.modelId || parsedCustom.modelId || models[0]?.id || undefined;
+    const soul = parsedCustom.soul || undefined;
+    const sop = parsedCustom.sop.length > 0 ? parsedCustom.sop : undefined;
+
+    setIsDeploying(true);
+    try {
+      await agentsApi.create({
+        name: safeName,
+        role,
+        modelId,
+        soul,
+        sop,
+      });
+
+      if (onDeployed) {
+        await onDeployed();
+      }
+
+      addToast('Agent 部署成功，已加入团队', 'success');
+      if (selectedProjectId) {
+        addToast('当前版本请在项目详情中手动关联 Agent', 'info');
+      }
+      onClose();
+    } catch (error) {
+      addToast(`部署失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsDeploying(false);
+    }
+  };
+
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="部署新 Agent">
       <div className="space-y-6">
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">选择角色模板</h3>
-            <button 
+            <button
               onClick={() => setIsCustom(!isCustom)}
               className="text-[10px] font-bold text-primary hover:underline uppercase tracking-widest"
             >
               {isCustom ? "选择预设" : "自定义模板"}
             </button>
           </div>
-          
+
           {!isCustom ? (
             <div className="grid grid-cols-2 gap-3">
-              {uniqueRoles.length > 0 ? uniqueRoles.map((t) => (
-                <button 
-                  key={t.id}
-                  onClick={() => setSelectedTemplate(t.id)}
+              {uniqueRoles.length > 0 ? uniqueRoles.map((template) => (
+                <button
+                  key={template.id}
+                  onClick={() => setSelectedTemplate(template.id)}
                   className={cn(
                     "p-4 border rounded-2xl text-left transition-all",
-                    selectedTemplate === t.id ? "bg-primary/10 border-primary" : "bg-white/5 border-border-subtle hover:bg-white/10"
+                    selectedTemplate === template.id ? "bg-primary/10 border-primary" : "bg-white/5 border-border-subtle hover:bg-white/10"
                   )}
                 >
-                  <p className={cn("font-bold text-sm", selectedTemplate === t.id ? "text-primary" : "text-white")}>{t.name}</p>
-                  <p className="text-[10px] text-slate-500 mt-1">{t.desc}</p>
+                  <p className={cn("font-bold text-sm", selectedTemplate === template.id ? "text-primary" : "text-white")}>{template.name}</p>
+                  <p className="text-[10px] text-slate-500 mt-1">{template.desc}</p>
                 </button>
               )) : (
                 <p className="col-span-2 text-center text-slate-500 py-8">暂无可用 Agent 角色</p>
@@ -715,15 +1049,20 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
           ) : (
             <div className="space-y-4 p-4 bg-white/5 border border-dashed border-border-subtle rounded-2xl">
               <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">模板定义 (JSON/YAML)</label>
-                <textarea 
-                  rows={4} 
-                  placeholder='{ "role": "Custom", "capabilities": ["..."] }'
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">模板定义 (JSON)</label>
+                <textarea
+                  rows={5}
+                  value={customTemplateRaw}
+                  onChange={(event) => setCustomTemplateRaw(event.target.value)}
+                  placeholder='{ "role": "Reviewer", "soul": "...", "sop": ["步骤1","步骤2"] }'
                   className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
                 />
               </div>
-              <button 
-                onClick={() => { setSelectedTemplate('custom'); setIsCustom(false); }}
+              <button
+                onClick={() => {
+                  setSelectedTemplate('custom');
+                  setIsCustom(false);
+                }}
                 className="w-full py-2 bg-white/10 hover:bg-white/20 rounded-xl text-[10px] font-bold text-white transition-all uppercase tracking-widest"
               >
                 应用自定义模板
@@ -736,22 +1075,31 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 pt-4 border-t border-border-subtle">
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Agent 命名</label>
-              <input type="text" placeholder="例如: Aegis-Alpha" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+              <input
+                type="text"
+                value={agentName}
+                onChange={(event) => setAgentName(event.target.value)}
+                placeholder="例如: Aegis-Alpha"
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
             </div>
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配项目</label>
-              <select className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none">
-                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              <select
+                value={selectedProjectId}
+                onChange={(event) => setSelectedProjectId(event.target.value)}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+              >
+                <option value="">暂不分配项目</option>
+                {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
             </div>
-            <button 
-              onClick={() => {
-                addToast("Agent 部署成功，正在初始化环境...", "success");
-                onClose();
-              }} 
-              className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4"
+            <button
+              onClick={() => void handleDeploy()}
+              disabled={isDeploying}
+              className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4 disabled:opacity-60"
             >
-              立即部署
+              {isDeploying ? '部署中...' : '立即部署'}
             </button>
           </motion.div>
         )}
@@ -886,6 +1234,30 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
   const handleClose = () => {
     resetState();
     onClose();
+  };
+
+  const handleImportProjectFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      const raw = await file.text();
+      const normalized = raw.trim();
+      if (!normalized) {
+        addToast('文件内容为空，请重新选择', 'error');
+        return;
+      }
+      const nextInput = normalized.slice(0, 6000);
+      setRawInput(nextInput);
+      setIsImporting(false);
+      setStep('input');
+      addToast(`已导入文件: ${file.name}`, 'success');
+    } catch (error) {
+      addToast(`文件读取失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      event.target.value = '';
+    }
   };
 
   const handleToggleManualAgent = (agentId: string) => {
@@ -1205,7 +1577,13 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
               <p className="text-sm font-bold text-white">点击或拖拽文件到此处</p>
               <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">支持 .json, .yaml, .pdf 项目文档</p>
             </div>
-            <input type="file" className="hidden" id="project-file" onChange={() => addToast('文件已解析', 'success')} />
+            <input
+              type="file"
+              className="hidden"
+              id="project-file"
+              accept=".txt,.md,.json,.yaml,.yml,.csv,.log,.xml"
+              onChange={(event) => void handleImportProjectFile(event)}
+            />
             <label htmlFor="project-file" className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-[10px] font-bold text-white transition-all cursor-pointer">选择文件</label>
           </div>
         )}
@@ -1217,6 +1595,7 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
 const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
   const [selectedDecision, setSelectedDecision] = useState<any>(null);
   const [viewMode, setViewMode] = useState<'list' | 'details' | 'plan'>('list');
+  const [isApproving, setIsApproving] = useState(false);
   const formatDecisionTime = (date: string | Date | null | undefined) => {
     if (!date) {
       return new Date().toLocaleTimeString('zh-CN', {
@@ -1307,6 +1686,51 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
     onClose();
   };
 
+  const handleApprovePlan = async () => {
+    if (!selectedDecision) {
+      return;
+    }
+
+    const agentIdByName = new Map(agents.map((agent) => [agent.name, agent.id]));
+    let targetAgentIds: string[] = [];
+
+    if (String(selectedDecision.id).startsWith('blocked-')) {
+      const taskId = String(selectedDecision.id).replace('blocked-', '');
+      const task = tasks.find((item) => String(item.id) === taskId);
+      const relatedAgentId = task?.agent ? agentIdByName.get(task.agent) : undefined;
+      if (relatedAgentId) {
+        targetAgentIds.push(relatedAgentId);
+      }
+    } else if (String(selectedDecision.id).startsWith('overload-')) {
+      const overloadAgentId = String(selectedDecision.id).replace('overload-', '');
+      if (agents.some((agent) => agent.id === overloadAgentId)) {
+        targetAgentIds.push(overloadAgentId);
+      }
+    }
+
+    if (targetAgentIds.length === 0) {
+      targetAgentIds = agents.slice(0, 2).map((agent) => agent.id);
+    }
+
+    if (targetAgentIds.length === 0) {
+      addToast('未找到可执行决策的 Agent', 'error');
+      return;
+    }
+
+    setIsApproving(true);
+    try {
+      const plan = Array.isArray(selectedDecision.plan) ? selectedDecision.plan.join('；') : '';
+      const command = `系统决策已批准：${selectedDecision.title}。请按计划执行：${plan || '请立即处理并回传结果。'}`;
+      await sendBatchAgentMessage(targetAgentIds, command);
+      addToast('计划已批准并下发执行', 'success');
+      handleClose();
+    } catch (error) {
+      addToast(`执行下发失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
   return (
     <Modal 
       isOpen={isOpen} 
@@ -1359,7 +1783,13 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
           </div>
           <div className="flex gap-4 pt-4">
             <button onClick={() => setViewMode('details')} className="flex-1 py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all">查看判定详情</button>
-            <button onClick={() => { addToast("计划已批准并开始执行", "success"); handleClose(); }} className="flex-1 py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all">批准并执行</button>
+            <button
+              onClick={() => void handleApprovePlan()}
+              disabled={isApproving}
+              className="flex-1 py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-60"
+            >
+              {isApproving ? '下发中...' : '批准并执行'}
+            </button>
           </div>
         </div>
       ) : (
@@ -1743,7 +2173,18 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
   );
 };
 
-const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToast: any }) => {
+const ProjectRoom = ({
+  projectId,
+  addToast,
+  onNavigate,
+  onRefreshData,
+}: {
+  projectId: string | null;
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onNavigate?: (tab: string, id?: string) => void;
+  onRefreshData?: () => Promise<void>;
+}) => {
+  const [isIntervening, setIsIntervening] = useState(false);
   const project = useMemo(() => 
     projects.find(p => p.id === projectId) || projects[0] || {
       id: '',
@@ -1756,6 +2197,25 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
       agents: [],
     }, 
   [projectId, projects]);
+  const projectTasks = useMemo(
+    () =>
+      tasks.filter((task) => {
+        const taskProjectId = (task as Task & { projectId?: string }).projectId;
+        if (project.id && taskProjectId) {
+          return taskProjectId === project.id;
+        }
+        return Boolean(project.id) && String(task.id).startsWith(`${project.id}:`);
+      }),
+    [project.id, tasks],
+  );
+  const projectAgents = useMemo(() => {
+    if (project.agents.length > 0) {
+      return agents.filter((agent) => project.agents.includes(agent.id));
+    }
+
+    const linkedAgentNames = new Set(projectTasks.map((task) => task.agent));
+    return agents.filter((agent) => linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name));
+  }, [project.agents, projectTasks, agents]);
   const formatProjectLogTime = (date: string | Date | null | undefined) => {
     if (!date) {
       return new Date().toLocaleTimeString('zh-CN', {
@@ -1793,7 +2253,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
       timestamp: number;
     }> = [];
 
-    tasks
+    projectTasks
       .filter((task) => task.status === 'Blocked')
       .slice(0, 2)
       .forEach((task) => {
@@ -1808,7 +2268,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
         });
       });
 
-    tasks
+    projectTasks
       .filter((task) => task.status === 'In Progress')
       .slice(0, 3)
       .forEach((task) => {
@@ -1824,7 +2284,69 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
       });
 
     return logs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 6);
-  }, [tasks, agents]);
+  }, [projectTasks, agents]);
+  const projectBlockedCount = projectTasks.filter((task) => task.status === 'Blocked').length;
+  const projectDeliverables = useMemo(() => {
+    const mapped = projectTasks.slice(0, 6).map((task) => {
+      const type =
+        task.status === 'Completed'
+          ? '交付文档'
+          : task.status === 'Blocked'
+            ? '阻塞项'
+            : '进行项';
+      const size = `${Math.max(1, Math.round((task.title.length + (task.progress || 0)) / 6))}kb`;
+      return {
+        name: `${task.title}${task.status === 'Completed' ? '.md' : ''}`,
+        type,
+        size,
+      };
+    });
+    return mapped.length > 0
+      ? mapped
+      : [{ name: '暂无交付物', type: '等待任务推进', size: '-' }];
+  }, [projectTasks]);
+
+  const handleOpenTimeline = async () => {
+    if (!project.id) {
+      addToast('当前没有可查看的项目时间线', 'error');
+      return;
+    }
+    try {
+      const logs = await auditApi.listSystem(80);
+      const relatedCount = logs.filter((log) =>
+        log.resourceId === project.id
+        || log.summary.includes(project.name)
+        || (log.detail || '').includes(project.name),
+      ).length;
+      addToast(`已同步项目时间线，关联记录 ${relatedCount} 条`, 'success');
+    } catch {
+      addToast('时间线同步失败，已跳转审计页查看最新记录', 'info');
+    } finally {
+      onNavigate?.('audit');
+    }
+  };
+
+  const handleIntervene = async () => {
+    if (!project.id) {
+      addToast('当前没有可干预的项目', 'error');
+      return;
+    }
+    setIsIntervening(true);
+    try {
+      const command = projectBlockedCount > 0
+        ? `紧急干预：项目 ${project.name} 当前有 ${projectBlockedCount} 个阻塞任务，请优先解除阻塞并同步最新 ETA。`
+        : `紧急干预：项目 ${project.name} 请立即执行风险排查并提交状态报告。`;
+      await projectsApi.intervene(project.id, command);
+      if (onRefreshData) {
+        await onRefreshData();
+      }
+      addToast('紧急干预已触发，系统正在同步项目状态', 'success');
+    } catch (error) {
+      addToast(`紧急干预失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsIntervening(false);
+    }
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -1839,25 +2361,26 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               <Badge variant="primary">阶段: {project.phase}</Badge>
               <span className="flex items-center gap-1.5 text-[10px] text-warning font-bold">
                 <Zap size={10} />
-                风险: 等待设计确认
+                风险: {projectBlockedCount > 0 ? `${projectBlockedCount} 个任务阻塞` : '无阻塞风险'}
               </span>
             </div>
           </div>
         </div>
         <div className="flex gap-3">
           <button 
-            onClick={() => addToast("正在加载项目时间线...", "info")}
+            onClick={() => void handleOpenTimeline()}
             className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-border-subtle rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
           >
             <History size={16} />
             时间线
           </button>
           <button 
-            onClick={() => addToast("已触发紧急干预流程，正在通知相关人员...", "error")}
-            className="px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
+            onClick={() => void handleIntervene()}
+            disabled={isIntervening}
+            className="px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 disabled:opacity-60"
           >
             <ShieldCheck size={16} />
-            紧急干预
+            {isIntervening ? '干预中...' : '紧急干预'}
           </button>
         </div>
       </header>
@@ -1881,7 +2404,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               活跃任务
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {tasks.map((task, i) => (
+              {projectTasks.map((task, i) => (
                 <div key={i} className="bg-surface-soft border border-border-subtle p-5 rounded-2xl space-y-4 hover:border-white/20 transition-all group">
                   <div className="flex justify-between items-start">
                     <div>
@@ -1915,6 +2438,11 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
                   </div>
                 </div>
               ))}
+              {projectTasks.length === 0 && (
+                <div className="col-span-full bg-surface-soft border border-border-subtle p-6 rounded-2xl text-center text-sm text-slate-500">
+                  当前项目暂无任务数据
+                </div>
+              )}
             </div>
           </section>
 
@@ -1954,12 +2482,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               交付物
             </h3>
             <div className="space-y-2">
-              {[
-                { name: 'README.md', type: 'Markdown', size: '2.4kb' },
-                { name: 'requirements.pdf', type: 'PDF', size: '1.2mb' },
-                { name: 'prototype_v1', type: '设计稿', size: 'Figma' },
-                { name: 'architecture.md', type: 'Markdown', size: '5.1kb' }
-              ].map((file, i) => (
+              {projectDeliverables.map((file, i) => (
                 <div key={i} className="flex items-center justify-between p-3 bg-white/5 rounded-xl border border-border-subtle hover:bg-white/10 transition-colors cursor-pointer group">
                   <div className="flex items-center gap-3">
                     <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-slate-500 group-hover:text-primary transition-colors">
@@ -1982,7 +2505,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               项目 Agent
             </h3>
             <div className="space-y-3">
-              {agents.slice(0, 4).map((agent, i) => (
+              {projectAgents.slice(0, 4).map((agent, i) => (
                 <div key={i} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors cursor-pointer">
                   <div className="w-8 h-8 rounded-full bg-accent/20 flex items-center justify-center text-accent text-[10px] font-bold border border-accent/20">
                     {agent.name.charAt(0).toUpperCase()}
@@ -1994,6 +2517,9 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
                   <div className="w-1.5 h-1.5 rounded-full bg-primary" />
                 </div>
               ))}
+              {projectAgents.length === 0 && (
+                <p className="text-[11px] text-slate-500 text-center py-2">暂无项目成员数据</p>
+              )}
               <button className="w-full py-2 bg-white/5 border border-dashed border-border-subtle rounded-xl text-[10px] font-bold text-slate-500 hover:text-white hover:border-white/20 transition-all flex items-center justify-center gap-2">
                 <Plus size={12} />
                 指派 Agent
@@ -2008,19 +2534,46 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
 
 const TokenUsageTrendChart = ({ limit }: { limit: number }) => {
   const data = useMemo(() => {
-    const hours = Array.from({ length: 24 }, (_, i) => {
-      const hour = (new Date().getHours() - (23 - i) + 24) % 24;
-      // Generate some realistic-looking usage data
-      const baseUsage = (limit / 24) * 0.4;
-      const randomness = Math.random() * (limit / 24) * 0.8;
-      const peakFactor = (hour > 9 && hour < 18) ? 1.5 : 0.5; // Business hours peak
+    const now = Date.now();
+    const buckets = Array.from({ length: 24 }, (_, index) => {
+      const hour = (new Date().getHours() - (23 - index) + 24) % 24;
       return {
         time: `${hour}:00`,
-        usage: Math.floor((baseUsage + randomness) * peakFactor),
+        usage: 0,
       };
     });
-    return hours;
-  }, [limit]);
+
+    sessions.forEach((session) => {
+      const startedAt = new Date(session.startTime).getTime();
+      if (!Number.isFinite(startedAt)) {
+        return;
+      }
+      const diffHours = Math.floor((now - startedAt) / 3600000);
+      if (diffHours < 0 || diffHours > 23) {
+        return;
+      }
+      const bucketIndex = 23 - diffHours;
+      buckets[bucketIndex].usage += session.tokens || 0;
+    });
+
+    if (buckets.every((bucket) => bucket.usage === 0)) {
+      const base = Math.floor(
+        Math.max(
+          agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0),
+          1,
+        ) / 24,
+      );
+      return buckets.map((bucket, index) => ({
+        ...bucket,
+        usage: Math.min(limit, Math.max(0, Math.floor(base * (index >= 8 && index <= 17 ? 1.4 : 0.7)))),
+      }));
+    }
+
+    return buckets.map((bucket) => ({
+      ...bucket,
+      usage: Math.min(limit, bucket.usage),
+    }));
+  }, [limit, sessions, agents]);
 
   return (
     <div className="h-[100px] w-full mt-2">
@@ -2067,12 +2620,28 @@ const TokenUsageTrendChart = ({ limit }: { limit: number }) => {
 
 const TokenThroughputChart = () => {
   const data = useMemo(() => {
-    return Array.from({ length: 20 }, (_, i) => ({
-      time: i,
-      input: Math.floor(Math.random() * 5000 + 2000),
-      output: Math.floor(Math.random() * 8000 + 4000),
-    }));
-  }, []);
+    const source = sessions
+      .slice()
+      .sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime())
+      .slice(-20);
+
+    if (source.length === 0) {
+      return Array.from({ length: 20 }, (_, i) => ({
+        time: i,
+        input: 0,
+        output: 0,
+      }));
+    }
+
+    return source.map((session, index) => {
+      const total = Math.max(session.tokens || 0, 0);
+      return {
+        time: index,
+        input: Math.floor(total * 0.45),
+        output: Math.floor(total * 0.55),
+      };
+    });
+  }, [sessions]);
 
   return (
     <div className="h-full w-full">
@@ -2113,6 +2682,16 @@ type CommandUnderstandingCard = {
   warning?: string;
 };
 
+function parseSopSteps(content: string): string[] {
+  return content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => Boolean(line))
+    .map((line) => line.replace(/^[-*]\s*/, '').replace(/^\d+[\.)]\s*/, '').trim())
+    .filter((line) => line.length > 0)
+    .slice(0, 8);
+}
+
 const AgentCommander = ({
   agentId,
   addToast,
@@ -2145,11 +2724,65 @@ const AgentCommander = ({
   const [isUnderstanding, setIsUnderstanding] = useState(false);
   const [confirmCard, setConfirmCard] = useState<CommandUnderstandingCard | null>(null);
   const [isSendingCommand, setIsSendingCommand] = useState(false);
+  const [agentSoul, setAgentSoul] = useState('');
+  const [agentSopSteps, setAgentSopSteps] = useState<string[]>([]);
+  const [agentMemoryTags, setAgentMemoryTags] = useState<string[]>([]);
+  const [isLoadingAgentProfile, setIsLoadingAgentProfile] = useState(false);
   const agentSessions = sessions.filter((session) => session.agentId === activeAgent.id);
 
   useEffect(() => {
     setTokenLimit(activeAgent.tokenLimit || 100000);
+    setDailyUsage(activeAgent.tokensUsed || 0);
     setCurrentModelId(activeAgent.currentModelId || models[0]?.id || '');
+  }, [activeAgent.id]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadAgentProfile = async () => {
+      if (!activeAgent.id) {
+        setAgentSoul('');
+        setAgentSopSteps([]);
+        setAgentMemoryTags([]);
+        return;
+      }
+
+      setIsLoadingAgentProfile(true);
+      try {
+        const detail = await fetchOpenClawAgentDetail(activeAgent.id);
+        if (!active) {
+          return;
+        }
+
+        const soulContent = detail.soul?.content?.trim() || '';
+        const sopContent = detail.sop?.content?.trim() || '';
+        const memoryTags = (detail.memoryEntries || [])
+          .slice(0, 8)
+          .map((entry) => entry.summary?.trim())
+          .filter((item): item is string => Boolean(item));
+
+        setAgentSoul(soulContent);
+        setAgentSopSteps(parseSopSteps(sopContent));
+        setAgentMemoryTags(memoryTags);
+      } catch {
+        if (!active) {
+          return;
+        }
+        setAgentSoul('');
+        setAgentSopSteps([]);
+        setAgentMemoryTags([]);
+      } finally {
+        if (active) {
+          setIsLoadingAgentProfile(false);
+        }
+      }
+    };
+
+    void loadAgentProfile();
+
+    return () => {
+      active = false;
+    };
   }, [activeAgent.id]);
 
   const buildCommandUnderstanding = (input: string): CommandUnderstandingCard => {
@@ -2209,10 +2842,8 @@ const AgentCommander = ({
       return;
     }
     setIsUnderstanding(true);
-    setTimeout(() => {
-      setConfirmCard(buildCommandUnderstanding(commandInput));
-      setIsUnderstanding(false);
-    }, 550);
+    setConfirmCard(buildCommandUnderstanding(commandInput));
+    setIsUnderstanding(false);
   };
 
   const handleConfirmExecute = async () => {
@@ -2235,6 +2866,71 @@ const AgentCommander = ({
       setIsSendingCommand(false);
     }
   };
+  const toTimestamp = (value?: string) => {
+    if (!value) {
+      return Date.now();
+    }
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : Date.now();
+  };
+  const linkedTasks = useMemo(
+    () =>
+      tasks.filter((task) => {
+        const taskAgent = String(task.agent || '').trim();
+        return taskAgent === activeAgent.id || taskAgent === activeAgent.name;
+      }),
+    [tasks, activeAgent.id, activeAgent.name],
+  );
+  const blockedLinkedTasks = linkedTasks.filter((task) => task.status === 'Blocked').slice(0, 3);
+  const inProgressLinkedTasks = linkedTasks.filter((task) => task.status === 'In Progress').slice(0, 4);
+  const commanderEvents = useMemo(() => {
+    const events: Array<{
+      type: 'system' | 'assistant';
+      title: string;
+      content: string;
+      timestamp: number;
+    }> = [];
+    if (agentSoul) {
+      events.push({
+        type: 'system',
+        title: '上下文加载',
+        content: 'SOUL 与 SOP 文档已同步完成，可执行最新指令。',
+        timestamp: Date.now() - 90 * 1000,
+      });
+    }
+
+    inProgressLinkedTasks.forEach((task) => {
+      const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
+      events.push({
+        type: 'assistant',
+        title: '执行中',
+        content: `正在推进任务：${task.title}`,
+        timestamp: toTimestamp(taskRecord.updatedAt || taskRecord.createdAt),
+      });
+    });
+
+    blockedLinkedTasks.forEach((task) => {
+      const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
+      events.push({
+        type: 'system',
+        title: '阻塞告警',
+        content: `任务“${task.title}”处于阻塞状态，等待处理。`,
+        timestamp: toTimestamp(taskRecord.updatedAt || taskRecord.createdAt),
+      });
+    });
+
+    return events
+      .sort((a, b) => b.timestamp - a.timestamp)
+      .slice(0, 6);
+  }, [agentSoul, inProgressLinkedTasks, blockedLinkedTasks]);
+  const commanderPlan = (
+    inProgressLinkedTasks.length > 0
+      ? inProgressLinkedTasks.map((task) => `推进任务：${task.title}`)
+      : linkedTasks.slice(0, 4).map((task) => `跟进任务：${task.title}`)
+  ).slice(0, 4);
+  const commanderRisks = blockedLinkedTasks.length > 0
+    ? blockedLinkedTasks.map((task) => `任务阻塞：${task.title}`)
+    : ['当前未发现阻塞风险'];
 
   return (
     <div className="h-full flex flex-col">
@@ -2340,7 +3036,9 @@ const AgentCommander = ({
               <button className="text-[10px] text-primary hover:underline">编辑</button>
             </div>
             <div className="bg-surface-soft border border-border-subtle rounded-xl p-4 font-mono text-xs text-slate-300 leading-relaxed relative group">
-              “你是一个细致入微的分析师，视清晰度为生命。你从不主观臆断，总是先行确认。你的目标是架起人类意图与技术执行之间的桥梁。”
+              {isLoadingAgentProfile
+                ? '正在加载 SOUL 文档...'
+                : agentSoul || '当前 Agent 暂无 SOUL 文档。'}
               <div className="absolute inset-0 bg-primary/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
             </div>
           </section>
@@ -2354,14 +3052,9 @@ const AgentCommander = ({
               <button className="text-[10px] text-primary hover:underline">编辑</button>
             </div>
             <div className="space-y-2">
-              {[
-                '1. 分析原始需求',
-                '2. 识别模糊点',
-                '3. 起草理解卡片',
-                '4. 等待确认'
-              ].map((step, i) => (
+              {(agentSopSteps.length > 0 ? agentSopSteps : ['当前 Agent 暂无 SOP 步骤']).map((step, i) => (
                 <div key={i} className="px-3 py-2 bg-white/5 border border-border-subtle rounded-lg text-[10px] text-slate-400">
-                  {step}
+                  {i + 1}. {step}
                 </div>
               ))}
             </div>
@@ -2373,7 +3066,7 @@ const AgentCommander = ({
               近期记忆
             </h3>
             <div className="flex flex-wrap gap-2">
-              {['RBAC 规范', 'SaaS 控制面板', '用户反馈 v2', 'API 限制', 'OAuth 流程', 'Prisma Schema'].map((tag, i) => (
+              {(agentMemoryTags.length > 0 ? agentMemoryTags : ['暂无长期记忆']).map((tag, i) => (
                 <span key={i} className="px-2 py-1 rounded-md bg-white/5 border border-border-subtle text-[10px] text-slate-400 hover:text-white hover:border-white/20 transition-colors cursor-pointer">
                   {tag}
                 </span>
@@ -2465,88 +3158,105 @@ const AgentCommander = ({
 
             <div className="h-px bg-border-subtle" />
 
-            <div className="flex gap-4">
-              <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-slate-500 shrink-0">
-                <History size={16} />
+            {commanderEvents.length === 0 && (
+              <div className="p-4 border border-border-subtle rounded-2xl bg-white/5 text-xs text-slate-500">
+                暂无近期执行事件，等待新任务指令。
               </div>
-              <div className="space-y-1">
-                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">04:43:15 - 系统初始化</p>
-                <p className="text-sm text-slate-400 italic">Agent 已加载 OpenClaw 工作区上下文。正在加载 SOUL 和 SOP...</p>
-              </div>
-            </div>
-
-            <div className="flex gap-4">
-              <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center text-accent shrink-0 border border-accent/20">
-                <BrainCircuit size={16} />
-              </div>
-              <div className="space-y-3 max-w-3xl">
-                <p className="text-[10px] text-accent font-bold uppercase tracking-wider">04:45:22 - 分析完成</p>
-                <div className="bg-surface-muted border border-border-subtle p-6 rounded-2xl rounded-tl-none space-y-5 shadow-2xl relative overflow-hidden group">
-                  <div className="absolute top-0 left-0 w-1 h-full bg-accent opacity-50" />
-                  <p className="text-sm leading-relaxed text-slate-200">
-                    我已经审查了项目 <span className="text-primary font-bold">“SaaS 管理工作台演示”</span>。
-                    目前的瓶颈是缺乏清晰的 RBAC（基于角色的访问控制）规范。我建议在继续实施之前先起草一份正式规范。
+            )}
+            {commanderEvents.map((event, index) => (
+              <div key={`${event.title}-${index}`} className="flex gap-4">
+                <div className={cn(
+                  "w-8 h-8 rounded-lg flex items-center justify-center shrink-0 border",
+                  event.type === 'assistant'
+                    ? "bg-accent/20 text-accent border-accent/20"
+                    : "bg-white/5 text-slate-500 border-border-subtle",
+                )}>
+                  {event.type === 'assistant' ? <BrainCircuit size={16} /> : <History size={16} />}
+                </div>
+                <div className="space-y-1">
+                  <p className={cn(
+                    "text-[10px] font-bold uppercase tracking-wider",
+                    event.type === 'assistant' ? 'text-accent' : 'text-slate-500',
+                  )}>
+                    {new Date(event.timestamp).toLocaleTimeString('zh-CN')} - {event.title}
                   </p>
-                  
-                  {/* Understanding Card */}
-                  <div className="bg-warning/5 border border-warning/20 rounded-2xl p-5 space-y-4 relative">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2 text-warning">
-                        <Zap size={14} />
-                        <span className="text-[10px] font-bold uppercase tracking-widest">需要理解确认</span>
-                      </div>
-                      <Badge variant="warning">需要行动</Badge>
+                  <p className="text-sm text-slate-400 italic">{event.content}</p>
+                </div>
+              </div>
+            ))}
+
+            <div className="bg-surface-muted border border-border-subtle p-6 rounded-2xl space-y-5 shadow-2xl relative overflow-hidden group max-w-3xl">
+              <div className="absolute top-0 left-0 w-1 h-full bg-accent opacity-50" />
+              <p className="text-sm leading-relaxed text-slate-200">
+                我已同步 <span className="text-primary font-bold">{activeAgent.name}</span> 的最新任务上下文。
+                当前执行焦点是 {inProgressLinkedTasks[0]?.title || linkedTasks[0]?.title || '等待新任务分配'}。
+              </p>
+              <div className="bg-warning/5 border border-warning/20 rounded-2xl p-5 space-y-4 relative">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 text-warning">
+                    <Zap size={14} />
+                    <span className="text-[10px] font-bold uppercase tracking-widest">执行建议确认</span>
+                  </div>
+                  <Badge variant={blockedLinkedTasks.length > 0 ? 'warning' : 'primary'}>
+                    {blockedLinkedTasks.length > 0 ? '需要行动' : '可继续推进'}
+                  </Badge>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">提议目标</p>
+                      <p className="text-xs text-white mt-1 font-medium">
+                        优先推进 {inProgressLinkedTasks[0]?.title || '当前主任务'}，并同步执行状态。
+                      </p>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="space-y-3">
-                        <div>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">提议目标</p>
-                          <p className="text-xs text-white mt-1 font-medium">为 Aegis OS 工作台定义一个全面的 RBAC 系统。</p>
-                        </div>
-                        <div>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">执行计划</p>
-                          <ul className="mt-2 space-y-2">
-                            {[
-                              '识别核心角色（管理员、经理、用户）',
-                              '为每个角色映射权限',
-                              '起草 architecture.md 更新',
-                              '请求负责人审查'
-                            ].map((step, i) => (
-                              <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
-                                <div className="w-1.5 h-1.5 rounded-full bg-primary mt-1.5 shrink-0" />
-                                {step}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      </div>
-                      <div className="space-y-3">
-                        <div>
-                          <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">识别风险</p>
-                          <p className="text-xs text-danger mt-1">• 可能与现有的认证中间件冲突</p>
-                          <p className="text-xs text-danger mt-0.5">• 多租户范围划定的复杂性</p>
-                        </div>
-                        <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
-                          <p className="text-[10px] text-slate-500 font-bold uppercase">预计工作量</p>
-                          <p className="text-xs text-white mt-1">2-3 小时的分析与起草</p>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex gap-3 pt-2">
-                      <button 
-                        onClick={handleConfirmAction}
-                        className="flex-1 py-2.5 bg-warning text-surface text-xs font-bold rounded-xl shadow-lg shadow-warning/20 hover:bg-warning/90 transition-all active:scale-95 uppercase tracking-wider"
-                      >
-                        确认并继续
-                      </button>
-                      <button 
-                        onClick={() => addToast("正在加载执行计划详情...", "info")}
-                        className="px-6 py-2.5 bg-white/5 border border-border-subtle text-xs font-bold rounded-xl hover:bg-white/10 transition-all hover:border-white/20 uppercase tracking-wider text-slate-400"
-                      >
-                        修改计划
-                      </button>
+                    <div>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">执行计划</p>
+                      <ul className="mt-2 space-y-2">
+                        {(commanderPlan.length > 0 ? commanderPlan : ['梳理任务优先级', '更新进度']).map((step, i) => (
+                          <li key={i} className="text-xs text-slate-300 flex items-start gap-2">
+                            <div className="w-1.5 h-1.5 rounded-full bg-primary mt-1.5 shrink-0" />
+                            {step}
+                          </li>
+                        ))}
+                      </ul>
                     </div>
                   </div>
+                  <div className="space-y-3">
+                    <div>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">识别风险</p>
+                      {commanderRisks.map((risk, i) => (
+                        <p key={i} className={cn("text-xs mt-1", blockedLinkedTasks.length > 0 ? 'text-danger' : 'text-primary')}>
+                          • {risk}
+                        </p>
+                      ))}
+                    </div>
+                    <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
+                      <p className="text-[10px] text-slate-500 font-bold uppercase">预计工作量</p>
+                      <p className="text-xs text-white mt-1">
+                        {inProgressLinkedTasks.length > 0 ? `${inProgressLinkedTasks.length} 个任务并行推进` : '等待任务调度'}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button 
+                    onClick={handleConfirmAction}
+                    className="flex-1 py-2.5 bg-warning text-surface text-xs font-bold rounded-xl shadow-lg shadow-warning/20 hover:bg-warning/90 transition-all active:scale-95 uppercase tracking-wider"
+                  >
+                    确认并继续
+                  </button>
+                  <button 
+                    onClick={() => {
+                      setCommandInput((prev) => {
+                        const prefix = prev.trim();
+                        const draft = `${prefix ? `${prefix}\n` : ''}请基于当前风险与执行计划进行调整，重点说明任务优先级与依赖解除顺序。`;
+                        return draft;
+                      });
+                    }}
+                    className="px-6 py-2.5 bg-white/5 border border-border-subtle text-xs font-bold rounded-xl hover:bg-white/10 transition-all hover:border-white/20 uppercase tracking-wider text-slate-400"
+                  >
+                    修改计划
+                  </button>
                 </div>
               </div>
             </div>
@@ -2695,34 +3405,76 @@ const AgentCommander = ({
   );
 };
 
-const SystemOperations = ({ onNavigate, addToast }: any) => {
+const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
   const [optimizationError, setOptimizationError] = useState<string | null>(null);
   const [selectedAction, setSelectedAction] = useState<string | null>(null);
+  const [isApplyingSuggestion, setIsApplyingSuggestion] = useState(false);
+  const [systemHealthSnapshot, setSystemHealthSnapshot] = useState<any | null>(null);
+  const [runtimeSnapshot, setRuntimeSnapshot] = useState<any | null>(null);
+  const [diagnosisSummary, setDiagnosisSummary] = useState<string | null>(null);
   const [optimizationSuggestion, setOptimizationSuggestion] = useState<{
     loadInsights: string[];
     blockerInsights: string[];
     actions: Array<{ id: string; title: string; desc: string }>;
   } | null>(null);
 
-  const handleRefresh = () => {
+  const loadSystemState = useCallback(async () => {
+    const [health, runtime] = await Promise.all([
+      systemApi.getHealth(),
+      systemApi.getRuntime(),
+    ]);
+    setSystemHealthSnapshot(health);
+    setRuntimeSnapshot(runtime);
+  }, []);
+
+  useEffect(() => {
+    void loadSystemState();
+  }, [loadSystemState]);
+
+  const handleRefresh = async () => {
     setIsRefreshing(true);
-    addToast("正在刷新系统状态...", "info");
-    setTimeout(() => {
+    addToast('正在刷新系统状态...', 'info');
+    try {
+      const tasksToRun: Array<Promise<unknown>> = [loadSystemState()];
+      if (onRefreshData) {
+        tasksToRun.push(onRefreshData());
+      }
+      await Promise.all(tasksToRun);
+      addToast('系统状态已更新', 'success');
+    } catch (error) {
+      addToast(`刷新失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
       setIsRefreshing(false);
-      addToast("系统状态已更新", "success");
-    }, 1500);
+    }
   };
 
-  const handleDiagnose = () => {
+  const handleDiagnose = async () => {
     setIsDiagnosing(true);
-    addToast("正在启动全系统诊断...", "info");
-    setTimeout(() => {
+    addToast('正在启动全系统诊断...', 'info');
+    try {
+      const [validation, readiness] = await Promise.all([
+        systemApi.validateRuntime(),
+        systemApi.getReadiness(),
+      ]);
+      await loadSystemState();
+      const readinessOk = Boolean((readiness as { ok?: unknown })?.ok ?? true);
+      const summary = validation.ok
+        ? readinessOk
+          ? '运行配置校验通过，系统已就绪'
+          : '运行配置已通过，但系统就绪检查存在风险'
+        : `运行配置校验失败: ${validation.message}`;
+      setDiagnosisSummary(summary);
+      addToast(summary, validation.ok && readinessOk ? 'success' : 'error');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '诊断失败';
+      setDiagnosisSummary(`诊断失败: ${message}`);
+      addToast(`诊断失败: ${message}`, 'error');
+    } finally {
       setIsDiagnosing(false);
-      addToast("诊断完成: 未发现异常", "success");
-    }, 3000);
+    }
   };
 
   const topConsumers = useMemo(() => 
@@ -2732,19 +3484,114 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
     ? Math.round(agents.reduce((sum, agent) => sum + (agent.load || 0), 0) / agents.length)
     : 0;
   const efficiencyScore = Math.max(0, 100 - avgLoad);
+  const healthServices = (systemHealthSnapshot?.services || []) as Array<{
+    name?: string;
+    status?: string;
+    detail?: string;
+  }>;
+  const serviceByName = new Map(
+    healthServices
+      .filter((service) => service?.name)
+      .map((service) => [String(service.name), service]),
+  );
+  const normalizeServiceStatus = (status?: string): '健康' | '警告' | '离线' => {
+    if (status === 'healthy') return '健康';
+    if (status === 'degraded') return '警告';
+    return '离线';
+  };
+
   const systemStatus = [
-    { label: 'API 网关', status: '健康', latency: '42ms', uptime: '99.9%' },
-    { label: 'OpenClaw 连接器', status: agents.length > 0 ? '健康' : '离线', latency: '12ms', uptime: '100%' },
-    { label: 'Agent 集群', status: agents.length > 0 ? '健康' : '离线', latency: '-', uptime: agents.length > 0 ? '100%' : '0%' },
-    { label: '模型服务', status: models.length > 0 ? '健康' : '离线', latency: '-', uptime: models.length > 0 ? '99.5%' : '0%' },
+    {
+      label: 'API 网关',
+      status: normalizeServiceStatus(serviceByName.get('api')?.status),
+      detail: serviceByName.get('api')?.detail || 'Express API 已运行',
+    },
+    {
+      label: 'OpenClaw 连接器',
+      status: normalizeServiceStatus(serviceByName.get('runtime')?.status),
+      detail: serviceByName.get('runtime')?.detail || '运行状态未知',
+    },
+    {
+      label: 'Agent 集群',
+      status: agents.length > 0 ? '健康' : '离线',
+      detail: `${agents.length} 个 Agent 在线`,
+    },
+    {
+      label: '模型服务',
+      status: models.length > 0 ? '健康' : '离线',
+      detail: `${models.length} 个模型可用`,
+    },
   ];
   const allHealthy = systemStatus.every((service) => service.status === '健康');
+  const readinessChecks = [
+    {
+      label: '环境变量',
+      ok: runtimeSnapshot?.configured !== false,
+    },
+    {
+      label: 'OpenClaw 工作区',
+      ok: projects.length > 0,
+    },
+    {
+      label: '数据库连接',
+      ok: serviceByName.get('database')?.status === 'healthy',
+    },
+    {
+      label: '运行模式校验',
+      ok: runtimeSnapshot?.lastValidationStatus !== 'failed',
+    },
+    {
+      label: 'Agent 集群',
+      ok: agents.length > 0,
+    },
+    {
+      label: '模型资源',
+      ok: models.length > 0,
+    },
+  ];
   const modelCosts = models.slice(0, 4).map((model) => ({
     label: model.name,
     cost: `$${(model.totalTokens * 0.000002).toFixed(2)}`,
     usage: Math.min(100, Math.max(0, Math.round((model.dailyTokens / 200000) * 100))),
     color: model.status === 'Healthy' ? 'bg-primary' : 'bg-warning',
   }));
+
+  const handleExportCostReport = () => {
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      efficiencyScore,
+      averageAgentLoad: avgLoad,
+      runtime: runtimeSnapshot ?? null,
+      systemStatus,
+      readinessChecks,
+      modelCosts,
+      topConsumers: topConsumers.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        model: agent.model,
+        tokensUsed: agent.tokensUsed,
+        tokenLimit: agent.tokenLimit,
+        load: agent.load,
+      })),
+    };
+
+    try {
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `system-cost-report-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      addToast('成本报告已导出', 'success');
+    } catch (error) {
+      addToast(`导出失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
+  };
 
   const buildOptimizationSuggestion = () => {
     const overloadedAgents = agents.filter((agent) => agent.load >= 80);
@@ -2781,27 +3628,80 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
     setSelectedAction(null);
     addToast('正在分析...', 'info');
 
-    setTimeout(() => {
-      try {
-        setOptimizationSuggestion(buildOptimizationSuggestion());
-        addToast('优化建议已生成', 'success');
-      } catch {
-        setOptimizationError('数据加载失败，请重试');
-        addToast('数据加载失败，请重试', 'error');
-      } finally {
-        setIsOptimizing(false);
-      }
-    }, 700);
+    try {
+      setOptimizationSuggestion(buildOptimizationSuggestion());
+      addToast('优化建议已生成', 'success');
+    } catch {
+      setOptimizationError('数据加载失败，请重试');
+      addToast('数据加载失败，请重试', 'error');
+    } finally {
+      setIsOptimizing(false);
+    }
   };
 
-  const handleApplySuggestion = () => {
+  const handleApplySuggestion = async () => {
     if (!optimizationSuggestion || !selectedAction) {
       addToast('请先选择建议操作', 'error');
       return;
     }
     const action = optimizationSuggestion.actions.find((item) => item.id === selectedAction);
-    addToast(`已执行: ${action?.title || '优化策略'}`, 'success');
+    const agentIdByName = new Map(agents.map((agent) => [agent.name, agent.id]));
+    const resolveAgentId = (value: string) => {
+      if (agentIdByName.has(value)) {
+        return agentIdByName.get(value) as string;
+      }
+      return agents.find((agent) => agent.id === value)?.id;
+    };
+
+    let targetAgentIds: string[] = [];
+    let command = '';
+    if (selectedAction === 'rebalance') {
+      const overloaded = agents.filter((agent) => (agent.load || 0) >= 80).map((agent) => agent.id);
+      const idle = agents.filter((agent) => (agent.load || 0) <= 30).map((agent) => agent.name);
+      targetAgentIds = overloaded;
+      command = `系统优化建议：请将当前高负载任务分流给空闲 Agent（${idle.join('、') || '暂无空闲 Agent'}），并反馈新的负载分布。`;
+    } else if (selectedAction === 'priority') {
+      const blockedProjectIds = new Set(projects.filter((project) => project.status === 'Blocked').map((project) => project.id));
+      const projectAgents = projects
+        .filter((project) => blockedProjectIds.has(project.id))
+        .flatMap((project) => project.agents);
+      targetAgentIds = Array.from(new Set(projectAgents)).filter((id) => agents.some((agent) => agent.id === id));
+      command = '系统优化建议：请优先处理阻塞项目相关任务，更新优先级并同步预计完成时间。';
+    } else if (selectedAction === 'notify') {
+      targetAgentIds = Array.from(new Set(
+        tasks
+          .filter((task) => task.status === 'Blocked')
+          .map((task) => resolveAgentId(task.agent || ''))
+          .filter((item): item is string => Boolean(item)),
+      ));
+      command = '系统提醒：你负责的任务当前处于阻塞状态，请尽快反馈阻塞原因和解除计划。';
+    }
+
+    if (targetAgentIds.length === 0) {
+      addToast('未找到可执行该建议的目标 Agent', 'error');
+      return;
+    }
+
+    setIsApplyingSuggestion(true);
+    try {
+      await sendBatchAgentMessage(targetAgentIds, command);
+      if (onRefreshData) {
+        await onRefreshData();
+      }
+      addToast(`已执行: ${action?.title || '优化策略'}`, 'success');
+    } catch (error) {
+      addToast(`执行失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsApplyingSuggestion(false);
+    }
   };
+  const runtimeStartedAt = sessions
+    .map((session) => new Date(session.startTime).getTime())
+    .filter((timestamp) => Number.isFinite(timestamp))
+    .sort((a, b) => a - b)[0];
+  const elapsedMs = runtimeStartedAt ? Math.max(Date.now() - runtimeStartedAt, 0) : 0;
+  const runtimeDays = Math.floor(elapsedMs / (24 * 3600000));
+  const runtimeHours = Math.floor((elapsedMs % (24 * 3600000)) / 3600000);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2837,21 +3737,24 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                 <div key={i} className="flex justify-between items-center p-4 bg-surface-muted rounded-xl border border-border-subtle hover:border-white/20 transition-colors group">
                   <div className="space-y-1">
                     <p className="text-sm font-medium text-white group-hover:text-primary transition-colors">{service.label}</p>
-                    <div className="flex gap-3">
-                      <p className="text-[10px] text-slate-500">延迟: {service.latency}</p>
-                      <p className="text-[10px] text-slate-500">运行时间: {service.uptime}</p>
-                    </div>
+                    <p className="text-[10px] text-slate-500">{service.detail}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <div className={cn(
                       "w-2 h-2 rounded-full",
                       service.status === '健康'
                         ? "bg-primary shadow-[0_0_8px_rgba(16,185,129,0.5)]"
-                        : "bg-warning shadow-[0_0_8px_rgba(245,158,11,0.45)]",
+                        : service.status === '警告'
+                          ? "bg-warning shadow-[0_0_8px_rgba(245,158,11,0.45)]"
+                          : "bg-danger shadow-[0_0_8px_rgba(239,68,68,0.45)]",
                     )} />
                     <span className={cn(
                       "text-xs font-bold",
-                      service.status === '健康' ? "text-primary" : "text-warning",
+                      service.status === '健康'
+                        ? "text-primary"
+                        : service.status === '警告'
+                          ? "text-warning"
+                          : "text-danger",
                     )}>{service.status}</span>
                   </div>
                 </div>
@@ -2894,7 +3797,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                 成本治理
               </h2>
               <button 
-                onClick={() => addToast("正在导出成本报告...", "info")}
+                onClick={handleExportCostReport}
                 className="text-xs text-primary hover:underline"
               >
                 导出报告
@@ -2996,10 +3899,11 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                       ))}
                     </div>
                     <button
-                      onClick={handleApplySuggestion}
-                      className="w-full py-2.5 bg-primary text-surface text-xs font-bold rounded-xl hover:bg-primary/90 transition-colors"
+                      onClick={() => void handleApplySuggestion()}
+                      disabled={isApplyingSuggestion}
+                      className="w-full py-2.5 bg-primary text-surface text-xs font-bold rounded-xl hover:bg-primary/90 transition-colors disabled:opacity-60"
                     >
-                      执行所选建议
+                      {isApplyingSuggestion ? '执行中...' : '执行所选建议'}
                     </button>
                   </div>
                 </div>
@@ -3059,14 +3963,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
               就绪检查
             </h2>
             <div className="space-y-4">
-              {[
-                { label: '环境变量', ok: true },
-                { label: 'OpenClaw 工作区', ok: true },
-                { label: '数据库连接', ok: true },
-                { label: 'Gemini API 密钥', ok: true },
-                { label: 'Nginx 代理', ok: true },
-                { label: 'Prisma 客户端', ok: true },
-              ].map((check, i) => (
+              {readinessChecks.map((check, i) => (
                 <div key={i} className="flex items-center justify-between group">
                   <span className="text-xs text-slate-400 group-hover:text-slate-300 transition-colors">{check.label}</span>
                   {check.ok ? (
@@ -3084,6 +3981,9 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
             >
               {isDiagnosing ? '诊断中...' : '运行全面诊断'}
             </button>
+            {diagnosisSummary && (
+              <p className="text-[10px] text-slate-400 leading-relaxed">{diagnosisSummary}</p>
+            )}
           </div>
 
           <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-4">
@@ -3118,12 +4018,14 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
               运行时间
             </h2>
             <div className="flex items-end gap-2">
-              <span className="text-3xl font-bold text-white">12</span>
+              <span className="text-3xl font-bold text-white">{runtimeDays}</span>
               <span className="text-sm text-slate-500 mb-1">天</span>
-              <span className="text-3xl font-bold text-white ml-2">04</span>
+              <span className="text-3xl font-bold text-white ml-2">{String(runtimeHours).padStart(2, '0')}</span>
               <span className="text-sm text-slate-500 mb-1">小时</span>
             </div>
-            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-bold">自上次部署以来</p>
+            <p className="text-[10px] text-slate-600 uppercase tracking-widest font-bold">
+              {runtimeSnapshot?.mode ? `当前模式: ${runtimeSnapshot.mode}` : '按会话启动时间估算'}
+            </p>
           </div>
         </div>
       </div>
@@ -3132,10 +4034,25 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
 };
 
 const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any) => {
-  const avgProgress = projects.length > 0
-    ? Math.round(projects.reduce((sum, project) => sum + (project.progress || 0), 0) / projects.length)
+  const [statusFilter, setStatusFilter] = useState<'all' | 'development' | 'planning' | 'blocked'>('all');
+
+  const filteredProjects = useMemo(() => {
+    if (statusFilter === 'all') {
+      return projects;
+    }
+    if (statusFilter === 'development') {
+      return projects.filter((project) => project.status === 'Development');
+    }
+    if (statusFilter === 'planning') {
+      return projects.filter((project) => project.status === 'Planning');
+    }
+    return projects.filter((project) => project.status === 'Blocked');
+  }, [statusFilter]);
+
+  const avgProgress = filteredProjects.length > 0
+    ? Math.round(filteredProjects.reduce((sum, project) => sum + (project.progress || 0), 0) / filteredProjects.length)
     : 0;
-  const activeRisks = projects.filter(
+  const activeRisks = filteredProjects.filter(
     (project) => (project.status as string) === 'At Risk' || project.status === 'Blocked',
   ).length;
   const stats = [
@@ -3155,13 +4072,18 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
         <div className="relative">
           <Filter size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <select 
-            onChange={() => addToast("过滤条件已更新", "info")}
+            value={statusFilter}
+            onChange={(event) => {
+              const value = event.target.value as 'all' | 'development' | 'planning' | 'blocked';
+              setStatusFilter(value);
+              addToast(`已筛选 ${value === 'all' ? '所有状态' : value === 'development' ? '开发中' : value === 'planning' ? '规划中' : '已阻塞'} 项目`, 'info');
+            }}
             className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-8 py-2 text-xs font-bold text-slate-300 appearance-none focus:outline-none focus:ring-1 focus:ring-primary/50"
           >
-            <option>所有状态</option>
-            <option>开发中</option>
-            <option>规划中</option>
-            <option>已阻塞</option>
+            <option value="all">所有状态</option>
+            <option value="development">开发中</option>
+            <option value="planning">规划中</option>
+            <option value="blocked">已阻塞</option>
           </select>
           <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
         </div>
@@ -3203,7 +4125,12 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
             </tr>
           </thead>
           <tbody className="divide-y divide-border-subtle">
-            {projects.map((project) => (
+            {filteredProjects.map((project) => {
+              const projectAgentNames = project.agents
+                .map((agentId) => agents.find((agent) => agent.id === agentId)?.name || agentId)
+                .filter(Boolean);
+
+              return (
               <tr key={project.id} className="hover:bg-white/5 transition-colors group cursor-pointer" onClick={() => onSelectProject(project.id)}>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
@@ -3228,16 +4155,23 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
                   </div>
                 </td>
                 <td className="px-6 py-4">
-                  <div className="flex -space-x-2">
-                    {project.agents.slice(0, 3).map((_, i) => (
-                      <div key={i} className="w-6 h-6 rounded-full border-2 border-surface-soft bg-surface-muted flex items-center justify-center text-[8px] font-bold">
-                        A{i+1}
+                  <div className="flex -space-x-2 items-center">
+                    {projectAgentNames.slice(0, 3).map((name, index) => (
+                      <div
+                        key={`${project.id}-agent-${index}`}
+                        title={name}
+                        className="w-6 h-6 rounded-full border-2 border-surface-soft bg-surface-muted flex items-center justify-center text-[8px] font-bold"
+                      >
+                        {name.trim().slice(0, 2).toUpperCase()}
                       </div>
                     ))}
-                    {project.agents.length > 3 && (
+                    {projectAgentNames.length > 3 && (
                       <div className="w-6 h-6 rounded-full border-2 border-surface-soft bg-white/5 flex items-center justify-center text-[8px] font-bold text-slate-500">
-                        +{project.agents.length - 3}
+                        +{projectAgentNames.length - 3}
                       </div>
+                    )}
+                    {projectAgentNames.length === 0 && (
+                      <span className="text-[10px] text-slate-500">未分配</span>
                     )}
                   </div>
                 </td>
@@ -3247,7 +4181,13 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
                   </button>
                 </td>
               </tr>
-            ))}
+              );
+            })}
+            {filteredProjects.length === 0 && (
+              <tr>
+                <td colSpan={6} className="px-6 py-8 text-center text-slate-500">当前筛选条件下暂无项目</td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -3358,7 +4298,21 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
   </div>
 );
 
-const OpenClawWorkspace = ({ addToast }: any) => {
+const OpenClawWorkspace = ({
+  addToast,
+  workspace,
+  onRefreshData,
+  onNavigate,
+}: {
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  workspace?: {
+    rootPath?: string;
+    projects?: Array<{ id: string; name: string; relativePath?: string }>;
+    agents?: Array<{ agentId: string; name: string }>;
+  } | null;
+  onRefreshData?: () => Promise<void>;
+  onNavigate?: (tab: string, id?: string) => void;
+}) => {
   const getRelativeTime = (date: string | Date | null | undefined) => {
     if (!date) {
       return '暂无活动';
@@ -3404,6 +4358,40 @@ const OpenClawWorkspace = ({ addToast }: any) => {
         type: '会话',
       };
     });
+  const workspaceRootPath = workspace?.rootPath || '~/.openclaw/workspace';
+  const workspaceProjects = workspace?.projects || [];
+  const workspaceAgents = workspace?.agents || [];
+  const fileTreeItems = useMemo(() => {
+    const projectItems = (workspaceProjects.length > 0
+      ? workspaceProjects.slice(0, 5).map((project) => ({
+          name: project.relativePath || project.name || project.id,
+          type: 'folder',
+          indent: 1,
+        }))
+      : projects.slice(0, 5).map((project) => ({
+          name: project.name,
+          type: 'folder',
+          indent: 1,
+        })));
+    const agentItems = (workspaceAgents.length > 0
+      ? workspaceAgents.slice(0, 5).map((agent) => ({
+          name: agent.name || agent.agentId,
+          type: 'file',
+          indent: 1,
+        }))
+      : agents.slice(0, 5).map((agent) => ({
+          name: agent.name,
+          type: 'file',
+          indent: 1,
+        })));
+    return [
+      { name: 'workspace', type: 'folder', open: true, indent: 0 },
+      ...projectItems,
+      { name: 'agents', type: 'folder', open: true, indent: 0 },
+      ...agentItems,
+      { name: `tasks-${tasks.length}.json`, type: 'file', indent: 0 },
+    ];
+  }, [workspaceProjects, workspaceAgents, projects, agents, tasks.length]);
 
   return (
   <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -3419,10 +4407,20 @@ const OpenClawWorkspace = ({ addToast }: any) => {
       <div className="flex gap-3">
         <div className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-xs font-bold text-slate-400 flex items-center gap-2">
           <Database size={14} />
-          根目录: ~/.openclaw
+          根目录: {workspaceRootPath}
         </div>
         <button 
-          onClick={() => addToast("正在同步本地文件系统...", "info")}
+          onClick={async () => {
+            addToast('正在同步本地文件系统...', 'info');
+            try {
+              if (onRefreshData) {
+                await onRefreshData();
+              }
+              addToast('工作区同步完成', 'success');
+            } catch (error) {
+              addToast(`同步失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+            }
+          }}
           className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
         >
           <RotateCcw size={16} />
@@ -3439,14 +4437,7 @@ const OpenClawWorkspace = ({ addToast }: any) => {
             文件浏览器
           </h3>
           <div className="space-y-1">
-            {[
-              { name: 'src', type: 'folder', open: true },
-              { name: 'components', type: 'folder', indent: 1 },
-              { name: 'App.tsx', type: 'file', indent: 1 },
-              { name: 'server.ts', type: 'file' },
-              { name: 'package.json', type: 'file' },
-              { name: 'dist', type: 'folder' },
-            ].map((item: any, i) => (
+            {fileTreeItems.map((item: any, i) => (
               <div key={i} className={cn(
                 "flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs cursor-pointer transition-colors",
                 item.indent ? "ml-4" : "",
@@ -3513,7 +4504,15 @@ const OpenClawWorkspace = ({ addToast }: any) => {
         <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
           <div className="px-6 py-4 border-b border-border-subtle flex justify-between items-center">
             <h2 className="font-semibold text-white">近期报告</h2>
-            <button className="text-xs text-primary hover:underline">查看全部</button>
+            <button
+              className="text-xs text-primary hover:underline"
+              onClick={() => {
+                onNavigate?.('audit');
+                addToast('已跳转到审计页查看完整报告', 'info');
+              }}
+            >
+              查看全部
+            </button>
           </div>
           <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
             {recentReports.length === 0 && (
@@ -3540,7 +4539,13 @@ const OpenClawWorkspace = ({ addToast }: any) => {
   );
 };
 
-const RealTimeMonitoring = ({ addToast }: any) => {
+const RealTimeMonitoring = ({
+  addToast,
+  onNavigate,
+}: {
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onNavigate?: (tab: string, id?: string) => void;
+}) => {
   const sessionList = sessions;
   const [activeFilter, setActiveFilter] = useState('all');
 
@@ -3615,7 +4620,15 @@ const RealTimeMonitoring = ({ addToast }: any) => {
       <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
         <div className="px-6 py-4 border-b border-border-subtle flex justify-between items-center bg-white/5">
           <h2 className="font-semibold text-white">会话活动流</h2>
-          <button className="text-xs text-primary hover:underline">查看历史</button>
+          <button
+            className="text-xs text-primary hover:underline"
+            onClick={() => {
+              onNavigate?.('audit');
+              addToast('已跳转到审计追踪查看历史会话记录', 'info');
+            }}
+          >
+            查看历史
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -3827,8 +4840,9 @@ const Dialog = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose
   </AnimatePresence>
 );
 
-const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
+const ModelNexus = ({ addToast, onOpenNewModel, onRefreshData }: any) => {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   
   const stats = useMemo(() => ({
     totalTokens: models.reduce((acc, m) => acc + m.totalTokens, 0),
@@ -3858,10 +4872,26 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
         </div>
         <div className="flex gap-3">
           <button 
-            onClick={() => addToast("正在刷新模型状态...", "info")}
+            onClick={async () => {
+              if (!onRefreshData) {
+                addToast("当前页面未配置刷新能力", "error");
+                return;
+              }
+              setIsRefreshing(true);
+              addToast("正在刷新模型状态...", "info");
+              try {
+                await onRefreshData();
+                addToast("模型状态已刷新", "success");
+              } catch (error) {
+                addToast(`刷新失败: ${error instanceof Error ? error.message : '未知错误'}`, "error");
+              } finally {
+                setIsRefreshing(false);
+              }
+            }}
+            disabled={isRefreshing}
             className="p-2 bg-white/5 border border-border-subtle rounded-xl text-slate-400 hover:text-white transition-colors"
           >
-            <RotateCcw size={20} />
+            <RotateCcw size={20} className={cn(isRefreshing && "animate-spin")} />
           </button>
           <button 
             onClick={() => onOpenNewModel()}
@@ -4000,6 +5030,11 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
 };
 
 const AuditLogs = () => {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [remoteLogs, setRemoteLogs] = useState<SystemAuditLog[]>([]);
+  const [isLoadingRemoteLogs, setIsLoadingRemoteLogs] = useState(false);
+  const [selectedLogJson, setSelectedLogJson] = useState<string | null>(null);
+
   const formatLogTime = (value: string | Date | null | undefined) => {
     if (!value) {
       return '--:--:--';
@@ -4037,7 +5072,7 @@ const AuditLogs = () => {
     return null;
   };
 
-  const auditLogs = useMemo(() => {
+  const localAuditLogs = useMemo(() => {
     const logs: Array<{
       time: string;
       actor: string;
@@ -4045,6 +5080,7 @@ const AuditLogs = () => {
       resource: string;
       status: '成功' | '警告' | '进行中';
       sortValue: number;
+      raw: unknown;
     }> = [];
 
     const recentSessions = sessions
@@ -4071,6 +5107,7 @@ const AuditLogs = () => {
         resource: project?.name || '项目',
         status: session.status === 'active' ? '进行中' : '成功',
         sortValue: Number.isFinite(timestamp) ? timestamp : 0,
+        raw: session,
       });
     });
 
@@ -4087,6 +5124,7 @@ const AuditLogs = () => {
           resource: project.name,
           status: '警告',
           sortValue: Number.isFinite(timestamp) ? timestamp : 0,
+          raw: project,
         });
       });
 
@@ -4103,11 +5141,74 @@ const AuditLogs = () => {
           resource: task.title,
           status: '警告',
           sortValue: Number.isFinite(timestamp) ? timestamp : 0,
+          raw: task,
         });
       });
 
     return logs.sort((a, b) => b.sortValue - a.sortValue).slice(0, 10);
   }, [sessions, agents, projects, tasks]);
+
+  const loadRemoteLogs = useCallback(async () => {
+    setIsLoadingRemoteLogs(true);
+    try {
+      const list = await auditApi.listSystem(100);
+      setRemoteLogs(Array.isArray(list) ? list : []);
+    } catch {
+      setRemoteLogs([]);
+    } finally {
+      setIsLoadingRemoteLogs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadRemoteLogs();
+  }, [loadRemoteLogs]);
+
+  const normalizedRemoteLogs = useMemo(() => {
+    return remoteLogs
+      .map((log) => {
+        const createdAtTs = new Date(log.createdAt).getTime();
+        const summary = log.summary?.trim() || log.action || '系统事件';
+        const resource = log.resourceId
+          ? `${log.resourceType}:${log.resourceId}`
+          : log.resourceType;
+        const content = `${summary} ${log.detail || ''}`.toLowerCase();
+        const status: '成功' | '警告' | '进行中' =
+          /failed|error|blocked|deny|rejected|失败|阻塞|警告/.test(content)
+            ? '警告'
+            : /pending|running|processing|进行中|处理中/.test(content)
+              ? '进行中'
+              : '成功';
+
+        return {
+          time: formatLogTime(log.createdAt),
+          actor: log.actorLabel || log.actorType || '系统',
+          action: summary,
+          resource,
+          status,
+          sortValue: Number.isFinite(createdAtTs) ? createdAtTs : 0,
+          raw: log,
+        };
+      })
+      .sort((a, b) => b.sortValue - a.sortValue)
+      .slice(0, 50);
+  }, [remoteLogs]);
+
+  const mergedAuditLogs = useMemo(() => (
+    normalizedRemoteLogs.length > 0 ? normalizedRemoteLogs : localAuditLogs
+  ), [normalizedRemoteLogs, localAuditLogs]);
+
+  const filteredAuditLogs = useMemo(() => {
+    const keyword = searchTerm.trim().toLowerCase();
+    if (!keyword) {
+      return mergedAuditLogs;
+    }
+    return mergedAuditLogs.filter((log) => {
+      return `${log.time} ${log.actor} ${log.action} ${log.resource} ${log.status}`
+        .toLowerCase()
+        .includes(keyword);
+    });
+  }, [mergedAuditLogs, searchTerm]);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -4122,12 +5223,18 @@ const AuditLogs = () => {
             <input 
               type="text" 
               placeholder="搜索日志..."
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
               className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 w-64"
             />
           </div>
-          <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
+          <button
+            onClick={() => void loadRemoteLogs()}
+            disabled={isLoadingRemoteLogs}
+            className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2 disabled:opacity-60"
+          >
             <BarChart3 size={16} />
-            分析
+            {isLoadingRemoteLogs ? '刷新中...' : '分析'}
           </button>
         </div>
       </header>
@@ -4146,7 +5253,7 @@ const AuditLogs = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle">
-              {auditLogs.length > 0 ? auditLogs.map((log, i) => (
+              {filteredAuditLogs.length > 0 ? filteredAuditLogs.map((log, i) => (
                 <tr key={i} className="hover:bg-white/5 transition-colors group">
                   <td className="px-6 py-4 text-xs text-slate-500 font-mono">{log.time}</td>
                   <td className="px-6 py-4">
@@ -4175,37 +5282,156 @@ const AuditLogs = () => {
                     </div>
                   </td>
                   <td className="px-6 py-4 text-right">
-                    <button className="text-[10px] text-primary hover:underline">查看 JSON</button>
+                    <button
+                      className="text-[10px] text-primary hover:underline"
+                      onClick={() => setSelectedLogJson(JSON.stringify(log.raw ?? log, null, 2))}
+                    >
+                      查看 JSON
+                    </button>
                   </td>
                 </tr>
               )) : (
                 <tr>
-                  <td colSpan={6} className="px-6 py-8 text-center text-slate-500">暂无审计日志</td>
+                  <td colSpan={6} className="px-6 py-8 text-center text-slate-500">
+                    {searchTerm.trim() ? '未匹配到审计日志' : '暂无审计日志'}
+                  </td>
                 </tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
+      <Dialog
+        isOpen={Boolean(selectedLogJson)}
+        onClose={() => setSelectedLogJson(null)}
+        title="审计日志详情"
+      >
+        <pre className="text-xs text-slate-300 bg-surface-muted border border-border-subtle rounded-2xl p-4 whitespace-pre-wrap break-all">
+          {selectedLogJson}
+        </pre>
+      </Dialog>
     </div>
   );
 };
 
-const SettingsPage = ({ addToast }: any) => {
+const SettingsPage = ({
+  addToast,
+  onRuntimeUpdated,
+}: {
+  addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
+  onRuntimeUpdated?: () => Promise<void> | void;
+}) => {
+  const SETTINGS_STORAGE_KEY = 'aegis.settings.v1';
   const [language, setLanguage] = useState('zh');
   const [workspacePath, setWorkspacePath] = useState('~/.openclaw');
   const [isSaving, setIsSaving] = useState(false);
+  const [isRuntimeLoading, setIsRuntimeLoading] = useState(false);
+  const [isRuntimeValidating, setIsRuntimeValidating] = useState(false);
   const [autoSync, setAutoSync] = useState(true);
   const [apiProtection, setApiProtection] = useState(true);
   const [autonomousMode, setAutonomousMode] = useState(false);
   const [usageAlert, setUsageAlert] = useState(true);
+  const [runtimeProvider, setRuntimeProvider] = useState<'scripted' | 'openai-compatible'>('scripted');
+  const [runtimeApiBaseUrl, setRuntimeApiBaseUrl] = useState('');
+  const [runtimeModelName, setRuntimeModelName] = useState('');
+  const [runtimeApiKey, setRuntimeApiKey] = useState('');
+  const [clearRuntimeApiKey, setClearRuntimeApiKey] = useState(false);
+  const [runtimeApiKeyPreview, setRuntimeApiKeyPreview] = useState('');
+  const [runtimeApiKeyConfigured, setRuntimeApiKeyConfigured] = useState(false);
+  const [runtimeValidationHint, setRuntimeValidationHint] = useState('');
 
-  const handleSave = () => {
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
+      if (!raw) {
+        return;
+      }
+      const parsed = JSON.parse(raw) as {
+        language?: string;
+        workspacePath?: string;
+        autoSync?: boolean;
+        apiProtection?: boolean;
+        autonomousMode?: boolean;
+        usageAlert?: boolean;
+      };
+      setLanguage(parsed.language === 'en' ? 'en' : 'zh');
+      setWorkspacePath(parsed.workspacePath?.trim() || '~/.openclaw');
+      setAutoSync(parsed.autoSync !== false);
+      setApiProtection(parsed.apiProtection !== false);
+      setAutonomousMode(Boolean(parsed.autonomousMode));
+      setUsageAlert(parsed.usageAlert !== false);
+    } catch {
+      // ignore invalid local settings payload
+    }
+  }, []);
+
+  const loadRuntimeConfig = useCallback(async () => {
+    setIsRuntimeLoading(true);
+    try {
+      const config = await systemApi.getRuntimeConfig();
+      setRuntimeProvider(config.provider);
+      setRuntimeApiBaseUrl(config.apiBaseUrl || '');
+      setRuntimeModelName(config.modelName || '');
+      setRuntimeApiKey('');
+      setClearRuntimeApiKey(false);
+      setRuntimeApiKeyConfigured(Boolean(config.apiKeyConfigured));
+      setRuntimeApiKeyPreview(config.apiKeyPreview || '');
+      setRuntimeValidationHint(
+        config.lastValidationStatus === 'failed'
+          ? (config.lastValidationError || '最近一次校验失败')
+          : config.lastValidationStatus === 'healthy'
+            ? '最近一次校验通过'
+            : '尚未进行运行配置校验',
+      );
+    } catch (error) {
+      setRuntimeValidationHint(`运行配置加载失败: ${error instanceof Error ? error.message : '未知错误'}`);
+    } finally {
+      setIsRuntimeLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadRuntimeConfig();
+  }, [loadRuntimeConfig]);
+
+  const handleSave = async () => {
     setIsSaving(true);
-    setTimeout(() => {
-      setIsSaving(false);
+    try {
+      localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+        language,
+        workspacePath: workspacePath.trim() || '~/.openclaw',
+        autoSync,
+        apiProtection,
+        autonomousMode,
+        usageAlert,
+      }));
+      const runtimeResult = await systemApi.updateRuntimeConfig({
+        provider: runtimeProvider,
+        apiBaseUrl: runtimeApiBaseUrl.trim(),
+        modelName: runtimeModelName.trim(),
+        apiKey: runtimeApiKey.trim() || undefined,
+        clearApiKey: clearRuntimeApiKey,
+      });
+      setRuntimeApiKey('');
+      setClearRuntimeApiKey(false);
+      setRuntimeApiKeyConfigured(Boolean(runtimeResult.apiKeyConfigured));
+      setRuntimeApiKeyPreview(runtimeResult.apiKeyPreview || '');
+      setRuntimeValidationHint(
+        runtimeResult.lastValidationStatus === 'failed'
+          ? (runtimeResult.lastValidationError || '最近一次校验失败')
+          : runtimeResult.lastValidationStatus === 'healthy'
+            ? '最近一次校验通过'
+            : '运行配置已更新，建议执行校验',
+      );
+      if (onRuntimeUpdated) {
+        await onRuntimeUpdated();
+      }
       addToast("设置已保存", "success");
-    }, 1000);
+    } catch (error) {
+      addToast(`保存失败: ${error instanceof Error ? error.message : '未知错误'}`, "error");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleReset = () => {
@@ -4215,7 +5441,65 @@ const SettingsPage = ({ addToast }: any) => {
     setApiProtection(true);
     setAutonomousMode(false);
     setUsageAlert(true);
+    setRuntimeProvider('scripted');
+    setRuntimeApiBaseUrl('');
+    setRuntimeModelName('');
+    setRuntimeApiKey('');
+    setClearRuntimeApiKey(false);
+    setRuntimeValidationHint('运行配置已重置为默认值，保存后生效。');
+    try {
+      localStorage.removeItem(SETTINGS_STORAGE_KEY);
+    } catch {
+      // ignore storage reset errors
+    }
     addToast("设置已重置", "info");
+  };
+
+  const handleValidateRuntime = async () => {
+    setIsRuntimeValidating(true);
+    try {
+      const result = await systemApi.validateRuntime();
+      setRuntimeValidationHint(result.message || (result.ok ? '校验通过' : '校验失败'));
+      addToast(result.ok ? '运行配置校验通过' : '运行配置校验失败', result.ok ? 'success' : 'error');
+      await loadRuntimeConfig();
+      if (onRuntimeUpdated) {
+        await onRuntimeUpdated();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '校验失败';
+      setRuntimeValidationHint(message);
+      addToast(`运行配置校验失败: ${message}`, 'error');
+    } finally {
+      setIsRuntimeValidating(false);
+    }
+  };
+
+  const handleBrowseWorkspace = async () => {
+    const picker = (window as unknown as { showDirectoryPicker?: () => Promise<{ name?: string }> }).showDirectoryPicker;
+    if (typeof picker !== 'function') {
+      addToast('当前环境不支持目录浏览，请手动输入路径', 'info');
+      return;
+    }
+
+    try {
+      const directory = await picker();
+      const pickedName = directory?.name?.trim();
+      if (pickedName) {
+        const normalized = pickedName.startsWith('/') ? pickedName : `/${pickedName}`;
+        setWorkspacePath(normalized);
+        addToast(`已选择目录: ${normalized}`, 'success');
+      }
+    } catch (error) {
+      const name = (error as { name?: string })?.name;
+      if (name === 'AbortError') {
+        return;
+      }
+      addToast(`目录选择失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
+  };
+
+  const handlePasswordChange = () => {
+    addToast('当前版本暂不支持在线改密，请通过初始化流程重置管理员密码。', 'info');
   };
 
   return (
@@ -4233,7 +5517,7 @@ const SettingsPage = ({ addToast }: any) => {
             重置为默认值
           </button>
           <button 
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             disabled={isSaving}
             className="px-4 py-2 bg-primary text-surface rounded-lg text-sm font-bold hover:bg-primary/90 transition-colors disabled:opacity-50"
           >
@@ -4281,6 +5565,91 @@ const SettingsPage = ({ addToast }: any) => {
         </section>
 
         <section className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
+          <div className="px-6 py-4 border-b border-border-subtle bg-white/5 flex items-center justify-between">
+            <h2 className="font-semibold text-white flex items-center gap-2">
+              <Cpu size={18} className="text-warning" />
+              运行时模型配置
+            </h2>
+            <button
+              onClick={() => void loadRuntimeConfig()}
+              disabled={isRuntimeLoading}
+              className="text-[10px] font-bold text-primary hover:underline disabled:opacity-60 uppercase tracking-widest"
+            >
+              {isRuntimeLoading ? '加载中...' : '重新加载'}
+            </button>
+          </div>
+          <div className="p-6 space-y-5">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">运行模式</label>
+                <select
+                  value={runtimeProvider}
+                  onChange={(event) => setRuntimeProvider(event.target.value as 'scripted' | 'openai-compatible')}
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50 appearance-none"
+                >
+                  <option value="scripted">Scripted (本地脚本)</option>
+                  <option value="openai-compatible">OpenAI Compatible</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">模型名称</label>
+                <input
+                  type="text"
+                  value={runtimeModelName}
+                  onChange={(event) => setRuntimeModelName(event.target.value)}
+                  placeholder="例如: gpt-4.1"
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">API Base URL</label>
+              <input
+                type="text"
+                value={runtimeApiBaseUrl}
+                onChange={(event) => setRuntimeApiBaseUrl(event.target.value)}
+                placeholder="https://api.openai.com/v1"
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">API Key</label>
+              <input
+                type={apiProtection ? "password" : "text"}
+                value={runtimeApiKey}
+                onChange={(event) => setRuntimeApiKey(event.target.value)}
+                placeholder={runtimeApiKeyConfigured ? `已配置 (${runtimeApiKeyPreview || '******'})` : "输入新的 API Key"}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50"
+              />
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] text-slate-500">
+                  {runtimeApiKeyConfigured ? `已配置密钥: ${runtimeApiKeyPreview || '******'}` : '当前未配置 API Key'}
+                </p>
+                <label className="flex items-center gap-2 text-[10px] text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={clearRuntimeApiKey}
+                    onChange={(event) => setClearRuntimeApiKey(event.target.checked)}
+                    className="accent-primary"
+                  />
+                  清除现有密钥
+                </label>
+              </div>
+            </div>
+            <div className="flex items-center justify-between p-3 bg-white/5 border border-border-subtle rounded-xl">
+              <p className="text-xs text-slate-400">{runtimeValidationHint || '尚未进行运行配置校验'}</p>
+              <button
+                onClick={() => void handleValidateRuntime()}
+                disabled={isRuntimeValidating || isRuntimeLoading}
+                className="px-3 py-1.5 bg-white/10 border border-border-subtle rounded-lg text-[10px] font-bold text-slate-300 hover:bg-white/20 transition-colors disabled:opacity-60"
+              >
+                {isRuntimeValidating ? '校验中...' : '运行校验'}
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
           <div className="px-6 py-4 border-b border-border-subtle bg-white/5">
             <h2 className="font-semibold text-white flex items-center gap-2">
               <Database size={18} className="text-primary" />
@@ -4297,7 +5666,12 @@ const SettingsPage = ({ addToast }: any) => {
                   onChange={(e) => setWorkspacePath(e.target.value)}
                   className="flex-1 bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50" 
                 />
-                <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold text-slate-300 hover:bg-white/10 transition-colors">浏览</button>
+                <button
+                  onClick={() => void handleBrowseWorkspace()}
+                  className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold text-slate-300 hover:bg-white/10 transition-colors"
+                >
+                  浏览
+                </button>
               </div>
             </div>
             <div className="flex justify-between items-center">
@@ -4332,9 +5706,14 @@ const SettingsPage = ({ addToast }: any) => {
             <div className="flex justify-between items-center">
               <div>
                 <p className="text-sm font-medium text-white">管理员密码</p>
-                <p className="text-xs text-slate-500 mt-1">上次更改于 12 天前。</p>
+                <p className="text-xs text-slate-500 mt-1">在线改密将在后续版本支持。</p>
               </div>
-              <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-xs font-bold text-slate-300 hover:bg-white/10 transition-colors">更改密码</button>
+              <button
+                onClick={handlePasswordChange}
+                className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-xs font-bold text-slate-300 hover:bg-white/10 transition-colors"
+              >
+                更改密码
+              </button>
             </div>
             <div className="h-px bg-border-subtle" />
             <div className="flex justify-between items-center">
@@ -4414,9 +5793,12 @@ const SettingsPage = ({ addToast }: any) => {
 
 export default function App() {
   const [toasts, setToasts] = useState<any[]>([]);
+  const toastCounterRef = useRef(0);
 
   const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
-    const id = Math.random().toString(36).substr(2, 9);
+    const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? crypto.randomUUID()
+      : `${Date.now()}-${++toastCounterRef.current}`;
     setToasts(prev => [...prev, { id, message, type }]);
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
@@ -4425,37 +5807,94 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [isInitialized, setIsInitialized] = useState(true); 
-  const [isLoggedIn, setIsLoggedIn] = useState(false); 
+  const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
-  const handleLogin = () => {
-    if (password === 'OCC-Admin-2026-Ready') {
-      setIsLoggedIn(true);
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapAuth = async () => {
+      setAuthLoading(true);
+      try {
+        const status = await authApi.getStatus();
+        if (cancelled) {
+          return;
+        }
+        setIsInitialized(Boolean(status.setupComplete));
+        setIsLoggedIn(Boolean(status.authenticated));
+        setError('');
+      } catch (err) {
+        if (cancelled) {
+          return;
+        }
+        setIsInitialized(true);
+        setIsLoggedIn(false);
+        setError(err instanceof Error ? err.message : '认证服务暂不可用');
+      } finally {
+        if (!cancelled) {
+          setAuthLoading(false);
+        }
+      }
+    };
+
+    void bootstrapAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLogin = async () => {
+    if (!password.trim()) {
+      setError('请输入密码');
+      return;
+    }
+
+    try {
+      const status = await authApi.login(password.trim());
+      setIsInitialized(Boolean(status.setupComplete));
+      setIsLoggedIn(Boolean(status.authenticated));
       setError('');
+      setPassword('');
       addToast("登录成功，欢迎指挥官", "success");
-    } else {
-      setError('密码错误，请重试');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '登录失败，请重试');
       addToast("身份验证失败", "error");
     }
   };
 
-  const handleInitialize = () => {
-    if (password.length >= 8) {
-      setIsInitialized(true);
+  const handleInitialize = async () => {
+    if (!password.trim()) {
+      setError('请输入管理员密码');
+      return;
+    }
+
+    try {
+      const status = await authApi.setup(password.trim());
+      setIsInitialized(Boolean(status.setupComplete));
+      setIsLoggedIn(Boolean(status.authenticated));
       setPassword('');
       setError('');
       addToast("系统初始化完成", "success");
-    } else {
-      setError('密码长度至少为 8 位');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '初始化失败，请重试');
+      addToast("初始化失败", "error");
     }
   };
 
-  const handleLogout = () => {
-    setIsLoggedIn(false);
-    setPassword('');
-    addToast("已安全退出系统", "info");
+  const handleLogout = async () => {
+    try {
+      await authApi.logout();
+    } catch {
+      // ignore logout API failures and clear local state anyway
+    } finally {
+      setIsLoggedIn(false);
+      setPassword('');
+      addToast("已安全退出系统", "info");
+    }
   };
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -4469,30 +5908,244 @@ export default function App() {
   const [isNewProjectOpen, setIsNewProjectOpen] = useState(false);
   const [isDecisionCenterOpen, setIsDecisionCenterOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
+  const [managedModels, setManagedModels] = useState<Model[]>([]);
+  const [inboxNotifications, setInboxNotifications] = useState<NotificationInboxItem[]>([]);
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [markingAllRead, setMarkingAllRead] = useState(false);
 
-  const { agents, projects, tasks, sessions, runtime, refresh, sendAgentMessage } = useRealData();
+  const { agents, projects, tasks, sessions, workspace, runtime, refresh, sendAgentMessage } = useRealData();
+
+  const loadManagedModels = useCallback(async () => {
+    try {
+      const list = await modelsApi.list();
+      setManagedModels((list || []).map(toUiModel));
+    } catch {
+      setManagedModels([]);
+    }
+  }, []);
+
+  const loadInboxNotifications = useCallback(async () => {
+    try {
+      setNotificationsLoading(true);
+      const list = await notificationsApi.listInbox('zh-CN');
+      setInboxNotifications(Array.isArray(list) ? list : []);
+    } catch {
+      setInboxNotifications([]);
+    } finally {
+      setNotificationsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      setManagedModels([]);
+      setInboxNotifications([]);
+      return;
+    }
+    void loadManagedModels();
+    void loadInboxNotifications();
+  }, [isLoggedIn, loadManagedModels, loadInboxNotifications]);
 
   const runtimeModels = useMemo(
     () => buildRuntimeModels(runtime, agents, projects, tasks, sessions),
     [runtime, agents, projects, tasks, sessions],
   );
+  const activeModels = managedModels.length > 0 ? managedModels : runtimeModels;
+
+  const refreshAllData = useCallback(async () => {
+    await Promise.all([refresh(), loadManagedModels(), loadInboxNotifications()]);
+  }, [refresh, loadManagedModels, loadInboxNotifications]);
 
   syncRuntimeCollections({
-    models: runtimeModels,
+    models: activeModels,
     agents,
     projects,
     tasks,
     sessions,
   });
 
-  const highlightedAgentName = agents.find((agent) => agent.status !== 'Offline')?.name || '某个 Agent';
-  const highlightedProjectName = projects[0]?.name || '当前项目';
+  const toRelativeLabel = (dateInput: string | Date | null | undefined): string => {
+    if (!dateInput) return '刚刚';
+    const timestamp = new Date(dateInput).getTime();
+    if (!Number.isFinite(timestamp)) return '刚刚';
+    const diffMs = Date.now() - timestamp;
+    const minutes = Math.floor(diffMs / 60000);
+    if (minutes < 1) return '刚刚';
+    if (minutes < 60) return `${minutes} 分钟前`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} 小时前`;
+    return `${Math.floor(hours / 24)} 天前`;
+  };
 
-  const notifications = [
-    { id: 1, title: '系统更新', content: 'Aegis OS 已升级至 v2.4.0，新增了拓扑图谱实时同步功能。', time: '2小时前', type: 'info' },
-    { id: 2, title: '任务完成', content: `Agent "${highlightedAgentName}" 已完成 ${highlightedProjectName} 的阶段性方案。`, time: '5小时前', type: 'success' },
-    { id: 3, title: '安全警报', content: '检测到异常 API 调用尝试，已自动拦截并记录。', time: '1天前', type: 'warning' },
-  ];
+  const fallbackNotifications = useMemo(() => {
+    const items: Array<{
+      id: string;
+      title: string;
+      content: string;
+      time: string;
+      type: 'info' | 'success' | 'warning';
+      read: boolean;
+      sourceKey?: string;
+      to?: string;
+    }> = [];
+
+    tasks
+      .filter((task) => task.status === 'Blocked')
+      .slice(0, 2)
+      .forEach((task) => {
+        items.push({
+          id: `task-blocked-${task.id}`,
+          sourceKey: `task-blocked-${task.id}`,
+          title: '任务阻塞提醒',
+          content: `${task.agent || '系统'} 的任务「${task.title}」当前处于阻塞状态，请及时处理。`,
+          time: toRelativeLabel(task.updatedAt || task.createdAt),
+          type: 'warning',
+          read: false,
+          to: task.projectId ? `/projects/${task.projectId}` : '/projects',
+        });
+      });
+
+    projects
+      .filter((project) => project.status === 'At Risk' || project.status === 'Blocked')
+      .slice(0, 2)
+      .forEach((project) => {
+        items.push({
+          id: `project-risk-${project.id}`,
+          sourceKey: `project-risk-${project.id}`,
+          title: '项目风险预警',
+          content: `项目「${project.name}」状态为 ${project.status}，建议优先复盘关键依赖。`,
+          time: toRelativeLabel(project.updatedAt),
+          type: 'warning',
+          read: false,
+          to: `/projects/${project.id}`,
+        });
+      });
+
+    sessions.slice(0, 2).forEach((session) => {
+      const agent = agents.find((item) => item.id === session.agentId);
+      const project = projects.find((item) => item.id === session.projectId);
+      items.push({
+        id: `session-${session.id}`,
+        sourceKey: `session-${session.id}`,
+        title: session.status === 'active' ? '会话进行中' : '会话状态更新',
+        content: `${agent?.name || 'Agent'} 正在处理 ${project?.name || '项目任务'}。`,
+        time: toRelativeLabel(session.updatedAt || session.startTime),
+        type: session.status === 'active' ? 'info' : 'success',
+        read: false,
+        to: agent?.id ? `/agents/${agent.id}` : '/monitoring',
+      });
+    });
+
+    if (items.length === 0) {
+      items.push({
+        id: 'system-normal',
+        title: '系统状态',
+        content: '当前未检测到新的风险或阻塞事件。',
+        time: '刚刚',
+        type: 'info',
+        read: false,
+        to: '/dashboard',
+      });
+    }
+
+    return items.slice(0, 6);
+  }, [tasks, projects, sessions, agents]);
+
+  const notifications = useMemo(() => {
+    if (inboxNotifications.length === 0) {
+      return fallbackNotifications;
+    }
+    return inboxNotifications
+      .slice(0, 8)
+      .map((item) => ({
+        id: item.id || item.sourceKey,
+        sourceKey: item.sourceKey,
+        title: item.title,
+        content: item.detail,
+        time: toRelativeLabel(item.timestamp || item.updatedAt),
+        read: Boolean(item.read),
+        type: (item.severity === 'critical' || item.severity === 'warning' ? 'warning' : 'info') as 'info' | 'success' | 'warning',
+        to: item.to,
+      }));
+  }, [inboxNotifications, fallbackNotifications]);
+
+  const unreadNotificationCount = notifications.filter((item) => !('read' in item) || !item.read).length;
+
+  const handleMarkAllNotificationsRead = async () => {
+    if (inboxNotifications.length === 0) {
+      addToast('当前没有可标记的通知', 'info');
+      return;
+    }
+    const pending = inboxNotifications.filter((item) => !item.read);
+    if (pending.length === 0) {
+      addToast('通知已全部为已读状态', 'info');
+      return;
+    }
+
+    setMarkingAllRead(true);
+    try {
+      await Promise.all(
+        pending.map((item) =>
+          notificationsApi.updateInbox(item.sourceKey, { read: true, workflowStatus: 'acknowledged' }),
+        ),
+      );
+      await loadInboxNotifications();
+      addToast('已全部标为已读', 'success');
+    } catch (error) {
+      addToast(`标记失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setMarkingAllRead(false);
+    }
+  };
+
+  const handleNotificationClick = async (notification: {
+    sourceKey?: string;
+    to?: string;
+    read?: boolean;
+  }) => {
+    setShowNotifications(false);
+
+    const target = notification.to || '/dashboard';
+    if (target.startsWith('/projects/')) {
+      const projectId = target.split('/')[2];
+      if (projectId) {
+        setSelectedProjectId(projectId);
+        setActiveTab('project-room');
+      } else {
+        setActiveTab('projects');
+      }
+    } else if (target.startsWith('/agents/')) {
+      const targetAgentId = target.split('/')[2];
+      if (targetAgentId) {
+        setSelectedAgentId(targetAgentId);
+        setActiveTab('agent-commander');
+      } else {
+        setActiveTab('agents');
+      }
+    } else if (target.startsWith('/audit')) {
+      setActiveTab('audit');
+    } else if (target.startsWith('/workspace')) {
+      setActiveTab('workspace');
+    } else if (target.startsWith('/monitoring')) {
+      setActiveTab('monitoring');
+    } else if (target.startsWith('/system')) {
+      setActiveTab('system-health');
+    } else {
+      setActiveTab('dashboard');
+    }
+
+    if (notification.sourceKey && !notification.read) {
+      try {
+        await notificationsApi.updateInbox(notification.sourceKey, {
+          read: true,
+          workflowStatus: 'acknowledged',
+        });
+        await loadInboxNotifications();
+      } catch {
+        // ignore notification state update errors on navigation click
+      }
+    }
+  };
 
   // Navigation handlers for consistency
   const handleNavigate = (tab: string, id?: string) => {
@@ -4521,6 +6174,20 @@ export default function App() {
     setActiveTab('agent-commander');
   };
 
+  if (authLoading || isInitialized === null || isLoggedIn === null) {
+    return (
+      <div className="h-screen w-full bg-surface flex items-center justify-center p-6 bg-[radial-gradient(circle_at_50%_50%,rgba(0,242,255,0.05),transparent_70%)]">
+        <div className="max-w-md w-full bg-surface-soft border border-border-subtle rounded-3xl p-8 space-y-6 shadow-2xl text-center">
+          <div className="w-14 h-14 mx-auto bg-primary/10 rounded-2xl flex items-center justify-center text-primary">
+            <Activity size={28} />
+          </div>
+          <h1 className="text-xl font-bold text-white">正在验证系统状态</h1>
+          <p className="text-sm text-slate-400">请稍候，正在连接认证服务...</p>
+        </div>
+      </div>
+    );
+  }
+
   if (!isInitialized) {
     return (
       <div className="h-screen w-full bg-surface flex items-center justify-center p-6 bg-[radial-gradient(circle_at_50%_50%,rgba(0,242,255,0.05),transparent_70%)]">
@@ -4545,7 +6212,7 @@ export default function App() {
               />
               {error && <p className="text-[10px] text-danger font-bold uppercase">{error}</p>}
             </div>
-            <button onClick={handleInitialize} className="w-full py-3 bg-primary text-surface font-bold rounded-xl shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all active:scale-[0.98]">
+            <button onClick={() => void handleInitialize()} className="w-full py-3 bg-primary text-surface font-bold rounded-xl shadow-lg shadow-primary/20 hover:bg-primary/90 transition-all active:scale-[0.98]">
               初始化系统
             </button>
           </div>
@@ -4573,13 +6240,13 @@ export default function App() {
                 type="password" 
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
+                onKeyDown={(e) => e.key === 'Enter' && void handleLogin()}
                 placeholder="••••••••" 
                 className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all" 
               />
               {error && <p className="text-[10px] text-danger font-bold uppercase">{error}</p>}
             </div>
-            <button onClick={handleLogin} className="w-full py-3 bg-accent text-white font-bold rounded-xl shadow-lg shadow-accent/20 hover:bg-accent/90 transition-all active:scale-[0.98]">
+            <button onClick={() => void handleLogin()} className="w-full py-3 bg-accent text-white font-bold rounded-xl shadow-lg shadow-accent/20 hover:bg-accent/90 transition-all active:scale-[0.98]">
               登录 Aegis
             </button>
             <p className="text-center text-[10px] text-slate-600 uppercase tracking-widest font-bold">
@@ -4769,7 +6436,9 @@ export default function App() {
                 className={cn("p-2 text-slate-500 hover:text-white relative transition-colors", showNotifications && "text-white")}
               >
                 <Bell size={18} />
-                <div className="absolute top-2 right-2 w-2 h-2 bg-danger rounded-full border-2 border-surface" />
+                {unreadNotificationCount > 0 && (
+                  <div className="absolute top-2 right-2 w-2 h-2 bg-danger rounded-full border-2 border-surface" />
+                )}
               </button>
               
               <AnimatePresence>
@@ -4784,13 +6453,32 @@ export default function App() {
                     >
                       <div className="px-4 py-3 border-b border-border-subtle bg-white/5 flex justify-between items-center">
                         <h3 className="text-xs font-bold text-white uppercase tracking-widest">通知中心</h3>
-                        <button className="text-[10px] text-primary hover:underline" onClick={() => addToast("已全部标为已读", "success")}>全部已读</button>
+                        <button
+                          className="text-[10px] text-primary hover:underline disabled:opacity-60"
+                          onClick={() => void handleMarkAllNotificationsRead()}
+                          disabled={markingAllRead || notificationsLoading}
+                        >
+                          {markingAllRead ? '处理中...' : '全部已读'}
+                        </button>
                       </div>
                       <div className="max-h-96 overflow-y-auto divide-y divide-border-subtle">
+                        {notificationsLoading && (
+                          <div className="p-4 text-[10px] text-slate-500">正在加载通知...</div>
+                        )}
                         {notifications.map((n) => (
-                          <div key={n.id} className="p-4 hover:bg-white/5 transition-colors cursor-pointer">
+                          <div
+                            key={n.id}
+                            onClick={() => void handleNotificationClick(n)}
+                            className={cn(
+                              "p-4 hover:bg-white/5 transition-colors cursor-pointer",
+                              n.read ? "opacity-75" : "opacity-100",
+                            )}
+                          >
                             <div className="flex justify-between items-start mb-1">
-                              <h4 className="text-xs font-bold text-white">{n.title}</h4>
+                              <div className="flex items-center gap-2">
+                                {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-primary" />}
+                                <h4 className="text-xs font-bold text-white">{n.title}</h4>
+                              </div>
                               <span className="text-[8px] text-slate-500 uppercase tracking-widest">{n.time}</span>
                             </div>
                             <p className="text-[10px] text-slate-400 leading-relaxed">{n.content}</p>
@@ -4798,7 +6486,15 @@ export default function App() {
                         ))}
                       </div>
                       <div className="px-4 py-2 border-t border-border-subtle bg-white/5 text-center">
-                        <button className="text-[10px] font-bold text-slate-500 hover:text-white transition-colors uppercase tracking-widest">查看历史通知</button>
+                        <button
+                          className="text-[10px] font-bold text-slate-500 hover:text-white transition-colors uppercase tracking-widest"
+                          onClick={() => {
+                            setShowNotifications(false);
+                            setActiveTab('audit');
+                          }}
+                        >
+                          查看历史通知
+                        </button>
                       </div>
                     </motion.div>
                   </>
@@ -4810,7 +6506,7 @@ export default function App() {
               <button className="px-2 py-1 bg-white/5 border border-border-subtle rounded text-[10px] font-bold text-slate-400 hover:text-white transition-colors">
                 CN
               </button>
-              <button onClick={() => setIsLoggedIn(false)} className="p-2 text-slate-500 hover:text-danger transition-colors">
+              <button onClick={() => void handleLogout()} className="p-2 text-slate-500 hover:text-danger transition-colors">
                 <LogOut size={18} />
               </button>
             </div>
@@ -4830,15 +6526,15 @@ export default function App() {
             >
               {activeTab === 'dashboard' && <Dashboard onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
               {activeTab === 'agent-commander' && <AgentCommander agentId={selectedAgentId} addToast={addToast} sendCommand={sendAgentMessage} />}
-              {activeTab === 'project-room' && <ProjectRoom projectId={selectedProjectId} addToast={addToast} />}
-              {activeTab === 'system-health' && <SystemOperations onNavigate={handleNavigate} addToast={addToast} />}
-              {activeTab === 'model-nexus' && <ModelNexus addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} />}
-              {activeTab === 'monitoring' && <RealTimeMonitoring addToast={addToast} />}
+              {activeTab === 'project-room' && <ProjectRoom projectId={selectedProjectId} addToast={addToast} onNavigate={handleNavigate} onRefreshData={refreshAllData} />}
+              {activeTab === 'system-health' && <SystemOperations onNavigate={handleNavigate} addToast={addToast} onRefreshData={refreshAllData} />}
+              {activeTab === 'model-nexus' && <ModelNexus addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} onRefreshData={refreshAllData} />}
+              {activeTab === 'monitoring' && <RealTimeMonitoring addToast={addToast} onNavigate={handleNavigate} />}
               {activeTab === 'projects' && <ProjectsPortfolio onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} />}
               {activeTab === 'agents' && <AgentsRoster onSelectAgent={handleSelectAgent} addToast={addToast} onOpenTopology={() => setIsTopologyOpen(true)} onOpenDeploy={() => setIsDeployOpen(true)} onOpenConfig={(id: string) => { setSelectedAgentId(id); setIsAgentConfigOpen(true); }} />}
-              {activeTab === 'workspace' && <OpenClawWorkspace addToast={addToast} />}
+              {activeTab === 'workspace' && <OpenClawWorkspace addToast={addToast} workspace={workspace} onRefreshData={refreshAllData} onNavigate={handleNavigate} />}
               {activeTab === 'audit' && <AuditLogs />}
-              {activeTab === 'settings' && <SettingsPage addToast={addToast} />}
+              {activeTab === 'settings' && <SettingsPage addToast={addToast} onRuntimeUpdated={refreshAllData} />}
             </motion.div>
           </AnimatePresence>
         </div>
@@ -4846,11 +6542,18 @@ export default function App() {
 
         {/* Modals */}
         <AnimatePresence>
-          {isNewModelOpen && <NewModelModal isOpen={isNewModelOpen} onClose={() => setIsNewModelOpen(false)} addToast={addToast} />}
-          {isAgentConfigOpen && <AgentConfigModal isOpen={isAgentConfigOpen} onClose={() => setIsAgentConfigOpen(false)} agentId={selectedAgentId} addToast={addToast} />}
+          {isNewModelOpen && (
+            <NewModelModal
+              isOpen={isNewModelOpen}
+              onClose={() => setIsNewModelOpen(false)}
+              addToast={addToast}
+              onCreated={refreshAllData}
+            />
+          )}
+          {isAgentConfigOpen && <AgentConfigModal isOpen={isAgentConfigOpen} onClose={() => setIsAgentConfigOpen(false)} agentId={selectedAgentId} addToast={addToast} onUpdated={refreshAllData} />}
           {isTopologyOpen && <TeamTopologyModal isOpen={isTopologyOpen} onClose={() => setIsTopologyOpen(false)} />}
-          {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} />}
-          {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={() => { void refresh(); }} />}
+          {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} onDeployed={refreshAllData} />}
+          {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={() => { void refreshAllData(); }} />}
           {isDecisionCenterOpen && <DecisionCenterModal isOpen={isDecisionCenterOpen} onClose={() => setIsDecisionCenterOpen(false)} addToast={addToast} />}
         </AnimatePresence>
       </div>

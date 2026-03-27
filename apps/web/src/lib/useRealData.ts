@@ -112,19 +112,7 @@ export function useRealData(): RealDataState {
       setError(null);
     };
 
-    const onSnapshot = () => {
-      scheduleRefresh();
-    };
-
-    const onAgentStatus = () => {
-      scheduleRefresh();
-    };
-
-    const onProjectProgress = () => {
-      scheduleRefresh();
-    };
-
-    const onMessage = () => {
+    const onStreamEvent = () => {
       scheduleRefresh();
     };
 
@@ -134,18 +122,29 @@ export function useRealData(): RealDataState {
     };
 
     eventSource.addEventListener('open', onOpen);
-    eventSource.addEventListener('snapshot', onSnapshot);
-    eventSource.addEventListener('agent.status', onAgentStatus);
-    eventSource.addEventListener('project.progress', onProjectProgress);
-    eventSource.addEventListener('message', onMessage);
+    eventSource.addEventListener('message', onStreamEvent);
+    eventSource.addEventListener('connected', onStreamEvent);
+    eventSource.addEventListener('heartbeat', onStreamEvent);
+    eventSource.addEventListener('snapshot', onStreamEvent);
+    eventSource.addEventListener('task_update', onStreamEvent);
+    eventSource.addEventListener('agent_status', onStreamEvent);
+    eventSource.addEventListener('project_progress', onStreamEvent);
+    // Backward compatibility with older event naming.
+    eventSource.addEventListener('agent.status', onStreamEvent);
+    eventSource.addEventListener('project.progress', onStreamEvent);
     eventSource.addEventListener('error', onError);
 
     return () => {
       eventSource.removeEventListener('open', onOpen);
-      eventSource.removeEventListener('snapshot', onSnapshot);
-      eventSource.removeEventListener('agent.status', onAgentStatus);
-      eventSource.removeEventListener('project.progress', onProjectProgress);
-      eventSource.removeEventListener('message', onMessage);
+      eventSource.removeEventListener('message', onStreamEvent);
+      eventSource.removeEventListener('connected', onStreamEvent);
+      eventSource.removeEventListener('heartbeat', onStreamEvent);
+      eventSource.removeEventListener('snapshot', onStreamEvent);
+      eventSource.removeEventListener('task_update', onStreamEvent);
+      eventSource.removeEventListener('agent_status', onStreamEvent);
+      eventSource.removeEventListener('project_progress', onStreamEvent);
+      eventSource.removeEventListener('agent.status', onStreamEvent);
+      eventSource.removeEventListener('project.progress', onStreamEvent);
       eventSource.removeEventListener('error', onError);
       if (refreshTimer) {
         clearTimeout(refreshTimer);

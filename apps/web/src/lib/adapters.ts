@@ -15,6 +15,7 @@ export interface OpenClawTaskItem {
   progress: number;
   deadline?: string;
   blockers: string[];
+  createdAt?: string;
   updatedAt?: string;
 }
 
@@ -25,6 +26,7 @@ export interface OpenClawProjectDetail {
   progress: number;
   description: string;
   currentFocus?: string;
+  updatedAt?: string;
   agentIds: string[];
   tasks: OpenClawTaskItem[];
 }
@@ -48,10 +50,28 @@ export interface OpenClawAgentSummary {
   commander?: {
     maxDailyTokens?: number;
   };
+  lastActiveAt?: string;
 }
 
 export interface OpenClawAgentDetail {
+  agentId: string;
+  name: string;
+  title?: string;
+  responsibility?: string;
+  soul?: {
+    content: string;
+    exists?: boolean;
+    path?: string;
+    updatedAt?: string;
+  };
+  sop?: {
+    content: string;
+    exists?: boolean;
+    path?: string;
+    updatedAt?: string;
+  };
   memoryEntries?: OpenClawAgentMemoryEntry[];
+  tasks?: OpenClawTaskItem[];
 }
 
 export interface OpenClawAgentMemoryEntry {
@@ -67,6 +87,19 @@ export interface OpenClawWorkspaceOverview {
   syncedAt: string;
   rootPath: string;
   totalSessions: number;
+  projects?: Array<{
+    id: string;
+    name: string;
+    relativePath?: string;
+    taskCount?: number;
+    status?: string;
+  }>;
+  agents?: Array<{
+    agentId: string;
+    name: string;
+    title?: string;
+    workspacePath?: string;
+  }>;
 }
 
 export interface OpenClawRuntimeInfo {
@@ -221,6 +254,7 @@ function mapAgent(agent: OpenClawAgentSummary): Agent {
     tokensUsed: agent.usage?.totalTokensToday ?? 0,
     tokenLimit,
     sessionCount: agent.sessionCount,
+    lastActiveAt: agent.lastActiveAt,
   };
 }
 
@@ -234,6 +268,7 @@ function mapProject(project: OpenClawProjectDetail): Project {
     progress: clamp(project.progress, 0, 100),
     owner: mapProjectOwner(project),
     agents: Array.isArray(project.agentIds) ? project.agentIds : [],
+    updatedAt: project.updatedAt,
   };
 }
 
@@ -248,11 +283,76 @@ function mapTask(project: OpenClawProjectDetail, task: OpenClawTaskItem, index: 
 
   return {
     id: `${project.id}:${task.id || index}`,
+    projectId: project.id,
     title: task.title,
     agent: task.agentName || task.agentId || '未分配',
     status: mapTaskStatus(task.status),
     progress,
+    createdAt: task.createdAt ?? project.updatedAt,
+    updatedAt: task.updatedAt ?? project.updatedAt,
   };
+}
+
+function formatSessionDuration(startAt: string, active: boolean): string {
+  const start = new Date(startAt);
+  if (Number.isNaN(start.getTime())) {
+    return active ? '进行中' : '已完成';
+  }
+
+  const diffMs = Date.now() - start.getTime();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) {
+    return active ? '进行中' : '已完成';
+  }
+
+  const totalMinutes = Math.max(Math.floor(diffMs / 60000), 1);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours === 0) {
+    return `${totalMinutes}m`;
+  }
+
+  return `${hours}h ${minutes}m`;
+}
+
+function deriveSessionProject(
+  agentId: string,
+  rawProjects: OpenClawProjectDetail[],
+): OpenClawProjectDetail | undefined {
+  return rawProjects.find((project) =>
+    (project.agentIds || []).includes(agentId)
+    || (project.tasks || []).some((task) => task.agentId === agentId),
+  );
+}
+
+function mapSessions(rawAgents: OpenClawAgentSummary[], rawProjects: OpenClawProjectDetail[]): Session[] {
+  const fallbackProjectId = rawProjects[0]?.id ?? '';
+  const fallbackTime = new Date().toISOString();
+
+  return rawAgents
+    .filter((agent) => (agent.activeSessionCount ?? 0) > 0 || (agent.sessionCount ?? 0) > 0)
+    .map((agent, index) => {
+      const project = deriveSessionProject(agent.agentId, rawProjects);
+      const startTime = agent.lastActiveAt || project?.updatedAt || fallbackTime;
+      const sessionSlots = Math.max(agent.activeSessionCount || agent.sessionCount || 1, 1);
+      const tokens = Math.round((agent.usage?.totalTokensToday ?? 0) / sessionSlots);
+      const status: Session['status'] = (agent.activeSessionCount ?? 0) > 0 ? 'active' : 'completed';
+
+      return {
+        id: `${agent.agentId}-session-${index + 1}`,
+        agentId: agent.agentId,
+        modelId: inferModelId(agent.model),
+        projectId: project?.id ?? fallbackProjectId,
+        startTime,
+        duration: formatSessionDuration(startTime, status === 'active'),
+        tokens,
+        cost: Number((tokens * 0.000002).toFixed(4)),
+        status,
+        createdAt: startTime,
+        updatedAt: agent.lastActiveAt || project?.updatedAt || fallbackTime,
+      };
+    })
+    .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
 }
 
 export interface AdaptedOpenClawData {
@@ -282,7 +382,7 @@ export async function fetchOpenClawData(): Promise<AdaptedOpenClawData> {
     agents: rawAgents.map(mapAgent),
     projects: rawProjects.map(mapProject),
     tasks: rawProjects.flatMap((project) => (project.tasks || []).map((task, index) => mapTask(project, task, index))),
-    sessions: [],
+    sessions: mapSessions(rawAgents, rawProjects),
     workspace,
     runtime,
   };
@@ -299,10 +399,25 @@ export async function fetchAgentMemory(agentId: string): Promise<OpenClawAgentMe
   }
 }
 
+export async function fetchOpenClawAgentDetail(agentId: string): Promise<OpenClawAgentDetail> {
+  const safeId = encodeURIComponent(agentId);
+  return request<OpenClawAgentDetail>(`/openclaw/agents/${safeId}`);
+}
+
 export async function sendAgentMessage(agentId: string, message: string): Promise<unknown> {
   const safeId = encodeURIComponent(agentId);
   return request(`/openclaw/agents/${safeId}/message`, {
     method: 'POST',
     body: JSON.stringify({ message }),
+  });
+}
+
+export async function sendBatchAgentMessage(agentIds: string[], message: string): Promise<unknown> {
+  return request('/openclaw/agents/batch-message', {
+    method: 'POST',
+    body: JSON.stringify({
+      agentIds,
+      message,
+    }),
   });
 }
