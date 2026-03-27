@@ -1,11 +1,12 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { 
-  LayoutDashboard, 
-  Briefcase, 
-  Users, 
-  Terminal, 
-  Settings, 
-  ShieldCheck, 
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import {
+  LayoutDashboard,
+  Briefcase,
+  Users,
+  Terminal,
+  Settings,
+  ShieldCheck,
   Activity,
   Search,
   Bell,
@@ -46,32 +47,35 @@ import {
   Workflow,
   Info,
   DollarSign,
+  Scale,
+  Loader2,
   Upload,
   FileUp,
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip, 
+import {
+  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
   AreaChart, Area, ReferenceLine
 } from 'recharts';
 import { cn } from './lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from './types';
-import { useRealData } from './useRealData';
-import { projectsApi } from './lib/api';
+import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model, ModelLog } from './types';
+import { modelsApi, agentsApi, projectsApi, teamApi } from './lib/api';
+import { useModels } from './lib/hooks';
+import { useRealData } from './lib/useRealData';
 
 // --- Mock Data ---
 
 const DEFAULT_MODELS: Model[] = [
-  { 
-    id: 'm1', 
-    name: 'Codex-4.0', 
-    provider: 'OpenAI', 
-    status: 'Healthy', 
-    totalTokens: 1250000, 
-    dailyTokens: 45000, 
-    currentTask: '代码重构分析', 
+  {
+    id: 'm1',
+    name: 'Codex-4.0',
+    provider: 'OpenAI',
+    status: 'Healthy',
+    totalTokens: 1250000,
+    dailyTokens: 45000,
+    currentTask: '代码重构分析',
     latency: '120ms',
     throughput: '45.2 t/s',
     logs: [
@@ -80,14 +84,14 @@ const DEFAULT_MODELS: Model[] = [
       { timestamp: '2026-03-26 08:10:20', type: 'assistant', content: '正在分析项目结构，识别潜在的循环依赖...' }
     ]
   },
-  { 
-    id: 'm2', 
-    name: 'MiniMax-6.5', 
-    provider: 'MiniMax', 
-    status: 'Healthy', 
-    totalTokens: 890000, 
-    dailyTokens: 32000, 
-    currentTask: '多轮对话生成', 
+  {
+    id: 'm2',
+    name: 'MiniMax-6.5',
+    provider: 'MiniMax',
+    status: 'Healthy',
+    totalTokens: 890000,
+    dailyTokens: 32000,
+    currentTask: '多轮对话生成',
     latency: '150ms',
     throughput: '32.8 t/s',
     logs: [
@@ -95,14 +99,14 @@ const DEFAULT_MODELS: Model[] = [
       { timestamp: '2026-03-26 08:12:10', type: 'assistant', content: '我是 MiniMax 助手，很高兴为您服务。' }
     ]
   },
-  { 
-    id: 'm3', 
-    name: 'Kimi-Long', 
-    provider: 'Moonshot', 
-    status: 'Degraded', 
-    totalTokens: 2100000, 
-    dailyTokens: 120000, 
-    currentTask: '超长文档摘要', 
+  {
+    id: 'm3',
+    name: 'Kimi-Long',
+    provider: 'Moonshot',
+    status: 'Degraded',
+    totalTokens: 2100000,
+    dailyTokens: 120000,
+    currentTask: '超长文档摘要',
     latency: '450ms',
     throughput: '12.5 t/s',
     logs: [
@@ -144,99 +148,41 @@ const DEFAULT_TASKS: Task[] = [
   { id: 't4', title: '单元测试覆盖', agent: '测试工程师', status: 'Pending', progress: 0 },
 ];
 
-let models: Model[] = DEFAULT_MODELS;
-let agents: Agent[] = DEFAULT_AGENTS;
-let sessions: Session[] = DEFAULT_SESSIONS;
-let projects: Project[] = DEFAULT_PROJECTS;
-let tasks: Task[] = DEFAULT_TASKS;
+let MOCK_MODELS: Model[] = DEFAULT_MODELS;
+let MOCK_AGENTS: Agent[] = DEFAULT_AGENTS;
+let MOCK_SESSIONS: Session[] = DEFAULT_SESSIONS;
+let MOCK_PROJECTS: Project[] = DEFAULT_PROJECTS;
+let MOCK_TASKS: Task[] = DEFAULT_TASKS;
 
-const syncRuntimeCollections = (payload: {
-  models: Model[];
-  agents: Agent[];
-  projects: Project[];
-  tasks: Task[];
-  sessions: Session[];
-}) => {
-  models = payload.models;
-  agents = payload.agents;
-  projects = payload.projects;
-  tasks = payload.tasks;
-  sessions = payload.sessions;
+const LazyDashboardPage = React.lazy(() => import('./pages/DashboardLazy'));
+const LazyAgentCommanderPage = React.lazy(() => import('./pages/AgentCommanderLazy'));
+
+const TAB_PATHS: Record<string, string> = {
+  dashboard: '/dashboard',
+  'agent-commander': '/agent-commander',
+  'project-room': '/project-room',
+  'system-health': '/system-health',
+  'model-nexus': '/model-nexus',
+  monitoring: '/monitoring',
+  projects: '/projects',
+  agents: '/agents',
+  workspace: '/workspace',
+  audit: '/audit',
+  settings: '/settings'
 };
 
-function buildRuntimeModels(
-  runtime: unknown,
-  agents: Agent[],
-  projects: Project[],
-  tasks: Task[],
-  sessions: Session[],
-): Model[] {
-  const runtimeInfo = (runtime ?? {}) as {
-    provider?: string;
-    model?: string;
-    modelName?: string;
-    mode?: string;
-  };
+function getPathForTab(tab: string): string {
+  return TAB_PATHS[tab] || '/dashboard';
+}
 
-  const provider = runtimeInfo.provider || 'OpenClaw Runtime';
-  const modelName = runtimeInfo.modelName || runtimeInfo.model || `${provider} Core`;
-  const runtimeMode = runtimeInfo.mode || 'normal';
+function getTabFromPath(pathname: string): string {
+  const normalized = pathname.replace(/\/+$/, '') || '/';
+  if (normalized === '/') {
+    return 'dashboard';
+  }
 
-  const totalTokens = Math.max(
-    agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0) + sessions.reduce((sum, session) => sum + (session.tokens || 0), 0),
-    1,
-  );
-  const dailyTokens = Math.max(agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0), 1);
-  const activeSessions = sessions.filter((session) => session.status === 'active').length;
-  const throughputBase = Math.max(agents.length * 3 + activeSessions * 5 + tasks.length, 8);
-  const latencyBase = runtimeMode === 'production' ? 120 : 180;
-
-  const status: Model['status'] = runtimeMode === 'degraded'
-    ? 'Degraded'
-    : runtimeMode === 'offline'
-      ? 'Offline'
-      : 'Healthy';
-
-  const sharedLogs = DEFAULT_MODELS.flatMap((model) => model.logs).slice(0, 3);
-
-  return [
-    {
-      id: 'runtime',
-      name: modelName,
-      provider,
-      status,
-      totalTokens,
-      dailyTokens,
-      currentTask: projects[0]?.name ? `推进项目: ${projects[0].name}` : '等待任务分配',
-      latency: `${latencyBase + Math.min(activeSessions * 8, 220)}ms`,
-      throughput: `${throughputBase.toFixed(1)} t/s`,
-      logs: sharedLogs,
-    },
-    {
-      id: 'planning',
-      name: 'Planning Assist',
-      provider: 'Synthetic',
-      status: 'Healthy',
-      totalTokens: Math.max(Math.round(totalTokens * 0.45), 1),
-      dailyTokens: Math.max(Math.round(dailyTokens * 0.5), 1),
-      currentTask: `处理 ${tasks.length} 条任务编排`,
-      latency: `${latencyBase + 35}ms`,
-      throughput: `${Math.max(throughputBase * 0.75, 6).toFixed(1)} t/s`,
-      logs: DEFAULT_MODELS[0].logs,
-    },
-    {
-      id: 'qa',
-      name: 'QA Sentinel',
-      provider: 'Synthetic',
-      status: activeSessions > 4 ? 'Degraded' : 'Healthy',
-      totalTokens: Math.max(Math.round(totalTokens * 0.3), 1),
-      dailyTokens: Math.max(Math.round(dailyTokens * 0.35), 1),
-      currentTask: `巡检 ${projects.length} 个项目`,
-      latency: `${latencyBase + 55}ms`,
-      throughput: `${Math.max(throughputBase * 0.55, 5).toFixed(1)} t/s`,
-      logs: DEFAULT_MODELS[1]?.logs ?? sharedLogs,
-    },
-  ];
+  const matched = Object.entries(TAB_PATHS).find(([, routePath]) => routePath === normalized);
+  return matched?.[0] || 'dashboard';
 }
 
 // --- Components ---
@@ -246,15 +192,15 @@ const NavItem = ({ icon: Icon, label, active, onClick, collapsed, badge }: any) 
     onClick={onClick}
     className={cn(
       "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 group relative",
-      active 
-        ? "bg-primary text-surface shadow-lg shadow-primary/20" 
+      active
+        ? "bg-primary text-surface shadow-lg shadow-primary/20"
         : "text-slate-400 hover:bg-white/5 hover:text-white",
       collapsed && "justify-center px-0"
     )}
   >
     <Icon size={20} className={cn("shrink-0", active ? "text-surface" : "group-hover:scale-110 transition-transform")} />
     {!collapsed && (
-      <motion.span 
+      <motion.span
         initial={{ opacity: 0, x: -10 }}
         animate={{ opacity: 1, x: 0 }}
         className="text-xs font-bold whitespace-nowrap overflow-hidden"
@@ -319,11 +265,11 @@ const ToastContainer = ({ toasts }: { toasts: any[] }) => (
 );
 
 const ModelUsageChart = () => {
-  const data = useMemo(() => models.map(m => ({
+  const data = useMemo(() => MOCK_MODELS.map(m => ({
     name: m.name,
     value: m.dailyTokens,
     color: m.id === 'm1' ? '#00f2ff' : m.id === 'm2' ? '#f2ff00' : '#ff00f2'
-  })), [models]);
+  })), []);
 
   return (
     <div className="h-[280px] w-full flex flex-col items-center justify-center">
@@ -344,7 +290,7 @@ const ModelUsageChart = () => {
                 <Cell key={`cell-${index}`} fill={entry.color} />
               ))}
             </Pie>
-            <Tooltip 
+            <Tooltip
               contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #2d2e32', borderRadius: '12px', fontSize: '12px', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)' }}
               itemStyle={{ color: '#fff' }}
             />
@@ -367,14 +313,14 @@ const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose:
   if (!isOpen) return null;
   return (
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <motion.div 
+      <motion.div
         initial={{ opacity: 0 }}
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         onClick={onClose}
         className="absolute inset-0 bg-surface/80 backdrop-blur-sm"
       />
-      <motion.div 
+      <motion.div
         initial={{ opacity: 0, scale: 0.95, y: 20 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 20 }}
@@ -394,8 +340,54 @@ const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose:
   );
 };
 
-const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
+const NewModelModal = ({ isOpen, onClose, addToast, onModelCreated }: { isOpen: boolean, onClose: () => void, addToast: any, onModelCreated?: () => void }) => {
   const [step, setStep] = useState(1);
+  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState({
+    provider: '',
+    apiKey: '',
+    apiBaseUrl: '',
+    name: '',
+    tokenLimit: 1000000,
+  });
+
+  const handleProviderSelect = (provider: string) => {
+    setFormData(prev => ({ ...prev, provider }));
+    setStep(2);
+  };
+
+  const handleCredentialSubmit = (apiKey: string, apiBaseUrl: string) => {
+    setFormData(prev => ({ ...prev, apiKey, apiBaseUrl }));
+    setStep(3);
+  };
+
+  const handleComplete = async () => {
+    setLoading(true);
+    try {
+      await modelsApi.create({
+        name: formData.name || formData.provider,
+        provider: formData.provider,
+        apiKey: formData.apiKey,
+        apiBaseUrl: formData.apiBaseUrl,
+        tokenLimit: formData.tokenLimit,
+      });
+      addToast("模型接入成功！", "success");
+      onModelCreated?.();
+      onClose();
+      setStep(1);
+      setFormData({ provider: '', apiKey: '', apiBaseUrl: '', name: '', tokenLimit: 1000000 });
+    } catch (error: any) {
+      addToast(`接入失败: ${error.message}`, "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClose = () => {
+    onClose();
+    setStep(1);
+    setFormData({ provider: '', apiKey: '', apiBaseUrl: '', name: '', tokenLimit: 1000000 });
+  };
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="接入新计算模型">
       <div className="space-y-8">
@@ -418,9 +410,9 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
             <h3 className="text-lg font-bold text-white">选择模型提供商</h3>
             <div className="grid grid-cols-2 gap-4">
               {['OpenAI', 'Anthropic', 'Google Gemini', 'Meta Llama', 'Mistral AI', '本地部署'].map((provider) => (
-                <button 
+                <button
                   key={provider}
-                  onClick={() => setStep(2)}
+                  onClick={() => handleProviderSelect(provider)}
                   className="p-4 bg-white/5 border border-border-subtle rounded-2xl text-left hover:border-primary/50 hover:bg-primary/5 transition-all group"
                 >
                   <p className="font-bold text-white group-hover:text-primary transition-colors">{provider}</p>
@@ -437,11 +429,23 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
             <div className="space-y-4">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">API 密钥</label>
-                <input type="password" placeholder="sk-..." className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                <input
+                  type="password"
+                  placeholder="sk-..."
+                  value={formData.apiKey}
+                  onChange={(e) => setFormData(prev => ({ ...prev, apiKey: e.target.value }))}
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
               </div>
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">自定义端点 (可选)</label>
-                <input type="text" placeholder="https://api.example.com/v1" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                <input
+                  type="text"
+                  placeholder="https://api.example.com/v1"
+                  value={formData.apiBaseUrl}
+                  onChange={(e) => setFormData(prev => ({ ...prev, apiBaseUrl: e.target.value }))}
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
               </div>
             </div>
             <div className="flex gap-4 pt-4">
@@ -458,11 +462,23 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">模型名称</label>
-                  <input type="text" placeholder="gpt-4o" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                  <input
+                    type="text"
+                    placeholder="gpt-4o"
+                    value={formData.name}
+                    onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                    className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
                 </div>
                 <div className="space-y-2">
                   <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">每日 Token 限额</label>
-                  <input type="number" placeholder="1000000" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+                  <input
+                    type="number"
+                    placeholder="1000000"
+                    value={formData.tokenLimit}
+                    onChange={(e) => setFormData(prev => ({ ...prev, tokenLimit: parseInt(e.target.value) || 0 }))}
+                    className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                  />
                 </div>
               </div>
               <div className="p-4 bg-primary/5 border border-primary/20 rounded-xl flex items-center gap-3">
@@ -472,15 +488,12 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
             </div>
             <div className="flex gap-4 pt-4">
               <button onClick={() => setStep(2)} className="flex-1 py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all">返回</button>
-              <button 
-                onClick={() => {
-                  addToast("模型接入成功！", "success");
-                  onClose();
-                  setStep(1);
-                }} 
-                className="flex-1 py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all"
+              <button
+                onClick={handleComplete}
+                disabled={loading}
+                className="flex-1 py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
               >
-                完成接入
+                {loading ? '接入中...' : '完成接入'}
               </button>
             </div>
           </div>
@@ -491,7 +504,7 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
 };
 
 const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
-  const agent = agents.find(a => a.id === agentId) || agents[0];
+  const agent = MOCK_AGENTS.find(a => a.id === agentId) || MOCK_AGENTS[0];
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={`配置 Agent: ${agent.name}`}>
       <div className="space-y-6">
@@ -507,8 +520,8 @@ const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
         </div>
         <div className="space-y-2">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">核心身份 (SOUL)</label>
-          <textarea 
-            rows={3} 
+          <textarea
+            rows={3}
             className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
             defaultValue="你是一个细致入微的分析师，视清晰度为生命。你从不主观臆断，总是先行确认。"
           />
@@ -525,11 +538,11 @@ const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
             <button className="w-full py-2 border border-dashed border-border-subtle rounded-xl text-[10px] font-bold text-slate-500 hover:border-primary hover:text-primary transition-all">+ 添加步骤</button>
           </div>
         </div>
-        <button 
+        <button
           onClick={() => {
             addToast("Agent 配置已更新", "success");
             onClose();
-          }} 
+          }}
           className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4"
         >
           保存配置
@@ -540,12 +553,104 @@ const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
 };
 
 const TeamTopologyModal = ({ isOpen, onClose }: any) => {
+  const [loading, setLoading] = useState(false);
+  const [topology, setTopology] = useState<{
+    nodes: Array<{ id: string; name: string; role: string; status: string; x?: number; y?: number; layer?: string }>;
+    edges: Array<{ from: string; to: string; label?: string }>;
+  }>({ nodes: [], edges: [] });
+
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    let cancelled = false;
+    setLoading(true);
+
+    teamApi.getTopology()
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+
+        setTopology({
+          nodes: Array.isArray(data.nodes) ? data.nodes : [],
+          edges: Array.isArray(data.edges) ? data.edges : []
+        });
+      })
+      .catch((error) => {
+        console.warn('Failed to load team topology:', error);
+        if (!cancelled) {
+          setTopology({ nodes: [], edges: [] });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  const fallbackNodes = [
+    { id: 'fallback-core', name: '首席架构师', role: '核心决策层', status: 'Idle', x: 420, y: 80, layer: 'core' },
+    { id: 'fallback-logic-a', name: '数据分析师', role: '逻辑处理层', status: 'Idle', x: 220, y: 260, layer: 'logic' },
+    { id: 'fallback-logic-b', name: '代码审计员', role: '逻辑处理层', status: 'Idle', x: 620, y: 260, layer: 'logic' },
+    { id: 'fallback-exec-a', name: '执行单元 A', role: '任务执行层', status: 'Idle', x: 220, y: 450, layer: 'execution' },
+    { id: 'fallback-exec-b', name: '执行单元 B', role: '任务执行层', status: 'Idle', x: 620, y: 450, layer: 'execution' }
+  ];
+
+  const fallbackEdges = [
+    { from: 'fallback-core', to: 'fallback-logic-a', label: '分发' },
+    { from: 'fallback-core', to: 'fallback-logic-b', label: '分发' },
+    { from: 'fallback-logic-a', to: 'fallback-exec-a', label: '执行' },
+    { from: 'fallback-logic-b', to: 'fallback-exec-b', label: '执行' },
+    { from: 'fallback-logic-a', to: 'fallback-logic-b', label: '同步' }
+  ];
+
+  const nodes = topology.nodes.length > 0 ? topology.nodes : fallbackNodes;
+  const edges = topology.edges.length > 0 ? topology.edges : fallbackEdges;
+  const nodeMap = new Map(nodes.map((node) => [node.id, node]));
+
+  const colorByLayer = (layer?: string) => {
+    if (layer === 'core') {
+      return '#10b981';
+    }
+
+    if (layer === 'logic') {
+      return '#8b5cf6';
+    }
+
+    return '#64748b';
+  };
+
+  const radiusByLayer = (layer?: string) => {
+    if (layer === 'core') {
+      return 22;
+    }
+
+    if (layer === 'logic') {
+      return 18;
+    }
+
+    return 12;
+  };
+
+  const layerStats = {
+    core: nodes.filter((node) => node.layer === 'core').length,
+    logic: nodes.filter((node) => node.layer === 'logic').length,
+    execution: nodes.filter((node) => node.layer !== 'core' && node.layer !== 'logic').length
+  };
+
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="团队拓扑图谱">
       <div className="space-y-6">
         <div className="h-[400px] w-full bg-surface-muted rounded-2xl border border-border-subtle relative overflow-hidden flex items-center justify-center bg-[radial-gradient(circle_at_50%_50%,rgba(16,185,129,0.05),transparent_70%)]">
           <div className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'radial-gradient(#10b981 1px, transparent 1px)', backgroundSize: '20px 20px' }} />
-          <svg className="w-full h-full relative z-10" viewBox="0 0 400 300">
+          <svg className="w-full h-full relative z-10" viewBox="0 0 840 600">
             {/* Connections with glow */}
             <defs>
               <filter id="glow">
@@ -556,88 +661,156 @@ const TeamTopologyModal = ({ isOpen, onClose }: any) => {
                 </feMerge>
               </filter>
             </defs>
-            
-            <g stroke="rgba(16, 185, 129, 0.3)" strokeWidth="1.5" filter="url(#glow)">
-              <line x1="200" y1="50" x2="100" y2="150" />
-              <line x1="200" y1="50" x2="300" y2="150" />
-              <line x1="100" y1="150" x2="100" y2="250" />
-              <line x1="300" y1="150" x2="300" y2="250" />
-              <line x1="100" y1="150" x2="300" y2="150" strokeDasharray="4 4" />
+
+            <g stroke="rgba(16, 185, 129, 0.35)" strokeWidth="1.5" filter="url(#glow)">
+              {edges.map((edge, index) => {
+                const from = nodeMap.get(edge.from);
+                const to = nodeMap.get(edge.to);
+                if (!from || !to) {
+                  return null;
+                }
+
+                return (
+                  <line
+                    key={`${edge.from}-${edge.to}-${index}`}
+                    x1={from.x ?? 0}
+                    y1={from.y ?? 0}
+                    x2={to.x ?? 0}
+                    y2={to.y ?? 0}
+                    strokeDasharray={edge.label === '同步' ? '4 4' : undefined}
+                  />
+                );
+              })}
             </g>
-            
-            {/* Nodes */}
-            <motion.circle 
-              cx="200" cy="50" r="22" fill="#10b981" 
-              animate={{ r: [22, 24, 22] }}
-              transition={{ duration: 2, repeat: Infinity }}
-            />
-            <text x="200" y="85" textAnchor="middle" fill="white" fontSize="10" fontWeight="bold" className="uppercase tracking-widest">首席架构师</text>
-            
-            <circle cx="100" cy="150" r="18" fill="#8b5cf6" />
-            <text x="100" y="185" textAnchor="middle" fill="white" fontSize="9" fontWeight="medium">数据分析师</text>
-            
-            <circle cx="300" cy="150" r="18" fill="#8b5cf6" />
-            <text x="300" y="185" textAnchor="middle" fill="white" fontSize="9" fontWeight="medium">代码审计员</text>
-            
-            <circle cx="100" cy="250" r="12" fill="#64748b" />
-            <text x="100" y="275" textAnchor="middle" fill="slate-500" fontSize="8">执行单元 A</text>
-            
-            <circle cx="300" cy="250" r="12" fill="#64748b" />
-            <text x="300" y="275" textAnchor="middle" fill="slate-500" fontSize="8">执行单元 B</text>
+
+            {nodes.map((node, index) => {
+              const x = node.x ?? 420;
+              const y = node.y ?? 300;
+              const layer = node.layer || 'execution';
+              const radius = radiusByLayer(layer);
+              const color = colorByLayer(layer);
+
+              return (
+                <g key={node.id}>
+                  {layer === 'core' ? (
+                    <motion.circle
+                      cx={x}
+                      cy={y}
+                      r={radius}
+                      fill={color}
+                      animate={{ r: [radius, radius + 2, radius] }}
+                      transition={{ duration: 2, repeat: Infinity, delay: index * 0.1 }}
+                    />
+                  ) : (
+                    <circle cx={x} cy={y} r={radius} fill={color} />
+                  )}
+                  <text
+                    x={x}
+                    y={y + radius + 16}
+                    textAnchor="middle"
+                    fill="white"
+                    fontSize="10"
+                    fontWeight="bold"
+                  >
+                    {node.name}
+                  </text>
+                </g>
+              );
+            })}
           </svg>
-          
+
           <div className="absolute bottom-4 left-4 p-3 bg-surface/80 backdrop-blur-md border border-border-subtle rounded-xl space-y-2">
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-primary" />
-              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">核心决策层</span>
+              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">核心决策层 ({layerStats.core})</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-accent" />
-              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">逻辑处理层</span>
+              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">逻辑处理层 ({layerStats.logic})</span>
             </div>
             <div className="flex items-center gap-2">
               <div className="w-2 h-2 rounded-full bg-slate-500" />
-              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">任务执行层</span>
+              <span className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">任务执行层 ({layerStats.execution})</span>
             </div>
           </div>
         </div>
-        
+
         <div className="grid grid-cols-2 gap-4">
           <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
             <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">活跃连接</h4>
-            <p className="text-xl font-bold text-white">12 <span className="text-xs font-normal text-slate-500">个通道</span></p>
+            <p className="text-xl font-bold text-white">{edges.length} <span className="text-xs font-normal text-slate-500">个通道</span></p>
           </div>
           <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
-            <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">同步延迟</h4>
-            <p className="text-xl font-bold text-primary">14ms</p>
+            <h4 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">拓扑状态</h4>
+            <p className="text-xl font-bold text-primary">{loading ? '刷新中...' : '实时'}</p>
           </div>
         </div>
         <p className="text-xs text-slate-400 leading-relaxed">
-          当前拓扑显示了 Agent 之间的协作关系。首席架构师负责任务分解，并将其分配给分析师和审计员进行并行处理。
+          当前拓扑来自后端实时接口 `/api/team/topology`，展示 Agent 节点分布与协作链路。
         </p>
       </div>
     </Modal>
   );
 };
 
-const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
+const DeployAgentModal = ({ isOpen, onClose, addToast, onAgentDeployed }: { isOpen: boolean, onClose: () => void, addToast: any, onAgentDeployed?: () => void }) => {
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [isCustom, setIsCustom] = useState(false);
-  
+  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState({
+    name: '',
+    projectId: '',
+    customTemplate: '',
+  });
+
+  const handleDeploy = async () => {
+    if (!formData.name.trim()) {
+      addToast("请输入 Agent 名称", "error");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await agentsApi.create({
+        name: formData.name,
+        role: selectedTemplate || 'Custom',
+        modelId: undefined,
+        soul: isCustom ? formData.customTemplate : undefined,
+      });
+      addToast("Agent 部署成功，正在初始化环境...", "success");
+      onAgentDeployed?.();
+      onClose();
+      setFormData({ name: '', projectId: '', customTemplate: '' });
+      setSelectedTemplate(null);
+      setIsCustom(false);
+    } catch (error: any) {
+      addToast(`部署失败: ${error.message}`, "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleClose = () => {
+    onClose();
+    setFormData({ name: '', projectId: '', customTemplate: '' });
+    setSelectedTemplate(null);
+    setIsCustom(false);
+  };
+
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="部署新 Agent">
+    <Modal isOpen={isOpen} onClose={handleClose} title="部署新 Agent">
       <div className="space-y-6">
         <div className="space-y-4">
           <div className="flex justify-between items-center">
             <h3 className="text-sm font-bold text-white uppercase tracking-widest">选择角色模板</h3>
-            <button 
+            <button
               onClick={() => setIsCustom(!isCustom)}
               className="text-[10px] font-bold text-primary hover:underline uppercase tracking-widest"
             >
               {isCustom ? "选择预设" : "自定义模板"}
             </button>
           </div>
-          
+
           {!isCustom ? (
             <div className="grid grid-cols-2 gap-3">
               {[
@@ -646,7 +819,7 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
                 { id: 'writer', name: '文案策划', desc: '创意写作与内容营销' },
                 { id: 'analyst', name: '分析师', desc: '数据洞察与逻辑推理' },
               ].map((t) => (
-                <button 
+                <button
                   key={t.id}
                   onClick={() => setSelectedTemplate(t.id)}
                   className={cn(
@@ -663,13 +836,15 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
             <div className="space-y-4 p-4 bg-white/5 border border-dashed border-border-subtle rounded-2xl">
               <div className="space-y-2">
                 <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">模板定义 (JSON/YAML)</label>
-                <textarea 
-                  rows={4} 
+                <textarea
+                  rows={4}
                   placeholder='{ "role": "Custom", "capabilities": ["..."] }'
+                  value={formData.customTemplate}
+                  onChange={(e) => setFormData(prev => ({ ...prev, customTemplate: e.target.value }))}
                   className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
                 />
               </div>
-              <button 
+              <button
                 onClick={() => { setSelectedTemplate('custom'); setIsCustom(false); }}
                 className="w-full py-2 bg-white/10 hover:bg-white/20 rounded-xl text-[10px] font-bold text-white transition-all uppercase tracking-widest"
               >
@@ -683,22 +858,31 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
           <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 pt-4 border-t border-border-subtle">
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">Agent 命名</label>
-              <input type="text" placeholder="例如: Aegis-Alpha" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+              <input
+                type="text"
+                placeholder="例如: Aegis-Alpha"
+                value={formData.name}
+                onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
             </div>
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配项目</label>
-              <select className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none">
-                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              <select
+                value={formData.projectId}
+                onChange={(e) => setFormData(prev => ({ ...prev, projectId: e.target.value }))}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+              >
+                <option value="">暂不分配</option>
+                {MOCK_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
-            <button 
-              onClick={() => {
-                addToast("Agent 部署成功，正在初始化环境...", "success");
-                onClose();
-              }} 
-              className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4"
+            <button
+              onClick={handleDeploy}
+              disabled={loading}
+              className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4 disabled:opacity-50"
             >
-              立即部署
+              {loading ? '部署中...' : '立即部署'}
             </button>
           </motion.div>
         )}
@@ -707,23 +891,9 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
   );
 };
 
-type ParsedProjectDraft = {
-  name: string;
-  description: string;
-  phase: string;
-  agents: string[];
-  priority: 'High' | 'Medium' | 'Low';
-  team: string[];
-};
-
-const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) => {
+const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: { isOpen: boolean, onClose: () => void, addToast: any, onProjectCreated?: () => void }) => {
   const [isImporting, setIsImporting] = useState(false);
-  const [step, setStep] = useState<'input' | 'confirm'>('input');
-  const [rawInput, setRawInput] = useState('');
-  const [parsedProject, setParsedProject] = useState<ParsedProjectDraft | null>(null);
-  const [isParsing, setIsParsing] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
-  const [showManualForm, setShowManualForm] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -732,416 +902,93 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
     agentIds: [] as string[],
   });
 
-  const resetState = () => {
-    setIsImporting(false);
-    setStep('input');
-    setRawInput('');
-    setParsedProject(null);
-    setIsParsing(false);
-    setIsCreating(false);
-    setShowManualForm(false);
-    setFormData({
-      name: '',
-      description: '',
-      priority: 'Medium',
-      dueDate: '',
-      agentIds: [],
-    });
-  };
-
-  const suggestName = (input: string) => {
-    const trimmed = input.trim();
-    if (!trimmed) {
-      return '';
+  const handleSubmit = async () => {
+    if (!formData.name.trim()) {
+      addToast("请输入项目名称", "error");
+      return;
     }
 
-    const candidate = trimmed
-      .replace(/(请|帮我|我们|需要|想要|希望|做一个|做个|创建|搭建|开发|实现|一个|项目|系统)/g, ' ')
-      .replace(/[，。,.!?]/g, ' ')
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 4)
-      .join('');
-
-    return candidate ? candidate.slice(0, 16) + '项目' : '新项目';
-  };
-
-  const parseNaturalLanguage = (input: string): ParsedProjectDraft => {
-    const trimmed = input.trim();
-    const firstSentence = trimmed
-      .split(/[。！？.!?\n]/)
-      .map((line) => line.trim())
-      .find(Boolean) || trimmed;
-
-    const matchedName = trimmed.match(/(?:项目|系统|平台|应用|工作台|MVP)(?:名称|叫|名为)?[:：]?\s*([^\n，。；]{2,24})/);
-    let safeName = matchedName?.[1]?.trim() || suggestName(firstSentence) || '新项目';
-    if (!/(项目|系统|平台|应用|工作台|MVP)/.test(safeName)) {
-      safeName = `${safeName}项目`;
+    setLoading(true);
+    try {
+      await projectsApi.create({
+        name: formData.name,
+        description: formData.description,
+        requirements: formData.description,
+      });
+      addToast("项目创建成功，正在分配资源...", "success");
+      onProjectCreated?.();
+      onClose();
+      setFormData({ name: '', description: '', priority: 'Medium', dueDate: '', agentIds: [] });
+    } catch (error: any) {
+      addToast(`创建失败: ${error.message}`, "error");
+    } finally {
+      setLoading(false);
     }
-    if (safeName.length > 32) {
-      safeName = `${safeName.slice(0, 32)}...`;
-    }
-
-    const lower = trimmed.toLowerCase();
-    const inferPriority: 'High' | 'Medium' | 'Low' =
-      /(紧急|立即|尽快|高优|asap|critical|urgent)/.test(lower) ? 'High'
-      : /(低优|可延期|不紧急|nice to have|backlog)/.test(lower) ? 'Low'
-      : 'Medium';
-
-    const inferredAgents = agents
-      .filter((agent) => {
-        const profile = `${agent.name} ${agent.role}`.toLowerCase();
-        if (trimmed.includes(agent.name) || trimmed.includes(agent.role)) {
-          return true;
-        }
-        if (/(设计|ui|体验|视觉)/.test(lower) && /(设计|jeremy)/.test(profile)) {
-          return true;
-        }
-        if (/(研发|开发|编码|工程|技术)/.test(lower) && /(研发|工程|架构)/.test(profile)) {
-          return true;
-        }
-        if (/(测试|质量|qa)/.test(lower) && /(测试|qa)/.test(profile)) {
-          return true;
-        }
-        if (/(需求|规划|产品)/.test(lower) && /(需求|产品|分析)/.test(profile)) {
-          return true;
-        }
-        return false;
-      })
-      .map((agent) => agent.name);
-
-    const selectedManualAgents = formData.agentIds
-      .map((id) => agents.find((agent) => agent.id === id)?.name)
-      .filter(Boolean) as string[];
-
-    const safeAgents = selectedManualAgents.length > 0
-      ? selectedManualAgents
-      : inferredAgents.length > 0
-        ? inferredAgents.slice(0, 4)
-        : agents.slice(0, 3).map((agent) => agent.name);
-
-    return {
-      name: safeName,
-      description: trimmed,
-      phase: '规划中',
-      agents: safeAgents,
-      priority: inferPriority,
-      team: safeAgents,
-    };
   };
 
   const handleClose = () => {
-    resetState();
     onClose();
-  };
-
-  const handleToggleManualAgent = (agentId: string) => {
-    setFormData((prev) => ({
-      ...prev,
-      agentIds: prev.agentIds.includes(agentId)
-        ? prev.agentIds.filter((id) => id !== agentId)
-        : [...prev.agentIds, agentId],
-    }));
-  };
-
-  const handleParseInput = () => {
-    const input = rawInput.trim();
-    if (!input) {
-      addToast('请先输入项目需求', 'error');
-      return;
-    }
-
-    setIsParsing(true);
-    const parsed = parseNaturalLanguage(input);
-    setParsedProject(parsed);
-    setStep('confirm');
-    setIsParsing(false);
-    addToast('已生成项目理解确认卡', 'success');
-  };
-
-  const handleCreateFromParsed = async () => {
-    if (!parsedProject) {
-      return;
-    }
-
-    setIsCreating(true);
-    try {
-      await projectsApi.create({
-        name: parsedProject.name,
-        description: parsedProject.description,
-        requirements: rawInput.trim() || parsedProject.description,
-      });
-      addToast('项目创建成功，正在分配资源...', 'success');
-      onProjectCreated?.();
-      handleClose();
-    } catch (error: any) {
-      addToast('创建失败: ' + error.message, 'error');
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
-  const handleManualSubmit = () => {
-    if (!formData.name.trim()) {
-      addToast('请输入项目名称', 'error');
-      return;
-    }
-
-    if (!formData.description.trim()) {
-      addToast('请输入项目描述', 'error');
-      return;
-    }
-
-    const manualAgents = formData.agentIds
-      .map((id) => agents.find((agent) => agent.id === id)?.name)
-      .filter(Boolean) as string[];
-
-    setParsedProject({
-      name: formData.name.trim(),
-      description: formData.description.trim(),
-      phase: '规划中',
-      agents: manualAgents.length > 0 ? manualAgents : agents.slice(0, 3).map((agent) => agent.name),
-      priority: formData.priority as 'High' | 'Medium' | 'Low',
-      team: manualAgents,
-    });
-    setStep('confirm');
-    addToast('已生成项目理解确认卡', 'success');
-  };
-
-  const handleUseManualFromParsed = () => {
-    if (!parsedProject) {
-      return;
-    }
-
-    const selectedIds = agents
-      .filter((agent) => parsedProject.agents.includes(agent.name))
-      .map((agent) => agent.id);
-
-    setFormData({
-      name: parsedProject.name,
-      description: parsedProject.description,
-      priority: parsedProject.priority,
-      dueDate: '',
-      agentIds: selectedIds,
-    });
-    setShowManualForm(true);
-    setStep('input');
+    setFormData({ name: '', description: '', priority: 'Medium', dueDate: '', agentIds: [] });
   };
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} title="创建新项目">
       <div className="space-y-6">
-        <div className="flex justify-between items-center">
-          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">FR-010 自然语言创建</p>
+        <div className="flex justify-end">
           <button
             onClick={() => setIsImporting(!isImporting)}
             className="text-[10px] font-bold text-primary hover:underline uppercase tracking-widest flex items-center gap-1"
           >
             <Upload size={12} />
-            {isImporting ? '返回创建流程' : '导入项目定义'}
+            {isImporting ? "手动填写" : "导入项目定义"}
           </button>
         </div>
 
         {!isImporting ? (
           <>
-            {step === 'input' && (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目需求（自然语言）</label>
-                  <textarea
-                    rows={5}
-                    value={rawInput}
-                    onChange={(event) => setRawInput(event.target.value)}
-                    placeholder="例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由需求分析师、产品和研发推进。"
-                    className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={handleParseInput}
-                    disabled={isParsing || !rawInput.trim()}
-                    className="py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
-                  >
-                    {isParsing ? 'AI 解析中...' : 'AI 解析并生成确认卡'}
-                  </button>
-                  <button
-                    onClick={() => setShowManualForm((prev) => !prev)}
-                    className="py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all"
-                  >
-                    {showManualForm ? '收起手动表单' : '手动填写'}
-                  </button>
-                </div>
-
-                {showManualForm && (
-                  <div className="space-y-4 p-4 bg-white/5 border border-border-subtle rounded-2xl">
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目名称</label>
-                      <input
-                        type="text"
-                        value={formData.name}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, name: event.target.value }))}
-                        placeholder="例如: 智能供应链优化"
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目描述</label>
-                      <textarea
-                        rows={3}
-                        value={formData.description}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, description: event.target.value }))}
-                        placeholder="简述项目目标、范围和关键约束..."
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
-                        <select
-                          value={formData.priority}
-                          onChange={(event) => setFormData((prev) => ({ ...prev, priority: event.target.value as 'High' | 'Medium' | 'Low' }))}
-                          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-                        >
-                          <option value="High">高 (High)</option>
-                          <option value="Medium">中 (Medium)</option>
-                          <option value="Low">低 (Low)</option>
-                        </select>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">截止日期</label>
-                        <input
-                          type="date"
-                          value={formData.dueDate}
-                          onChange={(event) => setFormData((prev) => ({ ...prev, dueDate: event.target.value }))}
-                          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配团队</label>
-                      <div className="flex flex-wrap gap-2">
-                        {agents.map((agent) => (
-                          <label key={agent.id} className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors">
-                            <input
-                              type="checkbox"
-                              checked={formData.agentIds.includes(agent.id)}
-                              onChange={() => handleToggleManualAgent(agent.id)}
-                              className="accent-primary"
-                            />
-                            <span className="text-xs text-slate-300">{agent.name}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                    <button
-                      onClick={handleManualSubmit}
-                      disabled={isCreating}
-                      className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-2 disabled:opacity-50"
-                    >
-                      生成确认卡
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {step === 'confirm' && parsedProject && (
-              <div className="bg-surface-soft border border-warning/20 rounded-2xl p-5 space-y-5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-warning">
-                    <Zap size={14} />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">创建前理解确认卡</span>
-                  </div>
-                  <Badge variant="warning">待确认</Badge>
-                </div>
-                <div className="space-y-3">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">名称</label>
-                    <input
-                      type="text"
-                      value={parsedProject.name}
-                      onChange={(event) => setParsedProject((prev) => prev ? { ...prev, name: event.target.value } : prev)}
-                      className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">描述</label>
-                    <textarea
-                      rows={3}
-                      value={parsedProject.description}
-                      onChange={(event) => setParsedProject((prev) => prev ? { ...prev, description: event.target.value } : prev)}
-                      className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">阶段</label>
-                      <select
-                        value={parsedProject.phase}
-                        onChange={(event) => setParsedProject((prev) => prev ? { ...prev, phase: event.target.value } : prev)}
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-                      >
-                        <option value="规划中">规划中</option>
-                        <option value="分析">分析</option>
-                        <option value="设计">设计</option>
-                        <option value="开发">开发</option>
-                        <option value="验收">验收</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
-                      <select
-                        value={parsedProject.priority}
-                        onChange={(event) => setParsedProject((prev) => prev ? { ...prev, priority: event.target.value as 'High' | 'Medium' | 'Low' } : prev)}
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-                      >
-                        <option value="High">高 (High)</option>
-                        <option value="Medium">中 (Medium)</option>
-                        <option value="Low">低 (Low)</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">建议团队</label>
-                    <div className="flex flex-wrap gap-2">
-                      {(parsedProject.agents.length > 0 ? parsedProject.agents : ['未识别，建议手动调整']).map((agentName) => (
-                        <span key={agentName} className="px-3 py-1.5 rounded-xl bg-white/5 border border-border-subtle text-xs text-slate-300">
-                          {agentName}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={() => setStep('input')}
-                    className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
-                  >
-                    修改输入
-                  </button>
-                  <button
-                    onClick={handleUseManualFromParsed}
-                    className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
-                  >
-                    手动微调
-                  </button>
-                  <button
-                    onClick={handleCreateFromParsed}
-                    disabled={isCreating}
-                    className="flex-1 py-2.5 bg-primary text-surface rounded-xl text-xs font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
-                  >
-                    {isCreating ? '创建中...' : '确认创建'}
-                  </button>
-                </div>
-                <button
-                  onClick={handleClose}
-                  className="w-full py-2 bg-transparent border border-border-subtle rounded-xl text-xs font-bold text-slate-400 hover:text-white hover:bg-white/5 transition-all"
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目名称</label>
+              <input
+                type="text"
+                placeholder="例如: 智能供应链优化"
+                value={formData.name}
+                onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目描述</label>
+              <textarea
+                rows={3}
+                placeholder="简述项目的目标与核心挑战..."
+                value={formData.description}
+                onChange={(e) => setFormData(prev => ({ ...prev, description: e.target.value }))}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
+                <select
+                  value={formData.priority}
+                  onChange={(e) => setFormData(prev => ({ ...prev, priority: e.target.value }))}
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
                 >
-                  取消
-                </button>
+                  <option value="High">高 (High)</option>
+                  <option value="Medium">中 (Medium)</option>
+                  <option value="Low">低 (Low)</option>
+                </select>
               </div>
-            )}
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">截止日期</label>
+                <input
+                  type="date"
+                  value={formData.dueDate}
+                  onChange={(e) => setFormData(prev => ({ ...prev, dueDate: e.target.value }))}
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+                />
+              </div>
+            </div>
           </>
         ) : (
           <div className="p-8 border-2 border-dashed border-border-subtle rounded-2xl bg-white/5 flex flex-col items-center justify-center space-y-4 group hover:border-primary/50 transition-all cursor-pointer">
@@ -1152,10 +999,29 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
               <p className="text-sm font-bold text-white">点击或拖拽文件到此处</p>
               <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">支持 .json, .yaml, .pdf 项目文档</p>
             </div>
-            <input type="file" className="hidden" id="project-file" onChange={() => addToast('文件已解析', 'success')} />
+            <input type="file" className="hidden" id="project-file" onChange={() => addToast("文件已解析", "success")} />
             <label htmlFor="project-file" className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-[10px] font-bold text-white transition-all cursor-pointer">选择文件</label>
           </div>
         )}
+
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配团队</label>
+          <div className="flex flex-wrap gap-2">
+            {MOCK_AGENTS.map(a => (
+              <label key={a.id} className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors">
+                <input type="checkbox" className="accent-primary" />
+                <span className="text-xs text-slate-300">{a.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <button
+          onClick={handleSubmit}
+          disabled={loading}
+          className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4 disabled:opacity-50"
+        >
+          {loading ? '创建中...' : '创建项目'}
+        </button>
       </div>
     </Modal>
   );
@@ -1166,11 +1032,11 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
   const [viewMode, setViewMode] = useState<'list' | 'details' | 'plan'>('list');
 
   const decisions = [
-    { 
-      id: 1, 
-      title: '模型切换建议', 
-      desc: 'Agent 建议将当前任务切换至 Gemini 3.1 Pro 以获得更高精度。', 
-      impact: '成本增加 15%', 
+    {
+      id: 1,
+      title: '模型切换建议',
+      desc: 'Agent 建议将当前任务切换至 Gemini 3.1 Pro 以获得更高精度。',
+      impact: '成本增加 15%',
       type: 'warning',
       judgment: '当前任务涉及复杂的逻辑推理和长上下文处理，Gemini 3.1 Flash 的准确率下降至 82%，低于系统阈值 (85%)。建议升级模型以确保输出质量。',
       events: [
@@ -1185,11 +1051,11 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
         '4. 监控响应延迟与成本变化'
       ]
     },
-    { 
-      id: 2, 
-      title: 'API 额度预警', 
-      desc: '项目 "Aegis-X" 的 OpenAI 额度已消耗 90%。', 
-      impact: '可能导致服务中断', 
+    {
+      id: 2,
+      title: 'API 额度预警',
+      desc: '项目 "Aegis-X" 的 OpenAI 额度已消耗 90%。',
+      impact: '可能导致服务中断',
       type: 'danger',
       judgment: '根据过去 24 小时的消耗速率，剩余额度预计将在 3 小时内耗尽。系统已自动识别出非核心任务，建议立即执行限流策略。',
       events: [
@@ -1204,11 +1070,11 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
         '4. 优化 Prompt 以减少 Token 消耗'
       ]
     },
-    { 
-      id: 3, 
-      title: '新任务授权', 
-      desc: 'Agent 识别到一个潜在的优化路径，需要访问生产数据库只读权限。', 
-      impact: '安全风险: 低', 
+    {
+      id: 3,
+      title: '新任务授权',
+      desc: 'Agent 识别到一个潜在的优化路径，需要访问生产数据库只读权限。',
+      impact: '安全风险: 低',
       type: 'info',
       judgment: 'Agent 在执行性能调优任务时，发现慢查询日志指向了生产环境的特定索引。为了验证优化方案，需要对该索引进行 EXPLAIN 分析。',
       events: [
@@ -1232,12 +1098,12 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
   };
 
   return (
-    <Modal 
-      isOpen={isOpen} 
-      onClose={handleClose} 
+    <Modal
+      isOpen={isOpen}
+      onClose={handleClose}
       title={
-        viewMode === 'details' ? `Agent 判定: ${selectedDecision?.title}` : 
-        viewMode === 'plan' ? `执行计划: ${selectedDecision?.title}` : 
+        viewMode === 'details' ? `Agent 判定: ${selectedDecision?.title}` :
+        viewMode === 'plan' ? `执行计划: ${selectedDecision?.title}` :
         "关键决策中心"
       }
     >
@@ -1245,9 +1111,9 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
         <div className="space-y-6">
           <div className="p-5 bg-primary/5 border border-primary/20 rounded-2xl">
             <h4 className="text-xs font-bold text-primary uppercase tracking-widest mb-3">Agent 核心判定</h4>
-            <p className="text-sm text-slate-200 leading-relaxed italic">“{selectedDecision.judgment}”</p>
+            <p className="text-sm text-slate-200 leading-relaxed italic">"{selectedDecision.judgment}"</p>
           </div>
-          
+
           <div className="space-y-4">
             <h4 className="text-xs font-bold text-white uppercase tracking-widest">相关事件流</h4>
             <div className="space-y-3">
@@ -1304,14 +1170,14 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
               <div className="flex justify-between items-center pt-2">
                 <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">影响: {d.impact}</span>
                 <div className="flex gap-2">
-                  <button 
-                    onClick={() => { setSelectedDecision(d); setViewMode('details'); }} 
+                  <button
+                    onClick={() => { setSelectedDecision(d); setViewMode('details'); }}
                     className="px-3 py-1.5 bg-white/5 border border-border-subtle rounded-lg text-[10px] font-bold text-slate-400 hover:bg-white/10 hover:text-white transition-all"
                   >
                     查看详情
                   </button>
-                  <button 
-                    onClick={() => { setSelectedDecision(d); setViewMode('plan'); }} 
+                  <button
+                    onClick={() => { setSelectedDecision(d); setViewMode('plan'); }}
                     className="px-3 py-1.5 bg-primary/10 border border-primary/20 text-primary rounded-lg text-[10px] font-bold hover:bg-primary/20 transition-all"
                   >
                     查看计划
@@ -1327,26 +1193,164 @@ const DecisionCenterModal = ({ isOpen, onClose, addToast }: any) => {
 };
 
 const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpenNewProject, onOpenDecisionCenter }: any) => {
+  const [isOptimizationOpen, setIsOptimizationOpen] = useState(false);
+  const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null);
+  const [isOptimizing, setIsOptimizing] = useState(false);
+
   const handleConfirmAction = () => {
     addToast("已确认所有待处理决策", "success");
   };
 
+  const optimizationStrategies = [
+    {
+      id: 'cost',
+      name: '成本优化',
+      icon: DollarSign,
+      description: '降低 30% Token 消耗，通过使用更高效的模型',
+      savings: '节省 ~$12.50/天',
+      color: 'text-green-400',
+      bgColor: 'bg-green-400/10',
+      borderColor: 'border-green-400/30',
+      stats: { from: 'GPT-4', to: 'GPT-3.5 Turbo' },
+    },
+    {
+      id: 'speed',
+      name: '速度提升',
+      icon: Zap,
+      description: '提升 50% 响应速度，减少等待时间',
+      savings: '延迟降低 ~200ms',
+      color: 'text-blue-400',
+      bgColor: 'bg-blue-400/10',
+      borderColor: 'border-blue-400/30',
+      stats: { from: 'Claude-3.5', to: 'Claude-3-Haiku' },
+    },
+    {
+      id: 'balance',
+      name: '平衡模式',
+      icon: Scale,
+      description: '在成本和性能之间取得最佳平衡',
+      savings: '性价比提升 40%',
+      color: 'text-purple-400',
+      bgColor: 'bg-purple-400/10',
+      borderColor: 'border-purple-400/30',
+      stats: { from: '混合使用', to: '智能路由' },
+    },
+  ];
+
+  const handleApplyStrategy = async (strategy: typeof optimizationStrategies[0]) => {
+    setIsOptimizing(true);
+    setSelectedStrategy(strategy.id);
+    
+    // Simulate optimization process
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    addToast(`已应用「${strategy.name}」策略，${strategy.savings}`, 'success');
+    setIsOptimizing(false);
+    setIsOptimizationOpen(false);
+    setSelectedStrategy(null);
+  };
+
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
+      {isOptimizationOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-surface border border-border-subtle rounded-2xl w-full max-w-2xl max-h-[80vh] overflow-hidden shadow-2xl">
+            <div className="p-6 border-b border-border-subtle flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-bold text-white">优化策略</h2>
+                <p className="text-sm text-slate-400 mt-1">选择最适合您团队的优化方案</p>
+              </div>
+              <button 
+                onClick={() => setIsOptimizationOpen(false)}
+                className="p-2 hover:bg-white/10 rounded-lg transition-colors"
+              >
+                <X size={20} className="text-slate-400" />
+              </button>
+            </div>
+            <div className="p-6 space-y-4 overflow-y-auto max-h-[60vh]">
+              {optimizationStrategies.map((strategy) => (
+                <div 
+                  key={strategy.id}
+                  onClick={() => !isOptimizing && setSelectedStrategy(strategy.id)}
+                  className={cn(
+                    "p-5 rounded-xl border transition-all cursor-pointer",
+                    selectedStrategy === strategy.id 
+                      ? `${strategy.bgColor} ${strategy.borderColor} ring-2 ring-primary/50` 
+                      : "bg-white/5 border-border-subtle hover:border-white/20"
+                  )}
+                >
+                  <div className="flex items-start gap-4">
+                    <div className={cn("p-3 rounded-xl", strategy.bgColor)}>
+                      <strategy.icon size={24} className={strategy.color} />
+                    </div>
+                    <div className="flex-1">
+                      <div className="flex items-center justify-between">
+                        <h3 className="font-bold text-white">{strategy.name}</h3>
+                        {selectedStrategy === strategy.id && (
+                          <span className="text-xs text-primary font-bold">已选择</span>
+                        )}
+                      </div>
+                      <p className="text-sm text-slate-400 mt-1">{strategy.description}</p>
+                      <div className="flex items-center gap-4 mt-3 text-xs">
+                        <span className="text-slate-500">当前: <span className="text-slate-300">{strategy.stats.from}</span></span>
+                        <span className="text-slate-600">→</span>
+                        <span className={strategy.color}>优化后: <span className="font-bold">{strategy.stats.to}</span></span>
+                      </div>
+                      <div className="mt-3 flex items-center gap-2">
+                        <div className="px-2 py-1 rounded bg-primary/20 text-primary text-xs font-bold">
+                          {strategy.savings}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="p-6 border-t border-border-subtle flex justify-end gap-3">
+              <button 
+                onClick={() => setIsOptimizationOpen(false)}
+                className="px-4 py-2 text-sm font-medium text-slate-400 hover:text-white transition-colors"
+              >
+                取消
+              </button>
+              <button 
+                onClick={() => selectedStrategy && handleApplyStrategy(optimizationStrategies.find(s => s.id === selectedStrategy)!)}
+                disabled={!selectedStrategy || isOptimizing}
+                className={cn(
+                  "px-6 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2",
+                  selectedStrategy 
+                    ? "bg-primary text-surface hover:bg-primary/90" 
+                    : "bg-white/10 text-slate-500 cursor-not-allowed"
+                )}
+              >
+                {isOptimizing ? (
+                  <>
+                    <Loader2 size={16} className="animate-spin" />
+                    应用中...
+                  </>
+                ) : (
+                  '应用策略'
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="flex justify-between items-end">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-white">控制面板</h1>
           <p className="text-slate-400 mt-1">欢迎回来，指挥官。Aegis OS 已全面运行。</p>
         </div>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={() => onNavigate('audit')}
             className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-border-subtle rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
           >
             <History size={16} />
             审计日志
           </button>
-          <button 
+          <button
             onClick={() => onOpenNewProject()}
             className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-all flex items-center gap-2 shadow-lg shadow-primary/20 active:scale-95"
           >
@@ -1358,13 +1362,13 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {[
-          { label: '活跃项目', value: projects.length.toString(), icon: Briefcase, color: 'text-accent', trend: '本周 +1', tab: 'projects' },
+          { label: '活跃项目', value: MOCK_PROJECTS.length.toString(), icon: Briefcase, color: 'text-accent', trend: '本周 +1', tab: 'projects' },
           { label: 'Agent 负载', value: '78%', icon: Cpu, color: 'text-primary', trend: '稳定', tab: 'agents' },
           { label: '待处理决策', value: '2', icon: Zap, color: 'text-warning', trend: '需要关注', tab: 'dashboard' },
-          { label: '每日成本', value: `$${models.reduce((acc, m) => acc + m.dailyTokens * 0.00001, 0).toFixed(2)}`, icon: Activity, color: 'text-danger', trend: '较昨日 -5%', tab: 'model-nexus' },
+          { label: '每日成本', value: `$${MOCK_MODELS.reduce((acc, m) => acc + m.dailyTokens * 0.00001, 0).toFixed(2)}`, icon: Activity, color: 'text-danger', trend: '较昨日 -5%', tab: 'model-nexus' },
         ].map((stat, i) => (
-          <div 
-            key={i} 
+          <div
+            key={i}
             onClick={() => onNavigate(stat.tab)}
             className="bg-surface-soft border border-border-subtle p-6 rounded-2xl space-y-4 hover:border-white/20 transition-colors cursor-pointer group"
           >
@@ -1401,15 +1405,15 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
                   </div>
                   <Badge variant="warning">紧急</Badge>
                 </div>
-                <p className="text-sm text-slate-300">“我已经分析了‘多用户 RBAC’的新功能请求。我起草了一个 4 步执行计划。请确认我是否应该开始架构设计。”</p>
+                <p className="text-sm text-slate-300">"我已经分析了'多用户 RBAC'的新功能请求。我起草了一个 4 步执行计划。请确认我是否应该开始架构设计。"</p>
                 <div className="flex gap-2 pt-2">
-                  <button 
+                  <button
                     onClick={() => onOpenDecisionCenter(null, 'details')}
                     className="px-3 py-1.5 bg-warning text-surface text-xs font-bold rounded-lg shadow-lg shadow-warning/20 hover:bg-warning/90 transition-colors"
                   >
                     查看详情
                   </button>
-                  <button 
+                  <button
                     onClick={() => onOpenDecisionCenter(null, 'plan')}
                     className="px-3 py-1.5 bg-white/5 border border-border-subtle text-xs font-bold rounded-lg hover:bg-white/10 transition-colors"
                   >
@@ -1417,7 +1421,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
                   </button>
                 </div>
               </div>
-              
+
               <div className="p-4 bg-accent/5 border border-accent/20 rounded-xl space-y-3">
                 <div className="flex justify-between items-start">
                   <div>
@@ -1426,9 +1430,9 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
                   </div>
                   <Badge variant="accent">决策</Badge>
                 </div>
-                <p className="text-sm text-slate-300">“我为 Aegis OS 主题准备了三个设计方向：‘赛博指挥部’、‘极简石板’和‘极光玻璃’。我们应该采用哪一个？”</p>
+                <p className="text-sm text-slate-300">"我为 Aegis OS 主题准备了三个设计方向：'赛博指挥部'、'极简石板'和'极光玻璃'。我们应该采用哪一个？"</p>
                 <div className="flex gap-2 pt-2">
-                  <button 
+                  <button
                     onClick={(e) => { e.stopPropagation(); onNavigate('agents', '2'); }}
                     className="px-4 py-2 bg-accent text-white text-xs font-bold rounded-xl shadow-lg shadow-accent/20 hover:bg-accent/90 transition-all active:scale-95"
                   >
@@ -1468,7 +1472,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <button className="text-xs text-primary hover:underline" onClick={() => onNavigate('projects')}>管理组合</button>
             </div>
             <div className="divide-y divide-border-subtle">
-              {projects.map((project) => (
+              {MOCK_PROJECTS.map((project) => (
                 <div key={project.id} className="p-6 flex items-center justify-between hover:bg-white/5 transition-colors cursor-pointer group" onClick={() => onNavigate('project-room', project.id)}>
                   <div className="flex items-center gap-4">
                     <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-slate-400 group-hover:text-primary transition-colors">
@@ -1494,7 +1498,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
             </div>
           </div>
         </div>
-        
+
         <div className="space-y-6">
           <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6">
             <div className="flex justify-between items-center mb-6">
@@ -1502,13 +1506,13 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <button className="p-1 text-slate-500 hover:text-white"><MoreVertical size={16} /></button>
             </div>
             <div className="space-y-6">
-              {agents.slice(0, 5).map((agent) => (
+              {MOCK_AGENTS.slice(0, 5).map((agent) => (
                 <div key={agent.id} className="space-y-2 cursor-pointer group" onClick={() => onNavigate('agents', agent.id)}>
                   <div className="flex justify-between items-center">
                     <div className="flex items-center gap-2">
                       <div className={cn(
                         "w-2 h-2 rounded-full",
-                        agent.status === 'Thinking' ? 'bg-accent animate-pulse' : 
+                        agent.status === 'Thinking' ? 'bg-accent animate-pulse' :
                         agent.status === 'Executing' ? 'bg-primary' : 'bg-slate-600'
                       )} />
                       <span className="text-xs text-slate-300 font-medium group-hover:text-primary transition-colors">{agent.name}</span>
@@ -1516,7 +1520,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
                     <span className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">{agent.status === 'Thinking' ? '思考中' : agent.status === 'Executing' ? '执行中' : '空闲'}</span>
                   </div>
                   <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                    <motion.div 
+                    <motion.div
                       initial={{ width: 0 }}
                       animate={{ width: `${agent.load}%` }}
                       className={cn(
@@ -1569,9 +1573,16 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
 };
 
 const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToast: any }) => {
-  const project = useMemo(() => 
-    projects.find(p => p.id === projectId) || projects[0], 
-  [projectId, projects]);
+  const [activeTab, setActiveTab] = useState('tasks'); // 'tasks' | 'stages' | 'deliverables' | 'timeline'
+  const project = useMemo(() =>
+    MOCK_PROJECTS.find(p => p.id === projectId) || MOCK_PROJECTS[0],
+  [projectId]);
+  const tabs = [
+    { id: 'tasks', label: '任务' },
+    { id: 'stages', label: '阶段' },
+    { id: 'deliverables', label: '交付物' },
+    { id: 'timeline', label: '时间线' },
+  ];
 
   return (
     <div className="h-full flex flex-col">
@@ -1592,14 +1603,14 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
           </div>
         </div>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={() => addToast("正在加载项目时间线...", "info")}
             className="px-4 py-2 bg-white/5 hover:bg-white/10 border border-border-subtle rounded-lg text-sm font-medium transition-colors flex items-center gap-2"
           >
             <History size={16} />
             时间线
           </button>
-          <button 
+          <button
             onClick={() => addToast("已触发紧急干预流程，正在通知相关人员...", "error")}
             className="px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
           >
@@ -1612,23 +1623,28 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
       <div className="flex-1 overflow-hidden flex">
         <main className="flex-1 overflow-y-auto p-8 space-y-8">
           <div className="flex items-center gap-4 p-1 bg-white/5 rounded-xl border border-border-subtle w-fit">
-            {['任务', '阶段', '交付物', '时间线'].map((tab, i) => (
-              <button key={i} className={cn(
-                "px-4 py-1.5 rounded-lg text-xs font-bold transition-all",
-                i === 0 ? "bg-surface-muted text-white shadow-sm" : "text-slate-500 hover:text-slate-300"
-              )}>
-                {tab}
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  "px-4 py-1.5 rounded-lg text-xs font-bold transition-all",
+                  activeTab === tab.id ? "bg-surface-muted text-white shadow-sm" : "text-slate-500 hover:text-slate-300"
+                )}
+              >
+                {tab.label}
               </button>
             ))}
           </div>
 
-          <section className="space-y-4">
-            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
-              <Layers size={14} />
-              活跃任务
-            </h3>
+          {activeTab === 'tasks' && (
+            <section className="space-y-4">
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                <Layers size={14} />
+                活跃任务
+              </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {tasks.map((task, i) => (
+              {MOCK_TASKS.map((task, i) => (
                 <div key={i} className="bg-surface-soft border border-border-subtle p-5 rounded-2xl space-y-4 hover:border-white/20 transition-all group">
                   <div className="flex justify-between items-start">
                     <div>
@@ -1650,13 +1666,13 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
                       <span>{task.progress}%</span>
                     </div>
                     <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                      <motion.div 
+                      <motion.div
                         initial={{ width: 0 }}
                         animate={{ width: `${task.progress}%` }}
                         className={cn(
                           "h-full rounded-full transition-all duration-500",
                           task.status === 'Blocked' ? 'bg-danger' : 'bg-primary'
-                        )} 
+                        )}
                       />
                     </div>
                   </div>
@@ -1664,6 +1680,90 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               ))}
             </div>
           </section>
+          )}
+
+          {activeTab === 'stages' && (
+            <section className="space-y-4">
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                <BarChart3 size={14} />
+                项目阶段
+              </h3>
+              <div className="space-y-4">
+                {['需求分析', '设计规划', '开发实现', '测试验收', '部署上线'].map((stage, i) => (
+                  <div key={i} className="flex items-center gap-4 p-4 bg-surface-soft border border-border-subtle rounded-2xl">
+                    <div className={cn(
+                      "w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold",
+                      i < 2 ? "bg-primary/20 text-primary" : i === 2 ? "bg-accent/20 text-accent" : "bg-white/5 text-slate-500"
+                    )}>
+                      {i + 1}
+                    </div>
+                    <div className="flex-1">
+                      <p className={cn("text-sm font-bold", i <= 2 ? "text-white" : "text-slate-500")}>{stage}</p>
+                      <p className="text-[10px] text-slate-600 mt-0.5">
+                        {i === 0 ? '已完成 100%' : i === 1 ? '进行中 65%' : i === 2 ? '待开始' : '未开始'}
+                      </p>
+                    </div>
+                    {i < 3 && <Badge variant="primary">进行中</Badge>}
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {activeTab === 'deliverables' && (
+            <section className="space-y-4">
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                <FileText size={14} />
+                交付物清单
+              </h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {[
+                  { name: 'PRD 文档', status: '已完成', progress: 100 },
+                  { name: 'UI 设计稿', status: '进行中', progress: 65 },
+                  { name: 'API 文档', status: '待开始', progress: 0 },
+                  { name: '测试报告', status: '待开始', progress: 0 },
+                ].map((item, i) => (
+                  <div key={i} className="bg-surface-soft border border-border-subtle p-5 rounded-2xl space-y-3">
+                    <div className="flex justify-between items-start">
+                      <p className="text-sm font-semibold text-white">{item.name}</p>
+                      <Badge variant={item.progress === 100 ? 'primary' : item.progress > 0 ? 'accent' : 'default'}>
+                        {item.status}
+                      </Badge>
+                    </div>
+                    <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                      <div className="h-full bg-primary rounded-full" style={{ width: `${item.progress}%` }} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
+
+          {activeTab === 'timeline' && (
+            <section className="space-y-4">
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                <Clock size={14} />
+                项目时间线
+              </h3>
+              <div className="space-y-4">
+                {[
+                  { time: '2026-03-25 09:00', event: '项目启动会议', type: 'success' },
+                  { time: '2026-03-25 14:00', event: '需求评审完成', type: 'success' },
+                  { time: '2026-03-26 10:00', event: 'UI 设计稿提交', type: 'info' },
+                  { time: '2026-03-27 09:00', event: '开发任务分配', type: 'info' },
+                  { time: '2026-03-27 12:00', event: '等待设计确认', type: 'warning' },
+                ].map((item, i) => (
+                  <div key={i} className="flex items-center gap-4">
+                    <div className="w-2 h-2 rounded-full bg-primary" />
+                    <div className="flex-1 flex items-center gap-4 p-3 bg-surface-soft border border-border-subtle rounded-xl">
+                      <span className="text-[10px] text-slate-500 font-mono">{item.time}</span>
+                      <span className="text-sm text-white">{item.event}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          )}
 
           <section className="space-y-4">
             <div className="flex justify-between items-center">
@@ -1679,8 +1779,8 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
             <div className="bg-surface-muted border border-border-subtle rounded-2xl p-6 font-mono text-xs space-y-2 max-h-96 overflow-y-auto scrollbar-hide">
               <p className="text-slate-500"><span className="text-slate-600">[04:43:15]</span> <span className="text-accent">研发经理:</span> 开始实现 RBAC 中间件...</p>
               <p className="text-slate-500"><span className="text-slate-600">[04:43:22]</span> <span className="text-primary">系统:</span> 成功更新 architecture.md</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:43:45]</span> <span className="text-danger">Jeremy:</span> 因缺少‘Aegis OS’主题的设计确认而阻塞。</p>
-              <p className="text-slate-500"><span className="text-slate-600">[04:44:10]</span> <span className="text-warning">需求分析师:</span> 正在起草‘多用户 RBAC’的理解确认...</p>
+              <p className="text-slate-500"><span className="text-slate-600">[04:43:45]</span> <span className="text-danger">Jeremy:</span> 因缺少'Aegis OS'主题的设计确认而阻塞。</p>
+              <p className="text-slate-500"><span className="text-slate-600">[04:44:10]</span> <span className="text-warning">需求分析师:</span> 正在起草'多用户 RBAC'的理解确认...</p>
               <p className="text-slate-500"><span className="text-slate-600">[04:45:05]</span> <span className="text-accent">研发经理:</span> 正在分析 `server.ts` 中现有的认证逻辑...</p>
               <p className="text-slate-500"><span className="text-slate-600">[04:45:30]</span> <span className="text-primary">系统:</span> 快照已创建: `backup_v1.0.1_pre_rbac`</p>
               <div className="w-1 h-4 bg-primary animate-pulse inline-block align-middle ml-1" />
@@ -1723,7 +1823,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               项目 Agent
             </h3>
             <div className="space-y-3">
-              {agents.slice(0, 4).map((agent, i) => (
+              {MOCK_AGENTS.slice(0, 4).map((agent, i) => (
                 <div key={i} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors cursor-pointer">
                   <div className="w-8 h-8 rounded-full bg-accent/20 flex items-center justify-center text-accent text-[10px] font-bold border border-accent/20">
                     {agent.name.charAt(0).toUpperCase()}
@@ -1774,30 +1874,30 @@ const TokenUsageTrendChart = ({ limit }: { limit: number }) => {
             </linearGradient>
           </defs>
           <CartesianGrid strokeDasharray="3 3" stroke="#2d2e32" vertical={false} opacity={0.5} />
-          <XAxis 
-            dataKey="time" 
-            hide 
+          <XAxis
+            dataKey="time"
+            hide
           />
           <YAxis hide domain={[0, limit / 12]} />
-          <Tooltip 
+          <Tooltip
             contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #2d2e32', borderRadius: '8px', fontSize: '10px', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)' }}
             itemStyle={{ color: '#fff', padding: '2px 0' }}
             labelStyle={{ color: '#64748b', marginBottom: '4px', fontWeight: 'bold' }}
             cursor={{ stroke: '#00f2ff', strokeWidth: 1 }}
           />
-          <ReferenceLine 
-            y={limit / 24} 
-            stroke="#ff00f2" 
-            strokeDasharray="3 3" 
-            label={{ position: 'right', value: 'LIMIT', fill: '#ff00f2', fontSize: 7, fontWeight: 'bold' }} 
+          <ReferenceLine
+            y={limit / 24}
+            stroke="#ff00f2"
+            strokeDasharray="3 3"
+            label={{ position: 'right', value: 'LIMIT', fill: '#ff00f2', fontSize: 7, fontWeight: 'bold' }}
           />
-          <Area 
-            type="monotone" 
-            dataKey="usage" 
-            stroke="#00f2ff" 
+          <Area
+            type="monotone"
+            dataKey="usage"
+            stroke="#00f2ff"
             strokeWidth={2}
-            fillOpacity={0.4} 
-            fill="url(#colorUsage)" 
+            fillOpacity={0.4}
+            fill="url(#colorUsage)"
             animationDuration={1500}
           />
         </AreaChart>
@@ -1832,7 +1932,7 @@ const TokenThroughputChart = () => {
           <CartesianGrid strokeDasharray="3 3" stroke="#2d2e32" vertical={false} opacity={0.3} />
           <XAxis dataKey="time" hide />
           <YAxis hide />
-          <Tooltip 
+          <Tooltip
             contentStyle={{ backgroundColor: '#1a1b1e', border: '1px solid #2d2e32', borderRadius: '8px', fontSize: '10px' }}
             itemStyle={{ padding: '2px 0' }}
           />
@@ -1844,20 +1944,39 @@ const TokenThroughputChart = () => {
   );
 };
 
-const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToast: (msg: string, type?: any) => void }) => {
+const AgentCommander = ({
+  agentId,
+  addToast,
+  onSendTask,
+}: {
+  agentId: string | null,
+  addToast: (msg: string, type?: any) => void,
+  onSendTask?: (agentId: string, message: string) => Promise<void>,
+}) => {
   const [mode, setMode] = useState('confirm'); // 'confirm' | 'auto'
-  const activeAgent = useMemo(() => 
-    agents.find(a => a.id === agentId) || agents[0], 
-  [agentId, agents]);
-  
+  const activeAgent = useMemo(() =>
+    MOCK_AGENTS.find(a => a.id === agentId) || MOCK_AGENTS[0],
+  [agentId]);
+
   const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit);
   const [dailyUsage, setDailyUsage] = useState(12450);
   const [currentModelId, setCurrentModelId] = useState(activeAgent.currentModelId);
-  const agentSessions = useMemo(() => sessions.filter(s => s.agentId === activeAgent.id), [activeAgent.id, sessions]);
+  const [instructionDraft, setInstructionDraft] = useState('');
+  const [pendingInstruction, setPendingInstruction] = useState('');
+  const [isConfirmationOpen, setIsConfirmationOpen] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+  const [isOptimizationOpen, setIsOptimizationOpen] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
+  const agentSessions = useMemo(() => MOCK_SESSIONS.filter(s => s.agentId === activeAgent.id), [activeAgent.id]);
+
+  useEffect(() => {
+    setTokenLimit(activeAgent.tokenLimit);
+    setCurrentModelId(activeAgent.currentModelId);
+  }, [activeAgent.id, activeAgent.currentModelId, activeAgent.tokenLimit]);
 
   const handleModelChange = (modelId: string) => {
     setCurrentModelId(modelId);
-    const model = models.find(m => m.id === modelId);
+    const model = MOCK_MODELS.find(m => m.id === modelId);
     addToast(`已将 ${activeAgent.name} 切换至模型: ${model?.name}`, 'success');
   };
 
@@ -1869,6 +1988,76 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
     const val = parseInt(e.target.value);
     setTokenLimit(val);
     addToast(`Token 限制已更新为 ${val.toLocaleString()}`, "success");
+  };
+
+  const draftUnderstanding = useMemo(() => {
+    const raw = pendingInstruction.trim();
+    if (!raw) {
+      return {
+        objective: '等待输入任务指令',
+        plan: ['解析任务目标', '拆解执行步骤', '执行并回传结果'],
+        risk: ['任务目标不清晰可能导致偏差']
+      };
+    }
+
+    const short = raw.length > 120 ? `${raw.slice(0, 120)}...` : raw;
+    const mentions = raw.match(/#[\w-]+/g) || [];
+
+    return {
+      objective: short,
+      plan: [
+        '复述任务边界与交付物',
+        `使用模型 ${MOCK_MODELS.find((m) => m.id === currentModelId)?.name ?? currentModelId} 执行`,
+        '产出阶段性结果并等待进一步确认'
+      ],
+      risk: [
+        mentions.length > 0 ? `检测到标签 ${mentions.join(', ')}，将优先纳入上下文` : '未检测到结构化标签，可能需要补充约束',
+        mode === 'auto' ? '当前为自主运行模式，默认会加快执行节奏' : '当前为先确认模式，执行前会继续等待指令确认'
+      ]
+    };
+  }, [currentModelId, mode, pendingInstruction]);
+
+  const handlePrepareSend = () => {
+    const content = instructionDraft.trim();
+    if (!content) {
+      addToast('请输入任务指令后再发送', 'error');
+      return;
+    }
+
+    setPendingInstruction(content);
+    setIsConfirmationOpen(true);
+  };
+
+  const handleConfirmExecution = async () => {
+    if (!pendingInstruction.trim()) {
+      return;
+    }
+
+    setIsSending(true);
+    try {
+      if (onSendTask) {
+        await onSendTask(activeAgent.id, pendingInstruction.trim());
+      }
+      addToast(`任务已下发给 ${activeAgent.name}`, 'success');
+      setInstructionDraft('');
+      setPendingInstruction('');
+      setIsConfirmationOpen(false);
+    } catch (error: any) {
+      addToast(error?.message || '任务发送失败，请稍后重试', 'error');
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleEditInstruction = () => {
+    setIsConfirmationOpen(false);
+    setTimeout(() => composerRef.current?.focus(), 50);
+  };
+
+  const handleCancelSend = () => {
+    setIsConfirmationOpen(false);
+    setPendingInstruction('');
+    addToast('已取消发送', 'info');
   };
 
   return (
@@ -1890,8 +2079,8 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               <p className="text-xs text-slate-400">角色: {activeAgent.role}</p>
               <div className="flex items-center gap-2">
                 <div className="w-24 h-1 bg-white/5 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-primary transition-all duration-500" 
+                  <div
+                    className="h-full bg-primary transition-all duration-500"
                     style={{ width: `${(dailyUsage / tokenLimit) * 100}%` }}
                   />
                 </div>
@@ -1902,14 +2091,14 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
             </div>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-3 bg-white/5 p-1.5 rounded-xl border border-border-subtle shadow-inner">
             <div className="flex items-center gap-2 px-3 border-r border-border-subtle mr-1">
               <Lock size={12} className="text-slate-500" />
               <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">限额</span>
-              <input 
-                type="number" 
+              <input
+                type="number"
                 value={tokenLimit}
                 onChange={handleTokenLimitChange}
                 step={5000}
@@ -1917,7 +2106,7 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               />
             </div>
             <div className="flex items-center gap-1.5">
-              <button 
+              <button
                 onClick={() => setMode('confirm')}
                 className={cn(
                   "px-4 py-2 rounded-lg text-[10px] font-bold transition-all uppercase tracking-wider",
@@ -1926,7 +2115,7 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               >
                 先确认
               </button>
-              <button 
+              <button
                 onClick={() => setMode('auto')}
                 className={cn(
                   "px-4 py-2 rounded-lg text-[10px] font-bold transition-all uppercase tracking-wider",
@@ -1937,20 +2126,20 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               </button>
             </div>
           </div>
-          
+
           <div className="h-8 w-px bg-border-subtle" />
-          
+
           <div className="flex items-center gap-2 relative group/model">
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">当前模型:</span>
             <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-[10px] font-bold text-white flex items-center gap-2 hover:bg-white/10 transition-all hover:border-white/20">
-              {models.find(m => m.id === currentModelId)?.name}
+              {MOCK_MODELS.find(m => m.id === currentModelId)?.name}
               <ChevronDown size={12} className="text-slate-500" />
             </button>
             <div className="absolute top-full right-0 mt-2 w-48 bg-surface-muted border border-border-subtle rounded-xl shadow-2xl opacity-0 invisible group-hover/model:opacity-100 group-hover/model:visible transition-all z-50 p-2">
               <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-2 py-1">选择计算资源</p>
-              {models.map(m => (
-                <button 
-                  key={m.id} 
+              {MOCK_MODELS.map(m => (
+                <button
+                  key={m.id}
                   onClick={() => handleModelChange(m.id)}
                   className="w-full text-left px-3 py-2 rounded-lg text-xs text-slate-300 hover:bg-white/5 hover:text-white transition-colors flex justify-between items-center"
                 >
@@ -1975,7 +2164,7 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               <button className="text-[10px] text-primary hover:underline">编辑</button>
             </div>
             <div className="bg-surface-soft border border-border-subtle rounded-xl p-4 font-mono text-xs text-slate-300 leading-relaxed relative group">
-              “你是一个细致入微的分析师，视清晰度为生命。你从不主观臆断，总是先行确认。你的目标是架起人类意图与技术执行之间的桥梁。”
+              "你是一个细致入微的分析师，视清晰度为生命。你从不主观臆断，总是先行确认。你的目标是架起人类意图与技术执行之间的桥梁。"
               <div className="absolute inset-0 bg-primary/5 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
             </div>
           </section>
@@ -2034,10 +2223,10 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
                   <p className="text-[9px] text-slate-500 font-bold uppercase mb-2 tracking-widest">24小时消耗趋势</p>
                   <TokenUsageTrendChart limit={tokenLimit} />
                 </div>
-                <input 
-                  type="range" 
-                  min="10000" 
-                  max="500000" 
+                <input
+                  type="range"
+                  min="10000"
+                  max="500000"
                   step="10000"
                   value={tokenLimit}
                   onChange={(e) => setTokenLimit(parseInt(e.target.value))}
@@ -2119,10 +2308,10 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
                 <div className="bg-surface-muted border border-border-subtle p-6 rounded-2xl rounded-tl-none space-y-5 shadow-2xl relative overflow-hidden group">
                   <div className="absolute top-0 left-0 w-1 h-full bg-accent opacity-50" />
                   <p className="text-sm leading-relaxed text-slate-200">
-                    我已经审查了项目 <span className="text-primary font-bold">“SaaS 管理工作台演示”</span>。
+                    我已经审查了项目 <span className="text-primary font-bold">"SaaS 管理工作台演示"</span>。
                     目前的瓶颈是缺乏清晰的 RBAC（基于角色的访问控制）规范。我建议在继续实施之前先起草一份正式规范。
                   </p>
-                  
+
                   {/* Understanding Card */}
                   <div className="bg-warning/5 border border-warning/20 rounded-2xl p-5 space-y-4 relative">
                     <div className="flex items-center justify-between">
@@ -2168,13 +2357,13 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
                       </div>
                     </div>
                     <div className="flex gap-3 pt-2">
-                      <button 
+                      <button
                         onClick={handleConfirmAction}
                         className="flex-1 py-2.5 bg-warning text-surface text-xs font-bold rounded-xl shadow-lg shadow-warning/20 hover:bg-warning/90 transition-all active:scale-95 uppercase tracking-wider"
                       >
                         确认并继续
                       </button>
-                      <button 
+                      <button
                         onClick={() => addToast("正在加载执行计划详情...", "info")}
                         className="px-6 py-2.5 bg-white/5 border border-border-subtle text-xs font-bold rounded-xl hover:bg-white/10 transition-all hover:border-white/20 uppercase tracking-wider text-slate-400"
                       >
@@ -2190,15 +2379,28 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
           {/* Composer */}
           <div className="p-6 bg-surface/80 backdrop-blur-xl border-t border-border-subtle">
             <div className="max-w-4xl mx-auto relative group">
-              <textarea 
+              <textarea
+                ref={composerRef}
                 placeholder="输入命令或提出问题..."
+                value={instructionDraft}
+                onChange={(e) => setInstructionDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    handlePrepareSend();
+                  }
+                }}
                 className="w-full bg-surface-muted border border-border-subtle rounded-2xl px-5 py-4 pr-24 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all resize-none h-28 shadow-inner"
               />
               <div className="absolute right-4 bottom-4 flex items-center gap-3">
                 <button className="p-2 text-slate-500 hover:text-white transition-colors">
                   <Globe size={18} />
                 </button>
-                <button className="bg-primary text-surface p-3 rounded-xl shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all">
+                <button
+                  onClick={handlePrepareSend}
+                  disabled={isSending}
+                  className="bg-primary text-surface p-3 rounded-xl shadow-lg shadow-primary/20 hover:scale-105 active:scale-95 transition-all disabled:opacity-60 disabled:hover:scale-100"
+                >
                   <ChevronRight size={20} />
                 </button>
               </div>
@@ -2223,6 +2425,86 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
               </p>
             </div>
           </div>
+
+          <AnimatePresence>
+            {isConfirmationOpen && (
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="fixed inset-0 z-[120] bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+              >
+                <motion.div
+                  initial={{ opacity: 0, y: 16, scale: 0.98 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  exit={{ opacity: 0, y: 16, scale: 0.98 }}
+                  className="w-full max-w-2xl bg-surface-soft border border-border-subtle rounded-2xl shadow-2xl overflow-hidden"
+                >
+                  <div className="p-6 border-b border-border-subtle bg-white/5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-lg font-bold text-white">理解确认卡</h3>
+                      <Badge variant="warning">发送前确认</Badge>
+                    </div>
+                    <p className="text-xs text-slate-400 mt-2">
+                      Agent 将在你确认后执行。以下是对本次任务的初步理解：
+                    </p>
+                  </div>
+
+                  <div className="p-6 space-y-5">
+                    <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                      <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">提议目标</p>
+                      <p className="text-sm text-slate-100 mt-2 leading-relaxed">{draftUnderstanding.objective}</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                        <p className="text-[10px] text-slate-500 uppercase tracking-widest font-bold">执行计划</p>
+                        <div className="mt-2 space-y-2">
+                          {draftUnderstanding.plan.map((step, index) => (
+                            <p key={index} className="text-xs text-slate-300">
+                              {index + 1}. {step}
+                            </p>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="p-4 bg-warning/5 border border-warning/20 rounded-xl">
+                        <p className="text-[10px] text-warning uppercase tracking-widest font-bold">识别风险</p>
+                        <div className="mt-2 space-y-2">
+                          {draftUnderstanding.risk.map((item, index) => (
+                            <p key={index} className="text-xs text-slate-300">- {item}</p>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-6 border-t border-border-subtle bg-white/5 flex flex-col md:flex-row gap-3">
+                    <button
+                      onClick={handleConfirmExecution}
+                      disabled={isSending}
+                      className="flex-1 py-2.5 rounded-xl bg-primary text-surface text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-60"
+                    >
+                      {isSending ? '执行中...' : '✅ 确认执行'}
+                    </button>
+                    <button
+                      onClick={handleEditInstruction}
+                      disabled={isSending}
+                      className="flex-1 py-2.5 rounded-xl bg-white/5 border border-border-subtle text-sm font-bold text-slate-300 hover:bg-white/10 transition-all"
+                    >
+                      ✏️ 修改指令
+                    </button>
+                    <button
+                      onClick={handleCancelSend}
+                      disabled={isSending}
+                      className="flex-1 py-2.5 rounded-xl bg-danger/10 border border-danger/20 text-sm font-bold text-danger hover:bg-danger/20 transition-all"
+                    >
+                      ❌ 取消
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </main>
       </div>
     </div>
@@ -2251,9 +2533,9 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
     }, 3000);
   };
 
-  const topConsumers = useMemo(() => 
-    [...agents].sort((a, b) => b.tokensUsed - a.tokensUsed).slice(0, 5),
-  [agents]);
+  const topConsumers = useMemo(() =>
+    [...MOCK_AGENTS].sort((a, b) => b.tokensUsed - a.tokensUsed).slice(0, 5),
+  []);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2262,7 +2544,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
           <h1 className="text-3xl font-bold tracking-tight text-white">系统运行</h1>
           <p className="text-slate-400 mt-1">运行时状态、健康检查和成本治理。</p>
         </div>
-        <button 
+        <button
           onClick={handleRefresh}
           disabled={isRefreshing}
           className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2 disabled:opacity-50"
@@ -2340,7 +2622,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                 <BarChart3 size={18} className="text-accent" />
                 成本治理
               </h2>
-              <button 
+              <button
                 onClick={() => addToast("正在导出成本报告...", "info")}
                 className="text-xs text-primary hover:underline"
               >
@@ -2363,16 +2645,16 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                       <span className="text-xs text-slate-400">{item.usage}%</span>
                     </div>
                     <div className="h-2 w-full bg-white/5 rounded-full overflow-hidden">
-                      <motion.div 
+                      <motion.div
                         initial={{ width: 0 }}
                         animate={{ width: `${item.usage}%` }}
-                        className={cn("h-full rounded-full", item.color)} 
+                        className={cn("h-full rounded-full", item.color)}
                       />
                     </div>
                   </div>
                 ))}
               </div>
-              
+
               <div className="p-4 bg-white/5 rounded-xl border border-border-subtle flex items-center justify-between">
                 <div className="flex items-center gap-4">
                   <div className="p-2 rounded-lg bg-primary/10 text-primary">
@@ -2383,7 +2665,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                     <p className="text-xs text-slate-500">您的 Agent 团队正在最佳成本参数内运行。</p>
                   </div>
                 </div>
-                <button className="px-4 py-2 bg-primary text-surface text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors">优化策略</button>
+                <button onClick={() => addToast('正在加载优化策略...', 'info')} className="px-4 py-2 bg-primary text-surface text-xs font-bold rounded-lg hover:bg-primary/90 transition-colors">优化策略</button>
               </div>
             </div>
           </div>
@@ -2408,9 +2690,9 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
-                  {sessions.slice(0, 5).map((session) => {
-                    const agent = agents.find(a => a.id === session.agentId);
-                    const project = projects.find(p => p.id === session.projectId);
+                  {MOCK_SESSIONS.slice(0, 5).map((session) => {
+                    const agent = MOCK_AGENTS.find(a => a.id === session.agentId);
+                    const project = MOCK_PROJECTS.find(p => p.id === session.projectId);
                     return (
                       <tr key={session.id} className="hover:bg-white/5 transition-colors group">
                         <td className="px-6 py-4">
@@ -2458,7 +2740,7 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                 </div>
               ))}
             </div>
-            <button 
+            <button
               onClick={handleDiagnose}
               disabled={isDiagnosing}
               className="w-full py-2 bg-white/5 border border-border-subtle rounded-lg text-xs font-bold text-white hover:bg-white/10 transition-colors disabled:opacity-50"
@@ -2522,7 +2804,7 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
       <div className="flex gap-3">
         <div className="relative">
           <Filter size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <select 
+          <select
             onChange={() => addToast("过滤条件已更新", "info")}
             className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-8 py-2 text-xs font-bold text-slate-300 appearance-none focus:outline-none focus:ring-1 focus:ring-primary/50"
           >
@@ -2533,7 +2815,7 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
           </select>
           <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
         </div>
-        <button 
+        <button
           onClick={() => onOpenNewProject()}
           className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
         >
@@ -2575,7 +2857,7 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
             </tr>
           </thead>
           <tbody className="divide-y divide-border-subtle">
-            {projects.map((project) => (
+            {MOCK_PROJECTS.map((project) => (
               <tr key={project.id} className="hover:bg-white/5 transition-colors group cursor-pointer" onClick={() => onSelectProject(project.id)}>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
@@ -2635,14 +2917,14 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
         <p className="text-slate-400 mt-1">监控和管理您的数字员工能力。</p>
       </div>
       <div className="flex gap-3">
-        <button 
+        <button
           onClick={() => onOpenTopology()}
           className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2"
         >
           <Workflow size={16} />
           团队图谱
         </button>
-        <button 
+        <button
           onClick={() => onOpenDeploy()}
           className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
         >
@@ -2653,9 +2935,9 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
     </header>
 
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-      {agents.map((agent) => (
-        <div 
-          key={agent.id} 
+      {MOCK_AGENTS.map((agent) => (
+        <div
+          key={agent.id}
           className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-6 hover:border-white/20 transition-all group cursor-pointer"
           onClick={() => onSelectAgent(agent.id)}
         >
@@ -2677,7 +2959,7 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
           <div className="grid grid-cols-2 gap-4">
             <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">模型</p>
-              <p className="text-xs text-white mt-1 font-medium">{models.find(m => m.id === agent.currentModelId)?.name}</p>
+              <p className="text-xs text-white mt-1 font-medium">{MOCK_MODELS.find(m => m.id === agent.currentModelId)?.name}</p>
             </div>
             <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">已用 Token</p>
@@ -2691,7 +2973,7 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
               <span className="text-white font-bold">{agent.load}%</span>
             </div>
             <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-              <motion.div 
+              <motion.div
                 initial={{ width: 0 }}
                 animate={{ width: `${agent.load}%` }}
                 className={cn(
@@ -2703,7 +2985,7 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
           </div>
 
           <div className="flex gap-2 pt-2">
-            <button 
+            <button
               onClick={(e) => {
                 e.stopPropagation();
                 onSelectAgent(agent.id);
@@ -2713,7 +2995,7 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
             >
               命令
             </button>
-            <button 
+            <button
               onClick={(e) => {
                 e.stopPropagation();
                 onOpenConfig(agent.id);
@@ -2745,7 +3027,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
           <Database size={14} />
           根目录: ~/.openclaw
         </div>
-        <button 
+        <button
           onClick={() => addToast("正在同步本地文件系统...", "info")}
           className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
         >
@@ -2786,7 +3068,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
             ))}
           </div>
         </div>
-        
+
         <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-4">
           <h2 className="font-semibold text-white text-sm">工作区健康状况</h2>
           <div className="space-y-4">
@@ -2816,7 +3098,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
             <Badge variant="primary">7 个活跃</Badge>
           </div>
           <div className="p-6 space-y-4">
-            {projects.map((p, i) => (
+            {MOCK_PROJECTS.map((p, i) => (
               <div key={i} className="flex items-center justify-between p-4 bg-surface-muted rounded-xl border border-border-subtle hover:border-white/20 transition-all group">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center text-slate-500 group-hover:text-primary transition-colors">
@@ -2869,20 +3151,20 @@ const OpenClawWorkspace = ({ addToast }: any) => (
 );
 
 const RealTimeMonitoring = ({ addToast }: any) => {
-  const sessionList = sessions;
+  const [sessions] = useState(MOCK_SESSIONS);
   const [activeFilter, setActiveFilter] = useState('all');
 
   const filteredSessions = useMemo(() => {
-    if (activeFilter === 'all') return sessionList;
-    return sessionList.filter(s => s.status === activeFilter);
-  }, [sessionList, activeFilter]);
+    if (activeFilter === 'all') return sessions;
+    return sessions.filter(s => s.status === activeFilter);
+  }, [sessions, activeFilter]);
 
   const stats = useMemo(() => {
-    const totalTokens = sessionList.reduce((acc, s) => acc + s.tokens, 0);
-    const totalCost = sessionList.reduce((acc, s) => acc + s.cost, 0);
-    const activeCount = sessionList.filter(s => s.status === 'active').length;
+    const totalTokens = sessions.reduce((acc, s) => acc + s.tokens, 0);
+    const totalCost = sessions.reduce((acc, s) => acc + s.cost, 0);
+    const activeCount = sessions.filter(s => s.status === 'active').length;
     return { totalTokens, totalCost, activeCount };
-  }, [sessionList]);
+  }, [sessions]);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2960,8 +3242,8 @@ const RealTimeMonitoring = ({ addToast }: any) => {
             </thead>
             <tbody className="divide-y divide-border-subtle">
               {filteredSessions.map((session) => {
-                const agent = agents.find(a => a.id === session.agentId);
-                const project = projects.find(p => p.id === session.projectId);
+                const agent = MOCK_AGENTS.find(a => a.id === session.agentId);
+                const project = MOCK_PROJECTS.find(p => p.id === session.projectId);
                 return (
                   <tr key={session.id} className="hover:bg-white/5 transition-colors group">
                     <td className="px-6 py-4 text-xs text-slate-500 font-mono">{session.id}</td>
@@ -2974,7 +3256,7 @@ const RealTimeMonitoring = ({ addToast }: any) => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <Badge variant="default">{models.find(m => m.id === session.modelId)?.name}</Badge>
+                      <Badge variant="default">{MOCK_MODELS.find(m => m.id === session.modelId)?.name}</Badge>
                     </td>
                     <td className="px-6 py-4 text-xs text-slate-400">{project?.name}</td>
                     <td className="px-6 py-4 text-xs text-slate-500">{session.duration}</td>
@@ -2983,7 +3265,7 @@ const RealTimeMonitoring = ({ addToast }: any) => {
                       <div className="flex items-center gap-1.5">
                         <div className={cn(
                           "w-1.5 h-1.5 rounded-full",
-                          session.status === 'active' ? 'bg-primary animate-pulse' : 
+                          session.status === 'active' ? 'bg-primary animate-pulse' :
                           session.status === 'completed' ? 'bg-slate-500' : 'bg-danger'
                         )} />
                         <span className={cn(
@@ -3013,9 +3295,9 @@ const ModelTerminal = ({ model }: { model: Model }) => {
     const interval = setInterval(() => {
       const newLog = {
         timestamp: new Date().toLocaleTimeString(),
-        type: Math.random() > 0.5 ? 'bash' : 'assistant',
-        content: Math.random() > 0.5 
-          ? `Executing task: ${model.currentTask}... [OK]` 
+        type: (Math.random() > 0.5 ? 'bash' : 'assistant') as ModelLog['type'],
+        content: Math.random() > 0.5
+          ? `Executing task: ${model.currentTask}... [OK]`
           : `Processing token stream... ${Math.floor(Math.random() * 1000)} tokens generated.`,
       };
       setLogs(prev => [...prev.slice(-19), newLog]);
@@ -3043,7 +3325,7 @@ const ModelTerminal = ({ model }: { model: Model }) => {
           <div className="w-2 h-2 rounded-full bg-green-500/20 border border-green-500/40" />
         </div>
       </div>
-      <div 
+      <div
         ref={scrollRef}
         className="flex-1 p-4 overflow-y-auto text-[11px] space-y-4 scrollbar-hide bg-black/20"
       >
@@ -3110,16 +3392,16 @@ const Dialog = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose
 
 const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
-  
-  const stats = useMemo(() => ({
-    totalTokens: models.reduce((acc, m) => acc + m.totalTokens, 0),
-    totalCost: models.reduce((acc, m) => acc + m.totalTokens * 0.000002, 0),
-    activeModels: models.filter(m => m.status === 'Healthy').length
-  }), [models]);
 
-  const selectedModel = useMemo(() => 
-    models.find(m => m.id === selectedModelId),
-  [selectedModelId, models]);
+  const stats = useMemo(() => ({
+    totalTokens: MOCK_MODELS.reduce((acc, m) => acc + m.totalTokens, 0),
+    totalCost: MOCK_MODELS.reduce((acc, m) => acc + m.totalTokens * 0.000002, 0),
+    activeModels: MOCK_MODELS.filter(m => m.status === 'Healthy').length
+  }), []);
+
+  const selectedModel = useMemo(() =>
+    MOCK_MODELS.find(m => m.id === selectedModelId),
+  [selectedModelId]);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -3138,13 +3420,13 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
           </p>
         </div>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={() => addToast("正在刷新模型状态...", "info")}
             className="p-2 bg-white/5 border border-border-subtle rounded-xl text-slate-400 hover:text-white transition-colors"
           >
             <RotateCcw size={20} />
           </button>
-          <button 
+          <button
             onClick={() => onOpenNewModel()}
             className="px-4 py-2 bg-primary text-surface font-bold rounded-xl shadow-lg shadow-primary/20 flex items-center gap-2"
           >
@@ -3176,9 +3458,9 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {models.map((model) => (
-          <div 
-            key={model.id} 
+        {MOCK_MODELS.map((model) => (
+          <div
+            key={model.id}
             className="bg-surface-soft border border-border-subtle rounded-3xl p-6 space-y-6 hover:border-primary/30 transition-all group cursor-pointer"
             onClick={() => setSelectedModelId(model.id)}
           >
@@ -3206,7 +3488,7 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
                 <span className="text-sm font-mono text-white">{model.dailyTokens.toLocaleString()}</span>
               </div>
               <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                <motion.div 
+                <motion.div
                   initial={{ width: 0 }}
                   animate={{ width: `${(model.dailyTokens / 200000) * 100}%` }}
                   className="h-full bg-primary"
@@ -3223,7 +3505,7 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
                 <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">实时吞吐</p>
                 <p className="text-lg font-mono text-primary mt-1">{model.throughput}</p>
                 <div className="absolute bottom-0 left-0 right-0 h-1 bg-primary/20">
-                  <motion.div 
+                  <motion.div
                     className="h-full bg-primary"
                     animate={{ x: ['-100%', '100%'] }}
                     transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
@@ -3244,8 +3526,8 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
         ))}
       </div>
 
-      <Dialog 
-        isOpen={!!selectedModelId} 
+      <Dialog
+        isOpen={!!selectedModelId}
         onClose={() => setSelectedModelId(null)}
         title={selectedModel ? `${selectedModel.name} 实时终端` : '模型终端'}
       >
@@ -3290,8 +3572,8 @@ const AuditLogs = () => (
       <div className="flex gap-3">
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-          <input 
-            type="text" 
+          <input
+            type="text"
             placeholder="搜索日志..."
             className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-4 py-2 text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 w-64"
           />
@@ -3342,13 +3624,13 @@ const AuditLogs = () => (
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-1.5">
                     <div className={cn(
-                      "w-1.5 h-1.5 rounded-full", 
-                      log.status === '成功' ? 'bg-primary' : 
+                      "w-1.5 h-1.5 rounded-full",
+                      log.status === '成功' ? 'bg-primary' :
                       log.status === '警告' ? 'bg-warning' : 'bg-danger'
                     )} />
                     <span className={cn(
-                      "text-[10px] font-bold uppercase", 
-                      log.status === '成功' ? 'text-primary' : 
+                      "text-[10px] font-bold uppercase",
+                      log.status === '成功' ? 'text-primary' :
                       log.status === '警告' ? 'text-warning' : 'text-danger'
                     )}>{log.status}</span>
                   </div>
@@ -3400,13 +3682,13 @@ const SettingsPage = ({ addToast }: any) => {
           <p className="text-slate-400 mt-1">配置您的 Aegis OS 工作区和偏好设置。</p>
         </div>
         <div className="flex gap-3">
-          <button 
+          <button
             onClick={handleReset}
             className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors"
           >
             重置为默认值
           </button>
-          <button 
+          <button
             onClick={handleSave}
             disabled={isSaving}
             className="px-4 py-2 bg-primary text-surface rounded-lg text-sm font-bold hover:bg-primary/90 transition-colors disabled:opacity-50"
@@ -3431,7 +3713,7 @@ const SettingsPage = ({ addToast }: any) => {
                 <p className="text-xs text-slate-500 mt-1">选择界面的主要语言。</p>
               </div>
               <div className="flex gap-2 bg-white/5 p-1 rounded-xl border border-border-subtle">
-                <button 
+                <button
                   onClick={() => setLanguage('en')}
                   className={cn(
                     "px-4 py-1.5 text-xs font-bold rounded-lg transition-all",
@@ -3440,7 +3722,7 @@ const SettingsPage = ({ addToast }: any) => {
                 >
                   English
                 </button>
-                <button 
+                <button
                   onClick={() => setLanguage('zh')}
                   className={cn(
                     "px-4 py-1.5 text-xs font-bold rounded-lg transition-all",
@@ -3465,11 +3747,11 @@ const SettingsPage = ({ addToast }: any) => {
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">OpenClaw 根路径</label>
               <div className="flex gap-3">
-                <input 
-                  type="text" 
+                <input
+                  type="text"
                   value={workspacePath}
                   onChange={(e) => setWorkspacePath(e.target.value)}
-                  className="flex-1 bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50" 
+                  className="flex-1 bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50"
                 />
                 <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold text-slate-300 hover:bg-white/10 transition-colors">浏览</button>
               </div>
@@ -3479,7 +3761,7 @@ const SettingsPage = ({ addToast }: any) => {
                 <p className="text-sm font-medium text-white">自动同步工作区</p>
                 <p className="text-xs text-slate-500 mt-1">自动同步来自本地文件系统的更改。</p>
               </div>
-              <div 
+              <div
                 onClick={() => setAutoSync(!autoSync)}
                 className={cn(
                   "w-12 h-6 rounded-full relative cursor-pointer transition-colors",
@@ -3516,7 +3798,7 @@ const SettingsPage = ({ addToast }: any) => {
                 <p className="text-sm font-medium text-white">API 密钥保护</p>
                 <p className="text-xs text-slate-500 mt-1">在系统运行页面中隐藏敏感密钥。</p>
               </div>
-              <div 
+              <div
                 onClick={() => setApiProtection(!apiProtection)}
                 className={cn(
                   "w-12 h-6 rounded-full relative cursor-pointer transition-colors",
@@ -3545,7 +3827,7 @@ const SettingsPage = ({ addToast }: any) => {
                 <p className="text-sm font-medium text-white">自主模式</p>
                 <p className="text-xs text-slate-500 mt-1">允许 Agent 在没有明确确认的情况下执行任务。</p>
               </div>
-              <div 
+              <div
                 onClick={() => setAutonomousMode(!autonomousMode)}
                 className={cn(
                   "w-12 h-6 rounded-full relative cursor-pointer transition-colors",
@@ -3564,7 +3846,7 @@ const SettingsPage = ({ addToast }: any) => {
                 <p className="text-sm font-medium text-white">Token 使用警报</p>
                 <p className="text-xs text-slate-500 mt-1">当 Agent 超过其每日配额的 80% 时通知。</p>
               </div>
-              <div 
+              <div
                 onClick={() => setUsageAlert(!usageAlert)}
                 className={cn(
                   "w-12 h-6 rounded-full relative cursor-pointer transition-colors",
@@ -3597,36 +3879,132 @@ export default function App() {
     }, 3000);
   };
 
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const navigate = useNavigate();
+  const location = useLocation();
+  const activeTab = useMemo(() => getTabFromPath(location.pathname), [location.pathname]);
+  const setActiveTab = useCallback((tab: string) => {
+    navigate(getPathForTab(tab));
+  }, [navigate]);
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  const handleRefresh = () => setRefreshKey(k => k + 1);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [isInitialized, setIsInitialized] = useState(true); 
-  const [isLoggedIn, setIsLoggedIn] = useState(false); 
+  const [isInitialized, setIsInitialized] = useState(true);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
-  const handleLogin = () => {
-    if (password === 'OCC-Admin-2026-Ready') {
+  useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapAuth = async () => {
+      try {
+        const response = await fetch('/api/auth/status', { credentials: 'include' });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const payload = await response.json() as {
+          setupComplete?: boolean;
+          authenticated?: boolean;
+        };
+
+        if (cancelled) {
+          return;
+        }
+
+        setIsInitialized(Boolean(payload.setupComplete));
+        setIsLoggedIn(Boolean(payload.authenticated));
+      } catch (authError) {
+        console.warn('Failed to bootstrap auth status:', authError);
+      }
+    };
+
+    void bootstrapAuth();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const handleLogin = async () => {
+    const nextPassword = password.trim();
+    if (nextPassword.length < 8) {
+      setError('密码长度至少为 8 位');
+      addToast("身份验证失败", "error");
+      return;
+    }
+
+    setError('');
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ password: nextPassword })
+      });
+
+      if (!response.ok) {
+        throw new Error('密码错误，请重试');
+      }
+
       setIsLoggedIn(true);
-      setError('');
+      setPassword('');
       addToast("登录成功，欢迎指挥官", "success");
-    } else {
-      setError('密码错误，请重试');
+    } catch (loginError: any) {
+      const message = loginError?.message || '登录失败';
+      setError(message);
       addToast("身份验证失败", "error");
     }
   };
 
-  const handleInitialize = () => {
-    if (password.length >= 8) {
-      setIsInitialized(true);
-      setPassword('');
-      setError('');
-      addToast("系统初始化完成", "success");
-    } else {
+  const handleInitialize = async () => {
+    const nextPassword = password.trim();
+    if (nextPassword.length < 8) {
       setError('密码长度至少为 8 位');
+      return;
+    }
+
+    setError('');
+
+    try {
+      const response = await fetch('/api/auth/setup', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ password: nextPassword })
+      });
+
+      if (!response.ok) {
+        throw new Error('初始化失败，请稍后重试');
+      }
+
+      setIsInitialized(true);
+      setIsLoggedIn(true);
+      setPassword('');
+      addToast("系统初始化完成", "success");
+    } catch (setupError: any) {
+      const message = setupError?.message || '初始化失败';
+      setError(message);
+      addToast(message, "error");
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include'
+      });
+    } catch (logoutError) {
+      console.warn('Failed to logout via API:', logoutError);
+    }
+
     setIsLoggedIn(false);
     setPassword('');
     addToast("已安全退出系统", "info");
@@ -3644,36 +4022,21 @@ export default function App() {
   const [isDecisionCenterOpen, setIsDecisionCenterOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const { agents, projects, tasks, sessions, runtime, refresh } = useRealData();
-
-  const runtimeModels = useMemo(
-    () => buildRuntimeModels(runtime, agents, projects, tasks, sessions),
-    [runtime, agents, projects, tasks, sessions],
-  );
-
-  syncRuntimeCollections({
-    models: runtimeModels,
-    agents: agents.length > 0 ? agents : DEFAULT_AGENTS,
-    projects: projects.length > 0 ? projects : DEFAULT_PROJECTS,
-    tasks,
-    sessions,
-  });
-
   const notifications = [
     { id: 1, title: '系统更新', content: 'Aegis OS 已升级至 v2.4.0，新增了拓扑图谱实时同步功能。', time: '2小时前', type: 'info' },
     { id: 2, title: '任务完成', content: 'Agent "Jeremy" 已完成 Aegis OS UI 的初步设计方案。', time: '5小时前', type: 'success' },
     { id: 3, title: '安全警报', content: '检测到异常 API 调用尝试，已自动拦截并记录。', time: '1天前', type: 'warning' },
   ];
 
-  // Navigation handlers for consistency
+  // Navigation handler - wraps setActiveTab to handle optional id parameter
   const handleNavigate = (tab: string, id?: string) => {
-    if ((tab === 'project-room' || tab === 'projects') && id) {
+    if (tab === 'project-room' && id) {
       setSelectedProjectId(id);
       setActiveTab('project-room');
       return;
     }
 
-    if ((tab === 'agent-commander' || tab === 'agents') && id) {
+    if (tab === 'agent-commander' && id) {
       setSelectedAgentId(id);
       setActiveTab('agent-commander');
       return;
@@ -3682,6 +4045,37 @@ export default function App() {
     setActiveTab(tab);
   };
 
+  // Fetch real data from APIs
+  const { models } = useModels();
+  const {
+    agents: liveAgents,
+    projects: liveProjects,
+    tasks: liveTasks,
+    sessions: liveSessions,
+    sendAgentMessage: sendRuntimeMessage,
+  } = useRealData();
+
+  // Sync live API payloads into module-level data sources used by template sections.
+  MOCK_MODELS = models.length > 0
+    ? models.map((model) => ({
+      id: model.id,
+      name: model.name,
+      provider: model.provider,
+      status: model.status,
+      totalTokens: model.totalTokens,
+      dailyTokens: model.dailyTokens,
+      currentTask: model.currentTask || '待命',
+      latency: model.latency || 'N/A',
+      throughput: model.throughput || 'N/A',
+      logs: []
+    }))
+    : DEFAULT_MODELS;
+  MOCK_AGENTS = liveAgents.length > 0 ? liveAgents : DEFAULT_AGENTS;
+  MOCK_PROJECTS = liveProjects.length > 0 ? liveProjects : DEFAULT_PROJECTS;
+  MOCK_SESSIONS = liveSessions;
+  MOCK_TASKS = liveTasks;
+
+  // Legacy handlers for components that expect single-param handlers
   const handleSelectProject = (id: string) => {
     setSelectedProjectId(id);
     setActiveTab('project-room');
@@ -3690,6 +4084,10 @@ export default function App() {
   const handleSelectAgent = (id: string) => {
     setSelectedAgentId(id);
     setActiveTab('agent-commander');
+  };
+
+  const handleSendAgentTask = async (agentId: string, message: string) => {
+    await sendRuntimeMessage(agentId, message);
   };
 
   if (!isInitialized) {
@@ -3707,12 +4105,12 @@ export default function App() {
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">管理员密码</label>
-              <input 
-                type="password" 
+              <input
+                type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••" 
-                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all" 
+                placeholder="••••••••"
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 transition-all"
               />
               {error && <p className="text-[10px] text-danger font-bold uppercase">{error}</p>}
             </div>
@@ -3740,13 +4138,13 @@ export default function App() {
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">密码</label>
-              <input 
-                type="password" 
+              <input
+                type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-                placeholder="••••••••" 
-                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all" 
+                placeholder="••••••••"
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-accent/50 transition-all"
               />
               {error && <p className="text-[10px] text-danger font-bold uppercase">{error}</p>}
             </div>
@@ -3765,21 +4163,21 @@ export default function App() {
   return (
     <div className="flex h-screen w-full overflow-hidden bg-surface text-slate-200 font-sans antialiased">
       {/* Sidebar / Rail Consolidated */}
-      <motion.aside 
+      <motion.aside
         initial={false}
         animate={{ width: sidebarOpen ? 240 : 64 }}
         className="border-r border-border-subtle flex flex-col shrink-0 bg-surface z-30 relative"
       >
         {/* Logo Area */}
         <div className="p-4 flex items-center gap-4 h-16 border-b border-border-subtle/50">
-          <div 
-            className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center text-primary cursor-pointer hover:scale-105 transition-transform shrink-0" 
+          <div
+            className="w-10 h-10 bg-primary/10 rounded-xl flex items-center justify-center text-primary cursor-pointer hover:scale-105 transition-transform shrink-0"
             onClick={() => setActiveTab('dashboard')}
           >
             <Zap size={24} fill="currentColor" />
           </div>
           {sidebarOpen && (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               className="flex flex-col"
@@ -3792,72 +4190,72 @@ export default function App() {
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-6 space-y-2 overflow-y-auto scrollbar-hide">
-          <NavItem 
-            icon={LayoutDashboard} 
-            label="概览" 
-            active={activeTab === 'dashboard'} 
-            onClick={() => setActiveTab('dashboard')} 
+          <NavItem
+            icon={LayoutDashboard}
+            label="概览"
+            active={activeTab === 'dashboard'}
+            onClick={() => setActiveTab('dashboard')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={Briefcase} 
-            label="项目组合" 
-            active={activeTab === 'projects' || activeTab === 'project-room'} 
-            onClick={() => setActiveTab('projects')} 
+          <NavItem
+            icon={Briefcase}
+            label="项目组合"
+            active={activeTab === 'projects' || activeTab === 'project-room'}
+            onClick={() => setActiveTab('projects')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={Users} 
-            label="Agent 名册" 
-            active={activeTab === 'agents' || activeTab === 'agent-commander'} 
-            onClick={() => setActiveTab('agents')} 
+          <NavItem
+            icon={Users}
+            label="Agent 名册"
+            active={activeTab === 'agents' || activeTab === 'agent-commander'}
+            onClick={() => setActiveTab('agents')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={Layers} 
-            label="模型中心" 
-            active={activeTab === 'model-nexus'} 
-            onClick={() => setActiveTab('model-nexus')} 
+          <NavItem
+            icon={Layers}
+            label="模型中心"
+            active={activeTab === 'model-nexus'}
+            onClick={() => setActiveTab('model-nexus')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={Terminal} 
-            label="实时监控" 
-            active={activeTab === 'monitoring'} 
-            onClick={() => setActiveTab('monitoring')} 
+          <NavItem
+            icon={Terminal}
+            label="实时监控"
+            active={activeTab === 'monitoring'}
+            onClick={() => setActiveTab('monitoring')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={Globe} 
-            label="工作区" 
-            active={activeTab === 'workspace'} 
-            onClick={() => setActiveTab('workspace')} 
+          <NavItem
+            icon={Globe}
+            label="工作区"
+            active={activeTab === 'workspace'}
+            onClick={() => setActiveTab('workspace')}
             collapsed={!sidebarOpen}
           />
-          
+
           <div className="py-4">
             <div className={cn("h-px bg-border-subtle/50 mx-2", !sidebarOpen && "mx-1")} />
           </div>
 
-          <NavItem 
-            icon={Activity} 
-            label="系统运行" 
-            active={activeTab === 'system-health'} 
-            onClick={() => setActiveTab('system-health')} 
+          <NavItem
+            icon={Activity}
+            label="系统运行"
+            active={activeTab === 'system-health'}
+            onClick={() => setActiveTab('system-health')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={History} 
-            label="审计追踪" 
-            active={activeTab === 'audit'} 
-            onClick={() => setActiveTab('audit')} 
+          <NavItem
+            icon={History}
+            label="审计追踪"
+            active={activeTab === 'audit'}
+            onClick={() => setActiveTab('audit')}
             collapsed={!sidebarOpen}
           />
-          <NavItem 
-            icon={Settings} 
-            label="设置" 
-            active={activeTab === 'settings'} 
-            onClick={() => setActiveTab('settings')} 
+          <NavItem
+            icon={Settings}
+            label="设置"
+            active={activeTab === 'settings'}
+            onClick={() => setActiveTab('settings')}
             collapsed={!sidebarOpen}
           />
         </nav>
@@ -3874,7 +4272,7 @@ export default function App() {
               )}
             </div>
             {sidebarOpen && (
-              <motion.div 
+              <motion.div
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 className="flex-1 min-w-0"
@@ -3928,26 +4326,26 @@ export default function App() {
           <div className="flex items-center gap-4">
             <div className="relative hidden md:block">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-              <input 
-                type="text" 
+              <input
+                type="text"
                 placeholder="搜索任何内容... (⌘K)"
                 className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-4 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 w-64 transition-all focus:w-80"
               />
             </div>
             <div className="relative">
-              <button 
+              <button
                 onClick={() => setShowNotifications(!showNotifications)}
                 className={cn("p-2 text-slate-500 hover:text-white relative transition-colors", showNotifications && "text-white")}
               >
                 <Bell size={18} />
                 <div className="absolute top-2 right-2 w-2 h-2 bg-danger rounded-full border-2 border-surface" />
               </button>
-              
+
               <AnimatePresence>
                 {showNotifications && (
                   <>
                     <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
-                    <motion.div 
+                    <motion.div
                       initial={{ opacity: 0, y: 10, scale: 0.95 }}
                       animate={{ opacity: 1, y: 0, scale: 1 }}
                       exit={{ opacity: 0, y: 10, scale: 0.95 }}
@@ -3992,24 +4390,64 @@ export default function App() {
         <div className="flex-1 overflow-auto scrollbar-hide">
           <AnimatePresence mode="wait">
             <motion.div
-              key={activeTab}
+              key={location.pathname}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
               className="h-full"
             >
-              {activeTab === 'dashboard' && <Dashboard onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
-              {activeTab === 'agent-commander' && <AgentCommander agentId={selectedAgentId} addToast={addToast} />}
-              {activeTab === 'project-room' && <ProjectRoom projectId={selectedProjectId} addToast={addToast} />}
-              {activeTab === 'system-health' && <SystemOperations onNavigate={handleNavigate} addToast={addToast} />}
-              {activeTab === 'model-nexus' && <ModelNexus addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} />}
-              {activeTab === 'monitoring' && <RealTimeMonitoring addToast={addToast} />}
-              {activeTab === 'projects' && <ProjectsPortfolio onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} />}
-              {activeTab === 'agents' && <AgentsRoster onSelectAgent={handleSelectAgent} addToast={addToast} onOpenTopology={() => setIsTopologyOpen(true)} onOpenDeploy={() => setIsDeployOpen(true)} onOpenConfig={(id: string) => { setSelectedAgentId(id); setIsAgentConfigOpen(true); }} />}
-              {activeTab === 'workspace' && <OpenClawWorkspace addToast={addToast} />}
-              {activeTab === 'audit' && <AuditLogs />}
-              {activeTab === 'settings' && <SettingsPage addToast={addToast} />}
+              <React.Suspense
+                fallback={(
+                  <div className="h-full w-full flex items-center justify-center text-slate-400 text-sm">
+                    正在加载页面模块...
+                  </div>
+                )}
+              >
+                <Routes location={location}>
+                  <Route path="/" element={<Navigate to="/dashboard" replace />} />
+                  <Route
+                    path="/dashboard"
+                    element={
+                      <LazyDashboardPage
+                        onNavigate={handleNavigate}
+                        onSelectProject={handleSelectProject}
+                        onSelectAgent={handleSelectAgent}
+                        addToast={addToast}
+                        onOpenNewProject={() => setIsNewProjectOpen(true)}
+                        onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)}
+                        projects={MOCK_PROJECTS}
+                        agents={MOCK_AGENTS}
+                        tasks={MOCK_TASKS}
+                        models={MOCK_MODELS}
+                      />
+                    }
+                  />
+                  <Route
+                    path="/agent-commander"
+                    element={
+                      <LazyAgentCommanderPage
+                        agentId={selectedAgentId}
+                        addToast={addToast}
+                        onSendTask={handleSendAgentTask}
+                        agents={MOCK_AGENTS}
+                        models={MOCK_MODELS}
+                        sessions={MOCK_SESSIONS}
+                      />
+                    }
+                  />
+                  <Route path="/project-room" element={<ProjectRoom projectId={selectedProjectId} addToast={addToast} />} />
+                  <Route path="/system-health" element={<SystemOperations onNavigate={setActiveTab} addToast={addToast} />} />
+                  <Route path="/model-nexus" element={<ModelNexus addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} />} />
+                  <Route path="/monitoring" element={<RealTimeMonitoring addToast={addToast} />} />
+                  <Route path="/projects" element={<ProjectsPortfolio onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} />} />
+                  <Route path="/agents" element={<AgentsRoster onSelectAgent={handleSelectAgent} addToast={addToast} onOpenTopology={() => setIsTopologyOpen(true)} onOpenDeploy={() => setIsDeployOpen(true)} onOpenConfig={(id: string) => { setSelectedAgentId(id); setIsAgentConfigOpen(true); }} />} />
+                  <Route path="/workspace" element={<OpenClawWorkspace addToast={addToast} />} />
+                  <Route path="/audit" element={<AuditLogs />} />
+                  <Route path="/settings" element={<SettingsPage addToast={addToast} />} />
+                  <Route path="*" element={<Navigate to="/dashboard" replace />} />
+                </Routes>
+              </React.Suspense>
             </motion.div>
           </AnimatePresence>
         </div>
@@ -4017,11 +4455,11 @@ export default function App() {
 
         {/* Modals */}
         <AnimatePresence>
-          {isNewModelOpen && <NewModelModal isOpen={isNewModelOpen} onClose={() => setIsNewModelOpen(false)} addToast={addToast} />}
+          {isNewModelOpen && <NewModelModal isOpen={isNewModelOpen} onClose={() => setIsNewModelOpen(false)} addToast={addToast} onModelCreated={handleRefresh} />}
           {isAgentConfigOpen && <AgentConfigModal isOpen={isAgentConfigOpen} onClose={() => setIsAgentConfigOpen(false)} agentId={selectedAgentId} addToast={addToast} />}
           {isTopologyOpen && <TeamTopologyModal isOpen={isTopologyOpen} onClose={() => setIsTopologyOpen(false)} />}
-          {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} />}
-          {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={() => { void refresh(); }} />}
+          {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} onAgentDeployed={handleRefresh} />}
+          {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={handleRefresh} />}
           {isDecisionCenterOpen && <DecisionCenterModal isOpen={isDecisionCenterOpen} onClose={() => setIsDecisionCenterOpen(false)} addToast={addToast} />}
         </AnimatePresence>
       </div>

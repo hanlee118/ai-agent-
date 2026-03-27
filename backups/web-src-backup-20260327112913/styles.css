@@ -2,23 +2,25 @@
 
 :root {
   color-scheme: dark;
-  --bg: #080b10;
-  --bg-soft: #0b1015;
-  --panel: rgba(21, 25, 33, 0.92);
+  --bg: #0F1115;
+  --bg-soft: #16191E;
+  --bg-muted: #1C2128;
+  --panel: rgba(22, 25, 30, 0.95);
   --panel-strong: rgba(16, 21, 28, 0.98);
   --panel-elevated: rgba(20, 25, 34, 0.98);
-  --line: rgba(30, 41, 59, 0.92);
-  --line-strong: rgba(14, 165, 233, 0.34);
+  --border: rgba(255, 255, 255, 0.08);
   --text: #f8fafc;
   --muted: #94a3b8;
-  --primary: #38bdf8;
-  --primary-strong: #7dd3fc;
-  --success: #34d399;
-  --warning: #f59e0b;
-  --danger: #fb7185;
-  --shadow: 0 24px 64px rgba(2, 6, 23, 0.28);
-  --radius: 18px;
-  --radius-lg: 24px;
+  --primary: #10B981;
+  --primary-strong: #34d399;
+  --accent: #6366F1;
+  --accent-strong: #818cf8;
+  --warning: #F59E0B;
+  --danger: #F43F5E;
+  --success: #10B981;
+  --shadow: 0 24px 64px rgba(0, 0, 0, 0.32);
+  --radius: 16px;
+  --radius-lg: 22px;
   font-family: "Inter", "Noto Sans SC", "PingFang SC", sans-serif;
 }
 
@@ -28,7 +30,7 @@
 
 body {
   margin: 0;
-  background: #080b10;
+  background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
 }
@@ -3766,3 +3768,34 @@ input {
     display: none;
   }
 }
+
+/* ===== AEGIS OS GLASS UTILITIES ===== */
+.backdrop-blur-xl { backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); }
+.backdrop-blur-md { backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
+.backdrop-blur-lg { backdrop-filter: blur(32px); -webkit-backdrop-filter: blur(32px); }
+
+/* Border color utilities */
+.border-emerald-500\/30 { border-color: rgba(16, 185, 129, 0.3); }
+.border-emerald-500\/20 { border-color: rgba(16, 185, 129, 0.2); }
+.border-white\/\[0\.06\] { border-color: rgba(255, 255, 255, 0.06); }
+.border-white\/\[0\.08\] { border-color: rgba(255, 255, 255, 0.08); }
+.border-amber-500\/30 { border-color: rgba(245, 158, 11, 0.3); }
+
+/* Background utilities */
+.bg-\[#0F1115\]\/80 { background-color: rgba(15, 17, 21, 0.8); }
+.bg-\[#16191E\]\/70 { background-color: rgba(22, 25, 30, 0.7); }
+.bg-\[#16191E\]\/60 { background-color: rgba(22, 25, 30, 0.6); }
+.bg-\[#16191E\]\/90 { background-color: rgba(22, 25, 30, 0.9); }
+.bg-\[#1C2128\]\/60 { background-color: rgba(28, 33, 40, 0.6); }
+.bg-\[#1C2128\]\/70 { background-color: rgba(28, 33, 40, 0.7); }
+.bg-emerald-500\/20 { background-color: rgba(16, 185, 129, 0.2); }
+
+/* Hover border */
+.hover\:border-emerald-500\/30:hover { border-color: rgba(16, 185, 129, 0.3); }
+
+/* Shadow utilities */
+.hover\:shadow-lg:hover { box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05); }
+.hover\:shadow-black\/20:hover { --tw-shadow-color: rgba(0, 0, 0, 0.2); }
+
+/* Ring glow */
+.ring-emerald-500\/20 { box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.2); }

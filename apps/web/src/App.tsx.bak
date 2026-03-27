@@ -57,13 +57,11 @@ import {
   AreaChart, Area, ReferenceLine
 } from 'recharts';
 import { cn } from './lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from './types';
-import { useRealData } from './useRealData';
-import { projectsApi } from './lib/api';
+import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model, ModelLog } from './types';
 
 // --- Mock Data ---
 
-const DEFAULT_MODELS: Model[] = [
+const MOCK_MODELS: Model[] = [
   { 
     id: 'm1', 
     name: 'Codex-4.0', 
@@ -113,7 +111,7 @@ const DEFAULT_MODELS: Model[] = [
   },
 ];
 
-const DEFAULT_AGENTS: Agent[] = [
+const MOCK_AGENTS: Agent[] = [
   { id: '1', name: '需求分析师', role: '高级需求分析师', status: 'Thinking', load: 85, currentModelId: 'm1', tasks: 3, memoryCount: 124, tokensUsed: 45000, tokenLimit: 100000, sessionCount: 12 },
   { id: '2', name: 'Jeremy', role: '设计总监', status: 'Idle', load: 0, currentModelId: 'm2', tasks: 0, memoryCount: 89, tokensUsed: 12000, tokenLimit: 50000, sessionCount: 5 },
   { id: '3', name: '产品经理', role: '产品经理', status: 'Executing', load: 45, currentModelId: 'm1', tasks: 2, memoryCount: 210, tokensUsed: 67000, tokenLimit: 150000, sessionCount: 18 },
@@ -123,7 +121,7 @@ const DEFAULT_AGENTS: Agent[] = [
   { id: '7', name: '测试工程师', status: 'Idle', role: '测试工程师', load: 0, currentModelId: 'm2', tasks: 0, memoryCount: 32, tokensUsed: 5000, tokenLimit: 50000, sessionCount: 3 },
 ];
 
-const DEFAULT_SESSIONS: Session[] = [
+const MOCK_SESSIONS: Session[] = [
   { id: 's1', agentId: '1', modelId: 'm1', projectId: 'p1', startTime: '2026-03-26T07:10:00Z', duration: '12m', tokens: 1200, cost: 0.012, status: 'completed' },
   { id: 's2', agentId: '5', modelId: 'm1', projectId: 'p1', startTime: '2026-03-26T07:15:00Z', duration: '45m', tokens: 8500, cost: 0.085, status: 'active' },
   { id: 's3', agentId: '6', modelId: 'm2', projectId: 'p3', startTime: '2026-03-26T07:20:00Z', duration: '5m', tokens: 450, cost: 0.004, status: 'completed' },
@@ -131,113 +129,18 @@ const DEFAULT_SESSIONS: Session[] = [
   { id: 's5', agentId: '1', modelId: 'm3', projectId: 'p2', startTime: '2026-03-26T07:28:00Z', duration: '2m', tokens: 150, cost: 0.001, status: 'completed' },
 ];
 
-const DEFAULT_PROJECTS: Project[] = [
+const MOCK_PROJECTS: Project[] = [
   { id: 'p1', name: 'SaaS 管理工作台演示', description: 'Agent 团队从需求、设计、架构、研发到测试闭环的真实项目', status: 'Development', phase: '开发中', progress: 45, owner: '研发经理', agents: ['1', '2', '5', '7'] },
   { id: 'p2', name: 'OpenClaw 核心', description: 'OpenClaw 核心框架升级与优化', status: 'Planning', phase: '规划中', progress: 15, owner: '架构师', agents: ['1', '4'] },
   { id: 'p3', name: 'Aegis OS UI', description: 'Aegis Agent OS 界面重构与体验优化', status: 'Development', phase: '设计中', progress: 60, owner: 'Jeremy', agents: ['2', '6'] },
 ];
 
-const DEFAULT_TASKS: Task[] = [
+const MOCK_TASKS: Task[] = [
   { id: 't1', title: '实现 RBAC 中间件', agent: '研发经理', status: 'In Progress', progress: 65 },
   { id: 't2', title: '设计系统审计', agent: 'Jeremy', status: 'Blocked', progress: 20 },
   { id: 't3', title: 'API 文档更新', agent: '需求分析师', status: 'Completed', progress: 100 },
   { id: 't4', title: '单元测试覆盖', agent: '测试工程师', status: 'Pending', progress: 0 },
 ];
-
-let models: Model[] = DEFAULT_MODELS;
-let agents: Agent[] = DEFAULT_AGENTS;
-let sessions: Session[] = DEFAULT_SESSIONS;
-let projects: Project[] = DEFAULT_PROJECTS;
-let tasks: Task[] = DEFAULT_TASKS;
-
-const syncRuntimeCollections = (payload: {
-  models: Model[];
-  agents: Agent[];
-  projects: Project[];
-  tasks: Task[];
-  sessions: Session[];
-}) => {
-  models = payload.models;
-  agents = payload.agents;
-  projects = payload.projects;
-  tasks = payload.tasks;
-  sessions = payload.sessions;
-};
-
-function buildRuntimeModels(
-  runtime: unknown,
-  agents: Agent[],
-  projects: Project[],
-  tasks: Task[],
-  sessions: Session[],
-): Model[] {
-  const runtimeInfo = (runtime ?? {}) as {
-    provider?: string;
-    model?: string;
-    modelName?: string;
-    mode?: string;
-  };
-
-  const provider = runtimeInfo.provider || 'OpenClaw Runtime';
-  const modelName = runtimeInfo.modelName || runtimeInfo.model || `${provider} Core`;
-  const runtimeMode = runtimeInfo.mode || 'normal';
-
-  const totalTokens = Math.max(
-    agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0) + sessions.reduce((sum, session) => sum + (session.tokens || 0), 0),
-    1,
-  );
-  const dailyTokens = Math.max(agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0), 1);
-  const activeSessions = sessions.filter((session) => session.status === 'active').length;
-  const throughputBase = Math.max(agents.length * 3 + activeSessions * 5 + tasks.length, 8);
-  const latencyBase = runtimeMode === 'production' ? 120 : 180;
-
-  const status: Model['status'] = runtimeMode === 'degraded'
-    ? 'Degraded'
-    : runtimeMode === 'offline'
-      ? 'Offline'
-      : 'Healthy';
-
-  const sharedLogs = DEFAULT_MODELS.flatMap((model) => model.logs).slice(0, 3);
-
-  return [
-    {
-      id: 'runtime',
-      name: modelName,
-      provider,
-      status,
-      totalTokens,
-      dailyTokens,
-      currentTask: projects[0]?.name ? `推进项目: ${projects[0].name}` : '等待任务分配',
-      latency: `${latencyBase + Math.min(activeSessions * 8, 220)}ms`,
-      throughput: `${throughputBase.toFixed(1)} t/s`,
-      logs: sharedLogs,
-    },
-    {
-      id: 'planning',
-      name: 'Planning Assist',
-      provider: 'Synthetic',
-      status: 'Healthy',
-      totalTokens: Math.max(Math.round(totalTokens * 0.45), 1),
-      dailyTokens: Math.max(Math.round(dailyTokens * 0.5), 1),
-      currentTask: `处理 ${tasks.length} 条任务编排`,
-      latency: `${latencyBase + 35}ms`,
-      throughput: `${Math.max(throughputBase * 0.75, 6).toFixed(1)} t/s`,
-      logs: DEFAULT_MODELS[0].logs,
-    },
-    {
-      id: 'qa',
-      name: 'QA Sentinel',
-      provider: 'Synthetic',
-      status: activeSessions > 4 ? 'Degraded' : 'Healthy',
-      totalTokens: Math.max(Math.round(totalTokens * 0.3), 1),
-      dailyTokens: Math.max(Math.round(dailyTokens * 0.35), 1),
-      currentTask: `巡检 ${projects.length} 个项目`,
-      latency: `${latencyBase + 55}ms`,
-      throughput: `${Math.max(throughputBase * 0.55, 5).toFixed(1)} t/s`,
-      logs: DEFAULT_MODELS[1]?.logs ?? sharedLogs,
-    },
-  ];
-}
 
 // --- Components ---
 
@@ -319,11 +222,11 @@ const ToastContainer = ({ toasts }: { toasts: any[] }) => (
 );
 
 const ModelUsageChart = () => {
-  const data = useMemo(() => models.map(m => ({
+  const data = useMemo(() => MOCK_MODELS.map(m => ({
     name: m.name,
     value: m.dailyTokens,
     color: m.id === 'm1' ? '#00f2ff' : m.id === 'm2' ? '#f2ff00' : '#ff00f2'
-  })), [models]);
+  })), []);
 
   return (
     <div className="h-[280px] w-full flex flex-col items-center justify-center">
@@ -491,7 +394,7 @@ const NewModelModal = ({ isOpen, onClose, addToast }: any) => {
 };
 
 const AgentConfigModal = ({ isOpen, onClose, agentId, addToast }: any) => {
-  const agent = agents.find(a => a.id === agentId) || agents[0];
+  const agent = MOCK_AGENTS.find(a => a.id === agentId) || MOCK_AGENTS[0];
   return (
     <Modal isOpen={isOpen} onClose={onClose} title={`配置 Agent: ${agent.name}`}>
       <div className="space-y-6">
@@ -688,7 +591,7 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配项目</label>
               <select className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none">
-                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                {MOCK_PROJECTS.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
             <button 
@@ -707,441 +610,46 @@ const DeployAgentModal = ({ isOpen, onClose, addToast }: any) => {
   );
 };
 
-type ParsedProjectDraft = {
-  name: string;
-  description: string;
-  phase: string;
-  agents: string[];
-  priority: 'High' | 'Medium' | 'Low';
-  team: string[];
-};
-
-const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) => {
+const NewProjectModal = ({ isOpen, onClose, addToast }: any) => {
   const [isImporting, setIsImporting] = useState(false);
-  const [step, setStep] = useState<'input' | 'confirm'>('input');
-  const [rawInput, setRawInput] = useState('');
-  const [parsedProject, setParsedProject] = useState<ParsedProjectDraft | null>(null);
-  const [isParsing, setIsParsing] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
-  const [showManualForm, setShowManualForm] = useState(false);
-  const [formData, setFormData] = useState({
-    name: '',
-    description: '',
-    priority: 'Medium',
-    dueDate: '',
-    agentIds: [] as string[],
-  });
-
-  const resetState = () => {
-    setIsImporting(false);
-    setStep('input');
-    setRawInput('');
-    setParsedProject(null);
-    setIsParsing(false);
-    setIsCreating(false);
-    setShowManualForm(false);
-    setFormData({
-      name: '',
-      description: '',
-      priority: 'Medium',
-      dueDate: '',
-      agentIds: [],
-    });
-  };
-
-  const suggestName = (input: string) => {
-    const trimmed = input.trim();
-    if (!trimmed) {
-      return '';
-    }
-
-    const candidate = trimmed
-      .replace(/(请|帮我|我们|需要|想要|希望|做一个|做个|创建|搭建|开发|实现|一个|项目|系统)/g, ' ')
-      .replace(/[，。,.!?]/g, ' ')
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 4)
-      .join('');
-
-    return candidate ? candidate.slice(0, 16) + '项目' : '新项目';
-  };
-
-  const parseNaturalLanguage = (input: string): ParsedProjectDraft => {
-    const trimmed = input.trim();
-    const firstSentence = trimmed
-      .split(/[。！？.!?\n]/)
-      .map((line) => line.trim())
-      .find(Boolean) || trimmed;
-
-    const matchedName = trimmed.match(/(?:项目|系统|平台|应用|工作台|MVP)(?:名称|叫|名为)?[:：]?\s*([^\n，。；]{2,24})/);
-    let safeName = matchedName?.[1]?.trim() || suggestName(firstSentence) || '新项目';
-    if (!/(项目|系统|平台|应用|工作台|MVP)/.test(safeName)) {
-      safeName = `${safeName}项目`;
-    }
-    if (safeName.length > 32) {
-      safeName = `${safeName.slice(0, 32)}...`;
-    }
-
-    const lower = trimmed.toLowerCase();
-    const inferPriority: 'High' | 'Medium' | 'Low' =
-      /(紧急|立即|尽快|高优|asap|critical|urgent)/.test(lower) ? 'High'
-      : /(低优|可延期|不紧急|nice to have|backlog)/.test(lower) ? 'Low'
-      : 'Medium';
-
-    const inferredAgents = agents
-      .filter((agent) => {
-        const profile = `${agent.name} ${agent.role}`.toLowerCase();
-        if (trimmed.includes(agent.name) || trimmed.includes(agent.role)) {
-          return true;
-        }
-        if (/(设计|ui|体验|视觉)/.test(lower) && /(设计|jeremy)/.test(profile)) {
-          return true;
-        }
-        if (/(研发|开发|编码|工程|技术)/.test(lower) && /(研发|工程|架构)/.test(profile)) {
-          return true;
-        }
-        if (/(测试|质量|qa)/.test(lower) && /(测试|qa)/.test(profile)) {
-          return true;
-        }
-        if (/(需求|规划|产品)/.test(lower) && /(需求|产品|分析)/.test(profile)) {
-          return true;
-        }
-        return false;
-      })
-      .map((agent) => agent.name);
-
-    const selectedManualAgents = formData.agentIds
-      .map((id) => agents.find((agent) => agent.id === id)?.name)
-      .filter(Boolean) as string[];
-
-    const safeAgents = selectedManualAgents.length > 0
-      ? selectedManualAgents
-      : inferredAgents.length > 0
-        ? inferredAgents.slice(0, 4)
-        : agents.slice(0, 3).map((agent) => agent.name);
-
-    return {
-      name: safeName,
-      description: trimmed,
-      phase: '规划中',
-      agents: safeAgents,
-      priority: inferPriority,
-      team: safeAgents,
-    };
-  };
-
-  const handleClose = () => {
-    resetState();
-    onClose();
-  };
-
-  const handleToggleManualAgent = (agentId: string) => {
-    setFormData((prev) => ({
-      ...prev,
-      agentIds: prev.agentIds.includes(agentId)
-        ? prev.agentIds.filter((id) => id !== agentId)
-        : [...prev.agentIds, agentId],
-    }));
-  };
-
-  const handleParseInput = () => {
-    const input = rawInput.trim();
-    if (!input) {
-      addToast('请先输入项目需求', 'error');
-      return;
-    }
-
-    setIsParsing(true);
-    const parsed = parseNaturalLanguage(input);
-    setParsedProject(parsed);
-    setStep('confirm');
-    setIsParsing(false);
-    addToast('已生成项目理解确认卡', 'success');
-  };
-
-  const handleCreateFromParsed = async () => {
-    if (!parsedProject) {
-      return;
-    }
-
-    setIsCreating(true);
-    try {
-      await projectsApi.create({
-        name: parsedProject.name,
-        description: parsedProject.description,
-        requirements: rawInput.trim() || parsedProject.description,
-      });
-      addToast('项目创建成功，正在分配资源...', 'success');
-      onProjectCreated?.();
-      handleClose();
-    } catch (error: any) {
-      addToast('创建失败: ' + error.message, 'error');
-    } finally {
-      setIsCreating(false);
-    }
-  };
-
-  const handleManualSubmit = () => {
-    if (!formData.name.trim()) {
-      addToast('请输入项目名称', 'error');
-      return;
-    }
-
-    if (!formData.description.trim()) {
-      addToast('请输入项目描述', 'error');
-      return;
-    }
-
-    const manualAgents = formData.agentIds
-      .map((id) => agents.find((agent) => agent.id === id)?.name)
-      .filter(Boolean) as string[];
-
-    setParsedProject({
-      name: formData.name.trim(),
-      description: formData.description.trim(),
-      phase: '规划中',
-      agents: manualAgents.length > 0 ? manualAgents : agents.slice(0, 3).map((agent) => agent.name),
-      priority: formData.priority as 'High' | 'Medium' | 'Low',
-      team: manualAgents,
-    });
-    setStep('confirm');
-    addToast('已生成项目理解确认卡', 'success');
-  };
-
-  const handleUseManualFromParsed = () => {
-    if (!parsedProject) {
-      return;
-    }
-
-    const selectedIds = agents
-      .filter((agent) => parsedProject.agents.includes(agent.name))
-      .map((agent) => agent.id);
-
-    setFormData({
-      name: parsedProject.name,
-      description: parsedProject.description,
-      priority: parsedProject.priority,
-      dueDate: '',
-      agentIds: selectedIds,
-    });
-    setShowManualForm(true);
-    setStep('input');
-  };
-
+  
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="创建新项目">
+    <Modal isOpen={isOpen} onClose={onClose} title="创建新项目">
       <div className="space-y-6">
-        <div className="flex justify-between items-center">
-          <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">FR-010 自然语言创建</p>
-          <button
+        <div className="flex justify-end">
+          <button 
             onClick={() => setIsImporting(!isImporting)}
             className="text-[10px] font-bold text-primary hover:underline uppercase tracking-widest flex items-center gap-1"
           >
             <Upload size={12} />
-            {isImporting ? '返回创建流程' : '导入项目定义'}
+            {isImporting ? "手动填写" : "导入项目定义"}
           </button>
         </div>
 
         {!isImporting ? (
           <>
-            {step === 'input' && (
-              <div className="space-y-4">
-                <div className="space-y-2">
-                  <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目需求（自然语言）</label>
-                  <textarea
-                    rows={5}
-                    value={rawInput}
-                    onChange={(event) => setRawInput(event.target.value)}
-                    placeholder="例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由需求分析师、产品和研发推进。"
-                    className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  <button
-                    onClick={handleParseInput}
-                    disabled={isParsing || !rawInput.trim()}
-                    className="py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
-                  >
-                    {isParsing ? 'AI 解析中...' : 'AI 解析并生成确认卡'}
-                  </button>
-                  <button
-                    onClick={() => setShowManualForm((prev) => !prev)}
-                    className="py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all"
-                  >
-                    {showManualForm ? '收起手动表单' : '手动填写'}
-                  </button>
-                </div>
-
-                {showManualForm && (
-                  <div className="space-y-4 p-4 bg-white/5 border border-border-subtle rounded-2xl">
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目名称</label>
-                      <input
-                        type="text"
-                        value={formData.name}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, name: event.target.value }))}
-                        placeholder="例如: 智能供应链优化"
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目描述</label>
-                      <textarea
-                        rows={3}
-                        value={formData.description}
-                        onChange={(event) => setFormData((prev) => ({ ...prev, description: event.target.value }))}
-                        placeholder="简述项目目标、范围和关键约束..."
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                      />
-                    </div>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
-                        <select
-                          value={formData.priority}
-                          onChange={(event) => setFormData((prev) => ({ ...prev, priority: event.target.value as 'High' | 'Medium' | 'Low' }))}
-                          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-                        >
-                          <option value="High">高 (High)</option>
-                          <option value="Medium">中 (Medium)</option>
-                          <option value="Low">低 (Low)</option>
-                        </select>
-                      </div>
-                      <div className="space-y-2">
-                        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">截止日期</label>
-                        <input
-                          type="date"
-                          value={formData.dueDate}
-                          onChange={(event) => setFormData((prev) => ({ ...prev, dueDate: event.target.value }))}
-                          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                        />
-                      </div>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配团队</label>
-                      <div className="flex flex-wrap gap-2">
-                        {agents.map((agent) => (
-                          <label key={agent.id} className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors">
-                            <input
-                              type="checkbox"
-                              checked={formData.agentIds.includes(agent.id)}
-                              onChange={() => handleToggleManualAgent(agent.id)}
-                              className="accent-primary"
-                            />
-                            <span className="text-xs text-slate-300">{agent.name}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </div>
-                    <button
-                      onClick={handleManualSubmit}
-                      disabled={isCreating}
-                      className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-2 disabled:opacity-50"
-                    >
-                      生成确认卡
-                    </button>
-                  </div>
-                )}
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目名称</label>
+              <input type="text" placeholder="例如: 智能供应链优化" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目描述</label>
+              <textarea rows={3} placeholder="简述项目的目标与核心挑战..." className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none" />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
+                <select className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none">
+                  <option>高 (High)</option>
+                  <option>中 (Medium)</option>
+                  <option>低 (Low)</option>
+                </select>
               </div>
-            )}
-
-            {step === 'confirm' && parsedProject && (
-              <div className="bg-surface-soft border border-warning/20 rounded-2xl p-5 space-y-5">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2 text-warning">
-                    <Zap size={14} />
-                    <span className="text-[10px] font-bold uppercase tracking-widest">创建前理解确认卡</span>
-                  </div>
-                  <Badge variant="warning">待确认</Badge>
-                </div>
-                <div className="space-y-3">
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">名称</label>
-                    <input
-                      type="text"
-                      value={parsedProject.name}
-                      onChange={(event) => setParsedProject((prev) => prev ? { ...prev, name: event.target.value } : prev)}
-                      className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">描述</label>
-                    <textarea
-                      rows={3}
-                      value={parsedProject.description}
-                      onChange={(event) => setParsedProject((prev) => prev ? { ...prev, description: event.target.value } : prev)}
-                      className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">阶段</label>
-                      <select
-                        value={parsedProject.phase}
-                        onChange={(event) => setParsedProject((prev) => prev ? { ...prev, phase: event.target.value } : prev)}
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-                      >
-                        <option value="规划中">规划中</option>
-                        <option value="分析">分析</option>
-                        <option value="设计">设计</option>
-                        <option value="开发">开发</option>
-                        <option value="验收">验收</option>
-                      </select>
-                    </div>
-                    <div className="space-y-2">
-                      <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
-                      <select
-                        value={parsedProject.priority}
-                        onChange={(event) => setParsedProject((prev) => prev ? { ...prev, priority: event.target.value as 'High' | 'Medium' | 'Low' } : prev)}
-                        className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-                      >
-                        <option value="High">高 (High)</option>
-                        <option value="Medium">中 (Medium)</option>
-                        <option value="Low">低 (Low)</option>
-                      </select>
-                    </div>
-                  </div>
-                  <div className="space-y-2">
-                    <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">建议团队</label>
-                    <div className="flex flex-wrap gap-2">
-                      {(parsedProject.agents.length > 0 ? parsedProject.agents : ['未识别，建议手动调整']).map((agentName) => (
-                        <span key={agentName} className="px-3 py-1.5 rounded-xl bg-white/5 border border-border-subtle text-xs text-slate-300">
-                          {agentName}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex gap-3 pt-2">
-                  <button
-                    onClick={() => setStep('input')}
-                    className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
-                  >
-                    修改输入
-                  </button>
-                  <button
-                    onClick={handleUseManualFromParsed}
-                    className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
-                  >
-                    手动微调
-                  </button>
-                  <button
-                    onClick={handleCreateFromParsed}
-                    disabled={isCreating}
-                    className="flex-1 py-2.5 bg-primary text-surface rounded-xl text-xs font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
-                  >
-                    {isCreating ? '创建中...' : '确认创建'}
-                  </button>
-                </div>
-                <button
-                  onClick={handleClose}
-                  className="w-full py-2 bg-transparent border border-border-subtle rounded-xl text-xs font-bold text-slate-400 hover:text-white hover:bg-white/5 transition-all"
-                >
-                  取消
-                </button>
+              <div className="space-y-2">
+                <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">截止日期</label>
+                <input type="date" className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50" />
               </div>
-            )}
+            </div>
           </>
         ) : (
           <div className="p-8 border-2 border-dashed border-border-subtle rounded-2xl bg-white/5 flex flex-col items-center justify-center space-y-4 group hover:border-primary/50 transition-all cursor-pointer">
@@ -1152,10 +660,31 @@ const NewProjectModal = ({ isOpen, onClose, addToast, onProjectCreated }: any) =
               <p className="text-sm font-bold text-white">点击或拖拽文件到此处</p>
               <p className="text-[10px] text-slate-500 mt-1 uppercase tracking-widest">支持 .json, .yaml, .pdf 项目文档</p>
             </div>
-            <input type="file" className="hidden" id="project-file" onChange={() => addToast('文件已解析', 'success')} />
+            <input type="file" className="hidden" id="project-file" onChange={() => addToast("文件已解析", "success")} />
             <label htmlFor="project-file" className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-[10px] font-bold text-white transition-all cursor-pointer">选择文件</label>
           </div>
         )}
+
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配团队</label>
+          <div className="flex flex-wrap gap-2">
+            {MOCK_AGENTS.map(a => (
+              <label key={a.id} className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors">
+                <input type="checkbox" className="accent-primary" />
+                <span className="text-xs text-slate-300">{a.name}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+        <button 
+          onClick={() => {
+            addToast("项目创建成功，正在分配资源...", "success");
+            onClose();
+          }} 
+          className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-4"
+        >
+          创建项目
+        </button>
       </div>
     </Modal>
   );
@@ -1358,10 +887,10 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {[
-          { label: '活跃项目', value: projects.length.toString(), icon: Briefcase, color: 'text-accent', trend: '本周 +1', tab: 'projects' },
+          { label: '活跃项目', value: MOCK_PROJECTS.length.toString(), icon: Briefcase, color: 'text-accent', trend: '本周 +1', tab: 'projects' },
           { label: 'Agent 负载', value: '78%', icon: Cpu, color: 'text-primary', trend: '稳定', tab: 'agents' },
           { label: '待处理决策', value: '2', icon: Zap, color: 'text-warning', trend: '需要关注', tab: 'dashboard' },
-          { label: '每日成本', value: `$${models.reduce((acc, m) => acc + m.dailyTokens * 0.00001, 0).toFixed(2)}`, icon: Activity, color: 'text-danger', trend: '较昨日 -5%', tab: 'model-nexus' },
+          { label: '每日成本', value: `$${MOCK_MODELS.reduce((acc, m) => acc + m.dailyTokens * 0.00001, 0).toFixed(2)}`, icon: Activity, color: 'text-danger', trend: '较昨日 -5%', tab: 'model-nexus' },
         ].map((stat, i) => (
           <div 
             key={i} 
@@ -1468,7 +997,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <button className="text-xs text-primary hover:underline" onClick={() => onNavigate('projects')}>管理组合</button>
             </div>
             <div className="divide-y divide-border-subtle">
-              {projects.map((project) => (
+              {MOCK_PROJECTS.map((project) => (
                 <div key={project.id} className="p-6 flex items-center justify-between hover:bg-white/5 transition-colors cursor-pointer group" onClick={() => onNavigate('project-room', project.id)}>
                   <div className="flex items-center gap-4">
                     <div className="w-10 h-10 rounded-xl bg-white/5 flex items-center justify-center text-slate-400 group-hover:text-primary transition-colors">
@@ -1502,7 +1031,7 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
               <button className="p-1 text-slate-500 hover:text-white"><MoreVertical size={16} /></button>
             </div>
             <div className="space-y-6">
-              {agents.slice(0, 5).map((agent) => (
+              {MOCK_AGENTS.slice(0, 5).map((agent) => (
                 <div key={agent.id} className="space-y-2 cursor-pointer group" onClick={() => onNavigate('agents', agent.id)}>
                   <div className="flex justify-between items-center">
                     <div className="flex items-center gap-2">
@@ -1570,8 +1099,8 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
 
 const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToast: any }) => {
   const project = useMemo(() => 
-    projects.find(p => p.id === projectId) || projects[0], 
-  [projectId, projects]);
+    MOCK_PROJECTS.find(p => p.id === projectId) || MOCK_PROJECTS[0], 
+  [projectId]);
 
   return (
     <div className="h-full flex flex-col">
@@ -1628,7 +1157,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               活跃任务
             </h3>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {tasks.map((task, i) => (
+              {MOCK_TASKS.map((task, i) => (
                 <div key={i} className="bg-surface-soft border border-border-subtle p-5 rounded-2xl space-y-4 hover:border-white/20 transition-all group">
                   <div className="flex justify-between items-start">
                     <div>
@@ -1723,7 +1252,7 @@ const ProjectRoom = ({ projectId, addToast }: { projectId: string | null, addToa
               项目 Agent
             </h3>
             <div className="space-y-3">
-              {agents.slice(0, 4).map((agent, i) => (
+              {MOCK_AGENTS.slice(0, 4).map((agent, i) => (
                 <div key={i} className="flex items-center gap-3 p-2 rounded-xl hover:bg-white/5 transition-colors cursor-pointer">
                   <div className="w-8 h-8 rounded-full bg-accent/20 flex items-center justify-center text-accent text-[10px] font-bold border border-accent/20">
                     {agent.name.charAt(0).toUpperCase()}
@@ -1847,17 +1376,17 @@ const TokenThroughputChart = () => {
 const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToast: (msg: string, type?: any) => void }) => {
   const [mode, setMode] = useState('confirm'); // 'confirm' | 'auto'
   const activeAgent = useMemo(() => 
-    agents.find(a => a.id === agentId) || agents[0], 
-  [agentId, agents]);
+    MOCK_AGENTS.find(a => a.id === agentId) || MOCK_AGENTS[0], 
+  [agentId]);
   
   const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit);
   const [dailyUsage, setDailyUsage] = useState(12450);
   const [currentModelId, setCurrentModelId] = useState(activeAgent.currentModelId);
-  const agentSessions = useMemo(() => sessions.filter(s => s.agentId === activeAgent.id), [activeAgent.id, sessions]);
+  const agentSessions = useMemo(() => MOCK_SESSIONS.filter(s => s.agentId === activeAgent.id), [activeAgent.id]);
 
   const handleModelChange = (modelId: string) => {
     setCurrentModelId(modelId);
-    const model = models.find(m => m.id === modelId);
+    const model = MOCK_MODELS.find(m => m.id === modelId);
     addToast(`已将 ${activeAgent.name} 切换至模型: ${model?.name}`, 'success');
   };
 
@@ -1943,12 +1472,12 @@ const AgentCommander = ({ agentId, addToast }: { agentId: string | null, addToas
           <div className="flex items-center gap-2 relative group/model">
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">当前模型:</span>
             <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-[10px] font-bold text-white flex items-center gap-2 hover:bg-white/10 transition-all hover:border-white/20">
-              {models.find(m => m.id === currentModelId)?.name}
+              {MOCK_MODELS.find(m => m.id === currentModelId)?.name}
               <ChevronDown size={12} className="text-slate-500" />
             </button>
             <div className="absolute top-full right-0 mt-2 w-48 bg-surface-muted border border-border-subtle rounded-xl shadow-2xl opacity-0 invisible group-hover/model:opacity-100 group-hover/model:visible transition-all z-50 p-2">
               <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest px-2 py-1">选择计算资源</p>
-              {models.map(m => (
+              {MOCK_MODELS.map(m => (
                 <button 
                   key={m.id} 
                   onClick={() => handleModelChange(m.id)}
@@ -2252,8 +1781,8 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
   };
 
   const topConsumers = useMemo(() => 
-    [...agents].sort((a, b) => b.tokensUsed - a.tokensUsed).slice(0, 5),
-  [agents]);
+    [...MOCK_AGENTS].sort((a, b) => b.tokensUsed - a.tokensUsed).slice(0, 5),
+  []);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2408,9 +1937,9 @@ const SystemOperations = ({ onNavigate, addToast }: any) => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
-                  {sessions.slice(0, 5).map((session) => {
-                    const agent = agents.find(a => a.id === session.agentId);
-                    const project = projects.find(p => p.id === session.projectId);
+                  {MOCK_SESSIONS.slice(0, 5).map((session) => {
+                    const agent = MOCK_AGENTS.find(a => a.id === session.agentId);
+                    const project = MOCK_PROJECTS.find(p => p.id === session.projectId);
                     return (
                       <tr key={session.id} className="hover:bg-white/5 transition-colors group">
                         <td className="px-6 py-4">
@@ -2575,7 +2104,7 @@ const ProjectsPortfolio = ({ onSelectProject, addToast, onOpenNewProject }: any)
             </tr>
           </thead>
           <tbody className="divide-y divide-border-subtle">
-            {projects.map((project) => (
+            {MOCK_PROJECTS.map((project) => (
               <tr key={project.id} className="hover:bg-white/5 transition-colors group cursor-pointer" onClick={() => onSelectProject(project.id)}>
                 <td className="px-6 py-4">
                   <div className="flex items-center gap-3">
@@ -2653,7 +2182,7 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
     </header>
 
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-      {agents.map((agent) => (
+      {MOCK_AGENTS.map((agent) => (
         <div 
           key={agent.id} 
           className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-6 hover:border-white/20 transition-all group cursor-pointer"
@@ -2677,7 +2206,7 @@ const AgentsRoster = ({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, o
           <div className="grid grid-cols-2 gap-4">
             <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">模型</p>
-              <p className="text-xs text-white mt-1 font-medium">{models.find(m => m.id === agent.currentModelId)?.name}</p>
+              <p className="text-xs text-white mt-1 font-medium">{MOCK_MODELS.find(m => m.id === agent.currentModelId)?.name}</p>
             </div>
             <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
               <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">已用 Token</p>
@@ -2816,7 +2345,7 @@ const OpenClawWorkspace = ({ addToast }: any) => (
             <Badge variant="primary">7 个活跃</Badge>
           </div>
           <div className="p-6 space-y-4">
-            {projects.map((p, i) => (
+            {MOCK_PROJECTS.map((p, i) => (
               <div key={i} className="flex items-center justify-between p-4 bg-surface-muted rounded-xl border border-border-subtle hover:border-white/20 transition-all group">
                 <div className="flex items-center gap-4">
                   <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center text-slate-500 group-hover:text-primary transition-colors">
@@ -2869,20 +2398,20 @@ const OpenClawWorkspace = ({ addToast }: any) => (
 );
 
 const RealTimeMonitoring = ({ addToast }: any) => {
-  const sessionList = sessions;
+  const [sessions] = useState(MOCK_SESSIONS);
   const [activeFilter, setActiveFilter] = useState('all');
 
   const filteredSessions = useMemo(() => {
-    if (activeFilter === 'all') return sessionList;
-    return sessionList.filter(s => s.status === activeFilter);
-  }, [sessionList, activeFilter]);
+    if (activeFilter === 'all') return sessions;
+    return sessions.filter(s => s.status === activeFilter);
+  }, [sessions, activeFilter]);
 
   const stats = useMemo(() => {
-    const totalTokens = sessionList.reduce((acc, s) => acc + s.tokens, 0);
-    const totalCost = sessionList.reduce((acc, s) => acc + s.cost, 0);
-    const activeCount = sessionList.filter(s => s.status === 'active').length;
+    const totalTokens = sessions.reduce((acc, s) => acc + s.tokens, 0);
+    const totalCost = sessions.reduce((acc, s) => acc + s.cost, 0);
+    const activeCount = sessions.filter(s => s.status === 'active').length;
     return { totalTokens, totalCost, activeCount };
-  }, [sessionList]);
+  }, [sessions]);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -2960,8 +2489,8 @@ const RealTimeMonitoring = ({ addToast }: any) => {
             </thead>
             <tbody className="divide-y divide-border-subtle">
               {filteredSessions.map((session) => {
-                const agent = agents.find(a => a.id === session.agentId);
-                const project = projects.find(p => p.id === session.projectId);
+                const agent = MOCK_AGENTS.find(a => a.id === session.agentId);
+                const project = MOCK_PROJECTS.find(p => p.id === session.projectId);
                 return (
                   <tr key={session.id} className="hover:bg-white/5 transition-colors group">
                     <td className="px-6 py-4 text-xs text-slate-500 font-mono">{session.id}</td>
@@ -2974,7 +2503,7 @@ const RealTimeMonitoring = ({ addToast }: any) => {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <Badge variant="default">{models.find(m => m.id === session.modelId)?.name}</Badge>
+                      <Badge variant="default">{MOCK_MODELS.find(m => m.id === session.modelId)?.name}</Badge>
                     </td>
                     <td className="px-6 py-4 text-xs text-slate-400">{project?.name}</td>
                     <td className="px-6 py-4 text-xs text-slate-500">{session.duration}</td>
@@ -3013,9 +2542,9 @@ const ModelTerminal = ({ model }: { model: Model }) => {
     const interval = setInterval(() => {
       const newLog = {
         timestamp: new Date().toLocaleTimeString(),
-        type: Math.random() > 0.5 ? 'bash' : 'assistant',
-        content: Math.random() > 0.5 
-          ? `Executing task: ${model.currentTask}... [OK]` 
+        type: (Math.random() > 0.5 ? 'bash' : 'assistant') as ModelLog['type'],
+        content: Math.random() > 0.5
+          ? `Executing task: ${model.currentTask}... [OK]`
           : `Processing token stream... ${Math.floor(Math.random() * 1000)} tokens generated.`,
       };
       setLogs(prev => [...prev.slice(-19), newLog]);
@@ -3112,14 +2641,14 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   
   const stats = useMemo(() => ({
-    totalTokens: models.reduce((acc, m) => acc + m.totalTokens, 0),
-    totalCost: models.reduce((acc, m) => acc + m.totalTokens * 0.000002, 0),
-    activeModels: models.filter(m => m.status === 'Healthy').length
-  }), [models]);
+    totalTokens: MOCK_MODELS.reduce((acc, m) => acc + m.totalTokens, 0),
+    totalCost: MOCK_MODELS.reduce((acc, m) => acc + m.totalTokens * 0.000002, 0),
+    activeModels: MOCK_MODELS.filter(m => m.status === 'Healthy').length
+  }), []);
 
   const selectedModel = useMemo(() => 
-    models.find(m => m.id === selectedModelId),
-  [selectedModelId, models]);
+    MOCK_MODELS.find(m => m.id === selectedModelId),
+  [selectedModelId]);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -3176,7 +2705,7 @@ const ModelNexus = ({ addToast, onOpenNewModel }: any) => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        {models.map((model) => (
+        {MOCK_MODELS.map((model) => (
           <div 
             key={model.id} 
             className="bg-surface-soft border border-border-subtle rounded-3xl p-6 space-y-6 hover:border-primary/30 transition-all group cursor-pointer"
@@ -3644,21 +3173,6 @@ export default function App() {
   const [isDecisionCenterOpen, setIsDecisionCenterOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
 
-  const { agents, projects, tasks, sessions, runtime, refresh } = useRealData();
-
-  const runtimeModels = useMemo(
-    () => buildRuntimeModels(runtime, agents, projects, tasks, sessions),
-    [runtime, agents, projects, tasks, sessions],
-  );
-
-  syncRuntimeCollections({
-    models: runtimeModels,
-    agents: agents.length > 0 ? agents : DEFAULT_AGENTS,
-    projects: projects.length > 0 ? projects : DEFAULT_PROJECTS,
-    tasks,
-    sessions,
-  });
-
   const notifications = [
     { id: 1, title: '系统更新', content: 'Aegis OS 已升级至 v2.4.0，新增了拓扑图谱实时同步功能。', time: '2小时前', type: 'info' },
     { id: 2, title: '任务完成', content: 'Agent "Jeremy" 已完成 Aegis OS UI 的初步设计方案。', time: '5小时前', type: 'success' },
@@ -3666,22 +3180,6 @@ export default function App() {
   ];
 
   // Navigation handlers for consistency
-  const handleNavigate = (tab: string, id?: string) => {
-    if ((tab === 'project-room' || tab === 'projects') && id) {
-      setSelectedProjectId(id);
-      setActiveTab('project-room');
-      return;
-    }
-
-    if ((tab === 'agent-commander' || tab === 'agents') && id) {
-      setSelectedAgentId(id);
-      setActiveTab('agent-commander');
-      return;
-    }
-
-    setActiveTab(tab);
-  };
-
   const handleSelectProject = (id: string) => {
     setSelectedProjectId(id);
     setActiveTab('project-room');
@@ -3999,10 +3497,10 @@ export default function App() {
               transition={{ duration: 0.2 }}
               className="h-full"
             >
-              {activeTab === 'dashboard' && <Dashboard onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
+              {activeTab === 'dashboard' && <Dashboard onNavigate={setActiveTab} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
               {activeTab === 'agent-commander' && <AgentCommander agentId={selectedAgentId} addToast={addToast} />}
               {activeTab === 'project-room' && <ProjectRoom projectId={selectedProjectId} addToast={addToast} />}
-              {activeTab === 'system-health' && <SystemOperations onNavigate={handleNavigate} addToast={addToast} />}
+              {activeTab === 'system-health' && <SystemOperations onNavigate={setActiveTab} addToast={addToast} />}
               {activeTab === 'model-nexus' && <ModelNexus addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} />}
               {activeTab === 'monitoring' && <RealTimeMonitoring addToast={addToast} />}
               {activeTab === 'projects' && <ProjectsPortfolio onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} />}
@@ -4021,7 +3519,7 @@ export default function App() {
           {isAgentConfigOpen && <AgentConfigModal isOpen={isAgentConfigOpen} onClose={() => setIsAgentConfigOpen(false)} agentId={selectedAgentId} addToast={addToast} />}
           {isTopologyOpen && <TeamTopologyModal isOpen={isTopologyOpen} onClose={() => setIsTopologyOpen(false)} />}
           {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} />}
-          {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={() => { void refresh(); }} />}
+          {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} />}
           {isDecisionCenterOpen && <DecisionCenterModal isOpen={isDecisionCenterOpen} onClose={() => setIsDecisionCenterOpen(false)} addToast={addToast} />}
         </AnimatePresence>
       </div>

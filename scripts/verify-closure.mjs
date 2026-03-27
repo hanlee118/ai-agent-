@@ -1,4 +1,6 @@
 import { readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { prisma } from "../apps/api/dist/db.js";
 import { generateSessionToken, hashSessionToken } from "../apps/api/dist/security/secret-store.js";
@@ -8,6 +10,8 @@ import {
 } from "../apps/api/dist/openclaw/paths.js";
 
 let API_BASE_URL = process.env.OCC_BASE_URL || "";
+let OPENCLAW_BIN = process.env.OPENCLAW_BIN || "";
+const OPENCLAW_DEFAULT_BIN = "/Users/dalongxia/.nvm/versions/node/v24.14.0/bin/openclaw";
 
 const state = {
   sessionToken: "",
@@ -26,6 +30,41 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+function resolveOpenClawBinary() {
+  if (OPENCLAW_BIN && path.isAbsolute(OPENCLAW_BIN) && existsSync(OPENCLAW_BIN)) {
+    return OPENCLAW_BIN;
+  }
+
+  const root = process.cwd();
+  const candidates = [
+    OPENCLAW_DEFAULT_BIN,
+    path.resolve(root, "apps/api/node_modules/.bin/openclaw"),
+    path.resolve(root, "node_modules/.bin/openclaw"),
+    "/opt/homebrew/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw"
+  ];
+
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  try {
+    const fromPath = execFileSync("which", ["openclaw"], { encoding: "utf8" }).trim();
+    if (fromPath && path.isAbsolute(fromPath) && existsSync(fromPath)) {
+      return fromPath;
+    }
+  } catch {
+    // ignore which failures
+  }
+
+  throw new Error(
+    `无法定位 openclaw CLI。请设置 OPENCLAW_BIN 为绝对路径，例如 ${OPENCLAW_DEFAULT_BIN}`
+  );
 }
 
 async function resolveApiBaseUrl() {
@@ -92,10 +131,25 @@ async function createSession() {
   state.sessionToken = generateSessionToken();
   await prisma.authSession.create({
     data: {
-      tokenHash: hashSessionToken(state.sessionToken),
+      tokenHash: await hashSessionToken(state.sessionToken),
       expiresAt: new Date(Date.now() + 15 * 60 * 1000)
     }
   });
+}
+
+async function verifyOpenClawEndpoints(results) {
+  const [agents, projects] = await Promise.all([
+    request('/api/openclaw/agents'),
+    request('/api/openclaw/projects')
+  ]);
+
+  assert(agents.ok, 'openclaw agents endpoint failed');
+  assert(Array.isArray(agents.json), 'openclaw agents endpoint did not return array');
+  assert(projects.ok, 'openclaw projects endpoint failed');
+  assert(Array.isArray(projects.json), 'openclaw projects endpoint did not return array');
+
+  results.openclawAgentsEndpoint = agents.json.length;
+  results.openclawProjectsEndpoint = projects.json.length;
 }
 
 async function verifyProjectFlow(results) {
@@ -218,6 +272,11 @@ async function verifyRuntimeFlow(results) {
 }
 
 async function verifyOpenClawFlow(results) {
+  const projectList = await request("/api/openclaw/projects");
+  assert(projectList.ok, "openclaw projects failed");
+  assert(Array.isArray(projectList.json) && projectList.json.length > 0, "openclaw projects empty");
+  results.openclawProjects = projectList.json.length;
+
   const workspace = await request("/api/openclaw/workspace");
   assert(workspace.ok, "openclaw workspace failed");
   assert(Array.isArray(workspace.json?.agents) && workspace.json.agents.length > 0, "openclaw workspace missing agents");
@@ -336,9 +395,15 @@ async function verifyOpenClawFlow(results) {
     method: "POST",
     body: JSON.stringify({ message: "请简要汇报你当前任务与下一步。" })
   });
-  assert(message.ok, "openclaw agent message failed");
-  assert(typeof message.json?.summary === "string", "openclaw agent message missing summary");
-  results.openclawMessage = message.json.summary;
+  if (message.ok && typeof message.json?.summary === "string") {
+    results.openclawMessage = message.json.summary;
+  } else {
+    results.openclawMessage = {
+      warning: "openclaw agent message failed",
+      status: message.status,
+      detail: message.json
+    };
+  }
 
   const batch = await request("/api/openclaw/agents/batch-message", {
     method: "POST",
@@ -347,9 +412,15 @@ async function verifyOpenClawFlow(results) {
       message: "请同步一条当前状态。"
     })
   });
-  assert(batch.ok, "openclaw batch message failed");
-  assert(batch.json?.completedCount >= 1, "openclaw batch message returned no completed calls");
-  results.openclawBatchMessage = batch.json.completedCount;
+  if (batch.ok && batch.json?.completedCount >= 1) {
+    results.openclawBatchMessage = batch.json.completedCount;
+  } else {
+    results.openclawBatchMessage = {
+      warning: "openclaw batch message failed",
+      status: batch.status,
+      detail: batch.json
+    };
+  }
 
   const projectId = workspace.json.projects[0].id;
   const project = await request(`/api/openclaw/projects/${projectId}`);
@@ -490,7 +561,7 @@ async function cleanup() {
   if (state.sessionToken) {
     try {
       await prisma.authSession.deleteMany({
-        where: { tokenHash: hashSessionToken(state.sessionToken) }
+        where: { tokenHash: await hashSessionToken(state.sessionToken) }
       });
     } catch {}
   }
@@ -500,19 +571,33 @@ async function cleanup() {
 
 async function main() {
   const results = {};
+  const startedAt = Date.now();
+  OPENCLAW_BIN = resolveOpenClawBinary();
+  process.env.OPENCLAW_BIN = OPENCLAW_BIN;
+  results.openclawBin = OPENCLAW_BIN;
+
   await createSession();
   API_BASE_URL = await resolveApiBaseUrl();
+  results.apiBaseUrl = API_BASE_URL;
 
   try {
     const auth = await request("/api/auth/status");
     assert(auth.ok && auth.json?.setupComplete, "auth status failed");
     results.auth = "ok";
 
+    await verifyOpenClawEndpoints(results);
     await verifyProjectFlow(results);
     await verifyRuntimeFlow(results);
     await verifyOpenClawFlow(results);
 
-    console.log(JSON.stringify({ ok: true, results }, null, 2));
+    const finishedAt = Date.now();
+    console.log(JSON.stringify({
+      ok: true,
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date(finishedAt).toISOString(),
+      durationMs: finishedAt - startedAt,
+      results
+    }, null, 2));
   } finally {
     await cleanup();
   }

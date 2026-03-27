@@ -22,21 +22,19 @@ import type {
   PromptTemplateChannel,
   PromptTemplateUpsertInput,
   ProjectMessageInput,
-  RoleType,
   RuntimeSettingsInput,
   StageRejectInput,
   StageSubmissionInput,
-  TaskUpdateInput
+  TaskUpdateInput,
+  RoleType
 } from "@occ/shared";
 import {
   ensureSeedData,
   approveProject,
   createProject,
-  findAgent,
   findProject,
   getSystemHealth,
   interveneProject,
-  listAgents,
   listProjectTasks,
   listTasks,
   listProjects,
@@ -91,6 +89,9 @@ import {
   updateOpenClawProjectTask,
   updateOpenClawAgentDocument
 } from "./openclaw/workspace.js";
+import { createModelsRouter } from "./routes/models.js";
+import { createAgentsRouter } from "./routes/agents.js";
+import { createTeamRouter } from "./routes/team.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
@@ -246,6 +247,12 @@ app.use("/api", (req, res, next) => {
     return;
   }
 
+  // 临时策略：开发环境放开 /api/openclaw/*，便于前端联调与 SSE 调试
+  if (process.env.NODE_ENV !== "production" && req.path.startsWith("/openclaw/")) {
+    next();
+    return;
+  }
+
   void (async () => {
     const sessionToken = parseSessionToken(req.headers.cookie);
     const authStatus = await getAuthStatus(sessionToken);
@@ -268,6 +275,10 @@ app.use("/api", (req, res, next) => {
     next();
   })().catch(next);
 });
+
+app.use("/api/models", createModelsRouter());
+app.use("/api/agents", createAgentsRouter());
+app.use("/api/team", createTeamRouter());
 
 app.get("/api/system/runtime", asyncRoute(async (_req, res) => {
   res.json(await getRuntimeStatus());
@@ -425,6 +436,111 @@ app.post("/api/prompt-templates/:templateId/use", asyncRoute(async (req, res) =>
   }
 
   res.json(await markPromptTemplateUsed(templateId));
+}));
+
+
+type ProjectParsePriority = "High" | "Medium" | "Low";
+
+const PROJECT_PARSE_ROLE_LABELS: Record<RoleType, string> = {
+  ROLE_ASSISTANT: "总助理",
+  ROLE_PM: "项目经理",
+  ROLE_ANALYST: "需求分析师",
+  ROLE_PRODUCT: "产品总监",
+  ROLE_ARCH: "研发总监",
+  ROLE_DEV: "研发经理",
+  ROLE_QA: "测试工程师",
+  ROLE_HR: "HR总监"
+};
+
+const PROJECT_PARSE_ROLE_HINTS: Array<{ role: RoleType; patterns: RegExp[] }> = [
+  { role: "ROLE_PM", patterns: [/项目经理/, /pm/, /排期/, /里程碑/] },
+  { role: "ROLE_ANALYST", patterns: [/需求/, /分析/, /调研/] },
+  { role: "ROLE_PRODUCT", patterns: [/产品/, /原型/, /交互/, /体验/] },
+  { role: "ROLE_ARCH", patterns: [/架构/, /基础设施/, /infra/, /系统设计/] },
+  { role: "ROLE_DEV", patterns: [/研发/, /开发/, /编码/, /后端/, /前端/, /联调/] },
+  { role: "ROLE_QA", patterns: [/测试/, /验收/, /qa/, /质量/] },
+  { role: "ROLE_HR", patterns: [/招聘/, /人力/, /hr/] }
+];
+
+function inferProjectPriority(input: string): ProjectParsePriority {
+  if (/紧急|马上|立即|asap|今天|本周|高优先|关键/.test(input)) {
+    return "High";
+  }
+  if (/低优先|不着急|后续|有空|慢慢/.test(input)) {
+    return "Low";
+  }
+  return "Medium";
+}
+
+function inferProjectPhase(input: string): string {
+  if (/验收|测试|上线|发布|交付/.test(input)) {
+    return "验收";
+  }
+  if (/开发|编码|实现|联调|后端|前端/.test(input)) {
+    return "开发";
+  }
+  if (/设计|原型|界面|交互|架构/.test(input)) {
+    return "设计";
+  }
+  return "分析";
+}
+
+function inferProjectName(input: string, keywords: string[]): string {
+  const quoted = input.match(/["“](.{2,40})["”]/);
+  if (quoted?.[1]) {
+    return quoted[1].trim();
+  }
+
+  const candidate = input
+    .replace(/(请|帮我|我们|需要|想要|希望|做一个|做个|创建|搭建|开发|实现|一个|项目|系统)/g, " ")
+    .replace(/[，。,.!?]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 4)
+    .join("");
+
+  if (candidate) {
+    return candidate.slice(0, 16) + "项目";
+  }
+
+  if (keywords[0]) {
+    return keywords[0] + "项目";
+  }
+
+  return "新项目";
+}
+
+function inferProjectTeam(input: string, suggestedTeam: RoleType[]): RoleType[] {
+  const matched = PROJECT_PARSE_ROLE_HINTS
+    .filter((entry) => entry.patterns.some((pattern) => pattern.test(input)))
+    .map((entry) => entry.role);
+
+  if (matched.length > 0) {
+    return Array.from(new Set(matched));
+  }
+
+  return suggestedTeam.length > 0 ? suggestedTeam.slice(0, 5) : ["ROLE_PM", "ROLE_ANALYST", "ROLE_DEV", "ROLE_QA"];
+}
+
+app.post("/api/projects/parse", asyncRoute(async (req, res) => {
+  const input = String(req.body?.input ?? req.body?.description ?? "").trim();
+
+  if (!input) {
+    res.status(400).json({ message: "input is required" });
+    return;
+  }
+
+  const parsedIntent = previewRequirement(input);
+  const team = inferProjectTeam(input, parsedIntent.suggestedTeam);
+
+  res.json({
+    name: inferProjectName(input, parsedIntent.keywords),
+    description: parsedIntent.summary || input,
+    phase: inferProjectPhase(input),
+    agents: team.map((role) => PROJECT_PARSE_ROLE_LABELS[role]),
+    team,
+    priority: inferProjectPriority(input)
+  });
 }));
 
 app.post("/api/projects/preview", asyncRoute(async (req, res) => {
@@ -649,10 +765,6 @@ app.post("/api/projects/:id/messages", asyncRoute(async (req, res) => {
   res.json(project);
 }));
 
-app.get("/api/agents", asyncRoute(async (_req, res) => {
-  res.json(await listAgents());
-}));
-
 app.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
   const taskId = String(req.params.taskId);
   const payload = req.body as TaskUpdateInput;
@@ -679,18 +791,6 @@ app.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
     summary: `任务 ${task.id} 状态更新为 ${task.status}`
   });
   res.json(task);
-}));
-
-app.get("/api/agents/:roleId", asyncRoute(async (req, res) => {
-  const roleId = String(req.params.roleId) as RoleType;
-  const agent = await findAgent(roleId);
-
-  if (!agent) {
-    res.status(404).json({ message: "Agent not found" });
-    return;
-  }
-
-  res.json(agent);
 }));
 
 app.get("/api/openclaw/workspace", asyncRoute(async (_req, res) => {
@@ -983,6 +1083,36 @@ app.post("/api/openclaw/agents/:agentId/memory", asyncRoute(async (req, res) => 
 app.get("/api/openclaw/sla", asyncRoute(async (_req, res) => {
   res.json(await listOpenClawAgentSla());
 }));
+
+// SSE 实时事件端点
+app.get("/api/openclaw/events", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders();
+
+  // 发送连接成功
+  res.write('event: connected\ndata: {"status":"ok"}\n\n');
+
+  // 每 30 秒心跳
+  const heartbeat = setInterval(() => {
+    res.write(`event: heartbeat\ndata: {"time":"${new Date().toISOString()}"}\n\n`);
+  }, 30000);
+
+  // 每 5 秒发送模拟事件（开发用）
+  const events = setInterval(() => {
+    const eventTypes = ["agent_status", "task_update", "project_progress"];
+    const eventType = eventTypes[Math.floor(Math.random() * eventTypes.length)];
+    res.write(`event: ${eventType}\ndata: {}\n\n`);
+  }, 5000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    clearInterval(events);
+    res.end();
+  });
+});
 
 app.get("/api/projects/:id/live", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);

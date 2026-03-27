@@ -280,7 +280,7 @@ export function AgentsPage() {
 
   return (
     <div className="page">
-      <header className="page-header studio-page-header">
+      <header className="page-header studio-page-header bg-[#16191E]/70 backdrop-blur-xl rounded-2xl p-6 border border-white/[0.06]">
         <div>
           <p className="eyebrow">Agent Studio</p>
           <h2>{copy.title}</h2>
@@ -310,7 +310,7 @@ export function AgentsPage() {
 
       <section className="portfolio-command-grid">
         <div className="portfolio-command-main">
-          <article className="card studio-command-card studio-catalog-toolbar-card">
+          <article className="card studio-command-card studio-catalog-toolbar-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.rosterTitle}</p>
@@ -344,7 +344,7 @@ export function AgentsPage() {
         </div>
 
         <aside className="portfolio-command-rail">
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.orchestrationTitle}</p>
@@ -377,7 +377,7 @@ export function AgentsPage() {
             </div>
           </article>
 
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.workloadTitle}</p>
@@ -405,7 +405,7 @@ export function AgentsPage() {
           </article>
 
           {health ? (
-            <article className="card studio-side-card">
+            <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
               <div className="section-header">
                 <div>
                   <p className="eyebrow">{copy.runtimeWatch}</p>
@@ -428,7 +428,7 @@ export function AgentsPage() {
             </article>
           ) : null}
 
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.governanceTitle}</p>
@@ -505,11 +505,11 @@ function AgentStudioCard({
   const attention = isAttentionAgent(agent);
 
   return (
-    <article className={`studio-catalog-card ${attention ? "studio-catalog-card-warning" : ""}`}>
+    <article className={`studio-catalog-card rounded-2xl bg-[#1C2128]/70 backdrop-blur-md border border-white/[0.06] hover:border-emerald-500/30 hover:shadow-lg hover:shadow-black/20 transition-all duration-200 ${attention ? "border-amber-500/30 studio-catalog-card-warning" : ""}`}>
       <div className={`studio-catalog-accent ${attention ? "studio-catalog-accent-paused" : "studio-catalog-accent-working"}`} />
       <div className="studio-catalog-card-body">
         <div className="studio-catalog-card-head">
-          <div className="studio-catalog-icon">
+          <div className="studio-catalog-icon bg-[#10B981]/10 rounded-2xl">
             <BrainCircuit size={24} />
           </div>
           <div className="studio-catalog-badges">
@@ -545,7 +545,7 @@ function AgentStudioCard({
               <span>{copy.blocked} {agent.blockedTaskCount}</span>
             </div>
           </div>
-          <Link className="studio-card-arrow" to={`/agents/${agent.agentId}`}>
+          <Link className="studio-card-arrow rounded-xl bg-white/5 hover:bg-emerald-500/20" to={`/agents/${agent.agentId}`}>
             <ChevronRight size={18} />
           </Link>
         </div>
@@ -564,7 +564,7 @@ function MetricTile({
   tone?: "default" | "warning";
 }) {
   return (
-    <div className={`metric-card metric-${tone}`}>
+    <div className={`metric-card metric-${tone} bg-[#1C2128]/60 backdrop-blur-md rounded-2xl border border-white/[0.06] hover:border-emerald-500/30 transition-all duration-200`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>

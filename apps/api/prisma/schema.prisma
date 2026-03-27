@@ -258,3 +258,44 @@ model Task {
   @@index([projectId, stageType])
   @@index([assignee, status])
 }
+
+// ============================================================
+// Aegis OS Models
+// ============================================================
+
+model Model {
+  id          String     @id @default(uuid())
+  name        String
+  provider    String
+  apiKey      String?
+  apiBaseUrl  String?
+  status      String     @default("Offline")
+  totalTokens Int        @default(0)
+  dailyTokens Int        @default(0)
+  tokenLimit  Int        @default(1000000)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  logs        ModelLog[]
+}
+
+model ModelLog {
+  id        String   @id @default(uuid())
+  modelId   String
+  timestamp DateTime
+  type      String   // bash, json, assistant, system
+  content   String
+  label     String?
+  model     Model   @relation(fields: [modelId], references: [id], onDelete: Cascade)
+}
+
+model AgentSoul {
+  agentId   String   @id
+  content   String
+  updatedAt DateTime @updatedAt
+}
+
+model AgentSop {
+  agentId   String   @id
+  steps     String   // JSON array of step strings
+  updatedAt DateTime @updatedAt
+}

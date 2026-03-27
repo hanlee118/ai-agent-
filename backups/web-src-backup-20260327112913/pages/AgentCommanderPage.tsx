@@ -583,7 +583,7 @@ export function AgentCommanderPage() {
         </div>
       ) : null}
 
-      <section className="commander-hero">
+      <section className="commander-hero bg-[#16191E]/60 backdrop-blur-xl rounded-2xl border border-white/[0.06] p-6">
         <div className="commander-hero-main">
           <div className="commander-title-row">
             <Link className="button button-ghost inline-button" to="/agents">
@@ -643,9 +643,9 @@ export function AgentCommanderPage() {
         </div>
       </section>
 
-      <section className="commander-grid">
-        <aside className="commander-sidebar">
-          <div className="card commander-panel">
+      <section className="commander-grid gap-6">
+        <aside className="commander-sidebar flex flex-col gap-4">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.currentModel}</p>
@@ -706,7 +706,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.executionStrategy}</p>
@@ -734,7 +734,7 @@ export function AgentCommanderPage() {
             </p>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.tokenGuard}</p>
@@ -778,7 +778,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.governance}</p>
@@ -820,7 +820,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <p className="eyebrow">{copy.agentIdentity}</p>
             <div className="stack tight">
               <MiniMeta label={copy.responsibility} value={agent.responsibility} />
@@ -830,7 +830,7 @@ export function AgentCommanderPage() {
           </div>
         </aside>
 
-        <div className="commander-main">
+        <div className="commander-main flex flex-col gap-4">
           <div className="card commander-panel commander-composer">
             <div className="section-header">
               <div>
@@ -840,7 +840,7 @@ export function AgentCommanderPage() {
               <span className="muted-text">{copy.commandHint}</span>
             </div>
 
-            <div className="commander-decision-bar">
+            <div className="commander-decision-bar bg-[#1C2128]/60 rounded-xl p-4 border border-white/[0.06]">
               <div className="commander-decision-metric">
                 <span>{copy.executionStrategy}</span>
                 <strong>{agent.commander.executionMode === "autonomous" ? copy.autonomous : copy.confirmFirst}</strong>
@@ -856,7 +856,7 @@ export function AgentCommanderPage() {
             </div>
 
             <textarea
-              className="composer-textarea commander-textarea"
+              className="composer-textarea commander-textarea rounded-2xl bg-[#1C2128]/60 border border-white/[0.08] focus:border-emerald-500/40"
               value={instruction}
               onChange={(event) => setInstruction(event.target.value)}
               placeholder={copy.placeholder}
@@ -918,11 +918,11 @@ export function AgentCommanderPage() {
                   {preview.options.map((option) => (
                     <button
                       key={option.id}
-                      className={
+                      className={`rounded-xl bg-[#1C2128]/60 border border-white/[0.06] hover:border-emerald-500/30 transition-all duration-200 ${
                         option.id === preview.recommendedAction
                           ? "commander-option-card is-recommended"
                           : `commander-option-card commander-option-${option.tone}`
-                      }
+                      }`}
                       onClick={() => void handlePreviewOption(option.id)}
                       disabled={sending}
                       type="button"
@@ -957,7 +957,7 @@ export function AgentCommanderPage() {
           ) : null}
 
           {latestReply ? (
-            <div className="card commander-panel">
+            <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
               <div className="section-header">
                 <div>
                   <p className="eyebrow">{copy.latestReply}</p>
@@ -976,7 +976,7 @@ export function AgentCommanderPage() {
             </div>
           ) : null}
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.currentTasks}</p>
@@ -998,8 +998,8 @@ export function AgentCommanderPage() {
           </div>
         </div>
 
-        <aside className="commander-rail">
-          <div className="card commander-panel">
+        <aside className="commander-rail flex flex-col gap-4">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.coordinationTitle}</p>
@@ -1021,7 +1021,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <p className="eyebrow">{copy.memoryTitle}</p>
             <div className="form-grid">
               <label className="form-field">
@@ -1077,7 +1077,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <p className="eyebrow">{copy.usageTitle}</p>
             <div className="openclaw-session-list">
               {agent.usageLogs.map((entry) => (
@@ -1093,7 +1093,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <p className="eyebrow">{copy.recentSessions}</p>
             <div className="openclaw-session-list">
               {agent.sessions.map((session) => (
@@ -1109,7 +1109,7 @@ export function AgentCommanderPage() {
             </div>
           </div>
 
-          <div className="card commander-panel">
+          <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <p className="eyebrow">{copy.recentMessages}</p>
             <div className="openclaw-session-list">
               {agent.recentMessages.map((message) => (
@@ -1127,7 +1127,7 @@ export function AgentCommanderPage() {
         </aside>
       </section>
 
-      <section className="commander-editors">
+      <section className="commander-editors mt-6">
         <div className="editor-tabs">
           <button
             className={editorMode === "soul" ? "button button-primary" : "button button-ghost"}
@@ -1143,7 +1143,7 @@ export function AgentCommanderPage() {
           </button>
         </div>
 
-        <div className="card commander-panel">
+        <div className="card commander-panel rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
           <div className="section-header">
             <div>
               <p className="eyebrow">{copy.documentPath}</p>
@@ -1153,7 +1153,7 @@ export function AgentCommanderPage() {
           </div>
 
           <textarea
-            className="composer-textarea openclaw-editor"
+            className="composer-textarea openclaw-editor rounded-2xl bg-[#1C2128]/60 border border-white/[0.08] focus:border-emerald-500/40 min-h-[320px]"
             value={editorContent}
             onChange={(event) => setEditorContent(event.target.value)}
           />

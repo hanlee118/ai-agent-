@@ -5,9 +5,9 @@ CREATE TABLE IF NOT EXISTS "AgentProfile" (
     "description" TEXT NOT NULL,
     "status" TEXT NOT NULL,
     "workload" INTEGER NOT NULL,
-    "styles" JSONB NOT NULL,
-    "skills" JSONB NOT NULL,
-    "recentHighlights" JSONB NOT NULL,
+    "styles" TEXT NOT NULL,
+    "skills" TEXT NOT NULL,
+    "recentHighlights" TEXT NOT NULL,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL
 );
@@ -16,17 +16,17 @@ CREATE TABLE IF NOT EXISTS "Project" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "name" TEXT NOT NULL,
     "description" TEXT NOT NULL,
-    "parsedKeywords" JSONB NOT NULL,
-    "parsedConstraints" JSONB NOT NULL,
-    "parsedRisks" JSONB NOT NULL,
-    "parsedSuggestedTeam" JSONB NOT NULL,
+    "parsedKeywords" TEXT NOT NULL,
+    "parsedConstraints" TEXT NOT NULL,
+    "parsedRisks" TEXT NOT NULL,
+    "parsedSuggestedTeam" TEXT NOT NULL,
     "parsedSummary" TEXT NOT NULL,
     "status" TEXT NOT NULL,
     "currentStage" TEXT NOT NULL,
     "progress" INTEGER NOT NULL,
     "pendingApproval" BOOLEAN NOT NULL DEFAULT false,
     "currentRole" TEXT NOT NULL,
-    "team" JSONB NOT NULL,
+    "team" TEXT NOT NULL,
     "summary" TEXT NOT NULL,
     "liveTitle" TEXT NOT NULL,
     "liveBody" TEXT NOT NULL,
@@ -205,10 +205,10 @@ CREATE TABLE IF NOT EXISTS "ManagedAgentConfig" (
     "memoryEnabled" BOOLEAN NOT NULL DEFAULT true,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" DATETIME NOT NULL,
-    "allowedAgentIds" JSONB,
+    "allowedAgentIds" TEXT,
     "intro" TEXT,
     "responsibility" TEXT,
-    "toolAllowlist" JSONB
+    "toolAllowlist" TEXT
 );
 
 CREATE TABLE IF NOT EXISTS "AgentMemoryEntry" (
@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS "AgentMemoryEntry" (
     "summary" TEXT NOT NULL,
     "content" TEXT NOT NULL,
     "importance" INTEGER NOT NULL DEFAULT 50,
-    "tags" JSONB NOT NULL,
+    "tags" TEXT NOT NULL,
     "source" TEXT,
     "lastAccessedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

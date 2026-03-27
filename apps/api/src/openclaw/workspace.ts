@@ -57,6 +57,37 @@ import {
   OPENCLAW_WORKSPACE_ROOT
 } from "./paths.js";
 
+function resolveOpenClawBin(): string {
+  const envPath = String(process.env.OPENCLAW_BIN ?? "").trim();
+  if (envPath) {
+    if (!path.isAbsolute(envPath)) {
+      throw new Error("OPENCLAW_BIN must be an absolute path");
+    }
+    if (!existsSync(envPath)) {
+      throw new Error(`OPENCLAW_BIN not found: ${envPath}`);
+    }
+    return envPath;
+  }
+
+  const candidates = [
+    path.resolve(OPENCLAW_ROOT, "node_modules/.bin/openclaw"),
+    path.resolve(process.cwd(), "node_modules/.bin/openclaw"),
+    "/opt/homebrew/bin/openclaw",
+    "/usr/local/bin/openclaw",
+    "/usr/bin/openclaw"
+  ];
+
+  for (const candidate of candidates) {
+    if (path.isAbsolute(candidate) && existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "openclaw";
+}
+
+const OPENCLAW_BIN = resolveOpenClawBin();
+
 type TeamMember = {
   name: string;
   title: string;
@@ -680,7 +711,7 @@ export async function getOpenClawStatusSummary(forceRefresh = false): Promise<Op
   let stderr = "";
 
   try {
-    const result = await execFileAsync("openclaw", ["status", "--all", "--json"], {
+    const result = await execFileAsync(OPENCLAW_BIN, ["status", "--all", "--json"], {
       timeout: 60 * 1000,
       maxBuffer: 1024 * 1024 * 8
     });
@@ -755,7 +786,7 @@ export async function sendOpenClawAgentMessage(
   let stderr = "";
 
   try {
-    const result = await execFileAsync("openclaw", [
+    const result = await execFileAsync(OPENCLAW_BIN, [
       "agent",
       "--agent",
       agentId,

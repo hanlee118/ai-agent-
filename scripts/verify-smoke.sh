@@ -17,7 +17,7 @@ import { hashSessionToken } from "./apps/api/dist/security/secret-store.js";
 const sessionToken = String(process.env.SESSION_TOKEN ?? "").trim();
 if (sessionToken) {
   await prisma.authSession.deleteMany({
-    where: { tokenHash: hashSessionToken(sessionToken) }
+    where: { tokenHash: await hashSessionToken(sessionToken) }
   });
 }
 
@@ -78,7 +78,7 @@ import { generateSessionToken, hashSessionToken } from "./apps/api/dist/security
 const sessionToken = generateSessionToken();
 await prisma.authSession.create({
   data: {
-    tokenHash: hashSessionToken(sessionToken),
+    tokenHash: await hashSessionToken(sessionToken),
     expiresAt: new Date(Date.now() + 10 * 60 * 1000)
   }
 });

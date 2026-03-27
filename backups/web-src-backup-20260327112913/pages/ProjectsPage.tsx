@@ -266,7 +266,7 @@ export function ProjectsPage() {
 
   return (
     <div className="page">
-      <header className="page-header studio-page-header">
+      <header className="page-header studio-page-header bg-[#16191E]/70 backdrop-blur-xl rounded-2xl p-6 border border-white/[0.06]">
         <div>
           <p className="eyebrow">Project Portfolio</p>
           <h2>{copy.title}</h2>
@@ -297,7 +297,7 @@ export function ProjectsPage() {
 
       <section className="portfolio-command-grid">
         <div className="portfolio-command-main">
-          <article className="card studio-command-card studio-catalog-toolbar-card">
+          <article className="card studio-command-card studio-catalog-toolbar-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.overviewTitle}</p>
@@ -343,7 +343,7 @@ export function ProjectsPage() {
         </div>
 
         <aside className="portfolio-command-rail">
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.alertsTitle}</p>
@@ -361,7 +361,7 @@ export function ProjectsPage() {
             </div>
           </article>
 
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.sourceMix}</p>
@@ -378,7 +378,7 @@ export function ProjectsPage() {
             </div>
           </article>
 
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.statusMix}</p>
@@ -399,7 +399,7 @@ export function ProjectsPage() {
             </div>
           </article>
 
-          <article className="card studio-side-card">
+          <article className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.recentFocus}</p>
@@ -441,7 +441,7 @@ function PortfolioProjectCard({
   const statusTone = projectStatusTone(row.status);
 
   return (
-    <article className={`studio-catalog-card ${statusTone === "paused" ? "studio-catalog-card-warning" : statusTone === "completed" ? "studio-catalog-card-success" : ""}`}>
+    <article className={`studio-catalog-card rounded-2xl bg-[#1C2128]/70 backdrop-blur-md border border-white/[0.06] hover:border-emerald-500/30 hover:shadow-lg hover:shadow-black/20 transition-all duration-200 ${statusTone === "paused" ? "border-amber-500/30 studio-catalog-card-warning" : statusTone === "completed" ? "border-emerald-500/30 studio-catalog-card-success" : ""}`}>
       <div className={`studio-catalog-accent studio-catalog-accent-${statusTone}`} />
       <div className="studio-catalog-card-body">
         <div className="studio-catalog-card-head">
@@ -496,7 +496,7 @@ function PortfolioProjectCard({
 
 function MetricInline({ label, value }: { label: string; value: string }) {
   return (
-    <div className="metric-inline-card">
+    <div className="metric-inline-card bg-[#1C2128]/60 backdrop-blur-md rounded-2xl border border-white/[0.06] p-4">
       <span>{label}</span>
       <strong>{value}</strong>
     </div>

@@ -382,7 +382,7 @@ export function DashboardPage() {
 
   return (
     <div className="page dashboard-studio-page">
-      <header className="page-header studio-page-header">
+      <header className="page-header studio-page-header bg-[#16191E]/60 backdrop-blur-md rounded-2xl p-6 border border-white/[0.06]">
         <div>
           <p className="eyebrow">Observation-first AI workspace</p>
           <h2>{copy.title}</h2>
@@ -419,7 +419,7 @@ export function DashboardPage() {
 
       <section className="dashboard-studio-layout">
         <div className="dashboard-studio-main">
-          <section className="card studio-command-card dashboard-hero-card">
+          <section className="card studio-command-card dashboard-hero-card rounded-2xl bg-[#16191E]/80 backdrop-blur-md border border-white/[0.08]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.newProject}</p>
@@ -532,7 +532,7 @@ export function DashboardPage() {
             </div>
           </section>
 
-          <section className="card studio-command-card">
+          <section className="card studio-command-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Active Projects</p>
@@ -551,7 +551,7 @@ export function DashboardPage() {
             </div>
           </section>
 
-          <section className="card studio-command-card">
+          <section className="card studio-command-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">{copy.orchestrationTitle}</p>
@@ -601,7 +601,7 @@ export function DashboardPage() {
             </div>
           </section>
 
-          <section className="card ops-card studio-command-card">
+          <section className="card ops-card studio-command-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Operations Desk</p>
@@ -638,7 +638,7 @@ export function DashboardPage() {
         </div>
 
         <aside className="dashboard-studio-rail">
-          <div className="card studio-side-card">
+          <div className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Recent Activity</p>
@@ -655,7 +655,7 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="card studio-side-card">
+          <div className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Modules</p>
@@ -678,7 +678,7 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="card studio-side-card">
+          <div className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Local Agent Pulse</p>
@@ -704,7 +704,7 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="card studio-side-card">
+          <div className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Approval Queue</p>
@@ -721,7 +721,7 @@ export function DashboardPage() {
             </div>
           </div>
 
-          <div className="card studio-side-card">
+          <div className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">System Health</p>
@@ -759,7 +759,7 @@ export function DashboardPage() {
           </div>
 
           {spotlightProject ? (
-            <div className="card spotlight-card studio-side-card">
+            <div className="card spotlight-card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-emerald-500/20">
               <div className="section-header">
                 <div>
                   <p className="eyebrow">Spotlight</p>
@@ -772,7 +772,7 @@ export function DashboardPage() {
             </div>
           ) : null}
 
-          <div className="card studio-side-card">
+          <div className="card studio-side-card rounded-2xl bg-[#16191E]/70 backdrop-blur-xl border border-white/[0.06]">
             <div className="section-header">
               <div>
                 <p className="eyebrow">Archive</p>
@@ -830,7 +830,7 @@ function MetricCard({
   tone?: "default" | "warning";
 }) {
   return (
-    <div className={`metric-card metric-${tone}`}>
+    <div className={`metric-card metric-${tone} bg-[#1C2128]/60 backdrop-blur-md rounded-2xl border border-white/[0.06] hover:border-emerald-500/30 transition-all duration-200`}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
