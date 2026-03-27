@@ -1096,6 +1096,51 @@ app.get("/api/openclaw/sla", asyncRoute(async (_req, res) => {
   res.json(await listOpenClawAgentSla());
 }));
 
+type OpenClawRealtimeSnapshot = {
+  timestamp: string;
+  totalAgents: number;
+  activeAgents: number;
+  attentionAgents: number;
+  offlineAgents: number;
+  totalProjects: number;
+  blockedProjects: number;
+  completedProjects: number;
+  totalTasks: number;
+  blockedTasks: number;
+  inProgressTasks: number;
+  averageProjectProgress: number;
+};
+
+function buildOpenClawRealtimeSnapshot(
+  agentList: Awaited<ReturnType<typeof listOpenClawAgents>>,
+  projectList: Awaited<ReturnType<typeof listOpenClawProjects>>
+): OpenClawRealtimeSnapshot {
+  const totalTasks = projectList.reduce((sum, project) => sum + (project.taskCount || 0), 0);
+  const blockedTasks = projectList.reduce((sum, project) => sum + (project.blockedTaskCount || 0), 0);
+  const inProgressTasks = projectList.reduce(
+    (sum, project) => sum + project.tasks.filter((task) => task.status === "in_progress").length,
+    0
+  );
+  const averageProjectProgress = projectList.length > 0
+    ? Math.round(projectList.reduce((sum, project) => sum + (project.progress || 0), 0) / projectList.length)
+    : 0;
+
+  return {
+    timestamp: new Date().toISOString(),
+    totalAgents: agentList.length,
+    activeAgents: agentList.filter((agent) => agent.status === "active").length,
+    attentionAgents: agentList.filter((agent) => agent.status === "attention").length,
+    offlineAgents: agentList.filter((agent) => agent.status === "offline").length,
+    totalProjects: projectList.length,
+    blockedProjects: projectList.filter((project) => project.status === "blocked").length,
+    completedProjects: projectList.filter((project) => project.status === "completed").length,
+    totalTasks,
+    blockedTasks,
+    inProgressTasks,
+    averageProjectProgress
+  };
+}
+
 // SSE 实时事件端点
 app.get("/api/openclaw/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -1104,24 +1149,117 @@ app.get("/api/openclaw/events", (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
 
-  // 发送连接成功
-  res.write('event: connected\ndata: {"status":"ok"}\n\n');
+  let closed = false;
+  let previousSnapshot: OpenClawRealtimeSnapshot | null = null;
+  let previousAgentState = new Map<string, string>();
+  let previousProjectState = new Map<string, string>();
+
+  const emit = (event: string, payload: unknown) => {
+    if (closed) {
+      return;
+    }
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  const emitRealtimeEvents = async () => {
+    try {
+      const [agentList, projectList] = await Promise.all([
+        listOpenClawAgents(),
+        listOpenClawProjects()
+      ]);
+
+      const snapshot = buildOpenClawRealtimeSnapshot(agentList, projectList);
+      emit("snapshot", snapshot);
+
+      const changedAgents = agentList
+        .map((agent) => ({
+          agentId: agent.agentId,
+          name: agent.name,
+          status: agent.status,
+          blockedTaskCount: agent.blockedTaskCount,
+          taskCount: agent.taskCount
+        }))
+        .filter((agent) => previousAgentState.has(agent.agentId) && previousAgentState.get(agent.agentId) !== agent.status);
+
+      if (changedAgents.length > 0) {
+        emit("agent_status", {
+          timestamp: snapshot.timestamp,
+          changedAgents
+        });
+      }
+
+      const changedProjects = projectList
+        .map((project) => ({
+          projectId: project.id,
+          name: project.name,
+          status: project.status,
+          progress: project.progress,
+          blockedTaskCount: project.blockedTaskCount
+        }))
+        .filter((project) => {
+          const previous = previousProjectState.get(project.projectId);
+          const current = `${project.status}:${project.progress}:${project.blockedTaskCount}`;
+          return Boolean(previous) && previous !== current;
+        });
+
+      if (changedProjects.length > 0) {
+        emit("project_progress", {
+          timestamp: snapshot.timestamp,
+          changedProjects
+        });
+      }
+
+      if (
+        previousSnapshot
+        && (
+          previousSnapshot.blockedTasks !== snapshot.blockedTasks
+          || previousSnapshot.inProgressTasks !== snapshot.inProgressTasks
+          || previousSnapshot.totalTasks !== snapshot.totalTasks
+        )
+      ) {
+        emit("task_update", {
+          timestamp: snapshot.timestamp,
+          totalTasks: snapshot.totalTasks,
+          blockedTasks: snapshot.blockedTasks,
+          inProgressTasks: snapshot.inProgressTasks
+        });
+      }
+
+      previousSnapshot = snapshot;
+      previousAgentState = new Map(agentList.map((agent) => [agent.agentId, agent.status]));
+      previousProjectState = new Map(
+        projectList.map((project) => [
+          project.id,
+          `${project.status}:${project.progress}:${project.blockedTaskCount}`
+        ])
+      );
+    } catch (error) {
+      emit("system", {
+        timestamp: new Date().toISOString(),
+        status: "degraded",
+        message: error instanceof Error ? error.message : "failed to load realtime openclaw state"
+      });
+    }
+  };
+
+  emit("connected", { status: "ok" });
+  void emitRealtimeEvents();
 
   // 每 30 秒心跳
   const heartbeat = setInterval(() => {
-    res.write(`event: heartbeat\ndata: {"time":"${new Date().toISOString()}"}\n\n`);
+    emit("heartbeat", { time: new Date().toISOString() });
   }, 30000);
 
-  // 每 5 秒发送模拟事件（开发用）
-  const events = setInterval(() => {
-    const eventTypes = ["agent_status", "task_update", "project_progress"];
-    const eventType = eventTypes[Math.floor(Math.random() * eventTypes.length)];
-    res.write(`event: ${eventType}\ndata: {}\n\n`);
+  // 每 5 秒轮询并基于真实数据推送事件
+  const poller = setInterval(() => {
+    void emitRealtimeEvents();
   }, 5000);
 
   req.on("close", () => {
+    closed = true;
     clearInterval(heartbeat);
-    clearInterval(events);
+    clearInterval(poller);
     res.end();
   });
 });

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, Project, Session, Task } from '../types';
 import {
   fetchAgentMemory,
@@ -9,6 +9,7 @@ import {
   type OpenClawWorkspaceOverview,
 } from './adapters';
 import { agentsApi } from './api';
+import { useSSE } from '../hooks/useSSE';
 
 export interface RealDataState {
   agents: Agent[];
@@ -33,6 +34,7 @@ export function useRealData(): RealDataState {
   const [runtime, setRuntime] = useState<OpenClawRuntimeInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchManagedAgents = useCallback(async (): Promise<Agent[]> => {
     try {
@@ -90,68 +92,59 @@ export function useRealData(): RealDataState {
     void refresh();
   }, [refresh]);
 
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) {
       return;
     }
-
-    const eventSource = new EventSource('/api/openclaw/events', { withCredentials: true });
-    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const scheduleRefresh = () => {
-      if (refreshTimer) {
-        return;
-      }
-      refreshTimer = setTimeout(() => {
-        refreshTimer = null;
-        void refresh();
-      }, 250);
-    };
-
-    const onOpen = () => {
-      setError(null);
-    };
-
-    const onStreamEvent = () => {
-      scheduleRefresh();
-    };
-
-    const onError = () => {
-      // Keep the stream alive when possible; browser will auto-reconnect.
-      setError((prev) => prev ?? 'SSE connection interrupted, retrying...');
-    };
-
-    eventSource.addEventListener('open', onOpen);
-    eventSource.addEventListener('message', onStreamEvent);
-    eventSource.addEventListener('connected', onStreamEvent);
-    eventSource.addEventListener('heartbeat', onStreamEvent);
-    eventSource.addEventListener('snapshot', onStreamEvent);
-    eventSource.addEventListener('task_update', onStreamEvent);
-    eventSource.addEventListener('agent_status', onStreamEvent);
-    eventSource.addEventListener('project_progress', onStreamEvent);
-    // Backward compatibility with older event naming.
-    eventSource.addEventListener('agent.status', onStreamEvent);
-    eventSource.addEventListener('project.progress', onStreamEvent);
-    eventSource.addEventListener('error', onError);
-
-    return () => {
-      eventSource.removeEventListener('open', onOpen);
-      eventSource.removeEventListener('message', onStreamEvent);
-      eventSource.removeEventListener('connected', onStreamEvent);
-      eventSource.removeEventListener('heartbeat', onStreamEvent);
-      eventSource.removeEventListener('snapshot', onStreamEvent);
-      eventSource.removeEventListener('task_update', onStreamEvent);
-      eventSource.removeEventListener('agent_status', onStreamEvent);
-      eventSource.removeEventListener('project_progress', onStreamEvent);
-      eventSource.removeEventListener('agent.status', onStreamEvent);
-      eventSource.removeEventListener('project.progress', onStreamEvent);
-      eventSource.removeEventListener('error', onError);
-      if (refreshTimer) {
-        clearTimeout(refreshTimer);
-      }
-      eventSource.close();
-    };
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, 250);
   }, [refresh]);
+
+  const sseEvents = useMemo(
+    () => [
+      'connected',
+      'heartbeat',
+      'snapshot',
+      'task_update',
+      'agent_status',
+      'project_progress',
+      'agent.status',
+      'project.progress',
+    ],
+    [],
+  );
+
+  const handleSseOpen = useCallback(() => {
+    setError(null);
+  }, []);
+
+  const handleSseEvent = useCallback(() => {
+    scheduleRefresh();
+  }, [scheduleRefresh]);
+
+  const handleSseError = useCallback(() => {
+    setError((prev) => prev ?? 'SSE connection interrupted, retrying...');
+  }, []);
+
+  useSSE('/api/openclaw/events', {
+    withCredentials: true,
+    maxRetries: 5,
+    retryIntervalMs: 3000,
+    events: sseEvents,
+    onOpen: handleSseOpen,
+    onEvent: handleSseEvent,
+    onError: handleSseError,
+  });
+
+  useEffect(() => {
+    return () => {
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+      }
+    };
+  }, []);
 
   return {
     agents,
