@@ -21,6 +21,7 @@ export const roleOrder: RoleType[] = [
   "ROLE_PM",
   "ROLE_ANALYST",
   "ROLE_PRODUCT",
+  "ROLE_DESIGN",
   "ROLE_ARCH",
   "ROLE_DEV",
   "ROLE_QA",
@@ -30,7 +31,7 @@ export const roleOrder: RoleType[] = [
 export const stageAssignees: Record<StageType, RoleType> = {
   INIT: "ROLE_PM",
   ANALYSIS: "ROLE_ANALYST",
-  DESIGN: "ROLE_PRODUCT",
+  DESIGN: "ROLE_DESIGN",
   DEV: "ROLE_DEV",
   ACCEPT: "ROLE_QA"
 };
@@ -79,6 +80,17 @@ export const seedAgents: AgentProfile[] = [
     styles: ["用户导向", "审美敏感", "创新"],
     skills: { professional: 91, collaboration: 88, learning: 86, stability: 87, innovation: 93 },
     recentHighlights: ["补齐 2 个关键流程", "输出可执行页面结构"]
+  },
+  {
+    roleId: "ROLE_DESIGN",
+    name: "视觉设计总监",
+    tagline: "把抽象需求落成高辨识度体验",
+    description: "负责视觉方向、品牌语气、组件规范和可访问性设计审查。",
+    status: "working",
+    workload: 64,
+    styles: ["前卫", "一致性", "注重细节"],
+    skills: { professional: 94, collaboration: 86, learning: 88, stability: 85, innovation: 96 },
+    recentHighlights: ["完成官网视觉升级", "沉淀设计审查卡模板"]
   },
   {
     roleId: "ROLE_ARCH",
@@ -136,10 +148,10 @@ export function createSeedProjects(provider: RuntimeMode): ProjectDetail[] {
         currentStage: "DESIGN",
         progress: 46,
         pendingApproval: false,
-        currentRole: "ROLE_PRODUCT",
+        currentRole: "ROLE_DESIGN",
         updatedAt: "2026-03-25T10:18:00+08:00",
         parsedIntent: previewRequirement("设计并研发一个可观测、可审批、可干预的 AI 协作工作台。"),
-        summary: "产品总监正在完善观测室与仪表盘交互，预计本轮输出页面结构和组件清单。"
+        summary: "视觉设计总监正在完善官网视觉方向、组件规范与可访问性清单。"
       },
       provider
     ),
@@ -280,46 +292,123 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
       createdBy: "ROLE_ANALYST",
       updatedAt: baseDate.toISOString()
     });
+    all.push({
+      id: randomUUID(),
+      name: "项目排期方案.md",
+      type: "markdown",
+      content: "# 项目排期\n\n已形成里程碑、依赖、负责人和风险缓冲策略。",
+      version: 1,
+      status: currentStage === "ANALYSIS" ? "submitted" : "approved",
+      stageType: "ANALYSIS",
+      createdBy: "ROLE_PM",
+      updatedAt: baseDate.toISOString()
+    });
   }
 
-  if (["DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
+  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
     all.push({
       id: randomUUID(),
       name: "产品方案草案.md",
       type: "markdown",
       content: "# 产品方案\n\n当前聚焦仪表盘、观测室和审批交互。",
       version: 1,
-      status: currentStage === "DESIGN" ? "submitted" : "approved",
+      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
       stageType: "DESIGN",
-      createdBy: "ROLE_PRODUCT",
+      createdBy: "ROLE_DESIGN",
+      updatedAt: baseDate.toISOString()
+    });
+    all.push({
+      id: randomUUID(),
+      name: "客户汇报方案.ppt.md",
+      type: "markdown",
+      content: "# 客户汇报方案（PPT）\n\n包含背景、目标、范围、里程碑与阶段成果。",
+      version: 1,
+      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
+      stageType: "DESIGN",
+      createdBy: "ROLE_DESIGN",
+      updatedAt: baseDate.toISOString()
+    });
+    all.push({
+      id: randomUUID(),
+      name: "实施方案说明.word.md",
+      type: "markdown",
+      content: "# 实施方案（Word）\n\n结构化描述需求、约束、验收标准与执行计划。",
+      version: 1,
+      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
+      stageType: "DESIGN",
+      createdBy: "ROLE_DESIGN",
+      updatedAt: baseDate.toISOString()
+    });
+    all.push({
+      id: randomUUID(),
+      name: "设计审查卡.md",
+      type: "markdown",
+      content:
+        "# 设计审查卡\n\n- 视觉方向: 科技感 + 高可信度\n- 品牌语气: 专业、直接、可执行\n- UX 原则: 强主线、少打断、强反馈\n- 可访问性: 对比度>=4.5、键盘可达、语义结构完整\n- 审查结论: 通过",
+      version: 1,
+      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
+      stageType: "DESIGN",
+      createdBy: "ROLE_DESIGN",
       updatedAt: baseDate.toISOString()
     });
   }
 
-  if (["DEV", "ACCEPT"].includes(currentStage)) {
+  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
     all.push({
       id: randomUUID(),
       name: "研发任务拆解.md",
       type: "markdown",
       content: "# 开发任务\n\n前端、后端、共享模型拆分完成。",
       version: 1,
-      status: currentStage === "DEV" ? "submitted" : "approved",
+      status:
+        currentStage === "ANALYSIS" || currentStage === "DESIGN"
+          ? "draft"
+          : currentStage === "DEV"
+            ? "submitted"
+            : "approved",
+      stageType: "DEV",
+      createdBy: "ROLE_DEV",
+      updatedAt: baseDate.toISOString()
+    });
+    all.push({
+      id: randomUUID(),
+      name: "Demo原型说明.md",
+      type: "markdown",
+      content: "# Demo 原型\n\n核心路径可演示，支持评审与客户沟通。",
+      version: 1,
+      status:
+        currentStage === "ANALYSIS" || currentStage === "DESIGN"
+          ? "draft"
+          : currentStage === "DEV"
+            ? "submitted"
+            : "approved",
       stageType: "DEV",
       createdBy: "ROLE_DEV",
       updatedAt: baseDate.toISOString()
     });
   }
 
-  if (currentStage === "ACCEPT") {
+  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
     all.push({
       id: randomUUID(),
       name: "测试报告.md",
       type: "markdown",
       content: "# 测试报告\n\n主流程已走通，建议进入归档。",
       version: 1,
-      status: "approved",
+      status: currentStage === "ACCEPT" ? "approved" : "draft",
       stageType: "ACCEPT",
       createdBy: "ROLE_QA",
+      updatedAt: baseDate.toISOString()
+    });
+    all.push({
+      id: randomUUID(),
+      name: "产品说明文档回填.md",
+      type: "markdown",
+      content: "# 回填记录\n\n已校验实施结果与需求目标一致，并完成产品说明文档回填。",
+      version: 1,
+      status: currentStage === "ACCEPT" ? "approved" : "draft",
+      stageType: "ACCEPT",
+      createdBy: "ROLE_ASSISTANT",
       updatedAt: baseDate.toISOString()
     });
   }
@@ -339,18 +428,24 @@ export function buildTasks(
     ],
     ANALYSIS: [
       { title: "提炼目标与边界", description: "从原始需求中抽出目标、约束与风险。" },
+      { title: "输出项目排期", description: "形成里程碑、依赖关系和负责人计划。" },
       { title: "形成审批版分析稿", description: "整理出适合快速审批的分析交付物。" }
     ],
     DESIGN: [
       { title: "定义页面与结构", description: "固定核心页面、布局与交互顺序。" },
+      { title: "完成设计审查卡", description: "确认视觉方向、品牌语气、可访问性与审查结论。" },
+      { title: "输出客户汇报PPT", description: "整理客户沟通所需的背景、目标、范围与成果。" },
+      { title: "输出实施方案Word", description: "沉淀结构化方案、约束与验收标准。" },
       { title: "输出组件与接口草案", description: "为开发阶段准备结构化输入。" }
     ],
     DEV: [
       { title: "打通主链路", description: "完成创建、审批、返工、观测四条主链路。" },
+      { title: "实现 Demo 原型", description: "完成可演示的核心用户路径原型。" },
       { title: "补全仓储与接口", description: "让任务、交付物和时间轴全部落库。" }
     ],
     ACCEPT: [
       { title: "执行验收检查", description: "验证关键 API 和页面交互是否可用。" },
+      { title: "回填产品说明文档", description: "核对实施结果与需求目标并完成文档回填。" },
       { title: "整理复盘结论", description: "输出风险、改进项和复用建议。" }
     ]
   };
@@ -444,7 +539,7 @@ export function buildStageLiveSession(input: {
   const script: Record<StageType, string> = {
     INIT: `## 项目立项\n\n- 整理需求原文\n- 生成项目编号\n- 初始化阶段与团队配置\n- 准备进入分析阶段`,
     ANALYSIS: `## 需求分析\n\n- 提炼项目目标与核心用户场景\n- 识别隐含约束与时间风险\n- 收敛 MVP 边界，避免范围失控\n- 输出需求分析文档等待审批\n\n### 当前项目\n${input.projectName}`,
-    DESIGN: `## 产品设计\n\n- 绘制仪表盘与观测室信息结构\n- 定义审批卡与紧急介入的交互\n- 梳理关键组件和前后端契约\n- 为开发阶段准备页面与接口清单\n\n### 当前聚焦\n${input.summary}`,
+    DESIGN: `## 视觉与交互设计\n\n- 绘制仪表盘与观测室信息结构\n- 明确品牌语气、视觉层级与动效规则\n- 输出设计审查卡（含可访问性清单）\n- 为开发阶段准备组件清单与接口契约\n\n### 当前聚焦\n${input.summary}`,
     DEV: `## 开发阶段\n\n- 建立前后端目录与共享类型\n- 接入数据库和持久化仓储\n- 接入 Agent 运行抽象与实时流\n- 完成主要页面与操作链路`,
     ACCEPT: `## 验收阶段\n\n- 校验创建、审批、干预、恢复主路径\n- 检查时间轴与交付物展示\n- 汇总结论并准备归档复盘`
   };

@@ -13,7 +13,7 @@ export async function runOpenAICompatibleAgent(
   context: AgentRunContext
 ): Promise<AgentRunResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
+  const timeout = setTimeout(() => controller.abort(), 20000);
 
   try {
     const response = await fetch(`${config.apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
@@ -29,12 +29,7 @@ export async function runOpenAICompatibleAgent(
         messages: [
           {
             role: "system",
-            content: [
-              "你是 AI 协作工作台里的专业 Agent。",
-              "你必须输出清晰、结构化、可执行的中文内容。",
-              "不要自我介绍，不要写多余寒暄。",
-              "请严格使用 Markdown。"
-            ].join("\n")
+            content: buildSystemPrompt(context)
           },
           {
             role: "user",
@@ -48,13 +43,7 @@ export async function runOpenAICompatibleAgent(
               `风险：${context.parsedIntent.risks.join("；") || "无"}`,
               `补充摘要：${context.summary ?? "无"}`,
               "",
-              "请输出以下结构：",
-              `## ${STAGE_LABELS[context.stageType]}阶段执行纪要`,
-              "- 4 到 6 条执行要点",
-              "### 项目摘要",
-              "- 一段简短总结",
-              "### 下一步",
-              "- 2 到 3 条具体动作"
+              ...buildOutputGuidance(context)
             ].join("\n")
           }
         ]
@@ -96,4 +85,50 @@ function deriveThinkingSummary(content: string) {
   }
 
   return `模型已完成当前阶段草拟：${line.replace(/^- /, "").slice(0, 60)}`;
+}
+
+function buildSystemPrompt(context: AgentRunContext) {
+  const base = [
+    "你是 AI 协作工作台里的专业 Agent。",
+    "你必须输出清晰、结构化、可执行的中文内容。",
+    "不要自我介绍，不要写多余寒暄。",
+    "请严格使用 Markdown。"
+  ];
+
+  if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
+    base.push("你是视觉设计总监，避免模板化页面，优先保证品牌辨识度、信息层级和可访问性。");
+    base.push("输出必须包含视觉方向、版式策略、组件规范、CTA策略和无障碍检查项。");
+  }
+
+  return base.join("\n");
+}
+
+function buildOutputGuidance(context: AgentRunContext) {
+  if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
+    return [
+      "请输出以下结构：",
+      "## 视觉策略",
+      "- 视觉主题、品牌语气、主色与字体策略",
+      "## 页面信息架构",
+      "- 首屏/能力/流程/案例/CTA 的层级说明",
+      "## 组件规范",
+      "- 关键组件、状态与交互反馈",
+      "## 设计审查卡",
+      "- UX 原则（3条）",
+      "- 可访问性检查清单（至少3条）",
+      "- 审查结论（通过/不通过）",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  return [
+    "请输出以下结构：",
+    `## ${STAGE_LABELS[context.stageType]}阶段执行纪要`,
+    "- 4 到 6 条执行要点",
+    "### 项目摘要",
+    "- 一段简短总结",
+    "### 下一步",
+    "- 2 到 3 条具体动作"
+  ];
 }

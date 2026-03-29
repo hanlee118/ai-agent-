@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 import { AlertCircle, Briefcase, CheckCircle2, ChevronRight, Database, FileText, Globe, RotateCcw } from 'lucide-react';
 import { agents, projects, sessions } from '../lib/runtimeCollections';
 import { Badge } from './impl/GovernanceShared';

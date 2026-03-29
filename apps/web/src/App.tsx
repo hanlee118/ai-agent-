@@ -34,6 +34,23 @@ const DeployAgentModal = lazy(() => import('./pages/modals/DeployAgentModal'));
 const NewProjectModal = lazy(() => import('./pages/modals/NewProjectModal'));
 const DecisionCenterModal = lazy(() => import('./pages/modals/DecisionCenterModal'));
 
+const APP_TABS = [
+  'dashboard',
+  'agent-commander',
+  'project-room',
+  'system-health',
+  'model-nexus',
+  'monitoring',
+  'projects',
+  'agents',
+  'workspace',
+  'audit',
+  'settings',
+] as const;
+
+const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
+  Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
+
 export default function App() {
   const [toasts, setToasts] = useState<any[]>([]);
   const toastCounterRef = useRef(0);
@@ -142,6 +159,8 @@ export default function App() {
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [urlSearch, setUrlSearch] = useState<string>(() => (typeof window !== 'undefined' ? window.location.search : ''));
+  const deepLinkRouteHandledRef = useRef<string | null>(null);
 
   // Modal States
   const [isNewModelOpen, setIsNewModelOpen] = useState(false);
@@ -154,6 +173,78 @@ export default function App() {
   const [managedModels, setManagedModels] = useState<Model[]>([]);
 
   const { agents, projects, tasks, sessions, workspace, runtime, refresh, sendAgentMessage } = useRealData();
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleLocationChange = () => {
+      setUrlSearch(window.location.search);
+    };
+
+    window.addEventListener('popstate', handleLocationChange);
+    window.addEventListener('hashchange', handleLocationChange);
+
+    return () => {
+      window.removeEventListener('popstate', handleLocationChange);
+      window.removeEventListener('hashchange', handleLocationChange);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isLoggedIn || !urlSearch) {
+      return;
+    }
+
+    const params = new URLSearchParams(urlSearch);
+    const appTabParam = params.get('app_tab');
+    const targetProjectId = params.get('signoff_project_id') || params.get('project_id');
+    const targetAgentId = params.get('agent_id');
+    const nextTab = isAppTab(appTabParam) ? appTabParam : null;
+
+    if (!nextTab && !targetProjectId && !targetAgentId) {
+      return;
+    }
+
+    const routeKey = `${urlSearch}|projects:${projects.length}|agents:${agents.length}`;
+    if (deepLinkRouteHandledRef.current === routeKey) {
+      return;
+    }
+
+    let applied = false;
+
+    if (nextTab) {
+      setActiveTab(nextTab);
+      applied = true;
+    }
+
+    if (targetProjectId) {
+      const projectMatched = projects.length === 0 || projects.some((project) => project.id === targetProjectId);
+      if (projectMatched) {
+        setSelectedProjectId(targetProjectId);
+        if (!nextTab || nextTab === 'project-room' || params.has('signoff_project_id')) {
+          setActiveTab('project-room');
+        }
+        applied = true;
+      }
+    }
+
+    if (targetAgentId) {
+      const agentMatched = agents.length === 0 || agents.some((agent) => agent.id === targetAgentId);
+      if (agentMatched) {
+        setSelectedAgentId(targetAgentId);
+        if (!nextTab || nextTab === 'agent-commander') {
+          setActiveTab('agent-commander');
+        }
+        applied = true;
+      }
+    }
+
+    if (applied) {
+      deepLinkRouteHandledRef.current = routeKey;
+    }
+  }, [agents, isLoggedIn, projects, urlSearch]);
 
   const loadManagedModels = useCallback(async () => {
     try {
@@ -176,7 +267,92 @@ export default function App() {
     () => buildRuntimeModels(runtime, agents, projects, tasks, sessions),
     [runtime, agents, projects, tasks, sessions],
   );
-  const activeModels = managedModels.length > 0 ? managedModels : runtimeModels;
+  const activeModels = useMemo(() => {
+    const baseModels = managedModels.length > 0 ? managedModels : runtimeModels;
+    const usageByKey = new Map<string, { dailyTokens: number; activeAgents: number }>();
+
+    const normalizeKey = (value: string) => value.trim().toLowerCase();
+    const addUsage = (key: string | undefined, tokens: number, activeAgent = false) => {
+      const normalized = String(key ?? '').trim();
+      if (!normalized) {
+        return;
+      }
+      const mapKey = normalizeKey(normalized);
+      const prev = usageByKey.get(mapKey) ?? { dailyTokens: 0, activeAgents: 0 };
+      usageByKey.set(mapKey, {
+        dailyTokens: prev.dailyTokens + Math.max(0, Number(tokens || 0)),
+        activeAgents: prev.activeAgents + (activeAgent ? 1 : 0),
+      });
+    };
+
+    agents.forEach((agent) => {
+      const isActive = agent.status === 'Executing' || agent.status === 'Thinking';
+      const runtimeModelKey = String(agent.model || '').trim();
+      const configuredModelKey = String(agent.currentModelId || '').trim();
+      // Prefer runtime model label to reflect real invoking model; fallback to configured model id.
+      addUsage(runtimeModelKey || configuredModelKey, agent.tokensUsed || 0, isActive);
+    });
+
+    const matchesModelKey = (model: Model, usageKey: string) => {
+      const modelId = normalizeKey(model.id);
+      const modelName = normalizeKey(model.name);
+      const key = normalizeKey(usageKey);
+      return key === modelId
+        || key === modelName
+        || key.includes(modelName)
+        || modelName.includes(key);
+    };
+
+    const consumedKeys = new Set<string>();
+    const hydrated = baseModels.map((model) => {
+      let dynamicDailyTokens = 0;
+      let activeAgents = 0;
+
+      for (const [usageKey, usage] of usageByKey.entries()) {
+        if (matchesModelKey(model, usageKey)) {
+          consumedKeys.add(usageKey);
+          dynamicDailyTokens += usage.dailyTokens;
+          activeAgents += usage.activeAgents;
+        }
+      }
+
+      return {
+        ...model,
+        dailyTokens: Math.max(model.dailyTokens || 0, dynamicDailyTokens),
+        totalTokens: Math.max(model.totalTokens || 0, dynamicDailyTokens),
+        status: activeAgents > 0 ? 'Healthy' : model.status,
+      } as Model;
+    });
+
+    const inferredModels: Model[] = [];
+    for (const [usageKey, usage] of usageByKey.entries()) {
+      if (consumedKeys.has(usageKey)) {
+        continue;
+      }
+      const id = `runtime-${usageKey.replace(/[^a-z0-9]+/gi, '-')}`;
+      const name = usageKey;
+      const provider = usageKey.includes('/') ? usageKey.split('/')[0] : 'Runtime';
+      inferredModels.push({
+        id,
+        name,
+        provider,
+        status: usage.activeAgents > 0 ? 'Healthy' : 'Degraded',
+        totalTokens: usage.dailyTokens,
+        dailyTokens: usage.dailyTokens,
+        currentTask: projects[0]?.name ? `推进项目: ${projects[0].name}` : '待分配任务',
+        latency: 'N/A',
+        throughput: 'N/A',
+        logs: [],
+      });
+    }
+
+    const combined = [...hydrated, ...inferredModels];
+    if (combined.length === 0) {
+      return runtimeModels;
+    }
+
+    return combined.sort((left, right) => (right.dailyTokens || 0) - (left.dailyTokens || 0));
+  }, [managedModels, runtimeModels, agents, projects]);
 
   const {
     notifications,
@@ -408,11 +584,11 @@ export default function App() {
               >
                 {activeTab === 'dashboard' && <DashboardPage onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
                 {activeTab === 'agent-commander' && <AgentCommanderPage agentId={selectedAgentId} addToast={addToast} sendCommand={sendAgentMessage} />}
-                {activeTab === 'project-room' && <ProjectRoomPage projectId={selectedProjectId} addToast={addToast} onNavigate={handleNavigate} onRefreshData={refreshAllData} />}
+                {activeTab === 'project-room' && <ProjectRoomPage projectId={selectedProjectId} addToast={addToast} onRefreshData={refreshAllData} />}
                 {activeTab === 'system-health' && <SystemOpsPage onNavigate={handleNavigate} addToast={addToast} onRefreshData={refreshAllData} />}
                 {activeTab === 'model-nexus' && <ModelNexusPage addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} onRefreshData={refreshAllData} />}
                 {activeTab === 'monitoring' && <MonitoringPage addToast={addToast} onNavigate={handleNavigate} />}
-                {activeTab === 'projects' && <ProjectsPage onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} />}
+                {activeTab === 'projects' && <ProjectsPage onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onRefreshData={refreshAllData} />}
                 {activeTab === 'agents' && <AgentsPage onSelectAgent={handleSelectAgent} addToast={addToast} onOpenTopology={() => setIsTopologyOpen(true)} onOpenDeploy={() => setIsDeployOpen(true)} onOpenConfig={(id: string) => { setSelectedAgentId(id); setIsAgentConfigOpen(true); }} />}
                 {activeTab === 'workspace' && <WorkspacePage addToast={addToast} workspace={workspace} onRefreshData={refreshAllData} onNavigate={handleNavigate} />}
                 {activeTab === 'audit' && <AuditPage />}

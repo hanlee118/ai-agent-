@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Activity, Terminal, Zap } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { agents, models, projects, sessions } from '../lib/runtimeCollections';

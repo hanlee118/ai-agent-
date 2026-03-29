@@ -1,78 +1,40 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useMemo, useState } from 'react';
 import {
-  LayoutDashboard,
-  Briefcase,
   Users,
-  Terminal,
-  Settings,
   ShieldCheck,
   Activity,
-  Search,
-  ChevronRight,
-  ChevronLeft,
-  Command,
-  Cpu,
-  Zap,
-  MessageSquare,
-  FileText,
-  History,
-  BrainCircuit,
-  Database,
-  Lock,
-  Globe,
-  Plus,
-  LogOut,
   AlertCircle,
-  CheckCircle2,
-  Clock,
-  Layers,
   BarChart3,
-  ExternalLink,
-  ChevronDown,
-  Filter,
-  MoreVertical,
-  Edit3,
-  Trash2,
-  Play,
-  Pause,
+  CheckCircle2,
+  History,
   RotateCcw,
-  Eye,
-  EyeOff,
-  Languages,
-  UserPlus,
-  HelpCircle,
-  Code2,
-  Workflow,
-  Info,
-  DollarSign,
-  Upload,
-  FileUp,
-  X,
+  Zap,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import {
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
-  AreaChart, Area, ReferenceLine,
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
 } from 'recharts';
 import { cn } from '../lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from '../types';
-import AuditTable from '../features/audit/AuditTable';
-import { useAuditLogs } from '../features/audit/useAuditLogs';
-import { useAuditSearch } from '../features/audit/useAuditSearch';
-import SettingsPanel from '../features/settings/SettingsPanel';
-import AgentConfigModalPanel from '../features/agent-config/AgentConfigModal';
-import DeployAgentModalPanel from '../features/deploy-agent/DeployAgentModal';
-import {
-  agentsApi,
-  auditApi,
-  modelsApi,
-  projectsApi,
-  systemApi,
-  type Model as ApiModel,
-} from '../lib/api';
-import { fetchOpenClawAgentDetail, sendBatchAgentMessage } from '../lib/adapters';
-import { agents, models, projects, sessions, tasks } from '../lib/runtimeCollections';
+import { agents, models, projects, sessions } from '../lib/runtimeCollections';
+
+const ROLE_BINDING_RULES: Array<{
+  roleId: string;
+  label: string;
+  patterns: RegExp[];
+}> = [
+  { roleId: 'ROLE_ANALYST', label: '需求分析师', patterns: [/analyst|需求|分析|requirements/i] },
+  { roleId: 'ROLE_PRODUCT', label: '产品总监', patterns: [/product|产品|prd/i] },
+  { roleId: 'ROLE_DESIGN', label: '视觉设计总监', patterns: [/design|设计|视觉|ui|ux|jeremy/i] },
+  { roleId: 'ROLE_DEV', label: '研发经理', patterns: [/dev|研发|开发|engineer|rd/i] },
+  { roleId: 'ROLE_QA', label: '测试工程师', patterns: [/qa|测试|质量/i] },
+];
 
 const Badge = ({ children, variant = 'default' }: any) => {
   const variants: any = {
@@ -222,6 +184,34 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
     [agents],
   );
   const efficiencyScore = Math.max(0, 100 - avgLoad);
+  const roleBindings = useMemo(
+    () =>
+      ROLE_BINDING_RULES.map((rule) => {
+        const matched = agents.find((agent) => {
+          const text = `${agent.id} ${agent.name} ${agent.role}`.toLowerCase();
+          return rule.patterns.some((pattern) => pattern.test(text));
+        });
+        const configuredModel = matched
+          ? models.find((model) => model.id === matched.currentModelId)?.name || matched.currentModelId || '-'
+          : '-';
+        const runtimeModel = matched?.model || configuredModel;
+        const fallbackModel = matched?.fallbackModel || '-';
+        const routeStatus = matched
+          ? (runtimeModel === configuredModel ? '主路由' : '降级/偏移')
+          : '未绑定';
+
+        return {
+          ...rule,
+          agentName: matched?.name || '-',
+          runtimeModel,
+          configuredModel,
+          fallbackModel,
+          routeStatus,
+          healthy: Boolean(matched),
+        };
+      }),
+    [agents, models],
+  );
 
   const throughputData = useMemo(() => {
     const rows = sessions
@@ -490,6 +480,29 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
             >
               {isDiagnosing ? '诊断中...' : '运行全面诊断'}
             </button>
+          </div>
+
+          <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-4">
+            <h2 className="font-semibold text-white flex items-center gap-2">
+              <Users size={18} className="text-primary" />
+              角色绑定与模型路由
+            </h2>
+            <div className="space-y-3">
+              {roleBindings.map((binding) => (
+                <div key={binding.roleId} className="p-3 rounded-xl border border-border-subtle bg-white/5 space-y-1">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs text-white font-semibold">{binding.label}</p>
+                    <Badge variant={binding.healthy ? (binding.routeStatus === '主路由' ? 'primary' : 'warning') : 'danger'}>
+                      {binding.routeStatus}
+                    </Badge>
+                  </div>
+                  <p className="text-[11px] text-slate-400">Agent: {binding.agentName}</p>
+                  <p className="text-[11px] text-slate-500">运行模型: {binding.runtimeModel}</p>
+                  <p className="text-[11px] text-slate-500">配置模型: {binding.configuredModel}</p>
+                  <p className="text-[11px] text-slate-500">备用模型: {binding.fallbackModel}</p>
+                </div>
+              ))}
+            </div>
           </div>
 
           <div className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-4">

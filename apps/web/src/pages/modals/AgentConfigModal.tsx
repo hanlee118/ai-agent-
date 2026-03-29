@@ -1,4 +1,3 @@
-import React from 'react';
 import AgentConfigModalPanel from '../../features/agent-config/AgentConfigModal';
 import { agents, models } from '../../lib/runtimeCollections';
 

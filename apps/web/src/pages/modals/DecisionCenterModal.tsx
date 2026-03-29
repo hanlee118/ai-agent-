@@ -1,10 +1,9 @@
-import React, { useMemo, useState } from 'react';
-import { X } from 'lucide-react';
-import { motion } from 'motion/react';
+import { useMemo, useState } from 'react';
 import { sendBatchAgentMessage } from '../../lib/adapters';
 import { agents, tasks } from '../../lib/runtimeCollections';
 import type { Task } from '../../types';
 import { cn } from '../../lib/utils';
+import SurfaceModal from '../impl/SurfaceModal';
 
 type Props = {
   isOpen: boolean;
@@ -22,45 +21,6 @@ type Decision = {
   events: Array<{ time: string; content: string }>;
   plan: string[];
 };
-
-function Modal({
-  isOpen,
-  onClose,
-  title,
-  children,
-}: {
-  isOpen: boolean;
-  onClose: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        onClick={onClose}
-        className="absolute inset-0 bg-surface/80 backdrop-blur-sm"
-      />
-      <motion.div
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="relative w-full max-w-2xl bg-surface-soft border border-border-subtle rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-      >
-        <header className="px-8 py-6 border-b border-border-subtle flex justify-between items-center bg-white/5">
-          <h2 className="text-xl font-bold text-white">{title}</h2>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-white transition-colors">
-            <X size={20} />
-          </button>
-        </header>
-        <div className="flex-1 overflow-y-auto p-8">{children}</div>
-      </motion.div>
-    </div>
-  );
-}
 
 export default function DecisionCenterModal({ isOpen, onClose, addToast }: Props) {
   const [selectedDecision, setSelectedDecision] = useState<Decision | null>(null);
@@ -196,7 +156,7 @@ export default function DecisionCenterModal({ isOpen, onClose, addToast }: Props
   };
 
   return (
-    <Modal
+    <SurfaceModal
       isOpen={isOpen}
       onClose={handleClose}
       title={
@@ -326,6 +286,6 @@ export default function DecisionCenterModal({ isOpen, onClose, addToast }: Props
           ))}
         </div>
       )}
-    </Modal>
+    </SurfaceModal>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { BarChart3, Search } from 'lucide-react';
 import AuditTable from '../features/audit/AuditTable';
 import { useAuditLogs } from '../features/audit/useAuditLogs';

@@ -25,6 +25,12 @@ import {
 import { prisma } from "../db.js";
 import { getRuntimeStatus, runStageAgent } from "../agents/runtime.js";
 import {
+  finalizeRequirementBackfill,
+  getIssueByProjectId,
+  type RequirementContract
+} from "../system/v1-method-store.js";
+import { generateOfficialSiteArtifact } from "../utils/official-site.js";
+import {
   buildDeliverables,
   buildStageLiveSession,
   buildStages,
@@ -38,6 +44,339 @@ import {
 import { previewRequirement } from "../utils/project-parser.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
+const DESIGN_REVIEW_MARKER = "## 设计审查卡";
+
+function normalizeDesignReview(input: StageSubmissionInput["designReview"]) {
+  if (!input) {
+    return null;
+  }
+
+  const visualDirection = String(input.visualDirection ?? "").trim();
+  const brandTone = String(input.brandTone ?? "").trim();
+  const approvedBy = String(input.approvedBy ?? "").trim();
+  const approved = Boolean(input.approved);
+  const uxPrinciples = (Array.isArray(input.uxPrinciples) ? input.uxPrinciples : [])
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+  const accessibilityChecklist = (Array.isArray(input.accessibilityChecklist) ? input.accessibilityChecklist : [])
+    .map((item) => String(item).trim())
+    .filter(Boolean);
+  const notes = String(input.notes ?? "").trim();
+
+  if (!visualDirection || !brandTone || !approvedBy) {
+    return null;
+  }
+
+  if (uxPrinciples.length < 3 || accessibilityChecklist.length < 3) {
+    return null;
+  }
+
+  return {
+    visualDirection,
+    brandTone,
+    approvedBy,
+    approved,
+    uxPrinciples,
+    accessibilityChecklist,
+    notes
+  };
+}
+
+function validateDesignSubmission(content: string) {
+  const normalized = content.trim();
+  if (normalized.length < 260) {
+    return ["设计交付内容过短（至少 260 字）"];
+  }
+
+  const requiredSections = ["## 视觉方案", "## 版式策略", "## 组件清单", "## 品牌语气"];
+  const missingSections = requiredSections.filter((section) => !normalized.includes(section));
+
+  const bullets = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "));
+
+  const errors: string[] = [];
+  if (missingSections.length > 0) {
+    errors.push(`缺少关键章节：${missingSections.join("、")}`);
+  }
+  if (bullets.length < 8) {
+    errors.push("设计说明颗粒度不足（至少 8 条要点）");
+  }
+
+  return errors;
+}
+
+function renderDesignReviewCard(input: {
+  visualDirection: string;
+  brandTone: string;
+  approvedBy: string;
+  approved: boolean;
+  uxPrinciples: string[];
+  accessibilityChecklist: string[];
+  notes: string;
+}) {
+  const lines = [
+    DESIGN_REVIEW_MARKER,
+    `- 视觉方向: ${input.visualDirection}`,
+    `- 品牌语气: ${input.brandTone}`,
+    `- UX 原则: ${input.uxPrinciples.join("；")}`,
+    `- 可访问性检查: ${input.accessibilityChecklist.join("；")}`,
+    `- 审查人: ${input.approvedBy}`,
+    `- 审查结论: ${input.approved ? "通过" : "不通过"}`
+  ];
+
+  if (input.notes) {
+    lines.push(`- 审查备注: ${input.notes}`);
+  }
+
+  return lines.join("\n");
+}
+
+function hasApprovedDesignReview(content: string) {
+  return content.includes(DESIGN_REVIEW_MARKER) && /审查结论:\s*通过/.test(content);
+}
+
+function containsAny(input: string, patterns: RegExp[]) {
+  return patterns.some((pattern) => pattern.test(input));
+}
+
+function buildImplementationSummary(project: ProjectDetail) {
+  const doneTasks = project.tasks.filter((task) => task.status === "done").length;
+  const totalTasks = project.tasks.length;
+  const deliverableNames = project.deliverables.map((item) => item.name).slice(0, 8).join("、");
+  const stageSummary = `${STAGE_LABELS[project.currentStage]}阶段完成，项目进度 ${project.progress}%`;
+  return [
+    `${stageSummary}，任务完成 ${doneTasks}/${totalTasks}。`,
+    `当前交付物: ${deliverableNames || "暂无"}`,
+    `项目总结: ${project.summary}`
+  ].join("\n");
+}
+
+function evaluateRequirementAlignment(
+  project: ProjectDetail,
+  input: {
+    objective: string;
+    inScope: string[];
+    acceptanceCriteria: string[];
+    artifacts: string[];
+  }
+) {
+  const normalizedAcceptance = input.acceptanceCriteria.join(" ").toLowerCase();
+  const deliverableNames = project.deliverables.map((item) => item.name);
+  const deliverablesJoined = deliverableNames.join(" ").toLowerCase();
+  const blockedTasks = project.tasks.filter((task) => task.status === "blocked");
+
+  const expectedArtifacts = (input.artifacts.length > 0 ? input.artifacts : ["项目排期", "客户汇报方案（PPT）", "实施方案（Word）", "Demo 原型"])
+    .map((label) => {
+      const pattern = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, ""), "i");
+      const fallback =
+        label.includes("PPT")
+          ? /ppt|汇报方案/i
+          : label.toLowerCase().includes("word")
+            ? /word|实施方案/i
+            : label.toLowerCase().includes("demo")
+              ? /demo|原型/i
+              : /排期|schedule/i;
+      return {
+        label,
+        matched: pattern.test(deliverablesJoined) || fallback.test(deliverablesJoined)
+      };
+    });
+
+  const needDemo = containsAny(normalizedAcceptance, [/demo|演示|原型/]);
+  const demoReady = expectedArtifacts.find((item) => item.label.includes("Demo"))?.matched ?? false;
+  const missingArtifacts = expectedArtifacts.filter((item) => !item.matched).map((item) => item.label);
+  const unmetChecks: string[] = [];
+
+  if (!input.objective.trim()) {
+    unmetChecks.push("需求合同缺少目标定义");
+  }
+  if (input.inScope.length === 0) {
+    unmetChecks.push("需求合同缺少 In Scope");
+  }
+  if (input.acceptanceCriteria.length === 0) {
+    unmetChecks.push("需求合同缺少验收标准");
+  }
+
+  if (project.status !== "completed" || project.progress < 100) {
+    unmetChecks.push("项目未达到完成状态");
+  }
+  if (blockedTasks.length > 0) {
+    unmetChecks.push(`仍有阻塞任务 ${blockedTasks.length} 个`);
+  }
+  if (needDemo && !demoReady) {
+    unmetChecks.push("验收要求提及 Demo，但未检测到 Demo 产物");
+  }
+  if (missingArtifacts.length > 0) {
+    unmetChecks.push(`缺少关键产出物: ${missingArtifacts.join("、")}`);
+  }
+
+  const matched = unmetChecks.length === 0;
+  const validationNote = matched
+    ? "实施结果与当前需求目标一致，关键产出物齐全，可回填产品说明文档。"
+    : `检测到不一致项: ${unmetChecks.join("；")}。请先处理后再继续新需求。`;
+
+  return {
+    matched,
+    validationNote
+  };
+}
+
+async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail) {
+  if (project.status !== "completed") {
+    return;
+  }
+
+  const issue = await getIssueByProjectId(project.id);
+  if (!issue) {
+    return;
+  }
+
+  const contract = issue.requirementContract;
+  const objective = contract?.objective || String(issue.clarificationAnswers.goal ?? "");
+  const inScope = contract?.inScope ?? (issue.clarificationAnswers.scope ? [issue.clarificationAnswers.scope] : []);
+  const acceptanceCriteria = contract?.acceptanceCriteria ?? (issue.clarificationAnswers.acceptance ? [issue.clarificationAnswers.acceptance] : []);
+  const artifacts = contract?.artifacts ?? [];
+  const implementationSummary = buildImplementationSummary(project);
+  const alignment = evaluateRequirementAlignment(project, {
+    objective,
+    inScope,
+    acceptanceCriteria,
+    artifacts
+  });
+
+  await finalizeRequirementBackfill({
+    issueId: issue.id,
+    projectId: project.id,
+    title: issue.title || project.name,
+    refinedRequirement: issue.rawInput || project.description,
+    implementationSummary,
+    validationStatus: alignment.matched ? "matched" : "mismatch",
+    validationNote: alignment.validationNote,
+    requirementContract: contract
+  });
+
+  try {
+    const artifact = await generateOfficialSiteArtifact(project);
+    const currentAcceptMaxVersion = project.deliverables
+      .filter((item) => item.stageType === "ACCEPT")
+      .reduce((max, item) => Math.max(max, item.version), 0);
+
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      const existing = await tx.deliverable.findFirst({
+        where: {
+          projectId: project.id,
+          stageType: "ACCEPT",
+          name: "官网演示页.html"
+        },
+        orderBy: { version: "desc" }
+      });
+
+      const content = [
+        "# 官网演示页",
+        "",
+        "此页面由设计/开发/验收交付物自动汇总生成。",
+        `访问地址: ${artifact.publicPath}`,
+        `本地文件: ${artifact.filePaths[0]}`
+      ].join("\n");
+
+      if (existing) {
+        await tx.deliverable.update({
+          where: { id: existing.id },
+          data: {
+            status: "approved",
+            content,
+            updatedAt: new Date()
+          }
+        });
+      } else {
+        await tx.deliverable.create({
+          data: {
+            projectId: project.id,
+            stageType: "ACCEPT",
+            name: "官网演示页.html",
+            type: "code",
+            content,
+            version: currentAcceptMaxVersion + 1,
+            status: "approved",
+            createdBy: "ROLE_DESIGN",
+            updatedAt: new Date()
+          }
+        });
+      }
+
+      await tx.timelineEvent.create({
+        data: {
+          projectId: project.id,
+          timestamp: new Date(),
+          agentId: "ROLE_DESIGN",
+          type: "system",
+          title: "官网演示页已生成",
+          content: `已生成高保真官网产物，路径：${artifact.publicPath}`,
+          priority: "normal"
+        }
+      });
+    });
+  } catch {
+    // 生成官网产物失败时不阻断主流程，避免影响项目收敛与回填。
+  }
+}
+
+function formatRequirementContract(contract: RequirementContract) {
+  return [
+    `目标: ${contract.objective || "待补充"}`,
+    `In Scope: ${(contract.inScope || []).join("；") || "待补充"}`,
+    `Out of Scope: ${(contract.outOfScope || []).join("；") || "待补充"}`,
+    `验收标准: ${(contract.acceptanceCriteria || []).join("；") || "待补充"}`,
+    `目标产出: ${(contract.artifacts || []).join("、") || "待补充"}`,
+    contract.designTheme ? `设计主题: ${contract.designTheme}` : "",
+    contract.valueNarrative ? `价值叙事: ${contract.valueNarrative}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function enrichProjectWithRequirementContract(project: ProjectDetail, contract?: RequirementContract) {
+  if (!contract) {
+    return project;
+  }
+
+  const contractBlock = `\n\n## 需求合同\n${formatRequirementContract(contract)}`;
+  project.deliverables = project.deliverables.map((deliverable) => {
+    if (deliverable.name.includes("需求分析文档")) {
+      return {
+        ...deliverable,
+        content: `${deliverable.content}${contractBlock}`
+      };
+    }
+    if (deliverable.name.includes("项目排期方案")) {
+      return {
+        ...deliverable,
+        content: `${deliverable.content}\n\n## 需求合同约束\n- ${contract.objective}`
+      };
+    }
+    if (deliverable.name.includes("产品方案草案") || deliverable.name.toLowerCase().includes("word")) {
+      return {
+        ...deliverable,
+        content: `${deliverable.content}${contractBlock}`
+      };
+    }
+    return deliverable;
+  });
+
+  project.summary = `${project.summary} 已绑定需求合同并同步到交付物。`;
+  project.timeline.unshift({
+    id: randomUUID(),
+    timestamp: new Date().toISOString(),
+    agentId: "ROLE_ANALYST",
+    type: "message",
+    title: "需求合同已绑定项目",
+    content: `需求合同已注入交付物，目标: ${contract.objective || "待补充"}`,
+    priority: "normal"
+  });
+  return project;
+}
 
 export async function ensureSeedData(runtimeMode: RuntimeMode) {
   const existingAgents = await prisma.agentProfile.count();
@@ -61,6 +400,37 @@ export async function ensureSeedData(runtimeMode: RuntimeMode) {
   } else {
     await backfillProjectTasks();
   }
+
+  await reconcileLegacyStageDeliverables();
+}
+
+async function reconcileLegacyStageDeliverables() {
+  const completedStages = await prisma.stage.findMany({
+    where: { status: "completed" },
+    select: {
+      projectId: true,
+      type: true
+    }
+  });
+
+  if (completedStages.length === 0) {
+    return;
+  }
+
+  await prisma.$transaction(
+    completedStages.map((stage) =>
+      prisma.deliverable.updateMany({
+        where: {
+          projectId: stage.projectId,
+          stageType: stage.type,
+          status: "submitted"
+        },
+        data: {
+          status: "approved"
+        }
+      })
+    )
+  );
 }
 
 export async function listProjects(): Promise<ProjectSummary[]> {
@@ -128,7 +498,58 @@ export async function findProject(id: string): Promise<ProjectDetail | undefined
   return project ? toProjectDetail(project) : undefined;
 }
 
-export async function createProject(input: CreateProjectInput, runtimeMode: RuntimeMode): Promise<ProjectDetail> {
+export async function archiveProjectAcceptanceReport(
+  id: string,
+  markdown: string,
+  title?: string
+): Promise<ProjectDetail | undefined> {
+  const project = await findProject(id);
+  if (!project) {
+    return undefined;
+  }
+
+  const now = new Date();
+  const dateTag = now.toISOString().slice(0, 10);
+  const reportTitle = title?.trim() || `阶段验收报告-${dateTag}.md`;
+  const nextVersion = project.deliverables
+    .filter((item) => item.stageType === "ACCEPT" && item.name.startsWith("阶段验收报告"))
+    .reduce((max, item) => Math.max(max, item.version), 0) + 1;
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.deliverable.create({
+      data: {
+        projectId: id,
+        stageType: "ACCEPT",
+        name: reportTitle,
+        type: "markdown",
+        content: markdown,
+        version: nextVersion,
+        status: "approved",
+        createdBy: "ROLE_PM",
+        updatedAt: now
+      }
+    });
+
+    await tx.timelineEvent.create({
+      data: {
+        projectId: id,
+        timestamp: now,
+        agentId: "ROLE_PM",
+        type: "system",
+        title: "阶段验收报告已归档",
+        content: `${reportTitle} 已写入交付物（v${nextVersion}）。`,
+        priority: "normal"
+      }
+    });
+  });
+
+  return findProject(id);
+}
+
+export async function createProject(
+  input: CreateProjectInput & { requirementContract?: RequirementContract },
+  runtimeMode: RuntimeMode
+): Promise<ProjectDetail> {
   const parsedIntent = previewRequirement(input.description);
   const id = await nextProjectId();
   const currentStage: StageType = "ANALYSIS";
@@ -175,6 +596,7 @@ export async function createProject(input: CreateProjectInput, runtimeMode: Runt
     content: run.thinkingSummary,
     priority: "normal"
   });
+  enrichProjectWithRequirementContract(project, input.requirementContract);
 
   await persistProject(project);
   return findProject(id).then((value) => value as ProjectDetail);
@@ -185,6 +607,17 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
 
   if (!project || !project.pendingApproval) {
     return project;
+  }
+
+  if (project.currentStage === "DESIGN") {
+    const designDeliverables = project.deliverables
+      .filter((item) => item.stageType === "DESIGN")
+      .sort((a, b) => b.version - a.version);
+    const latestDesignDeliverable = designDeliverables[0];
+
+    if (!latestDesignDeliverable || !hasApprovedDesignReview(latestDesignDeliverable.content)) {
+      throw new Error("DESIGN_REVIEW_NOT_APPROVED: 设计阶段缺少已通过的设计审查卡，禁止进入开发阶段。");
+    }
   }
 
   const currentIndex = stageOrder.indexOf(project.currentStage);
@@ -199,6 +632,17 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
         endedAt: new Date()
       }
     });
+    await tx.deliverable.updateMany({
+      where: {
+        projectId: id,
+        stageType: currentStage.type,
+        status: "submitted"
+      },
+      data: {
+        status: "approved",
+        updatedAt: new Date()
+      }
+    });
     await tx.task.updateMany({
       where: { projectId: id, stageType: currentStage.type },
       data: { status: "done" }
@@ -210,8 +654,8 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
         timestamp: new Date(),
         agentId: "ROLE_PM",
         type: "approval_done",
-        title: "阶段审批通过",
-        content: `你已批准 ${currentStage.label} 阶段，系统继续推进。`,
+        title: `${currentStage.label}阶段审批通过`,
+        content: `你已批准 ${currentStage.label} 阶段，系统继续推进。签核人：项目经理。`,
         priority: "normal"
       }
     });
@@ -308,7 +752,11 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     });
   });
 
-  return findProject(id);
+  const updated = await findProject(id);
+  if (updated) {
+    await syncRequirementBackfillOnProjectCompleted(updated);
+  }
+  return updated;
 }
 
 export async function rejectProjectStage(
@@ -380,8 +828,8 @@ export async function rejectProjectStage(
           timestamp: new Date(),
           agentId: "ROLE_PM",
           type: "approval_rejected",
-          title: "阶段审批未通过",
-          content: reason,
+          title: `${STAGE_LABELS[currentStage]}阶段审批未通过`,
+          content: `${STAGE_LABELS[currentStage]}阶段驳回原因：${reason}`,
           priority: "high"
         },
         {
@@ -460,6 +908,81 @@ export async function resumeProject(id: string): Promise<ProjectDetail | undefin
   return findProject(id);
 }
 
+export async function closeProject(id: string): Promise<ProjectDetail | undefined> {
+  const project = await findProject(id);
+  if (!project) {
+    return undefined;
+  }
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.task.updateMany({
+      where: {
+        projectId: id,
+        status: { in: ["todo", "in_progress", "blocked"] }
+      },
+      data: {
+        status: "done"
+      }
+    });
+
+    await tx.stage.updateMany({
+      where: {
+        projectId: id,
+        status: { in: ["pending", "active", "blocked", "rejected"] }
+      },
+      data: {
+        status: "completed",
+        progress: 100,
+        endedAt: new Date()
+      }
+    });
+
+    await tx.project.update({
+      where: { id },
+      data: {
+        status: "completed",
+        currentStage: "ACCEPT",
+        currentRole: "ROLE_PM",
+        progress: 100,
+        pendingApproval: false,
+        summary: "项目已手动关闭，不再继续推进。",
+        liveTitle: "项目已关闭",
+        liveBody: "## 项目状态\n\n该项目已被手动关闭，不再自动推进。",
+        liveProvider: "scripted",
+        liveStartedAt: new Date()
+      }
+    });
+
+    await tx.timelineEvent.create({
+      data: {
+        projectId: id,
+        timestamp: new Date(),
+        agentId: "ROLE_PM",
+        type: "system",
+        title: "项目已手动关闭",
+        content: "当前项目已被关闭，后续不会继续执行阶段任务。",
+        priority: "normal"
+      }
+    });
+  });
+
+  return findProject(id);
+}
+
+export async function deleteProject(id: string): Promise<boolean> {
+  const existing = await prisma.project.findUnique({
+    where: { id },
+    select: { id: true }
+  });
+
+  if (!existing) {
+    return false;
+  }
+
+  await prisma.project.delete({ where: { id } });
+  return true;
+}
+
 export async function submitCurrentStage(
   id: string,
   input: StageSubmissionInput
@@ -477,6 +1000,22 @@ export async function submitCurrentStage(
     .map((item) => item.version);
   const nextVersion = (versions.length ? Math.max(...versions) : 0) + 1;
   const deliverableName = input.title?.trim() || `${stageLabel}交付物 v${nextVersion}.md`;
+  const normalizedDesignReview = currentStageType === "DESIGN" ? normalizeDesignReview(input.designReview) : null;
+  if (currentStageType === "DESIGN") {
+    if (!normalizedDesignReview) {
+      throw new Error("DESIGN_REVIEW_REQUIRED: 设计阶段提交必须包含完整设计审查卡。");
+    }
+    if (!normalizedDesignReview.approved) {
+      throw new Error("DESIGN_REVIEW_NOT_APPROVED: 设计审查卡未通过，禁止提交阶段交付。");
+    }
+    const designErrors = validateDesignSubmission(input.content);
+    if (designErrors.length > 0) {
+      throw new Error(`DESIGN_REVIEW_REQUIRED: ${designErrors.join("；")}`);
+    }
+  }
+  const submittedContent = normalizedDesignReview
+    ? `${input.content}\n\n${renderDesignReviewCard(normalizedDesignReview)}`
+    : input.content;
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.deliverable.create({
@@ -485,7 +1024,7 @@ export async function submitCurrentStage(
         stageType: currentStageType,
         name: deliverableName,
         type: "markdown",
-        content: input.content,
+        content: submittedContent,
         version: nextVersion,
         status: "submitted",
         createdBy: currentRole,
@@ -511,7 +1050,7 @@ export async function submitCurrentStage(
         pendingApproval: true,
         summary: `${stageLabel}阶段交付物已提交，等待你的审批。`,
         liveTitle: `${ROLE_LABELS[currentRole]}已提交${stageLabel}阶段交付物`,
-        liveBody: input.content,
+        liveBody: submittedContent,
         liveProvider: project.liveSession.provider,
         liveStartedAt: new Date()
       }
@@ -533,7 +1072,7 @@ export async function submitCurrentStage(
           timestamp: new Date(),
           agentId: "ROLE_PM",
           type: "approval_required",
-          title: "等待你的阶段审批",
+          title: `${stageLabel}阶段等待审批`,
           content: `${stageLabel}阶段已完成输出，请决定是否进入下一阶段。`,
           priority: "high"
         }

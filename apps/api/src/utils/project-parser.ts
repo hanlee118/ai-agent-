@@ -4,6 +4,7 @@ const DEFAULT_TEAM: RoleType[] = [
   "ROLE_PM",
   "ROLE_ANALYST",
   "ROLE_PRODUCT",
+  "ROLE_DESIGN",
   "ROLE_ARCH",
   "ROLE_DEV",
   "ROLE_QA",
@@ -104,4 +105,3 @@ function summarize(input: string, keywords: string[], constraints: string[]): st
   const limit = constraints[0] ?? "按 MVP 方式推进";
   return `系统将围绕 ${focus} 展开，优先验证项目创建、实时观测与人工闸门，并遵循「${limit}」的约束。原始需求摘要：${input.slice(0, 50)}${input.length > 50 ? "..." : ""}`;
 }
-

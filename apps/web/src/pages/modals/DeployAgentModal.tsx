@@ -1,4 +1,3 @@
-import React from 'react';
 import DeployAgentModalPanel from '../../features/deploy-agent/DeployAgentModal';
 import { agents, models, projects } from '../../lib/runtimeCollections';
 

@@ -137,6 +137,57 @@ function unwrapPayload<T>(payload: unknown): T {
   return payload as T;
 }
 
+type CoreProjectSummary = {
+  id: string;
+  name: string;
+  status: 'active' | 'paused' | 'blocked' | 'completed';
+  currentStage: 'INIT' | 'ANALYSIS' | 'DESIGN' | 'DEV' | 'ACCEPT';
+  progress: number;
+  updatedAt: string;
+  pendingApproval: boolean;
+  currentRole: string;
+  summary: string;
+  openTaskCount: number;
+};
+
+type CoreProjectTask = {
+  id: string;
+  projectId: string;
+  stageType: 'INIT' | 'ANALYSIS' | 'DESIGN' | 'DEV' | 'ACCEPT';
+  title: string;
+  description: string;
+  assignee: string;
+  status: 'todo' | 'in_progress' | 'blocked' | 'done';
+  priority: 'low' | 'normal' | 'high';
+  updatedAt: string;
+};
+
+type CoreProjectDetail = CoreProjectSummary & {
+  description: string;
+  team: string[];
+  tasks: CoreProjectTask[];
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  ROLE_ASSISTANT: '总助理',
+  ROLE_PM: '项目经理',
+  ROLE_ANALYST: '需求分析师',
+  ROLE_PRODUCT: '产品总监',
+  ROLE_DESIGN: '视觉设计总监',
+  ROLE_ARCH: '研发总监',
+  ROLE_DEV: '研发经理',
+  ROLE_QA: '测试工程师',
+  ROLE_HR: 'HR总监',
+};
+
+const STAGE_LABELS: Record<string, string> = {
+  INIT: '立项',
+  ANALYSIS: '分析',
+  DESIGN: '设计',
+  DEV: '开发',
+  ACCEPT: '验收',
+};
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`, {
     ...options,
@@ -196,6 +247,112 @@ function mapProjectStatus(status: OpenClawProjectDetail['status']): ProjectStatu
     default:
       return 'Planning';
   }
+}
+
+function mapCoreProjectStatus(project: CoreProjectSummary): ProjectStatus {
+  if (project.status === 'completed') {
+    return 'Completed';
+  }
+  if (project.status === 'blocked' || project.status === 'paused') {
+    return 'Blocked';
+  }
+  if (project.currentStage === 'DEV') {
+    return 'Development';
+  }
+  if (project.currentStage === 'ACCEPT') {
+    return 'Testing';
+  }
+  return 'Planning';
+}
+
+function mapCoreTaskStatus(status: CoreProjectTask['status']): Task['status'] {
+  switch (status) {
+    case 'done':
+      return 'Completed';
+    case 'in_progress':
+      return 'In Progress';
+    case 'blocked':
+      return 'Blocked';
+    case 'todo':
+    default:
+      return 'Pending';
+  }
+}
+
+function mapCoreTaskProgress(status: CoreProjectTask['status']) {
+  switch (status) {
+    case 'done':
+      return 100;
+    case 'in_progress':
+      return 55;
+    case 'blocked':
+      return 35;
+    case 'todo':
+    default:
+      return 0;
+  }
+}
+
+function mapCoreProject(project: CoreProjectDetail): Project {
+  return {
+    id: project.id,
+    name: project.name,
+    description: project.description || project.summary || '',
+    status: mapCoreProjectStatus(project),
+    phase: STAGE_LABELS[project.currentStage] || project.currentStage,
+    progress: clamp(project.progress, 0, 100),
+    owner: ROLE_LABELS[project.currentRole] || project.currentRole || '未分配',
+    agents: Array.isArray(project.team) ? project.team : [],
+    createdAt: project.updatedAt,
+    updatedAt: project.updatedAt,
+  };
+}
+
+function mapCoreTask(task: CoreProjectTask): Task {
+  return {
+    id: task.id,
+    title: task.title,
+    agent: ROLE_LABELS[task.assignee] || task.assignee || '未分配',
+    status: mapCoreTaskStatus(task.status),
+    progress: mapCoreTaskProgress(task.status),
+    projectId: task.projectId,
+    createdAt: task.updatedAt,
+    updatedAt: task.updatedAt,
+  };
+}
+
+function mapCoreSessions(projects: CoreProjectDetail[], tasks: Task[]): Session[] {
+  const sessions: Session[] = [];
+  const now = Date.now();
+
+  for (const project of projects) {
+    const active = tasks
+      .filter((task) => task.projectId === project.id && (task.status === 'In Progress' || task.status === 'Blocked'))
+      .slice(0, 4);
+
+    for (const task of active) {
+      const updatedAt = task.updatedAt || new Date().toISOString();
+      const startMs = new Date(updatedAt).getTime();
+      const safeStartMs = Number.isNaN(startMs) ? now : startMs;
+      const minutes = Math.max(1, Math.floor((now - safeStartMs) / 60000));
+
+      sessions.push({
+        id: `core-${project.id}-${task.id}`,
+        agentId: task.agent,
+        modelId: 'runtime',
+        projectId: project.id,
+        startTime: new Date(safeStartMs).toISOString(),
+        duration: minutes < 60 ? `${minutes}m` : `${Math.floor(minutes / 60)}h ${minutes % 60}m`,
+        tokens: 0,
+        cost: 0,
+        status: task.status === 'Blocked' ? 'failed' : 'active',
+        createdAt: new Date(safeStartMs).toISOString(),
+        updatedAt,
+      });
+    }
+  }
+
+  return sessions.sort((a, b) => new Date(b.updatedAt || b.startTime).getTime() - new Date(a.updatedAt || a.startTime).getTime());
 }
 
 function mapTaskStatus(status: OpenClawTaskItem['status']): Task['status'] {
@@ -364,6 +521,12 @@ export interface AdaptedOpenClawData {
   runtime: OpenClawRuntimeInfo | null;
 }
 
+export interface AdaptedCoreProjectData {
+  projects: Project[];
+  tasks: Task[];
+  sessions: Session[];
+}
+
 export async function fetchOpenClawData(): Promise<AdaptedOpenClawData> {
   const [rawAgents, rawProjects] = await Promise.all([
     request<OpenClawAgentSummary[]>('/openclaw/agents'),
@@ -386,6 +549,29 @@ export async function fetchOpenClawData(): Promise<AdaptedOpenClawData> {
     workspace,
     runtime,
   };
+}
+
+export async function fetchCoreProjectData(): Promise<AdaptedCoreProjectData> {
+  const summaries = await request<CoreProjectSummary[]>('/projects');
+  if (!Array.isArray(summaries) || summaries.length === 0) {
+    return { projects: [], tasks: [], sessions: [] };
+  }
+
+  const details = (await Promise.all(
+    summaries.map(async (summary) => {
+      try {
+        return await request<CoreProjectDetail>(`/projects/${encodeURIComponent(summary.id)}`);
+      } catch {
+        return null;
+      }
+    }),
+  )).filter(Boolean) as CoreProjectDetail[];
+
+  const projects = details.map(mapCoreProject);
+  const tasks = details.flatMap((project) => project.tasks.map(mapCoreTask));
+  const sessions = mapCoreSessions(details, tasks);
+
+  return { projects, tasks, sessions };
 }
 
 export async function fetchAgentMemory(agentId: string): Promise<OpenClawAgentMemoryEntry[]> {

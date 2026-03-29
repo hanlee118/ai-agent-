@@ -1,78 +1,47 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import {
-  LayoutDashboard,
-  Briefcase,
-  Users,
-  Terminal,
-  Settings,
-  ShieldCheck,
   Activity,
-  Search,
-  ChevronRight,
-  ChevronLeft,
-  Command,
-  Cpu,
-  Zap,
-  MessageSquare,
-  FileText,
-  History,
-  BrainCircuit,
-  Database,
-  Lock,
-  Globe,
-  Plus,
-  LogOut,
-  AlertCircle,
-  CheckCircle2,
-  Clock,
-  Layers,
   BarChart3,
-  ExternalLink,
+  BrainCircuit,
+  CheckCircle2,
   ChevronDown,
-  Filter,
-  MoreVertical,
-  Edit3,
-  Trash2,
-  Play,
-  Pause,
-  RotateCcw,
-  Eye,
-  EyeOff,
-  Languages,
+  ChevronRight,
+  Command,
+  Database,
+  FileText,
+  Globe,
+  History,
+  Lock,
+  ShieldCheck,
   UserPlus,
-  HelpCircle,
-  Code2,
   Workflow,
-  Info,
-  DollarSign,
-  Upload,
-  FileUp,
-  X,
+  Zap,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import {
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
-  AreaChart, Area, ReferenceLine,
-} from 'recharts';
 import { cn } from '../lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from '../types';
-import AuditTable from '../features/audit/AuditTable';
-import { useAuditLogs } from '../features/audit/useAuditLogs';
-import { useAuditSearch } from '../features/audit/useAuditSearch';
-import SettingsPanel from '../features/settings/SettingsPanel';
-import AgentConfigModalPanel from '../features/agent-config/AgentConfigModal';
-import DeployAgentModalPanel from '../features/deploy-agent/DeployAgentModal';
-import {
-  agentsApi,
-  auditApi,
-  modelsApi,
-  projectsApi,
-  systemApi,
-  type Model as ApiModel,
-} from '../lib/api';
-import { fetchOpenClawAgentDetail, sendBatchAgentMessage } from '../lib/adapters';
+import type { Agent, Task } from '../types';
+import { fetchOpenClawAgentDetail } from '../lib/adapters';
 import { agents, models, projects, sessions, tasks } from '../lib/runtimeCollections';
+import { TokenUsageTrendChart } from './impl/GovernanceShared';
+
+type CommandUnderstandingCard = {
+  raw: string;
+  summary: string;
+  goal: string;
+  project: string;
+  involvedAgent: string;
+  eta: string;
+  warning?: string;
+};
+
+const parseSopSteps = (content: string) =>
+  content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/^[-*]\s*/, '').replace(/^\d+[.)]\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, 8);
 
 const Badge = ({ children, variant = 'default' }: any) => {
   const variants: any = {
@@ -105,6 +74,7 @@ const AgentCommander = ({
     status: 'Idle',
     load: 0,
     currentModelId: models[0]?.id || 'runtime',
+    fallbackModel: '',
     tasks: 0,
     memoryCount: 0,
     tokensUsed: 0,
@@ -222,7 +192,7 @@ const AgentCommander = ({
     addToast(`已确认 ${activeAgent.name} 的下一步行动`, 'success');
   };
 
-  const handleTokenLimitChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleTokenLimitChange = (e: ChangeEvent<HTMLInputElement>) => {
     const val = Math.max(parseInt(e.target.value) || 0, 1);
     setTokenLimit(val);
     addToast(`Token 限制已更新为 ${val.toLocaleString()}`, "success");
@@ -327,6 +297,10 @@ const AgentCommander = ({
   const commanderRisks = blockedLinkedTasks.length > 0
     ? blockedLinkedTasks.map((task) => `任务阻塞：${task.title}`)
     : ['当前未发现阻塞风险'];
+  const configuredModelName = models.find((m) => m.id === currentModelId)?.name || currentModelId || '未配置';
+  const runtimeModelName = activeAgent.model || configuredModelName;
+  const fallbackModelName = activeAgent.fallbackModel || '未配置';
+  const modelRouteStatus = runtimeModelName === configuredModelName ? '主路由' : '路由偏移';
 
   return (
     <div className="h-full flex flex-col">
@@ -356,6 +330,14 @@ const AgentCommander = ({
                   {dailyUsage.toLocaleString()} / {tokenLimit.toLocaleString()} Tokens
                 </span>
               </div>
+            </div>
+            <div className="flex items-center gap-2 mt-1 text-[10px] text-slate-500">
+              <span>路由: 运行 {runtimeModelName}</span>
+              <span>·</span>
+              <span>配置 {configuredModelName}</span>
+              <span>·</span>
+              <span>备用 {fallbackModelName}</span>
+              <Badge variant={modelRouteStatus === '主路由' ? 'primary' : 'warning'}>{modelRouteStatus}</Badge>
             </div>
           </div>
         </div>
@@ -400,7 +382,7 @@ const AgentCommander = ({
           <div className="flex items-center gap-2 relative group/model">
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">当前模型:</span>
             <button className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-[10px] font-bold text-white flex items-center gap-2 hover:bg-white/10 transition-all hover:border-white/20">
-              {models.find(m => m.id === currentModelId)?.name}
+              {configuredModelName}
               <ChevronDown size={12} className="text-slate-500" />
             </button>
             <div className="absolute top-full right-0 mt-2 w-48 bg-surface-muted border border-border-subtle rounded-xl shadow-2xl opacity-0 invisible group-hover/model:opacity-100 group-hover/model:visible transition-all z-50 p-2">

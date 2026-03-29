@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Agent, Project, Session, Task } from '../types';
 import {
   fetchAgentMemory,
+  fetchCoreProjectData,
   fetchOpenClawData,
   sendAgentMessage,
   type OpenClawAgentMemoryEntry,
@@ -46,6 +47,7 @@ export function useRealData(): RealDataState {
         status: (agent.status as Agent['status']) || 'Idle',
         load: agent.load ?? 0,
         currentModelId: agent.currentModelId || '',
+        fallbackModel: agent.fallbackModel || '',
         model: agent.currentModelId || '',
         tasks: agent.tasks ?? 0,
         memoryCount: agent.memoryCount ?? 0,
@@ -58,20 +60,52 @@ export function useRealData(): RealDataState {
     }
   }, []);
 
+  const mergeAgents = useCallback((managedAgents: Agent[], runtimeAgents: Agent[]) => {
+    if (managedAgents.length === 0) {
+      return runtimeAgents;
+    }
+
+    const runtimeById = new Map(runtimeAgents.map((agent) => [agent.id, agent]));
+    const merged = managedAgents.map((managed) => {
+      const runtimeAgent = runtimeById.get(managed.id);
+      return runtimeAgent
+        ? {
+            ...runtimeAgent,
+            ...managed,
+            // Keep runtime model label so ModelNexus can reflect real invoking model names.
+            model: runtimeAgent.model || managed.model || managed.currentModelId,
+            lastActiveAt: runtimeAgent.lastActiveAt || managed.lastActiveAt,
+          }
+        : managed;
+    });
+
+    const managedIds = new Set(merged.map((agent) => agent.id));
+    const runtimeOnly = runtimeAgents.filter((agent) => !managedIds.has(agent.id));
+    return [...merged, ...runtimeOnly];
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setError(null);
 
     try {
-      const [data, managedAgents] = await Promise.all([
-        fetchOpenClawData(),
-        fetchManagedAgents(),
+      const [data, managedAgents, coreData] = await Promise.all([
+        fetchOpenClawData().catch(() => ({
+          agents: [],
+          projects: [],
+          tasks: [],
+          sessions: [],
+          workspace: null,
+          runtime: null,
+        })),
+        fetchManagedAgents().catch(() => []),
+        fetchCoreProjectData().catch(() => ({ projects: [], tasks: [], sessions: [] })),
       ]);
 
-      setAgents(managedAgents.length > 0 ? managedAgents : data.agents);
-      setProjects(data.projects);
-      setTasks(data.tasks);
-      setSessions(data.sessions);
+      setAgents(mergeAgents(managedAgents, data.agents));
+      setProjects(coreData.projects.length > 0 ? coreData.projects : data.projects);
+      setTasks(coreData.tasks.length > 0 ? coreData.tasks : data.tasks);
+      setSessions(coreData.sessions.length > 0 ? coreData.sessions : data.sessions);
       setWorkspace(data.workspace);
       setRuntime(data.runtime);
     } catch (err) {
@@ -86,7 +120,7 @@ export function useRealData(): RealDataState {
     } finally {
       setLoading(false);
     }
-  }, [fetchManagedAgents]);
+  }, [fetchManagedAgents, mergeAgents]);
 
   useEffect(() => {
     void refresh();

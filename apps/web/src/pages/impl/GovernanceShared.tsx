@@ -1,7 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Cpu, X } from 'lucide-react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
+import {
+  PieChart,
+  Pie,
+  Cell,
+  ResponsiveContainer,
+  Tooltip,
+  AreaChart,
+  Area,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  ReferenceLine,
+} from 'recharts';
 import { cn } from '../../lib/utils';
 import { modelsApi } from '../../lib/api';
 import { models } from '../../lib/runtimeCollections';
@@ -58,6 +70,67 @@ export function ModelUsageChart() {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+export function TokenUsageTrendChart({ limit }: { limit: number }) {
+  const data = useMemo(() => {
+    const safeLimit = Math.max(1, Number(limit) || 1);
+    return Array.from({ length: 24 }, (_, i) => {
+      const hour = (new Date().getHours() - (23 - i) + 24) % 24;
+      const baseUsage = (safeLimit / 24) * 0.45;
+      const peakFactor = hour > 9 && hour < 18 ? 1.25 : 0.65;
+      const rhythm = 1 + Math.sin((i / 24) * Math.PI * 2) * 0.2;
+      return {
+        time: `${hour}:00`,
+        usage: Math.max(0, Math.floor(baseUsage * peakFactor * rhythm)),
+      };
+    });
+  }, [limit]);
+
+  return (
+    <div className="h-[100px] w-full mt-2">
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 5, right: 5, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id="colorUsage" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#00f2ff" stopOpacity={0.3} />
+              <stop offset="95%" stopColor="#00f2ff" stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="#2d2e32" vertical={false} opacity={0.5} />
+          <XAxis dataKey="time" hide />
+          <YAxis hide domain={[0, Math.max(1, Number(limit) || 1) / 12]} />
+          <Tooltip
+            contentStyle={{
+              backgroundColor: '#1a1b1e',
+              border: '1px solid #2d2e32',
+              borderRadius: '8px',
+              fontSize: '10px',
+              boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)',
+            }}
+            itemStyle={{ color: '#fff', padding: '2px 0' }}
+            labelStyle={{ color: '#64748b', marginBottom: '4px', fontWeight: 'bold' }}
+            cursor={{ stroke: '#00f2ff', strokeWidth: 1 }}
+          />
+          <ReferenceLine
+            y={Math.max(1, Number(limit) || 1) / 24}
+            stroke="#ff00f2"
+            strokeDasharray="3 3"
+            label={{ position: 'right', value: 'LIMIT', fill: '#ff00f2', fontSize: 7, fontWeight: 'bold' }}
+          />
+          <Area
+            type="monotone"
+            dataKey="usage"
+            stroke="#00f2ff"
+            strokeWidth={2}
+            fillOpacity={0.4}
+            fill="url(#colorUsage)"
+            animationDuration={1500}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
     </div>
   );
 }

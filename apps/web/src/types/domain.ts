@@ -30,6 +30,7 @@ export interface Agent {
   status: AgentStatus;
   load: number;
   currentModelId: string;
+  fallbackModel?: string;
   model?: string;
   tasks: number;
   memoryCount: number;

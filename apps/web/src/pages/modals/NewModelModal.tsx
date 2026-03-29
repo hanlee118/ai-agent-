@@ -1,109 +1,8 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import {
-  LayoutDashboard,
-  Briefcase,
-  Users,
-  Terminal,
-  Settings,
-  ShieldCheck,
-  Activity,
-  Search,
-  ChevronRight,
-  ChevronLeft,
-  Command,
-  Cpu,
-  Zap,
-  MessageSquare,
-  FileText,
-  History,
-  BrainCircuit,
-  Database,
-  Lock,
-  Globe,
-  Plus,
-  LogOut,
-  AlertCircle,
-  CheckCircle2,
-  Clock,
-  Layers,
-  BarChart3,
-  ExternalLink,
-  ChevronDown,
-  Filter,
-  MoreVertical,
-  Edit3,
-  Trash2,
-  Play,
-  Pause,
-  RotateCcw,
-  Eye,
-  EyeOff,
-  Languages,
-  UserPlus,
-  HelpCircle,
-  Code2,
-  Workflow,
-  Info,
-  DollarSign,
-  Upload,
-  FileUp,
-  X,
-} from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import {
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
-  AreaChart, Area, ReferenceLine,
-} from 'recharts';
+import { useState } from 'react';
+import { ShieldCheck } from 'lucide-react';
 import { cn } from '../../lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from '../../types';
-import AuditTable from '../../features/audit/AuditTable';
-import { useAuditLogs } from '../../features/audit/useAuditLogs';
-import { useAuditSearch } from '../../features/audit/useAuditSearch';
-import SettingsPanel from '../../features/settings/SettingsPanel';
-import AgentConfigModalPanel from '../../features/agent-config/AgentConfigModal';
-import DeployAgentModalPanel from '../../features/deploy-agent/DeployAgentModal';
-import {
-  agentsApi,
-  auditApi,
-  modelsApi,
-  projectsApi,
-  systemApi,
-  type Model as ApiModel,
-} from '../../lib/api';
-import { fetchOpenClawAgentDetail, sendBatchAgentMessage } from '../../lib/adapters';
-import { agents, models, projects, sessions, tasks } from '../../lib/runtimeCollections';
-
-const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose: () => void, title: string, children: React.ReactNode }) => {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <motion.div 
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        onClick={onClose}
-        className="absolute inset-0 bg-surface/80 backdrop-blur-sm"
-      />
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="relative w-full max-w-2xl bg-surface-soft border border-border-subtle rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-      >
-        <header className="px-8 py-6 border-b border-border-subtle flex justify-between items-center bg-white/5">
-          <h2 className="text-xl font-bold text-white">{title}</h2>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-white transition-colors">
-            <X size={20} />
-          </button>
-        </header>
-        <div className="flex-1 overflow-y-auto p-8">
-          {children}
-        </div>
-      </motion.div>
-    </div>
-  );
-};
+import { modelsApi } from '../../lib/api';
+import SurfaceModal from '../impl/SurfaceModal';
 
 const NewModelModal = ({
   isOpen,
@@ -187,7 +86,7 @@ const NewModelModal = ({
   };
 
   return (
-    <Modal isOpen={isOpen} onClose={handleClose} title="接入新计算模型">
+    <SurfaceModal isOpen={isOpen} onClose={handleClose} title="接入新计算模型">
       <div className="space-y-8">
         <div className="flex items-center gap-4 mb-8">
           {[1, 2, 3].map((s) => (
@@ -305,7 +204,7 @@ const NewModelModal = ({
           </div>
         )}
       </div>
-    </Modal>
+    </SurfaceModal>
   );
 };
 

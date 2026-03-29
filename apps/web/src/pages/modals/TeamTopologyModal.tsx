@@ -1,110 +1,8 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
-import {
-  LayoutDashboard,
-  Briefcase,
-  Users,
-  Terminal,
-  Settings,
-  ShieldCheck,
-  Activity,
-  Search,
-  ChevronRight,
-  ChevronLeft,
-  Command,
-  Cpu,
-  Zap,
-  MessageSquare,
-  FileText,
-  History,
-  BrainCircuit,
-  Database,
-  Lock,
-  Globe,
-  Plus,
-  LogOut,
-  AlertCircle,
-  CheckCircle2,
-  Clock,
-  Layers,
-  BarChart3,
-  ExternalLink,
-  ChevronDown,
-  Filter,
-  MoreVertical,
-  Edit3,
-  Trash2,
-  Play,
-  Pause,
-  RotateCcw,
-  Eye,
-  EyeOff,
-  Languages,
-  UserPlus,
-  HelpCircle,
-  Code2,
-  Workflow,
-  Info,
-  DollarSign,
-  Upload,
-  FileUp,
-  X,
-} from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import {
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
-  AreaChart, Area, ReferenceLine,
-} from 'recharts';
-import { cn } from '../../lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from '../../types';
-import AuditTable from '../../features/audit/AuditTable';
-import { useAuditLogs } from '../../features/audit/useAuditLogs';
-import { useAuditSearch } from '../../features/audit/useAuditSearch';
-import SettingsPanel from '../../features/settings/SettingsPanel';
-import AgentConfigModalPanel from '../../features/agent-config/AgentConfigModal';
-import DeployAgentModalPanel from '../../features/deploy-agent/DeployAgentModal';
-import {
-  agentsApi,
-  auditApi,
-  modelsApi,
-  projectsApi,
-  systemApi,
-  teamApi,
-  type Model as ApiModel,
-} from '../../lib/api';
-import { fetchOpenClawAgentDetail, sendBatchAgentMessage } from '../../lib/adapters';
-import { agents, models, projects, sessions, tasks } from '../../lib/runtimeCollections';
-
-const Modal = ({ isOpen, onClose, title, children }: { isOpen: boolean, onClose: () => void, title: string, children: React.ReactNode }) => {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-      <motion.div 
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        exit={{ opacity: 0 }}
-        onClick={onClose}
-        className="absolute inset-0 bg-surface/80 backdrop-blur-sm"
-      />
-      <motion.div 
-        initial={{ opacity: 0, scale: 0.95, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 20 }}
-        className="relative w-full max-w-2xl bg-surface-soft border border-border-subtle rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
-      >
-        <header className="px-8 py-6 border-b border-border-subtle flex justify-between items-center bg-white/5">
-          <h2 className="text-xl font-bold text-white">{title}</h2>
-          <button onClick={onClose} className="p-2 text-slate-500 hover:text-white transition-colors">
-            <X size={20} />
-          </button>
-        </header>
-        <div className="flex-1 overflow-y-auto p-8">
-          {children}
-        </div>
-      </motion.div>
-    </div>
-  );
-};
+import { useEffect, useState } from 'react';
+import { motion } from 'motion/react';
+import { teamApi } from '../../lib/api';
+import { agents } from '../../lib/runtimeCollections';
+import SurfaceModal from '../impl/SurfaceModal';
 
 const TeamTopologyModal = ({ isOpen, onClose }: any) => {
   const [topologyNodes, setTopologyNodes] = useState<Array<{
@@ -232,7 +130,7 @@ const TeamTopologyModal = ({ isOpen, onClose }: any) => {
       .filter(Boolean) as Array<{ from: { x: number; y: number }; to: { x: number; y: number } }>;
 
   return (
-    <Modal isOpen={isOpen} onClose={onClose} title="团队拓扑图谱">
+    <SurfaceModal isOpen={isOpen} onClose={onClose} title="团队拓扑图谱">
       <div className="space-y-6">
         <div className="h-[400px] w-full bg-surface-muted rounded-2xl border border-border-subtle relative overflow-hidden flex items-center justify-center bg-[radial-gradient(circle_at_50%_50%,rgba(16,185,129,0.05),transparent_70%)]">
           <div className="absolute inset-0 opacity-10 pointer-events-none" style={{ backgroundImage: 'radial-gradient(#10b981 1px, transparent 1px)', backgroundSize: '20px 20px' }} />
@@ -325,7 +223,7 @@ const TeamTopologyModal = ({ isOpen, onClose }: any) => {
             : '暂无 Agent 数据'}
         </p>
       </div>
-    </Modal>
+    </SurfaceModal>
   );
 };
 

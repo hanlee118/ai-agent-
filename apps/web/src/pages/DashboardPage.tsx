@@ -1,78 +1,20 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import {
-  LayoutDashboard,
   Briefcase,
-  Users,
-  Terminal,
-  Settings,
-  ShieldCheck,
   Activity,
-  Search,
   ChevronRight,
-  ChevronLeft,
-  Command,
   Cpu,
   Zap,
-  MessageSquare,
-  FileText,
   History,
-  BrainCircuit,
   Database,
-  Lock,
   Globe,
   Plus,
-  LogOut,
-  AlertCircle,
-  CheckCircle2,
-  Clock,
-  Layers,
-  BarChart3,
-  ExternalLink,
-  ChevronDown,
-  Filter,
   MoreVertical,
-  Edit3,
-  Trash2,
-  Play,
-  Pause,
-  RotateCcw,
-  Eye,
-  EyeOff,
-  Languages,
-  UserPlus,
-  HelpCircle,
-  Code2,
   Workflow,
-  Info,
-  DollarSign,
-  Upload,
-  FileUp,
-  X,
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
-import {
-  PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Legend,
-  AreaChart, Area, ReferenceLine,
-} from 'recharts';
+import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
-import { Agent, Project, Task, Session, AgentStatus, ProjectStatus, Model } from '../types';
-import AuditTable from '../features/audit/AuditTable';
-import { useAuditLogs } from '../features/audit/useAuditLogs';
-import { useAuditSearch } from '../features/audit/useAuditSearch';
-import SettingsPanel from '../features/settings/SettingsPanel';
-import AgentConfigModalPanel from '../features/agent-config/AgentConfigModal';
-import DeployAgentModalPanel from '../features/deploy-agent/DeployAgentModal';
-import {
-  agentsApi,
-  auditApi,
-  modelsApi,
-  projectsApi,
-  systemApi,
-  type Model as ApiModel,
-} from '../lib/api';
-import { fetchOpenClawAgentDetail, sendBatchAgentMessage } from '../lib/adapters';
-import { agents, models, projects, sessions, tasks } from '../lib/runtimeCollections';
+import { agents, models, projects, tasks } from '../lib/runtimeCollections';
+import { ModelUsageChart, TokenUsageTrendChart } from './impl/GovernanceShared';
 
 const Badge = ({ children, variant = 'default' }: any) => {
   const variants: any = {

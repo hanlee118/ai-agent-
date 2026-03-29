@@ -40,6 +40,7 @@ export interface Agent {
   status: 'Idle' | 'Thinking' | 'Executing' | 'Offline';
   load: number;
   currentModelId?: string;
+  fallbackModel?: string;
   tasks: number;
   memoryCount?: number;
   tokensUsed: number;

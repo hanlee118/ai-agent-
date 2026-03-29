@@ -7,6 +7,7 @@ export type RoleType =
   | "ROLE_PM"
   | "ROLE_ANALYST"
   | "ROLE_PRODUCT"
+  | "ROLE_DESIGN"
   | "ROLE_ARCH"
   | "ROLE_DEV"
   | "ROLE_QA"
@@ -737,6 +738,17 @@ export interface InterventionInput {
 export interface StageSubmissionInput {
   title?: string;
   content: string;
+  designReview?: DesignReviewCardInput;
+}
+
+export interface DesignReviewCardInput {
+  visualDirection: string;
+  brandTone: string;
+  uxPrinciples: string[];
+  accessibilityChecklist: string[];
+  approvedBy: string;
+  approved: boolean;
+  notes?: string;
 }
 
 export interface ProjectMessageInput {
@@ -764,6 +776,7 @@ export const ROLE_LABELS: Record<RoleType, string> = {
   ROLE_PM: "项目经理",
   ROLE_ANALYST: "需求分析师",
   ROLE_PRODUCT: "产品总监",
+  ROLE_DESIGN: "视觉设计总监",
   ROLE_ARCH: "研发总监",
   ROLE_DEV: "研发经理",
   ROLE_QA: "测试工程师",

@@ -784,40 +784,90 @@ export async function sendOpenClawAgentMessage(
 
   let stdout = "";
   let stderr = "";
+  let activeModel = agent.commander.selectedModel;
+  const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(
+    `${agent.agentId} ${agent.name} ${agent.title} ${agent.responsibility}`
+  );
+  const fallbackModel =
+    normalizeModelId(agent.commander.fallbackModel)
+    || normalizeModelId(process.env.OPENCLAW_AGENT_FALLBACK_MODEL)
+    || (isDesignAgent ? "openai/gpt-5.4" : "")
+    || "minima/MiniMax-M2.7-highspeed";
+  let switchedToFallback = false;
+  const maxAttempts = 3;
+  let finalError: string | null = null;
 
-  try {
-    const result = await execFileAsync(OPENCLAW_BIN, [
-      "agent",
-      "--agent",
-      agentId,
-      "--message",
-      message,
-      "--json"
-    ], {
-      timeout: 10 * 60 * 1000,
-      maxBuffer: 1024 * 1024 * 8
-    });
-    stdout = result.stdout;
-    stderr = result.stderr;
-  } catch (error) {
-    const detail =
-      error instanceof Error && "stderr" in error && typeof error.stderr === "string"
-        ? error.stderr.trim()
-        : error instanceof Error
-          ? error.message
-          : "OpenClaw agent command failed";
-    await prisma.agentUsageLog.create({
-      data: {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const result = await execFileAsync(OPENCLAW_BIN, [
+        "agent",
+        "--agent",
         agentId,
-        model: agent.commander.selectedModel,
-        promptTokens: estimatedPromptTokens,
-        completionTokens: 0,
-        totalTokens: estimatedPromptTokens,
-        status: "failed",
-        commandType: classifyInstruction(message)
+        "--message",
+        message,
+        "--json"
+      ], {
+        timeout: 10 * 60 * 1000,
+        maxBuffer: 1024 * 1024 * 8
+      });
+      stdout = result.stdout;
+      stderr = result.stderr;
+      finalError = null;
+      break;
+    } catch (error) {
+      const detail =
+        error instanceof Error && "stderr" in error && typeof error.stderr === "string"
+          ? error.stderr.trim()
+          : error instanceof Error
+            ? error.message
+            : "OpenClaw agent command failed";
+      finalError = detail || "OpenClaw agent command failed";
+
+      await prisma.agentUsageLog.create({
+        data: {
+          agentId,
+          model: activeModel,
+          promptTokens: estimatedPromptTokens,
+          completionTokens: 0,
+          totalTokens: estimatedPromptTokens,
+          status: "failed",
+          commandType: classifyInstruction(message)
+        }
+      });
+
+      const isLockError = /session file locked|locked \(timeout|gateway closed/i.test(finalError);
+      const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(finalError);
+      const shouldRetryWithFallback =
+        isTokenError
+        && !switchedToFallback
+        && Boolean(fallbackModel)
+        && fallbackModel !== activeModel;
+
+      if (shouldRetryWithFallback) {
+        try {
+          await switchAgentModelForRetry(agentId, fallbackModel);
+        } catch (switchError) {
+          const reason = switchError instanceof Error ? switchError.message : "fallback switch failed";
+          finalError = `${finalError}\n[model-fallback] ${reason}`;
+          break;
+        }
+        activeModel = fallbackModel;
+        switchedToFallback = true;
+        await sleep(450);
+        continue;
       }
-    });
-    throw new Error(detail || "OpenClaw agent command failed");
+
+      if (isLockError && attempt < maxAttempts) {
+        await sleep(500 * attempt);
+        continue;
+      }
+
+      break;
+    }
+  }
+
+  if (finalError) {
+    throw new Error(finalError);
   }
 
   const raw = (stdout || stderr).trim();
@@ -833,7 +883,7 @@ export async function sendOpenClawAgentMessage(
   const ok = payload?.status === "ok" || raw.includes('"status": "ok"');
   const summary = String(payload?.summary ?? extractJsonStringField(raw, "summary") ?? "completed");
   const estimatedCompletionTokens = estimateTokenCount(reply);
-  const model = result?.meta?.agentMeta?.model || agent.commander.selectedModel;
+  const model = result?.meta?.agentMeta?.model || activeModel;
 
   await prisma.agentUsageLog.create({
     data: {
@@ -2496,6 +2546,45 @@ function buildInstructionRisks(
   return risks.length > 0 ? risks : ["暂未识别到明显高风险项，但仍建议在关键里程碑同步结果。"];
 }
 
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+async function switchAgentModelForRetry(agentId: string, model: string) {
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
+  if (!config?.agents?.list?.length) {
+    return;
+  }
+
+  const target = config.agents.list.find((item) => item.id === agentId);
+  if (!target) {
+    return;
+  }
+
+  const normalizedModel = normalizeModelId(model);
+  if (!normalizedModel || target.model === normalizedModel) {
+    return;
+  }
+
+  target.model = normalizedModel;
+  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+
+  await prisma.managedAgentConfig.upsert({
+    where: { agentId },
+    create: {
+      agentId,
+      selectedModel: normalizedModel,
+      defaultModel: normalizedModel,
+      fallbackModel: normalizedModel
+    },
+    update: {
+      selectedModel: normalizedModel
+    }
+  });
+}
+
 async function readTextFile(filePath: string) {
   try {
     return await readFile(filePath, "utf8");
@@ -2671,7 +2760,7 @@ function validateCommandInput(input: string) {
   }
 
   // 检查危险字符
-  const dangerousChars = [';', '&', '|', '$', '`', '(', ')', '{', '}', '[', ']', '<', '>', '\n', '\r'];
+  const dangerousChars = [';', '&', '|', '$', '`', '<', '>', '\n', '\r'];
   for (const char of dangerousChars) {
     if (input.includes(char)) {
       throw new Error(`输入参数不能包含危险字符: ${char}`);

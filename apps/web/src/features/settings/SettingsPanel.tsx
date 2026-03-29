@@ -4,6 +4,7 @@ import { cn } from '../../lib/utils';
 import { useSettings } from './useSettings';
 import RuntimeConfigPanel from '../runtime-config/RuntimeConfigPanel';
 import { useRuntimeConfig } from '../runtime-config/useRuntimeConfig';
+import ProductContextPanel from './ProductContextPanel';
 
 type SettingsPanelProps = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -104,6 +105,8 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
       </header>
 
       <div className="space-y-8">
+        <ProductContextPanel addToast={addToast} />
+
         <section className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
           <div className="px-6 py-4 border-b border-border-subtle bg-white/5">
             <h2 className="font-semibold text-white flex items-center gap-2">
