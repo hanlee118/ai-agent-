@@ -77,6 +77,15 @@ type ProjectDetailResponse = {
   }>;
 };
 
+type ProjectDeliverable = NonNullable<ProjectDetailResponse['deliverables']>[number];
+type SideDeliverableItem = {
+  id: string;
+  name: string;
+  type: string;
+  size: string;
+  deliverable?: ProjectDeliverable;
+};
+
 const ROLE_LABELS: Record<string, string> = {
   ROLE_ASSISTANT: '总助理',
   ROLE_PM: '项目经理',
@@ -215,7 +224,7 @@ const ProjectRoom = ({
   const [isCopyingSignoffLink, setIsCopyingSignoffLink] = useState(false);
   const signoffAutoOpenKeyRef = useRef<string | null>(null);
   const projectRoomUrlStateAppliedRef = useRef<string | null>(null);
-  const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDetailResponse['deliverables'][number] | null>(null);
+  const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [designReviewHistory, setDesignReviewHistory] = useState<Array<{
     submittedAt: string;
     reviewer: string;
@@ -406,7 +415,7 @@ const ProjectRoom = ({
     return logs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 6);
   }, [effectiveProjectTasks]);
 
-  const projectDeliverablesSide = useMemo(() => {
+  const projectDeliverablesSide = useMemo<SideDeliverableItem[]>(() => {
     if (deliverables.length > 0) {
       return deliverables.slice(0, 8).map((item) => ({
         id: item.id,
@@ -999,7 +1008,7 @@ const ProjectRoom = ({
     try {
       await projectsApi.reject(project.id, reason.trim());
       await refreshProjectView();
-      addToast(`已驳回 ${currentStageLabel} 阶段并要求返工`, 'warning');
+      addToast(`已驳回 ${currentStageLabel} 阶段并要求返工`, 'info');
     } catch (error) {
       addToast(`驳回失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
@@ -1442,7 +1451,7 @@ const ProjectRoom = ({
                 <button
                   key={file.id}
                   onClick={() => {
-                    if ('deliverable' in file && file.deliverable) {
+                    if (file.deliverable) {
                       setPreviewDeliverable(file.deliverable);
                     }
                   }}

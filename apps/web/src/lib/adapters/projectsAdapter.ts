@@ -6,6 +6,7 @@ const statusMeta: Record<Project['status'], { label: string; variant: StatusVari
   Testing: { label: '测试中', variant: 'accent' },
   Completed: { label: '已完成', variant: 'primary' },
   Blocked: { label: '阻塞', variant: 'danger' },
+  'At Risk': { label: '风险中', variant: 'warning' },
 };
 
 export function toProjectView(project: Project, agentNameMap: Record<string, string> = {}): ProjectView {

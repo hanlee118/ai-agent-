@@ -1,5 +1,5 @@
 export type AgentStatus = 'Idle' | 'Thinking' | 'Executing' | 'Offline';
-export type ProjectStatus = 'Planning' | 'Development' | 'Testing' | 'Completed' | 'Blocked';
+export type ProjectStatus = 'Planning' | 'Development' | 'Testing' | 'Completed' | 'Blocked' | 'At Risk';
 export type TaskStatus = 'Pending' | 'In Progress' | 'Completed' | 'Blocked';
 export type SessionStatus = 'active' | 'completed' | 'failed';
 

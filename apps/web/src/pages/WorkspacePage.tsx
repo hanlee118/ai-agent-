@@ -5,7 +5,7 @@ import { Badge } from './impl/GovernanceShared';
 
 type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
-  workspace?: { rootPath?: string };
+  workspace?: { rootPath?: string } | null;
   onRefreshData?: () => Promise<void> | void;
   onNavigate?: (tab: string, id?: string) => void;
 };
@@ -22,6 +22,8 @@ const getRelativeTime = (date: string | Date | undefined) => {
 };
 
 export default function WorkspacePage({ addToast, workspace, onRefreshData, onNavigate }: Props) {
+  const agentNameById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.name])), [agents]);
+
   const healthChecks = [
     { label: 'Agent 连接', ok: agents.length > 0 },
     { label: '项目活跃', ok: projects.length > 0 },
@@ -31,11 +33,11 @@ export default function WorkspacePage({ addToast, workspace, onRefreshData, onNa
   const recentReports = useMemo(
     () =>
       sessions.slice(0, 4).map((session) => ({
-        title: session.agentName || 'Agent 会话',
+        title: agentNameById.get(session.agentId) || 'Agent 会话',
         date: getRelativeTime(session.updatedAt || session.createdAt),
         type: '会话',
       })),
-    [sessions],
+    [agentNameById, sessions],
   );
 
   return (
