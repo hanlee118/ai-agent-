@@ -187,6 +187,57 @@ export async function getDesignModelPolicyHealth() {
   };
 }
 
+export async function repairDesignModelPolicy() {
+  const before = await getDesignModelPolicyHealth();
+  const beforeSelected = before.designAgentConfig.selectedModel;
+  const beforeFallback = before.designAgentConfig.fallbackModel;
+
+  const targetSelected = DESIGN_MODEL_PRIMARY;
+  const targetFallback = DESIGN_MODEL_FALLBACKS[0];
+
+  await prisma.managedAgentConfig.upsert({
+    where: { agentId: "ROLE_DESIGN" },
+    create: {
+      agentId: "ROLE_DESIGN",
+      displayName: "视觉设计总监",
+      title: "ROLE_DESIGN",
+      selectedModel: targetSelected,
+      defaultModel: targetSelected,
+      fallbackModel: targetFallback,
+      executionMode: "confirm_first",
+      requireConfirmation: true,
+      autoApproveMinorSteps: false,
+      memoryEnabled: true,
+      allowedAgentIds: [],
+      toolAllowlist: []
+    },
+    update: {
+      selectedModel: targetSelected,
+      defaultModel: targetSelected,
+      fallbackModel: targetFallback
+    }
+  });
+
+  const after = await getDesignModelPolicyHealth();
+  const afterSelected = after.designAgentConfig.selectedModel;
+  const afterFallback = after.designAgentConfig.fallbackModel;
+
+  return {
+    ok: after.designAgentConfig.policyAligned,
+    repaired: true,
+    policyTarget: {
+      selectedModel: targetSelected,
+      fallbackModel: targetFallback
+    },
+    changed: {
+      selectedModel: beforeSelected !== afterSelected,
+      fallbackModel: beforeFallback !== afterFallback
+    },
+    before,
+    after
+  };
+}
+
 async function probeModelAvailability(
   model: string,
   role: ModelRole,
@@ -448,4 +499,3 @@ async function readOpenClawProviders() {
     return {};
   }
 }
-

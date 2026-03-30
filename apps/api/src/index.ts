@@ -62,7 +62,10 @@ import { listAuditLogs, writeAuditLog } from "./system/audit-log.js";
 import { listNotificationInbox, updateNotificationInboxState } from "./system/notifications.js";
 import { createPromptTemplate, listPromptTemplates, markPromptTemplateUsed } from "./system/prompt-templates.js";
 import { getSystemReadiness } from "./system/readiness.js";
-import { getDesignModelPolicyHealth } from "./system/design-model-policy-health.js";
+import {
+  getDesignModelPolicyHealth,
+  repairDesignModelPolicy
+} from "./system/design-model-policy-health.js";
 import {
   getCachedLocalAgentMonitorOverview,
   subscribeLocalAgentMonitor,
@@ -1316,6 +1319,20 @@ app.get("/api/system/readiness", asyncRoute(async (_req, res) => {
 app.get("/api/system/design-model-policy/health", asyncRoute(async (_req, res) => {
   const result = await getDesignModelPolicyHealth();
   res.status(result.ok ? 200 : 503).json(result);
+}));
+
+app.post("/api/system/design-model-policy/repair", asyncRoute(async (req, res) => {
+  const result = await repairDesignModelPolicy();
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "design_model_policy.repaired",
+    resourceType: "runtime",
+    resourceId: "ROLE_DESIGN",
+    summary: "已执行设计模型策略一键修复",
+    detail: `selected=${result.after.designAgentConfig.selectedModel} fallback=${result.after.designAgentConfig.fallbackModel}`
+  });
+  res.status(result.ok ? 200 : 202).json(result);
 }));
 
 app.get("/api/system/local-agent-monitor", asyncRoute(async (_req, res) => {

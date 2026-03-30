@@ -30,5 +30,15 @@
   - 降级链是否可执行（fallbackReady）
   - `ROLE_DESIGN` 配置是否与策略对齐（policyAligned）
 
+## 一键修复接口
+- `POST /api/system/design-model-policy/repair`
+- 行为：
+  - 自动对齐 `ROLE_DESIGN`：
+    - `selectedModel = openai/gpt-5.4`
+    - `defaultModel = openai/gpt-5.4`
+    - `fallbackModel = openai/gpt-5.3-codex`
+  - 修复后自动再次执行体检
+  - 返回修复前后体检结果与差异（`before` / `after` / `changed`）
+
 ## 说明
 - 当前环境中 `gpt-5.3` 直连可用性不稳定，策略采用 `gpt-5.3-codex` 作为 5.3 系列标准备选。

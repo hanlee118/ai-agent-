@@ -161,6 +161,7 @@ pnpm start:prod
 - `GET /api/system/health`
 - `GET /api/system/readiness`
 - `GET /api/system/design-model-policy/health`
+- `POST /api/system/design-model-policy/repair`
 - `GET /api/system/audit-logs`
 
 ### OpenClaw
