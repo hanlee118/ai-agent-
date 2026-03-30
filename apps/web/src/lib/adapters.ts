@@ -168,6 +168,23 @@ type CoreProjectDetail = CoreProjectSummary & {
   tasks: CoreProjectTask[];
 };
 
+type CoreTaskBoardItem = {
+  id: string;
+  projectId: string;
+  stageType: 'INIT' | 'ANALYSIS' | 'DESIGN' | 'DEV' | 'ACCEPT';
+  title: string;
+  description: string;
+  assignee: string;
+  status: 'todo' | 'in_progress' | 'blocked' | 'done';
+  priority: 'low' | 'normal' | 'high';
+  updatedAt: string;
+  projectName: string;
+  projectStatus: 'active' | 'paused' | 'blocked' | 'completed';
+  projectCurrentStage: 'INIT' | 'ANALYSIS' | 'DESIGN' | 'DEV' | 'ACCEPT';
+  projectPendingApproval: boolean;
+  projectUpdatedAt: string;
+};
+
 const ROLE_LABELS: Record<string, string> = {
   ROLE_ASSISTANT: '总助理',
   ROLE_PM: '项目经理',
@@ -308,6 +325,21 @@ function mapCoreProject(project: CoreProjectDetail): Project {
   };
 }
 
+function mapCoreProjectSummary(project: CoreProjectSummary): Project {
+  return {
+    id: project.id,
+    name: project.name,
+    description: project.summary || '',
+    status: mapCoreProjectStatus(project),
+    phase: STAGE_LABELS[project.currentStage] || project.currentStage,
+    progress: clamp(project.progress, 0, 100),
+    owner: ROLE_LABELS[project.currentRole] || project.currentRole || '未分配',
+    agents: [],
+    createdAt: project.updatedAt,
+    updatedAt: project.updatedAt,
+  };
+}
+
 function mapCoreTask(task: CoreProjectTask): Task {
   return {
     id: task.id,
@@ -321,7 +353,23 @@ function mapCoreTask(task: CoreProjectTask): Task {
   };
 }
 
-function mapCoreSessions(projects: CoreProjectDetail[], tasks: Task[]): Session[] {
+function mapCoreTaskBoardItem(task: CoreTaskBoardItem): Task {
+  return {
+    id: task.id,
+    title: task.title,
+    agent: ROLE_LABELS[task.assignee] || task.assignee || '未分配',
+    status: mapCoreTaskStatus(task.status),
+    progress: mapCoreTaskProgress(task.status),
+    projectId: task.projectId,
+    createdAt: task.updatedAt,
+    updatedAt: task.updatedAt,
+  };
+}
+
+function mapCoreSessions(
+  projects: Array<Pick<CoreProjectSummary, 'id' | 'updatedAt'>>,
+  tasks: Task[],
+): Session[] {
   const sessions: Session[] = [];
   const now = Date.now();
 
@@ -552,24 +600,18 @@ export async function fetchOpenClawData(): Promise<AdaptedOpenClawData> {
 }
 
 export async function fetchCoreProjectData(): Promise<AdaptedCoreProjectData> {
-  const summaries = await request<CoreProjectSummary[]>('/projects');
+  const [summaries, taskBoard] = await Promise.all([
+    request<CoreProjectSummary[]>('/projects'),
+    request<CoreTaskBoardItem[]>('/tasks').catch(() => [] as CoreTaskBoardItem[]),
+  ]);
+
   if (!Array.isArray(summaries) || summaries.length === 0) {
     return { projects: [], tasks: [], sessions: [] };
   }
 
-  const details = (await Promise.all(
-    summaries.map(async (summary) => {
-      try {
-        return await request<CoreProjectDetail>(`/projects/${encodeURIComponent(summary.id)}`);
-      } catch {
-        return null;
-      }
-    }),
-  )).filter(Boolean) as CoreProjectDetail[];
-
-  const projects = details.map(mapCoreProject);
-  const tasks = details.flatMap((project) => project.tasks.map(mapCoreTask));
-  const sessions = mapCoreSessions(details, tasks);
+  const projects = summaries.map(mapCoreProjectSummary);
+  const tasks = Array.isArray(taskBoard) ? taskBoard.map(mapCoreTaskBoardItem) : [];
+  const sessions = mapCoreSessions(summaries, tasks);
 
   return { projects, tasks, sessions };
 }

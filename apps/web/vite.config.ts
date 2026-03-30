@@ -20,6 +20,11 @@ export default defineConfig({
   server: {
     port: 5173,
     allowedHosts: true,
+    watch: {
+      // Generated artifacts are updated by backend jobs; ignoring them prevents
+      // Vite from triggering full-page reload loops while users view ProjectRoom.
+      ignored: ["**/public/generated/**", "**/site/generated/**"],
+    },
     proxy: {
       "/api": {
         target: "http://localhost:8787",

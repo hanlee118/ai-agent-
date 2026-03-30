@@ -4,7 +4,9 @@ import {
   Briefcase,
   CheckCircle2,
   ChevronRight,
+  Copy,
   Download,
+  ExternalLink,
   FileText,
   History,
   Layers,
@@ -17,7 +19,12 @@ import {
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
 import type { ProjectStatus, Task } from '../types';
-import { projectsApi, type ProjectAcceptanceReport } from '../lib/api';
+import {
+  projectsApi,
+  type ProjectAcceptanceReport,
+  type ProjectExecutionRecord,
+  type ProjectFinalArtifactsReport,
+} from '../lib/api';
 import { agents, projects, tasks } from '../lib/runtimeCollections';
 import SurfaceModal from './impl/SurfaceModal';
 
@@ -85,6 +92,7 @@ type SideDeliverableItem = {
   size: string;
   deliverable?: ProjectDeliverable;
 };
+type FinalArtifactItem = ProjectFinalArtifactsReport['artifacts'][number];
 
 const ROLE_LABELS: Record<string, string> = {
   ROLE_ASSISTANT: '总助理',
@@ -215,6 +223,12 @@ const ProjectRoom = ({
   const [isExportingAcceptanceReport, setIsExportingAcceptanceReport] = useState(false);
   const [isArchivingAcceptanceReport, setIsArchivingAcceptanceReport] = useState(false);
   const [acceptanceReport, setAcceptanceReport] = useState<ProjectAcceptanceReport | null>(null);
+  const [finalArtifacts, setFinalArtifacts] = useState<ProjectFinalArtifactsReport | null>(null);
+  const [executionRecords, setExecutionRecords] = useState<ProjectExecutionRecord[]>([]);
+  const [isLoadingFinalArtifacts, setIsLoadingFinalArtifacts] = useState(false);
+  const [isLoadingExecutions, setIsLoadingExecutions] = useState(false);
+  const [downloadingArtifactKey, setDownloadingArtifactKey] = useState<string | null>(null);
+  const [downloadingDeliverableId, setDownloadingDeliverableId] = useState<string | null>(null);
   const [signoffStageFilter, setSignoffStageFilter] = useState<string>('all');
   const [signoffDecisionFilter, setSignoffDecisionFilter] = useState<'all' | 'approved' | 'rejected' | 'pending'>('all');
   const [signoffTimeFilter, setSignoffTimeFilter] = useState<'all' | '24h' | '7d' | '30d'>('all');
@@ -247,26 +261,28 @@ const ProjectRoom = ({
     () =>
       projects.find((p) => p.id === projectId) ||
       projects[0] || {
-        id: '',
-        name: '暂无项目',
+        id: projectId || '',
+        name: projectId ? `项目 ${projectId}` : '暂无项目',
         description: '',
         status: 'Planning' as ProjectStatus,
-        phase: '待开始',
+        phase: projectId ? '加载中' : '待开始',
         progress: 0,
         owner: '',
         agents: [],
       },
-    [projectId],
+    [projectId, projects],
   );
 
+  const effectiveProjectId = projectId || project.id;
+
   const loadProjectDetail = useCallback(async () => {
-    if (!project.id) {
+    if (!effectiveProjectId) {
       setDetail(null);
       return;
     }
     setLoadingDetail(true);
     try {
-      const next = await projectsApi.getDetail(project.id);
+      const next = await projectsApi.getDetail(effectiveProjectId);
       setDetail(next);
     } catch (error) {
       setDetail(null);
@@ -274,7 +290,7 @@ const ProjectRoom = ({
     } finally {
       setLoadingDetail(false);
     }
-  }, [project.id, addToast]);
+  }, [effectiveProjectId, addToast]);
 
   useEffect(() => {
     void loadProjectDetail();
@@ -283,13 +299,14 @@ const ProjectRoom = ({
   const fallbackTasks = useMemo(
     () =>
       tasks.filter((task) => {
+        const targetProjectId = effectiveProjectId;
         const taskProjectId = (task as Task & { projectId?: string }).projectId;
-        if (project.id && taskProjectId) {
-          return taskProjectId === project.id;
+        if (targetProjectId && taskProjectId) {
+          return taskProjectId === targetProjectId;
         }
-        return Boolean(project.id) && String(task.id).startsWith(`${project.id}:`);
+        return Boolean(targetProjectId) && String(task.id).startsWith(`${targetProjectId}:`);
       }),
-    [project.id],
+    [effectiveProjectId],
   );
 
   const detailTasks = useMemo(
@@ -336,6 +353,78 @@ const ProjectRoom = ({
     [detail?.timeline],
   );
 
+  const timelineEvents = useMemo(() => {
+    if (timelineItems.length > 0) {
+      return timelineItems;
+    }
+
+    const stageEvents = stageItems.flatMap((stage) => {
+      const events: Array<{
+        id: string;
+        timestamp: string;
+        agentId?: string;
+        type: string;
+        title: string;
+        content: string;
+        priority: 'low' | 'normal' | 'high' | 'urgent';
+      }> = [];
+
+      if (stage.startedAt) {
+        events.push({
+          id: `stage-start-${stage.type}-${stage.startedAt}`,
+          timestamp: stage.startedAt,
+          agentId: stage.assignee,
+          type: 'stage_started',
+          title: `${stage.label || STAGE_LABELS[stage.type] || stage.type} 开始`,
+          content: `阶段负责人 ${roleLabel(stage.assignee)} 开始推进该阶段，当前完成度 ${stage.progress}%`,
+          priority: stage.status === 'blocked' ? 'high' : 'normal',
+        });
+      }
+
+      if (stage.endedAt) {
+        events.push({
+          id: `stage-end-${stage.type}-${stage.endedAt}`,
+          timestamp: stage.endedAt,
+          agentId: stage.assignee,
+          type: 'stage_completed',
+          title: `${stage.label || STAGE_LABELS[stage.type] || stage.type} 完成`,
+          content: `阶段已结束，状态为 ${CORE_STAGE_STATUS_LABELS[stage.status] || stage.status}`,
+          priority: stage.status === 'rejected' || stage.status === 'blocked' ? 'high' : 'low',
+        });
+      }
+
+      return events;
+    });
+
+    const taskEvents = effectiveProjectTasks.map((task) => {
+      const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
+      const timestamp = taskRecord.updatedAt || taskRecord.createdAt || new Date().toISOString();
+      return {
+        id: `task-${task.id}-${timestamp}`,
+        timestamp,
+        agentId: task.agent,
+        type: 'task_update',
+        title: `任务状态更新: ${task.title}`,
+        content: `当前状态 ${task.status}，进度 ${task.progress}%`,
+        priority: task.status === 'Blocked' ? 'urgent' as const : task.status === 'In Progress' ? 'normal' as const : 'low' as const,
+      };
+    });
+
+    const deliverableEvents = deliverables.map((item) => ({
+      id: `deliverable-${item.id}-${item.updatedAt}`,
+      timestamp: item.updatedAt,
+      agentId: item.createdBy,
+      type: 'deliverable_update',
+      title: `交付物更新: ${item.name}`,
+      content: `${STAGE_LABELS[item.stageType] || item.stageType} · ${DELIVERABLE_STATUS_LABELS[item.status]}`,
+      priority: item.status === 'rejected' ? 'high' as const : item.status === 'submitted' ? 'normal' as const : 'low' as const,
+    }));
+
+    return [...stageEvents, ...taskEvents, ...deliverableEvents]
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 60);
+  }, [timelineItems, stageItems, effectiveProjectTasks, deliverables]);
+
   const deliverablesByStage = useMemo(() => {
     const grouped = new Map<string, typeof deliverables>();
     for (const item of deliverables) {
@@ -346,6 +435,29 @@ const ProjectRoom = ({
     return grouped;
   }, [deliverables]);
 
+  const deliverableById = useMemo(() => {
+    const mapping = new Map<string, ProjectDeliverable>();
+    deliverables.forEach((item) => {
+      mapping.set(item.id, item);
+    });
+    return mapping;
+  }, [deliverables]);
+
+  const quickFinalArtifacts = useMemo(
+    () => (finalArtifacts?.artifacts || []).slice(0, 5),
+    [finalArtifacts],
+  );
+
+  const executionSummary = useMemo(() => {
+    const total = executionRecords.length;
+    const success = executionRecords.filter((item) => item.status === 'success').length;
+    const failed = executionRecords.filter((item) => item.status === 'failed').length;
+    const realModelRuns = executionRecords.filter(
+      (item) => item.provider === 'openai-compatible' || item.runtimeMode === 'openai-compatible',
+    ).length;
+    return { total, success, failed, realModelRuns };
+  }, [executionRecords]);
+
   const projectAgents = useMemo(() => {
     if (project.agents.length > 0) {
       return agents.filter((agent) => project.agents.includes(agent.id));
@@ -355,6 +467,13 @@ const ProjectRoom = ({
   }, [project.agents, effectiveProjectTasks]);
 
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
+
+  const tabStats = useMemo(() => ({
+    任务: effectiveProjectTasks.length,
+    阶段: stageItems.length,
+    交付物: deliverables.length,
+    时间线: timelineEvents.length,
+  }), [effectiveProjectTasks.length, stageItems.length, deliverables.length, timelineEvents.length]);
 
   const isDesignPhase = useMemo(() => {
     const text = [project.phase, project.description, ...effectiveProjectTasks.map((task) => `${task.title} ${task.agent}`)]
@@ -439,6 +558,8 @@ const ProjectRoom = ({
   const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
+  const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
+  const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
 
   const getStageAcceptance = (stageType: string) => {
     const items = deliverablesByStage.get(stageType) || [];
@@ -466,7 +587,9 @@ const ProjectRoom = ({
     const rejected = items.filter((item) => item.status === 'rejected').length;
     const submitted = items.filter((item) => item.status === 'submitted').length;
     const draft = items.filter((item) => item.status === 'draft').length;
-    return { total: items.length, approved, rejected, submitted, draft };
+    const readable = items.filter((item) => isDeliverableReadable(item)).length;
+    const unreadable = Math.max(0, items.length - readable);
+    return { total: items.length, approved, rejected, submitted, draft, readable, unreadable };
   };
 
   const signoffStageOptions = useMemo(() => {
@@ -633,10 +756,60 @@ const ProjectRoom = ({
     window.history.replaceState(window.history.state, '', nextUrl);
   }, [activeTab, project.id, signoffDecisionFilter, signoffKeyword, signoffStageFilter, signoffTimeFilter]);
 
+  const loadFinalArtifacts = useCallback(async (options?: { silent?: boolean }) => {
+    if (!effectiveProjectId) {
+      setFinalArtifacts(null);
+      return;
+    }
+    setIsLoadingFinalArtifacts(true);
+    try {
+      const report = await projectsApi.getFinalArtifacts(effectiveProjectId);
+      setFinalArtifacts(report);
+    } catch (error) {
+      setFinalArtifacts(null);
+      if (!options?.silent) {
+        addToast(`加载最终验收成果失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      setIsLoadingFinalArtifacts(false);
+    }
+  }, [effectiveProjectId, addToast]);
+
+  const loadExecutions = useCallback(async (options?: { silent?: boolean }) => {
+    if (!effectiveProjectId) {
+      setExecutionRecords([]);
+      return;
+    }
+    setIsLoadingExecutions(true);
+    try {
+      const report = await projectsApi.getExecutions(effectiveProjectId, 120);
+      setExecutionRecords(report.executions || []);
+    } catch (error) {
+      setExecutionRecords([]);
+      if (!options?.silent) {
+        addToast(`加载执行证据失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      setIsLoadingExecutions(false);
+    }
+  }, [effectiveProjectId, addToast]);
+
   const refreshProjectView = useCallback(async () => {
     await onRefreshData?.();
-    await loadProjectDetail();
-  }, [onRefreshData, loadProjectDetail]);
+    await Promise.all([
+      loadProjectDetail(),
+      loadFinalArtifacts(),
+      loadExecutions({ silent: true }),
+    ]);
+  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail]);
+
+  useEffect(() => {
+    void loadFinalArtifacts({ silent: true });
+  }, [loadFinalArtifacts]);
+
+  useEffect(() => {
+    void loadExecutions({ silent: true });
+  }, [loadExecutions]);
 
   useEffect(() => {
     if (!project.id) {
@@ -664,7 +837,10 @@ const ProjectRoom = ({
     setSignoffKeyword(urlFilters?.keyword || '');
     setIsLoadingAcceptanceReport(true);
     try {
-      const report = await projectsApi.getAcceptanceReport(project.id);
+      const [report] = await Promise.all([
+        projectsApi.getAcceptanceReport(project.id),
+        loadFinalArtifacts({ silent: true }),
+      ]);
       setAcceptanceReport(report);
     } catch (error) {
       setAcceptanceReport(null);
@@ -754,7 +930,10 @@ const ProjectRoom = ({
       const response = await projectsApi.archiveAcceptanceReport(project.id);
       await refreshProjectView();
       addToast(`验收报告已归档: ${response.deliverableName}`, 'success');
-      const report = await projectsApi.getAcceptanceReport(project.id);
+      const [report] = await Promise.all([
+        projectsApi.getAcceptanceReport(project.id),
+        loadFinalArtifacts({ silent: true }),
+      ]);
       setAcceptanceReport(report);
     } catch (error) {
       addToast(`归档验收报告失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
@@ -795,6 +974,117 @@ const ProjectRoom = ({
     anchor.click();
     document.body.removeChild(anchor);
     window.URL.revokeObjectURL(url);
+  };
+
+  const handleOpenFinalArtifact = (artifact: FinalArtifactItem) => {
+    if (artifact.source === 'link' && artifact.url) {
+      window.open(artifact.url, '_blank', 'noopener,noreferrer');
+      return;
+    }
+
+    const target = artifact.deliverableId ? deliverableById.get(artifact.deliverableId) : undefined;
+    if (target) {
+      setPreviewDeliverable(target);
+      return;
+    }
+
+    if (artifact.content) {
+      setPreviewDeliverable({
+        id: artifact.deliverableId || `virtual-${artifact.key}`,
+        name: artifact.name,
+        type: 'markdown',
+        status: (artifact.status as DeliverableStatus) || 'approved',
+        stageType: artifact.stageType || 'ACCEPT',
+        content: artifact.content,
+        version: artifact.version || 1,
+        createdBy: 'ROLE_PM',
+        updatedAt: artifact.updatedAt || new Date().toISOString(),
+      });
+      return;
+    }
+
+    addToast('该成果当前无可预览内容', 'info');
+  };
+
+  const handleDownloadFinalArtifact = async (artifact: FinalArtifactItem) => {
+    if (!artifact.content) {
+      addToast('该成果暂无可下载正文', 'info');
+      return;
+    }
+    setDownloadingArtifactKey(artifact.key);
+    try {
+      const fallbackExt = artifact.name.includes('.') ? '' : '.md';
+      downloadText(
+        `${artifact.name}${fallbackExt}`,
+        artifact.content,
+        'text/markdown;charset=utf-8',
+      );
+      addToast(`已下载 ${artifact.name}`, 'success');
+    } catch (error) {
+      addToast(`下载失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setDownloadingArtifactKey(null);
+    }
+  };
+
+  const handleDownloadDeliverable = async (deliverable: ProjectDeliverable) => {
+    const content = String(deliverable.content || '');
+    if (!content.trim()) {
+      addToast('该交付物暂无可下载正文', 'info');
+      return;
+    }
+
+    setDownloadingDeliverableId(deliverable.id);
+    try {
+      const fallbackExt = deliverable.name.includes('.') ? '' : '.md';
+      downloadText(
+        `${deliverable.name}${fallbackExt}`,
+        content,
+        'text/markdown;charset=utf-8',
+      );
+      addToast(`已下载 ${deliverable.name}`, 'success');
+    } catch (error) {
+      addToast(`下载交付物失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setDownloadingDeliverableId(null);
+    }
+  };
+
+  const handleCopyDeliverableContent = async (deliverable: ProjectDeliverable) => {
+    const content = String(deliverable.content || '').trim();
+    if (!content) {
+      addToast('该交付物暂无正文可复制', 'info');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(content);
+      } else {
+        window.prompt('复制以下交付物正文', content);
+      }
+      addToast('交付物正文已复制', 'success');
+    } catch (error) {
+      addToast(`复制失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
+  };
+
+  const handleCopyFinalArtifactLink = async (artifact: FinalArtifactItem) => {
+    if (!artifact.url) {
+      addToast('该成果没有可复制链接', 'info');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(artifact.url);
+      } else {
+        window.prompt('复制以下链接', artifact.url);
+      }
+      addToast('成果链接已复制', 'success');
+    } catch (error) {
+      addToast(`复制失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
   };
 
   const getSignoffFilterSummary = () => {
@@ -1105,14 +1395,14 @@ const ProjectRoom = ({
 
   return (
     <div className="h-full flex flex-col">
-      <header className="px-8 py-6 border-b border-border-subtle flex justify-between items-center bg-surface/50 backdrop-blur-md">
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-2xl bg-primary/10 flex items-center justify-center text-primary border border-primary/20">
+      <header className="px-4 sm:px-6 lg:px-8 py-4 sm:py-6 border-b border-border-subtle flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between bg-surface/50 backdrop-blur-md">
+        <div className="w-full min-w-0 flex items-start sm:items-center gap-3 sm:gap-4">
+          <div className="w-10 h-10 sm:w-12 sm:h-12 rounded-2xl bg-primary/10 flex items-center justify-center text-primary border border-primary/20 shrink-0">
             <Briefcase size={24} />
           </div>
-          <div>
-            <h1 className="text-xl font-bold text-white">{project.name}</h1>
-            <div className="flex items-center gap-3 mt-1">
+          <div className="min-w-0">
+            <h1 className="text-lg sm:text-xl font-bold text-white break-words">{project.name}</h1>
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3 mt-1">
               <Badge variant="primary">阶段: {STAGE_LABELS[currentStageType || ''] || project.phase}</Badge>
               <span className="flex items-center gap-1.5 text-[10px] text-warning font-bold">
                 <Zap size={10} />
@@ -1122,10 +1412,10 @@ const ProjectRoom = ({
             </div>
           </div>
         </div>
-        <div className="flex gap-3">
+        <div className="w-full xl:w-auto flex flex-wrap items-center justify-start xl:justify-end gap-2 sm:gap-3">
           <button
             onClick={() => void handleOpenAcceptanceReport()}
-            className="px-4 py-2 bg-white/5 text-slate-200 hover:bg-white/10 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
+            className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 bg-white/5 text-slate-200 hover:bg-white/10 rounded-lg text-xs sm:text-sm font-semibold transition-colors"
           >
             <CheckCircle2 size={16} />
             验收报告
@@ -1133,7 +1423,7 @@ const ProjectRoom = ({
           <button
             onClick={() => void handleIntervene()}
             disabled={isIntervening}
-            className="px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2 disabled:opacity-60"
+            className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-xs sm:text-sm font-semibold transition-colors disabled:opacity-60"
           >
             <ShieldCheck size={16} />
             {isIntervening ? '干预中...' : '紧急干预'}
@@ -1141,7 +1431,7 @@ const ProjectRoom = ({
           {isDesignPhase ? (
             <button
               onClick={() => setIsDesignReviewOpen(true)}
-              className="px-4 py-2 bg-primary text-slate-950 hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
+              className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 bg-primary text-slate-950 hover:bg-primary/90 rounded-lg text-xs sm:text-sm font-semibold transition-colors"
             >
               <FileText size={16} />
               提交设计审查卡
@@ -1151,21 +1441,119 @@ const ProjectRoom = ({
       </header>
 
       <div className="flex-1 overflow-hidden flex">
-        <main className="flex-1 overflow-y-auto p-8 space-y-8">
-          <div className="flex items-center gap-4 p-1 bg-white/5 rounded-xl border border-border-subtle w-fit">
-            {(['任务', '阶段', '交付物', '时间线'] as ProjectRoomTab[]).map((tab) => (
-              <button
-                key={tab}
-                onClick={() => setActiveTab(tab)}
-                className={cn(
-                  'px-4 py-1.5 rounded-lg text-xs font-bold transition-all',
-                  activeTab === tab ? 'bg-surface-muted text-white shadow-sm' : 'text-slate-500 hover:text-slate-300',
-                )}
-              >
-                {tab}
-              </button>
-            ))}
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-8">
+          <div className="w-full overflow-x-auto scrollbar-hide">
+            <div className="inline-flex min-w-max items-center gap-2 p-1 bg-white/5 rounded-xl border border-border-subtle">
+              {(['任务', '阶段', '交付物', '时间线'] as ProjectRoomTab[]).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setActiveTab(tab)}
+                  className={cn(
+                    'px-4 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap inline-flex items-center gap-1.5',
+                    activeTab === tab ? 'bg-surface-muted text-white shadow-sm' : 'text-slate-500 hover:text-slate-300',
+                  )}
+                >
+                  {tab}
+                  <span className={cn(
+                    'text-[10px] px-1.5 py-0.5 rounded-full border',
+                    activeTab === tab ? 'border-white/20 text-slate-200 bg-white/10' : 'border-border-subtle text-slate-500 bg-white/5',
+                  )}>
+                    {tabStats[tab]}
+                  </span>
+                </button>
+              ))}
+            </div>
           </div>
+
+          {activeTab === '交付物' ? (
+          <section className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                <CheckCircle2 size={14} />
+                最终验收成果
+              </h3>
+              {isLoadingFinalArtifacts ? (
+                <Badge variant="default">同步中</Badge>
+              ) : finalArtifacts ? (
+                <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
+                  {finalArtifacts.readyForAcceptance
+                    ? `已就绪 ${finalArtifacts.coverage.provided}/${finalArtifacts.coverage.required}`
+                    : `待补齐 ${finalArtifacts.coverage.missing} 项`}
+                </Badge>
+              ) : (
+                <Badge variant="default">暂无</Badge>
+              )}
+            </div>
+
+            {finalArtifacts ? (
+              <div className="space-y-3">
+                {finalArtifacts.missingRequired.length > 0 ? (
+                  <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                    缺失验收产物：{finalArtifacts.missingRequired.join('、')}
+                  </div>
+                ) : null}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {quickFinalArtifacts.map((artifact) => (
+                    <div key={`${artifact.key}-${artifact.deliverableId || artifact.url || artifact.name}`} className="rounded-xl border border-border-subtle bg-surface-soft p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs text-slate-400">{artifact.category}</p>
+                        <Badge variant={artifact.ready ? (artifact.required ? 'primary' : 'accent') : 'warning'}>
+                          {artifact.ready ? (artifact.required ? '必需-就绪' : '附加') : '待完善'}
+                        </Badge>
+                      </div>
+                      <p className="text-sm font-semibold text-white">{artifact.name}</p>
+                      <p className="text-[11px] text-slate-500">
+                        {artifact.stageType || '-'} · {artifact.status || '-'} · {artifact.updatedAt ? new Date(artifact.updatedAt).toLocaleString('zh-CN') : '-'}
+                      </p>
+                      <p className="text-[11px] text-slate-400 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
+                      {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => handleOpenFinalArtifact(artifact)}
+                          className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-200 hover:bg-white/10 flex items-center gap-1"
+                        >
+                          {artifact.source === 'link' ? <ExternalLink size={11} /> : <FileText size={11} />}
+                          {artifact.source === 'link' ? '打开链接' : '查看内容'}
+                        </button>
+                        {artifact.content ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleDownloadFinalArtifact(artifact)}
+                            disabled={downloadingArtifactKey === artifact.key}
+                            className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25 disabled:opacity-60 flex items-center gap-1"
+                          >
+                            <Download size={11} />
+                            {downloadingArtifactKey === artifact.key ? '下载中...' : '下载文件'}
+                          </button>
+                        ) : null}
+                        {artifact.url ? (
+                          <button
+                            type="button"
+                            onClick={() => void handleCopyFinalArtifactLink(artifact)}
+                            className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10 flex items-center gap-1"
+                          >
+                            <Copy size={11} />
+                            复制链接
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                  {quickFinalArtifacts.length === 0 ? (
+                    <div className="col-span-full rounded-xl border border-border-subtle bg-surface-soft p-4 text-xs text-slate-500">
+                      暂无可展示的验收成果，请先推进阶段交付物。
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 text-xs text-slate-500">
+                正在准备验收成果清单...
+              </div>
+            )}
+          </section>
+          ) : null}
 
           {activeTab === '任务' ? (
             <>
@@ -1269,9 +1657,16 @@ const ProjectRoom = ({
                           <div className="flex items-center justify-between gap-3">
                             <div>
                               <p className="text-sm text-white font-medium">{item.name}</p>
-                              <p className="text-[11px] text-slate-500 mt-1">{new Date(item.updatedAt).toLocaleString('zh-CN')} · {roleLabel(item.createdBy)}</p>
+                              <p className="text-[11px] text-slate-500 mt-1">
+                                {new Date(item.updatedAt).toLocaleString('zh-CN')} · {roleLabel(item.createdBy)} · {isDeliverableReadable(item) ? '可查阅' : '正文待补全'}
+                              </p>
                             </div>
-                            <Badge variant={statusVariantByDeliverable(item.status)}>{DELIVERABLE_STATUS_LABELS[item.status]}</Badge>
+                            <div className="flex items-center gap-2">
+                              <Badge variant={isDeliverableReadable(item) ? 'accent' : 'warning'}>
+                                {isDeliverableReadable(item) ? '正文完整' : '正文偏短'}
+                              </Badge>
+                              <Badge variant={statusVariantByDeliverable(item.status)}>{DELIVERABLE_STATUS_LABELS[item.status]}</Badge>
+                            </div>
                           </div>
                         </button>
                       ))}
@@ -1334,6 +1729,9 @@ const ProjectRoom = ({
                       <p className="text-[11px] text-slate-500">
                         通过 {acceptanceStats.approved} · 驳回 {acceptanceStats.rejected} · 待处理 {acceptanceStats.submitted} · 草稿 {acceptanceStats.draft}
                       </p>
+                      <p className="text-[11px] text-slate-500">
+                        可查阅 {acceptanceStats.readable} · 待补正文 {acceptanceStats.unreadable}
+                      </p>
 
                       <div className="space-y-1">
                         <p className="text-[11px] text-slate-500">阶段交付物 ({stageDeliverables.length})</p>
@@ -1343,7 +1741,12 @@ const ProjectRoom = ({
                             onClick={() => setPreviewDeliverable(item)}
                             className="w-full text-left text-xs text-slate-300 p-2 rounded-lg bg-white/5 hover:bg-white/10"
                           >
-                            {item.name}
+                            <span className="inline-flex items-center gap-2">
+                              <span>{item.name}</span>
+                              <span className={cn('text-[10px]', isDeliverableReadable(item) ? 'text-primary' : 'text-warning')}>
+                                {isDeliverableReadable(item) ? '可查阅' : '正文待补'}
+                              </span>
+                            </span>
                           </button>
                         )) : <p className="text-xs text-slate-500">暂无</p>}
                       </div>
@@ -1375,7 +1778,7 @@ const ProjectRoom = ({
                         <Badge variant="default">{stageDeliverables.length} 份交付</Badge>
                       </div>
                       <p className="text-[11px] text-slate-500">
-                        验收统计: 通过 {acceptanceStats.approved} · 驳回 {acceptanceStats.rejected} · 待处理 {acceptanceStats.submitted}
+                        验收统计: 通过 {acceptanceStats.approved} · 驳回 {acceptanceStats.rejected} · 待处理 {acceptanceStats.submitted} · 可查阅 {acceptanceStats.readable}
                       </p>
 
                       {stageDeliverables.length > 0 ? (
@@ -1390,10 +1793,15 @@ const ProjectRoom = ({
                                 <div>
                                   <p className="text-sm font-semibold text-white">{item.name}</p>
                                   <p className="text-xs text-slate-500 mt-1">
-                                    版本 v{item.version ?? 1} · 产出人 {roleLabel(item.createdBy)} · {new Date(item.updatedAt).toLocaleString('zh-CN')}
+                                    版本 v{item.version ?? 1} · 产出人 {roleLabel(item.createdBy)} · {new Date(item.updatedAt).toLocaleString('zh-CN')} · {isDeliverableReadable(item) ? '可查阅' : '正文待补全'}
                                   </p>
                                 </div>
-                                <Badge variant={statusVariantByDeliverable(item.status)}>{DELIVERABLE_STATUS_LABELS[item.status]}</Badge>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant={isDeliverableReadable(item) ? 'accent' : 'warning'}>
+                                    {isDeliverableReadable(item) ? '正文完整' : '正文偏短'}
+                                  </Badge>
+                                  <Badge variant={statusVariantByDeliverable(item.status)}>{DELIVERABLE_STATUS_LABELS[item.status]}</Badge>
+                                </div>
                               </div>
                             </button>
                           ))}
@@ -1414,8 +1822,56 @@ const ProjectRoom = ({
                 <History size={14} />
                 项目时间线
               </h3>
+
+              <div className="bg-surface-soft border border-border-subtle rounded-2xl p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Agent 执行证据</p>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="default">总计 {executionSummary.total}</Badge>
+                    <Badge variant="primary">成功 {executionSummary.success}</Badge>
+                    <Badge variant={executionSummary.failed > 0 ? 'danger' : 'default'}>失败 {executionSummary.failed}</Badge>
+                    <Badge variant={executionSummary.realModelRuns > 0 ? 'accent' : 'warning'}>
+                      真实模型 {executionSummary.realModelRuns}
+                    </Badge>
+                  </div>
+                </div>
+                {isLoadingExecutions ? (
+                  <p className="text-xs text-slate-500">执行证据同步中...</p>
+                ) : executionRecords.length > 0 ? (
+                  <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                    {executionRecords.slice(0, 12).map((record) => (
+                      <div key={record.id} className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs text-slate-300">
+                            {new Date(record.createdAt).toLocaleString('zh-CN')} · {STAGE_LABELS[record.stageType] || record.stageType} · {roleLabel(record.role)}
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <Badge variant={record.status === 'failed' ? 'danger' : 'primary'}>{record.status}</Badge>
+                            <Badge variant="accent">{record.provider || record.runtimeMode || 'unknown'}</Badge>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-500">
+                          action: {record.action} · model: {record.model || 'n/a'} · latency: {record.latencyMs ?? '-'}ms
+                        </p>
+                        {record.promptSummary ? (
+                          <p className="text-[11px] text-slate-400 whitespace-pre-wrap">{record.promptSummary}</p>
+                        ) : null}
+                        {record.outputPreview ? (
+                          <p className="text-[11px] text-slate-300 whitespace-pre-wrap">{record.outputPreview}</p>
+                        ) : null}
+                        {record.errorMessage ? (
+                          <p className="text-[11px] text-danger whitespace-pre-wrap">{record.errorMessage}</p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">暂无执行证据（尚未触发阶段 Agent 调用）</p>
+                )}
+              </div>
+
               <div className="space-y-3">
-                {timelineItems.length > 0 ? timelineItems.map((item) => (
+                {timelineEvents.length > 0 ? timelineEvents.map((item) => (
                   <div key={item.id} className="bg-surface-soft border border-border-subtle rounded-2xl p-4">
                     <div className="flex items-start justify-between gap-3">
                       <div>
@@ -1607,6 +2063,90 @@ const ProjectRoom = ({
                     通过 {acceptanceReport.summary.signoffApproved} / 驳回 {acceptanceReport.summary.signoffRejected}
                   </p>
                 </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">最终验收成果（可直接查阅）</h4>
+                  {finalArtifacts ? (
+                    <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
+                      {finalArtifacts.readyForAcceptance ? '可验收确认' : `缺失 ${finalArtifacts.coverage.missing} 项`}
+                    </Badge>
+                  ) : (
+                    <Badge variant="default">同步中</Badge>
+                  )}
+                </div>
+
+                {finalArtifacts ? (
+                  <>
+                    {finalArtifacts.missingRequired.length > 0 ? (
+                      <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
+                        缺失必需产物：{finalArtifacts.missingRequired.join('、')}
+                      </div>
+                    ) : null}
+
+                    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                      {finalArtifacts.artifacts.map((artifact) => (
+                        <div key={`${artifact.key}-${artifact.deliverableId || artifact.url || artifact.name}`} className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-xs text-slate-400">{artifact.category}</p>
+                            <Badge variant={artifact.ready ? (artifact.required ? 'primary' : 'accent') : 'warning'}>
+                              {artifact.ready ? (artifact.required ? '必需-就绪' : '附加') : '待完善'}
+                            </Badge>
+                          </div>
+                          <p className="text-sm font-semibold text-white">{artifact.name}</p>
+                          <p className="text-[11px] text-slate-500">
+                            {artifact.stageType || '-'} · {artifact.status || '-'} · {artifact.updatedAt ? new Date(artifact.updatedAt).toLocaleString('zh-CN') : '-'}
+                          </p>
+                          <p className="text-xs text-slate-300 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
+                          {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
+                          <div className="flex flex-wrap items-center gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => handleOpenFinalArtifact(artifact)}
+                              className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-200 hover:bg-white/10 flex items-center gap-1"
+                            >
+                              {artifact.source === 'link' ? <ExternalLink size={11} /> : <FileText size={11} />}
+                              {artifact.source === 'link' ? '打开链接' : '查看内容'}
+                            </button>
+                            {artifact.content ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleDownloadFinalArtifact(artifact)}
+                                disabled={downloadingArtifactKey === artifact.key}
+                                className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25 disabled:opacity-60 flex items-center gap-1"
+                              >
+                                <Download size={11} />
+                                {downloadingArtifactKey === artifact.key ? '下载中...' : '下载文件'}
+                              </button>
+                            ) : null}
+                            {artifact.url ? (
+                              <button
+                                type="button"
+                                onClick={() => void handleCopyFinalArtifactLink(artifact)}
+                                className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10 flex items-center gap-1"
+                              >
+                                <Copy size={11} />
+                                复制链接
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-1.5">
+                      <h5 className="text-[11px] font-bold uppercase tracking-widest text-slate-500">验收确认清单</h5>
+                      {finalArtifacts.checklist.map((item) => (
+                        <p key={item} className="text-xs text-slate-300">- {item}</p>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 text-xs text-slate-500">
+                    正在加载最终验收成果...
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
@@ -1949,14 +2489,36 @@ const ProjectRoom = ({
         <div className="space-y-3">
           {previewDeliverable ? (
             <>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <Badge variant={statusVariantByDeliverable(previewDeliverable.status)}>{DELIVERABLE_STATUS_LABELS[previewDeliverable.status]}</Badge>
+                <Badge variant={isDeliverableReadable(previewDeliverable) ? 'accent' : 'warning'}>
+                  {isDeliverableReadable(previewDeliverable) ? '正文完整' : `正文偏短 (${getDeliverableContentLength(previewDeliverable)} 字)`}
+                </Badge>
                 <span className="text-xs text-slate-500">
                   阶段: {STAGE_LABELS[previewDeliverable.stageType] || previewDeliverable.stageType} ·
                   版本 v{previewDeliverable.version ?? 1} ·
                   产出人 {roleLabel(previewDeliverable.createdBy)} ·
                   更新于 {new Date(previewDeliverable.updatedAt).toLocaleString('zh-CN')}
                 </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadDeliverable(previewDeliverable)}
+                  disabled={downloadingDeliverableId === previewDeliverable.id}
+                  className="px-3 py-1.5 rounded-md bg-primary/15 border border-primary/30 text-xs text-primary hover:bg-primary/25 disabled:opacity-60 flex items-center gap-1"
+                >
+                  <Download size={12} />
+                  {downloadingDeliverableId === previewDeliverable.id ? '下载中...' : '下载交付物'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCopyDeliverableContent(previewDeliverable)}
+                  className="px-3 py-1.5 rounded-md bg-white/5 border border-border-subtle text-xs text-slate-200 hover:bg-white/10 flex items-center gap-1"
+                >
+                  <Copy size={12} />
+                  复制正文
+                </button>
               </div>
               <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border-subtle bg-surface-muted p-4">
                 <pre className="text-xs leading-6 text-slate-200 whitespace-pre-wrap break-words">{previewDeliverable.content || '该交付物暂无正文内容。'}</pre>

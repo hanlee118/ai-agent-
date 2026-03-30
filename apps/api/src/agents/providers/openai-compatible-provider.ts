@@ -12,66 +12,95 @@ export async function runOpenAICompatibleAgent(
   config: OpenAICompatibleConfig,
   context: AgentRunContext
 ): Promise<AgentRunResult> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 20000);
+  let lastError: unknown;
 
-  try {
-    const response = await fetch(`${config.apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${config.apiKey}`
-      },
-      body: JSON.stringify({
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 45000);
+
+    try {
+      const response = await fetch(`${config.apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.apiKey}`
+        },
+        body: JSON.stringify({
+          model: config.model,
+          temperature: 0.3,
+          messages: [
+            {
+              role: "system",
+              content: buildSystemPrompt(context)
+            },
+            {
+              role: "user",
+              content: [
+                `项目名称：${context.projectName}`,
+                `项目描述：${context.projectDescription}`,
+                `当前阶段：${STAGE_LABELS[context.stageType]}`,
+                `当前角色：${ROLE_LABELS[context.role]}`,
+                `关键词：${context.parsedIntent.keywords.join(" / ") || "无"}`,
+                `约束：${context.parsedIntent.constraints.join("；") || "无"}`,
+                `风险：${context.parsedIntent.risks.join("；") || "无"}`,
+                `补充摘要：${context.summary ?? "无"}`,
+                "",
+                ...buildOutputGuidance(context)
+              ].join("\n")
+            }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        if (attempt < 2 && isTransientStatus(response.status)) {
+          await waitBeforeRetry(attempt);
+          continue;
+        }
+        throw new Error(`Model request failed with status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+      };
+
+      const content = payload.choices?.[0]?.message?.content?.trim();
+      if (!content) {
+        throw new Error("Model response did not include content");
+      }
+
+      return {
+        provider: "openai-compatible" satisfies RuntimeMode,
         model: config.model,
-        temperature: 0.3,
-        messages: [
-          {
-            role: "system",
-            content: buildSystemPrompt(context)
-          },
-          {
-            role: "user",
-            content: [
-              `项目名称：${context.projectName}`,
-              `项目描述：${context.projectDescription}`,
-              `当前阶段：${STAGE_LABELS[context.stageType]}`,
-              `当前角色：${ROLE_LABELS[context.role]}`,
-              `关键词：${context.parsedIntent.keywords.join(" / ") || "无"}`,
-              `约束：${context.parsedIntent.constraints.join("；") || "无"}`,
-              `风险：${context.parsedIntent.risks.join("；") || "无"}`,
-              `补充摘要：${context.summary ?? "无"}`,
-              "",
-              ...buildOutputGuidance(context)
-            ].join("\n")
-          }
-        ]
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Model request failed with status ${response.status}`);
+        title: `${ROLE_LABELS[context.role]}正在推进${STAGE_LABELS[context.stageType]}阶段`,
+        body: content,
+        thinkingSummary: deriveThinkingSummary(content)
+      };
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const transientError = /aborted|timeout|timed out|fetch failed|network/i.test(message);
+      if (attempt < 2 && transientError) {
+        await waitBeforeRetry(attempt);
+        continue;
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const payload = (await response.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-
-    const content = payload.choices?.[0]?.message?.content?.trim();
-    if (!content) {
-      throw new Error("Model response did not include content");
-    }
-
-    return {
-      provider: "openai-compatible" satisfies RuntimeMode,
-      title: `${ROLE_LABELS[context.role]}正在推进${STAGE_LABELS[context.stageType]}阶段`,
-      body: content,
-      thinkingSummary: deriveThinkingSummary(content)
-    };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "model request failed"));
+}
+
+function isTransientStatus(status: number) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+async function waitBeforeRetry(attempt: number) {
+  const delayMs = Math.min(2500, attempt * 600);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function deriveThinkingSummary(content: string) {

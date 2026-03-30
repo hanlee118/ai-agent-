@@ -36,6 +36,7 @@ export function useRealData(): RealDataState {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasLoadedOnceRef = useRef(false);
 
   const fetchManagedAgents = useCallback(async (): Promise<Agent[]> => {
     try {
@@ -85,7 +86,10 @@ export function useRealData(): RealDataState {
   }, []);
 
   const refresh = useCallback(async () => {
-    setLoading(true);
+    const isFirstLoad = !hasLoadedOnceRef.current;
+    if (isFirstLoad) {
+      setLoading(true);
+    }
     setError(null);
 
     try {
@@ -111,14 +115,19 @@ export function useRealData(): RealDataState {
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load OpenClaw data';
       setError(message);
-      setAgents([]);
-      setProjects([]);
-      setTasks([]);
-      setSessions([]);
-      setWorkspace(null);
-      setRuntime(null);
+      if (isFirstLoad) {
+        setAgents([]);
+        setProjects([]);
+        setTasks([]);
+        setSessions([]);
+        setWorkspace(null);
+        setRuntime(null);
+      }
     } finally {
-      setLoading(false);
+      if (isFirstLoad) {
+        hasLoadedOnceRef.current = true;
+        setLoading(false);
+      }
     }
   }, [fetchManagedAgents, mergeAgents]);
 

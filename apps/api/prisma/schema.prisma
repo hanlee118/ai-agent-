@@ -189,6 +189,7 @@ model Project {
   tasks               Task[]
   deliverables        Deliverable[]
   timeline            TimelineEvent[]
+  executions          ProjectExecution[]
 }
 
 model Stage {
@@ -257,6 +258,31 @@ model Task {
 
   @@index([projectId, stageType])
   @@index([assignee, status])
+}
+
+model ProjectExecution {
+  id             String   @id @default(cuid())
+  projectId      String
+  stageType      String
+  role           String
+  action         String
+  status         String
+  provider       String?
+  model          String?
+  requestedMode  String?
+  runtimeMode    String?
+  promptSummary  String?
+  outputPreview  String?
+  errorMessage   String?
+  latencyMs      Int?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([projectId, stageType, createdAt])
+  @@index([status, createdAt])
 }
 
 // ============================================================

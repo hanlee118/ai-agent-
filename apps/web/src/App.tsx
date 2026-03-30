@@ -51,7 +51,51 @@ const APP_TABS = [
 const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
   Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
 
+const AUTH_CACHE_KEY = 'occ-auth-bootstrap';
+const AUTH_BYPASS_IN_DEV = import.meta.env.DEV && import.meta.env.VITE_ENABLE_AUTH !== 'true';
+
+const readCachedAuthState = (): { setupComplete: boolean; authenticated: boolean } | null => {
+  if (typeof window === 'undefined') {
+    return null;
+  }
+  try {
+    const raw = window.sessionStorage.getItem(AUTH_CACHE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as { setupComplete?: unknown; authenticated?: unknown };
+    if (typeof parsed?.setupComplete === 'boolean' && typeof parsed?.authenticated === 'boolean') {
+      return {
+        setupComplete: parsed.setupComplete,
+        authenticated: parsed.authenticated,
+      };
+    }
+  } catch {
+    // ignore invalid cache
+  }
+  return null;
+};
+
+const persistAuthState = (setupComplete: boolean, authenticated: boolean) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.sessionStorage.setItem(
+    AUTH_CACHE_KEY,
+    JSON.stringify({ setupComplete, authenticated }),
+  );
+};
+
+const clearAuthStateCache = () => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  window.sessionStorage.removeItem(AUTH_CACHE_KEY);
+};
+
 export default function App() {
+  const cachedAuthStateRef = useRef<{ setupComplete: boolean; authenticated: boolean } | null>(readCachedAuthState());
+  const cachedAuthState = cachedAuthStateRef.current;
   const [toasts, setToasts] = useState<any[]>([]);
   const toastCounterRef = useRef(0);
 
@@ -67,31 +111,55 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState('dashboard');
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [isInitialized, setIsInitialized] = useState<boolean | null>(null);
-  const [isLoggedIn, setIsLoggedIn] = useState<boolean | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [isInitialized, setIsInitialized] = useState<boolean>(
+    AUTH_BYPASS_IN_DEV ? true : (cachedAuthState?.setupComplete ?? true),
+  );
+  const [isLoggedIn, setIsLoggedIn] = useState<boolean>(
+    AUTH_BYPASS_IN_DEV ? true : (cachedAuthState?.authenticated ?? false),
+  );
+  const [authLoading, setAuthLoading] = useState(
+    AUTH_BYPASS_IN_DEV ? false : cachedAuthState === null,
+  );
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
+    if (AUTH_BYPASS_IN_DEV) {
+      setIsInitialized(true);
+      setIsLoggedIn(true);
+      setAuthLoading(false);
+      persistAuthState(true, true);
+      return;
+    }
+
     let cancelled = false;
+    const hasCachedSnapshot = cachedAuthState !== null;
 
     const bootstrapAuth = async () => {
-      setAuthLoading(true);
+      if (!hasCachedSnapshot) {
+        setAuthLoading(true);
+      }
       try {
         const status = await authApi.getStatus();
         if (cancelled) {
           return;
         }
-        setIsInitialized(Boolean(status.setupComplete));
-        setIsLoggedIn(Boolean(status.authenticated));
+        const setupComplete = Boolean(status.setupComplete);
+        const authenticated = Boolean(status.authenticated);
+        setIsInitialized(setupComplete);
+        setIsLoggedIn(authenticated);
+        persistAuthState(setupComplete, authenticated);
         setError('');
       } catch (err) {
         if (cancelled) {
           return;
         }
-        setIsInitialized(true);
-        setIsLoggedIn(false);
+        // Keep a valid cached snapshot to avoid full-screen auth flicker on transient failures.
+        if (!hasCachedSnapshot) {
+          setIsInitialized(true);
+          setIsLoggedIn(false);
+          persistAuthState(true, false);
+        }
         setError(err instanceof Error ? err.message : '认证服务暂不可用');
       } finally {
         if (!cancelled) {
@@ -115,8 +183,11 @@ export default function App() {
 
     try {
       const status = await authApi.login(password.trim());
-      setIsInitialized(Boolean(status.setupComplete));
-      setIsLoggedIn(Boolean(status.authenticated));
+      const setupComplete = Boolean(status.setupComplete);
+      const authenticated = Boolean(status.authenticated);
+      setIsInitialized(setupComplete);
+      setIsLoggedIn(authenticated);
+      persistAuthState(setupComplete, authenticated);
       setError('');
       setPassword('');
       addToast("登录成功，欢迎指挥官", "success");
@@ -134,8 +205,11 @@ export default function App() {
 
     try {
       const status = await authApi.setup(password.trim());
-      setIsInitialized(Boolean(status.setupComplete));
-      setIsLoggedIn(Boolean(status.authenticated));
+      const setupComplete = Boolean(status.setupComplete);
+      const authenticated = Boolean(status.authenticated);
+      setIsInitialized(setupComplete);
+      setIsLoggedIn(authenticated);
+      persistAuthState(setupComplete, authenticated);
       setPassword('');
       setError('');
       addToast("系统初始化完成", "success");
@@ -146,6 +220,11 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    if (AUTH_BYPASS_IN_DEV) {
+      addToast("开发模式已启用免登录", "info");
+      return;
+    }
+
     try {
       await authApi.logout();
     } catch {
@@ -153,6 +232,7 @@ export default function App() {
     } finally {
       setIsLoggedIn(false);
       setPassword('');
+      clearAuthStateCache();
       addToast("已安全退出系统", "info");
     }
   };
@@ -207,7 +287,7 @@ export default function App() {
       return;
     }
 
-    const routeKey = `${urlSearch}|projects:${projects.length}|agents:${agents.length}`;
+    const routeKey = urlSearch;
     if (deepLinkRouteHandledRef.current === routeKey) {
       return;
     }
@@ -220,31 +300,25 @@ export default function App() {
     }
 
     if (targetProjectId) {
-      const projectMatched = projects.length === 0 || projects.some((project) => project.id === targetProjectId);
-      if (projectMatched) {
-        setSelectedProjectId(targetProjectId);
-        if (!nextTab || nextTab === 'project-room' || params.has('signoff_project_id')) {
-          setActiveTab('project-room');
-        }
-        applied = true;
+      setSelectedProjectId(targetProjectId);
+      if (!nextTab || nextTab === 'project-room' || params.has('signoff_project_id')) {
+        setActiveTab('project-room');
       }
+      applied = true;
     }
 
     if (targetAgentId) {
-      const agentMatched = agents.length === 0 || agents.some((agent) => agent.id === targetAgentId);
-      if (agentMatched) {
-        setSelectedAgentId(targetAgentId);
-        if (!nextTab || nextTab === 'agent-commander') {
-          setActiveTab('agent-commander');
-        }
-        applied = true;
+      setSelectedAgentId(targetAgentId);
+      if (!nextTab || nextTab === 'agent-commander') {
+        setActiveTab('agent-commander');
       }
+      applied = true;
     }
 
     if (applied) {
       deepLinkRouteHandledRef.current = routeKey;
     }
-  }, [agents, isLoggedIn, projects, urlSearch]);
+  }, [isLoggedIn, urlSearch]);
 
   const loadManagedModels = useCallback(async () => {
     try {
@@ -262,6 +336,13 @@ export default function App() {
     }
     void loadManagedModels();
   }, [isLoggedIn, loadManagedModels]);
+
+  useEffect(() => {
+    if (!isLoggedIn) {
+      return;
+    }
+    void refresh();
+  }, [isLoggedIn, refresh]);
 
   const runtimeModels = useMemo(
     () => buildRuntimeModels(runtime, agents, projects, tasks, sessions),
@@ -447,7 +528,7 @@ export default function App() {
     setActiveTab('agent-commander');
   };
 
-  if (authLoading || isInitialized === null || isLoggedIn === null) {
+  if (authLoading) {
     return (
       <ErrorBoundary>
         <div className="h-screen w-full bg-surface flex items-center justify-center p-6 bg-[radial-gradient(circle_at_50%_50%,rgba(0,242,255,0.05),transparent_70%)]">

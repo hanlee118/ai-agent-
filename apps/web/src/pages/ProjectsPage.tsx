@@ -2,8 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, BarChart3, Briefcase, ChevronDown, Filter, Pause, Play, Plus, SkipForward, Trash2, XCircle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { agents, projects } from '../lib/runtimeCollections';
-import { projectsApi } from '../lib/api';
+import { projectsApi, type ProjectCleanupCandidate } from '../lib/api';
 import { Badge } from './impl/GovernanceShared';
+import SurfaceModal from './impl/SurfaceModal';
 
 type Props = {
   onSelectProject: (id: string) => void;
@@ -22,10 +23,16 @@ type AutomationState = {
 };
 
 export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProject, onRefreshData }: Props) {
-  const [statusFilter, setStatusFilter] = useState<'all' | 'development' | 'planning' | 'blocked'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'Planning' | 'Development' | 'Testing' | 'Completed' | 'Blocked' | 'At Risk'>('all');
   const [actionKey, setActionKey] = useState<string | null>(null);
   const [automation, setAutomation] = useState<AutomationState | null>(null);
   const [automationLoading, setAutomationLoading] = useState(false);
+  const [isCleanupCenterOpen, setIsCleanupCenterOpen] = useState(false);
+  const [cleanupLoading, setCleanupLoading] = useState(false);
+  const [cleanupRunning, setCleanupRunning] = useState(false);
+  const [cleanupCandidates, setCleanupCandidates] = useState<ProjectCleanupCandidate[]>([]);
+  const [selectedCleanupIds, setSelectedCleanupIds] = useState<string[]>([]);
+  const [cleanupMode, setCleanupMode] = useState<'candidates' | 'all'>('candidates');
 
   useEffect(() => {
     let cancelled = false;
@@ -111,29 +118,134 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
     }
   };
 
+  const cleanupReasonLabel: Record<string, string> = {
+    paused: '已暂停',
+    test_like: '测试/验证项目',
+    duplicate_name: '重复项目旧版本',
+  };
+
+  const recommendedCleanupIds = useMemo(
+    () => cleanupCandidates.filter((item) => item.recommended).map((item) => item.id),
+    [cleanupCandidates],
+  );
+
+  const loadCleanupCandidates = async () => {
+    setCleanupLoading(true);
+    try {
+      const candidates = await projectsApi.getCleanupCandidates();
+      setCleanupCandidates(candidates);
+      setSelectedCleanupIds(candidates.filter((item) => item.recommended).map((item) => item.id));
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '加载清理候选失败', 'error');
+    } finally {
+      setCleanupLoading(false);
+    }
+  };
+
+  const openCleanupCenter = async () => {
+    setIsCleanupCenterOpen(true);
+    setCleanupMode('candidates');
+    await loadCleanupCandidates();
+  };
+
+  const toggleCleanupSelection = (id: string) => {
+    setSelectedCleanupIds((prev) => (
+      prev.includes(id)
+        ? prev.filter((item) => item !== id)
+        : [...prev, id]
+    ));
+  };
+
+  const runCleanup = async () => {
+    if (selectedCleanupIds.length === 0) {
+      addToast('请先选择要清理的项目', 'info');
+      return;
+    }
+
+    const confirmed = window.confirm(`确认删除选中的 ${selectedCleanupIds.length} 个项目？删除后不可恢复。`);
+    if (!confirmed) {
+      return;
+    }
+
+    setCleanupRunning(true);
+    try {
+      if (cleanupMode === 'candidates') {
+        const result = await projectsApi.cleanupProjects({
+          ids: selectedCleanupIds,
+        });
+        if (result.deleted.length > 0) {
+          addToast(`清理完成：已删除 ${result.deleted.length} 个项目`, 'success');
+        } else {
+          addToast('未删除任何项目', 'info');
+        }
+        if (result.failed.length > 0) {
+          addToast(`有 ${result.failed.length} 个项目删除失败`, 'error');
+        }
+      } else {
+        const settled = await Promise.allSettled(
+          selectedCleanupIds.map((id) => projectsApi.remove(id)),
+        );
+        const successCount = settled.filter((item) => item.status === 'fulfilled').length;
+        const failedCount = settled.length - successCount;
+        if (successCount > 0) {
+          addToast(`批量删除完成：已删除 ${successCount} 个项目`, 'success');
+        } else {
+          addToast('未删除任何项目', 'info');
+        }
+        if (failedCount > 0) {
+          addToast(`有 ${failedCount} 个项目删除失败`, 'error');
+        }
+      }
+      await onRefreshData();
+      await loadCleanupCandidates();
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '执行项目清理失败', 'error');
+    } finally {
+      setCleanupRunning(false);
+    }
+  };
+
   const avgProgress = projects.length > 0
     ? Math.round(projects.reduce((sum, project) => sum + (project.progress || 0), 0) / projects.length)
     : 0;
   const activeRisks = projects.filter((project) => project.status === 'At Risk' || project.status === 'Blocked').length;
+  const statusOptionLabels: Record<Exclude<typeof statusFilter, 'all'>, string> = {
+    Planning: '规划中',
+    Development: '开发中',
+    Testing: '测试中',
+    Completed: '已完成',
+    Blocked: '阻塞',
+    'At Risk': '风险中',
+  };
   const filteredProjects = useMemo(() => {
     if (statusFilter === 'all') {
       return projects;
     }
-
-    if (statusFilter === 'development') {
-      return projects.filter((project) => project.status === 'Development' || /开发|执行|进行/.test(project.phase || ''));
-    }
-
-    if (statusFilter === 'planning') {
-      return projects.filter((project) => project.status === 'Planning' || /规划|分析|准备/.test(project.phase || ''));
-    }
-
-    return projects.filter((project) =>
-      project.status === 'Blocked'
-      || project.status === 'At Risk'
-      || /风险|阻塞/.test(project.phase || ''),
-    );
+    return projects.filter((project) => project.status === statusFilter);
   }, [statusFilter, projects]);
+
+  const cleanupRows = useMemo(() => {
+    if (cleanupMode === 'candidates') {
+      return cleanupCandidates.map((item) => ({
+        id: item.id,
+        name: item.name,
+        status: item.status,
+        stage: item.currentStage,
+        updatedAt: item.updatedAt,
+        reasons: item.reasons,
+        recommended: item.recommended,
+      }));
+    }
+    return projects.map((project) => ({
+      id: project.id,
+      name: project.name,
+      status: project.status,
+      stage: project.phase || '-',
+      updatedAt: project.updatedAt || new Date().toISOString(),
+      reasons: [] as string[],
+      recommended: false,
+    }));
+  }, [cleanupCandidates, cleanupMode, projects]);
 
   const stats = [
     { label: '项目总数', value: projects.length.toString(), icon: Briefcase, color: 'text-accent' },
@@ -149,19 +261,6 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
           <p className="text-slate-400 mt-1">管理和跟踪工作区中的所有活跃计划。</p>
         </div>
         <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={() => void runAutomationOnce()}
-            disabled={automationLoading}
-            className={cn(
-              'px-4 py-2 rounded-lg text-xs font-semibold border transition-colors',
-              'bg-primary/15 text-primary border-primary/30 hover:bg-primary/20',
-              automationLoading && 'opacity-60 cursor-not-allowed',
-            )}
-            title="立即执行一轮自动推进"
-          >
-            立即执行一轮
-          </button>
           <button
             type="button"
             onClick={() => void toggleAutomation()}
@@ -182,19 +281,27 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
             <select
               value={statusFilter}
               onChange={(event) => {
-                const next = event.target.value as 'all' | 'development' | 'planning' | 'blocked';
+                const next = event.target.value as typeof statusFilter;
                 setStatusFilter(next);
                 addToast('过滤条件已更新', 'info');
               }}
               className="bg-white/5 border border-border-subtle rounded-lg pl-9 pr-8 py-2 text-xs font-bold text-slate-300 appearance-none focus:outline-none focus:ring-1 focus:ring-primary/50"
             >
               <option value="all">所有状态</option>
-              <option value="development">开发中</option>
-              <option value="planning">规划中</option>
-              <option value="blocked">已阻塞</option>
+              {Object.entries(statusOptionLabels).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
             </select>
             <ChevronDown size={12} className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
           </div>
+          <button
+            type="button"
+            onClick={() => void openCleanupCenter()}
+            className="px-4 py-2 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20 border border-rose-500/30 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2"
+          >
+            <Trash2 size={14} />
+            清理中心
+          </button>
           <button onClick={onOpenNewProject} className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2">
             <Plus size={16} />
             创建项目
@@ -203,12 +310,32 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
       </header>
 
       {automation ? (
-        <div className="bg-surface-soft border border-border-subtle rounded-2xl p-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-xs">
-          <span className="text-slate-400">最近执行: {automation.lastRunAt ? new Date(automation.lastRunAt).toLocaleString('zh-CN') : '暂无'}</span>
-          <span className="text-slate-400">执行摘要: {automation.lastSummary || '暂无'}</span>
-          <span className={cn('font-medium', automation.lastError ? 'text-danger' : 'text-emerald-300')}>
-            {automation.lastError ? `最近错误: ${automation.lastError}` : '最近执行无错误'}
-          </span>
+        <div className="bg-surface-soft border border-border-subtle rounded-2xl p-4 space-y-3 text-xs">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+            <span className="text-slate-400">最近执行: {automation.lastRunAt ? new Date(automation.lastRunAt).toLocaleString('zh-CN') : '暂无'}</span>
+            <span className="text-slate-400">执行摘要: {automation.lastSummary || '暂无'}</span>
+            <span className={cn('font-medium', automation.lastError ? 'text-danger' : 'text-emerald-300')}>
+              {automation.lastError ? `最近错误: ${automation.lastError}` : '最近执行无错误'}
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <p className="text-slate-500">
+              “全局自动推进一轮”会对所有可推进项目执行一次自动提交+审批，不等于强制恢复已暂停项目。
+            </p>
+            <button
+              type="button"
+              onClick={() => void runAutomationOnce()}
+              disabled={automationLoading}
+              className={cn(
+                'px-4 py-2 rounded-lg text-xs font-semibold border transition-colors',
+                'bg-primary/15 text-primary border-primary/30 hover:bg-primary/20',
+                automationLoading && 'opacity-60 cursor-not-allowed',
+              )}
+              title="全局自动推进一轮"
+            >
+              全局自动推进一轮
+            </button>
+          </div>
         </div>
       ) : null}
 
@@ -337,6 +464,170 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
           </table>
         </div>
       </div>
+
+      <SurfaceModal
+        isOpen={isCleanupCenterOpen}
+        onClose={() => setIsCleanupCenterOpen(false)}
+        title="项目清理与批量删除"
+        panelClassName="max-w-5xl"
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border-subtle bg-white/5 p-4 text-xs text-slate-300 space-y-1">
+            <p>模式A：候选清理（系统推荐：已暂停 / 测试验证命名 / 重复旧版本）。</p>
+            <p>模式B：全部项目（你可任意多选并删除）。删除后不可恢复。</p>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setCleanupMode('candidates');
+                setSelectedCleanupIds(recommendedCleanupIds);
+              }}
+              className={cn(
+                'px-3 py-1.5 rounded-md border text-xs',
+                cleanupMode === 'candidates'
+                  ? 'bg-primary/15 border-primary/30 text-primary'
+                  : 'bg-white/5 border-border-subtle text-slate-300 hover:bg-white/10',
+              )}
+            >
+              候选清理
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCleanupMode('all');
+                setSelectedCleanupIds([]);
+              }}
+              className={cn(
+                'px-3 py-1.5 rounded-md border text-xs',
+                cleanupMode === 'all'
+                  ? 'bg-primary/15 border-primary/30 text-primary'
+                  : 'bg-white/5 border-border-subtle text-slate-300 hover:bg-white/10',
+              )}
+            >
+              全部项目
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="default">{cleanupMode === 'candidates' ? `候选 ${cleanupCandidates.length}` : `项目 ${projects.length}`}</Badge>
+            <Badge variant="accent">推荐 {recommendedCleanupIds.length}</Badge>
+            <Badge variant="warning">已选 {selectedCleanupIds.length}</Badge>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setSelectedCleanupIds(recommendedCleanupIds)}
+              className="px-3 py-1.5 rounded-md bg-white/5 border border-border-subtle text-xs text-slate-300 hover:bg-white/10"
+            >
+              选择推荐项
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedCleanupIds(cleanupRows.map((item) => item.id))}
+              className="px-3 py-1.5 rounded-md bg-white/5 border border-border-subtle text-xs text-slate-300 hover:bg-white/10"
+            >
+              全选当前列表
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedCleanupIds([])}
+              className="px-3 py-1.5 rounded-md bg-white/5 border border-border-subtle text-xs text-slate-300 hover:bg-white/10"
+            >
+              清空选择
+            </button>
+            <button
+              type="button"
+              onClick={() => void loadCleanupCandidates()}
+              disabled={cleanupLoading}
+              className="px-3 py-1.5 rounded-md bg-primary/15 border border-primary/30 text-xs text-primary hover:bg-primary/25 disabled:opacity-60"
+            >
+              {cleanupLoading ? '刷新中...' : '刷新候选'}
+            </button>
+          </div>
+
+          <div className="max-h-[52vh] overflow-y-auto rounded-xl border border-border-subtle">
+            <table className="w-full text-left border-collapse">
+              <thead>
+                <tr className="bg-white/5 border-b border-border-subtle">
+                  <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">选择</th>
+                  <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">项目</th>
+                  <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">状态</th>
+                  <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">原因</th>
+                  <th className="px-4 py-3 text-[10px] font-bold text-slate-500 uppercase tracking-widest">更新时间</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-border-subtle">
+                {cleanupRows.map((item) => {
+                  const checked = selectedCleanupIds.includes(item.id);
+                  return (
+                    <tr key={item.id} className="hover:bg-white/5">
+                      <td className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleCleanupSelection(item.id)}
+                        />
+                      </td>
+                      <td className="px-4 py-3">
+                        <p className="text-sm text-white font-medium">{item.name}</p>
+                        <p className="text-[11px] text-slate-500 mt-1">{item.id} · {item.stage}</p>
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-300">{item.status}</td>
+                      <td className="px-4 py-3">
+                        {item.reasons.length > 0 ? (
+                          <div className="flex flex-wrap gap-1">
+                            {item.reasons.map((reason) => (
+                              <Badge key={`${item.id}-${reason}`} variant={reason === 'duplicate_name' ? 'warning' : 'default'}>
+                                {cleanupReasonLabel[reason] || reason}
+                              </Badge>
+                            ))}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-slate-500">-</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-xs text-slate-400">{new Date(item.updatedAt).toLocaleString('zh-CN')}</td>
+                    </tr>
+                  );
+                })}
+                {!cleanupLoading && cleanupRows.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-500">
+                      {cleanupMode === 'candidates' ? '当前没有可清理候选项目' : '当前没有项目可删除'}
+                    </td>
+                  </tr>
+                ) : null}
+                {cleanupLoading ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-10 text-center text-sm text-slate-500">候选加载中...</td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setIsCleanupCenterOpen(false)}
+              className="px-4 py-2 rounded-lg border border-border-subtle bg-white/5 text-slate-300 hover:bg-white/10 text-sm"
+            >
+              关闭
+            </button>
+            <button
+              type="button"
+              onClick={() => void runCleanup()}
+              disabled={cleanupRunning || selectedCleanupIds.length === 0}
+              className="px-4 py-2 rounded-lg border border-rose-500/30 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 text-sm font-semibold disabled:opacity-60"
+            >
+              {cleanupRunning ? '清理中...' : `删除所选 (${selectedCleanupIds.length})`}
+            </button>
+          </div>
+        </div>
+      </SurfaceModal>
     </div>
   );
 }

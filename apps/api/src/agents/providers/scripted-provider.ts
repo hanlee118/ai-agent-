@@ -12,6 +12,7 @@ export interface AgentRunContext {
 
 export interface AgentRunResult {
   provider: RuntimeMode;
+  model: string;
   title: string;
   body: string;
   thinkingSummary: string;
@@ -64,9 +65,9 @@ export async function runScriptedAgent(context: AgentRunContext): Promise<AgentR
 
   return {
     provider: "scripted",
+    model: "scripted-agent",
     title: `${ROLE_LABELS[context.role]}正在推进${STAGE_LABELS[context.stageType]}阶段`,
     body,
     thinkingSummary: `${ROLE_LABELS[context.role]} 已完成当前阶段的结构化推演，正在准备正式输出。`
   };
 }
-

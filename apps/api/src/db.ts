@@ -2,7 +2,8 @@ import { PrismaClient } from "@prisma/client";
 import { fileURLToPath } from "node:url";
 
 const appRootUrl = new URL("../", import.meta.url);
-const defaultDatabasePath = fileURLToPath(new URL("./prisma/dev.db", appRootUrl));
+const schemaRootUrl = new URL("../prisma/", import.meta.url);
+const defaultDatabasePath = fileURLToPath(new URL("./dev.db", schemaRootUrl));
 type PrismaClientInstance = InstanceType<typeof PrismaClient>;
 
 process.env.DATABASE_URL = normalizeDatabaseUrl(process.env.DATABASE_URL) || `file:${defaultDatabasePath}`;
@@ -42,5 +43,9 @@ function normalizeDatabaseUrl(value?: string) {
     return raw;
   }
 
-  return `file:${fileURLToPath(new URL(filePath, appRootUrl))}`;
+  const resolveBase = filePath.startsWith("./prisma/") || filePath.startsWith("prisma/")
+    ? appRootUrl
+    : schemaRootUrl;
+
+  return `file:${fileURLToPath(new URL(filePath, resolveBase))}`;
 }

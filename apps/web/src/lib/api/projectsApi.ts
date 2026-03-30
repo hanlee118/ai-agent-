@@ -101,6 +101,70 @@ export type ProjectAcceptanceReport = {
   recommendations: string[];
 };
 
+export type ProjectFinalArtifactsReport = {
+  projectId: string;
+  projectName: string;
+  status: string;
+  currentStage: string;
+  generatedAt: string;
+  readyForAcceptance: boolean;
+  coverage: {
+    required: number;
+    provided: number;
+    missing: number;
+  };
+  artifacts: Array<{
+    key: string;
+    category: string;
+    required: boolean;
+    ready: boolean;
+    issue?: string;
+    source: 'deliverable' | 'link';
+    deliverableId?: string;
+    name: string;
+    stageType?: string;
+    status?: string;
+    version?: number;
+    updatedAt?: string;
+    content?: string;
+    excerpt?: string;
+    url?: string;
+    filePath?: string;
+  }>;
+  missingRequired: string[];
+  checklist: string[];
+};
+
+export type ProjectCleanupCandidate = {
+  id: string;
+  name: string;
+  status: string;
+  currentStage: string;
+  updatedAt: string;
+  reasons: string[];
+  recommended: boolean;
+};
+
+export type ProjectExecutionRecord = {
+  id: string;
+  projectId: string;
+  stageType: string;
+  role: string;
+  action: string;
+  status: 'success' | 'failed' | string;
+  provider?: string | null;
+  model?: string | null;
+  requestedMode?: string | null;
+  runtimeMode?: string | null;
+  promptSummary?: string | null;
+  outputPreview?: string | null;
+  errorMessage?: string | null;
+  latencyMs?: number | null;
+  metadata?: unknown;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export const projectsApi = {
   async list(params?: { status?: string; page?: number; limit?: number }) {
     const searchParams = new URLSearchParams();
@@ -117,6 +181,34 @@ export const projectsApi = {
 
   async getAcceptanceReport(id: string) {
     return request<ProjectAcceptanceReport>(`/projects/${id}/acceptance-report`);
+  },
+
+  async getFinalArtifacts(id: string) {
+    return request<ProjectFinalArtifactsReport>(`/projects/${id}/final-artifacts`);
+  },
+
+  async getExecutions(id: string, limit = 120) {
+    return request<{
+      projectId: string;
+      total: number;
+      executions: ProjectExecutionRecord[];
+    }>(`/projects/${id}/executions?limit=${encodeURIComponent(String(limit))}`);
+  },
+
+  async getCleanupCandidates() {
+    return request<ProjectCleanupCandidate[]>('/projects/cleanup/candidates');
+  },
+
+  async cleanupProjects(input: { ids?: string[]; mode?: 'recommended' | 'all_candidates'; dryRun?: boolean }) {
+    return request<{
+      requested: number;
+      deleted: Array<{ id: string; name: string }>;
+      failed: Array<{ id: string; error: string }>;
+      remaining: number;
+    }>('/projects/cleanup', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
   },
 
   async exportAcceptanceReportMarkdown(id: string) {

@@ -45,6 +45,22 @@ import { previewRequirement } from "../utils/project-parser.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
+const MIN_DELIVERABLE_CONTENT_LENGTH = 180;
+const STAGE_OBJECTIVES: Record<StageType, string> = {
+  INIT: "确认项目目标、边界与团队分工，建立执行基线。",
+  ANALYSIS: "把输入需求转成结构化需求合同、约束与风险清单。",
+  DESIGN: "输出可执行设计方案，明确信息架构、视觉方向与交互规则。",
+  DEV: "把设计与任务拆解落地为可运行实现，并完成联调验证。",
+  ACCEPT: "完成验收验证、结果总结与文档回填，形成可持续迭代闭环。"
+};
+
+const STAGE_NEXT_INPUT: Record<StageType, string> = {
+  INIT: "将项目章程与角色分工交给分析阶段继续细化。",
+  ANALYSIS: "把需求合同、排期和风险清单交给设计阶段产出方案。",
+  DESIGN: "把设计审查卡、方案文档和组件规范交给开发阶段执行。",
+  DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
+  ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
+};
 
 function normalizeDesignReview(input: StageSubmissionInput["designReview"]) {
   if (!input) {
@@ -379,6 +395,8 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
 }
 
 export async function ensureSeedData(runtimeMode: RuntimeMode) {
+  await ensureProjectExecutionStorage();
+
   const existingAgents = await prisma.agentProfile.count();
   if (existingAgents === 0) {
     await prisma.agentProfile.createMany({
@@ -402,6 +420,52 @@ export async function ensureSeedData(runtimeMode: RuntimeMode) {
   }
 
   await reconcileLegacyStageDeliverables();
+
+  const allowRealtimeBackfillOnBoot =
+    runtimeMode === "scripted" || process.env.REAL_MODEL_BOOT_RECONCILE === "true";
+
+  if (allowRealtimeBackfillOnBoot) {
+    await reconcileAllProjectsDeliverables();
+  }
+}
+
+async function ensureProjectExecutionStorage() {
+  await prisma.$executeRawUnsafe(`
+    CREATE TABLE IF NOT EXISTS "ProjectExecution" (
+      "id" TEXT NOT NULL PRIMARY KEY,
+      "projectId" TEXT NOT NULL,
+      "stageType" TEXT NOT NULL,
+      "role" TEXT NOT NULL,
+      "action" TEXT NOT NULL,
+      "status" TEXT NOT NULL,
+      "provider" TEXT,
+      "model" TEXT,
+      "requestedMode" TEXT,
+      "runtimeMode" TEXT,
+      "promptSummary" TEXT,
+      "outputPreview" TEXT,
+      "errorMessage" TEXT,
+      "latencyMs" INTEGER,
+      "metadata" TEXT,
+      "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      "updatedAt" DATETIME NOT NULL,
+      CONSTRAINT "ProjectExecution_projectId_fkey"
+        FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+    )
+  `);
+
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "ProjectExecution_projectId_createdAt_idx"
+    ON "ProjectExecution"("projectId", "createdAt")
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "ProjectExecution_projectId_stageType_createdAt_idx"
+    ON "ProjectExecution"("projectId", "stageType", "createdAt")
+  `);
+  await prisma.$executeRawUnsafe(`
+    CREATE INDEX IF NOT EXISTS "ProjectExecution_status_createdAt_idx"
+    ON "ProjectExecution"("status", "createdAt")
+  `);
 }
 
 async function reconcileLegacyStageDeliverables() {
@@ -431,6 +495,532 @@ async function reconcileLegacyStageDeliverables() {
       })
     )
   );
+}
+
+async function reconcileAllProjectsDeliverables() {
+  const projects = await prisma.project.findMany({
+    select: { id: true }
+  });
+
+  for (const project of projects) {
+    const record = await loadProjectRecord(project.id);
+    if (!record) {
+      continue;
+    }
+    await reconcileProjectDeliverables(record);
+  }
+}
+
+async function loadProjectRecord(id: string) {
+  return prisma.project.findUnique({
+    where: { id },
+    include: {
+      stages: { orderBy: { sortOrder: "asc" } },
+      tasks: { orderBy: [{ stageType: "asc" }, { sortOrder: "asc" }] },
+      deliverables: { orderBy: [{ updatedAt: "desc" }] },
+      timeline: { orderBy: { timestamp: "desc" } }
+    }
+  });
+}
+
+type ProjectRecord = NonNullable<Awaited<ReturnType<typeof loadProjectRecord>>>;
+
+function formatTaskStatusLabel(status: string) {
+  if (status === "done") return "已完成";
+  if (status === "in_progress") return "进行中";
+  if (status === "blocked") return "阻塞";
+  return "待处理";
+}
+
+function extractMarkdownSection(content: string, title: string) {
+  const regex = new RegExp(`${title}\\n([\\s\\S]*?)(\\n##\\s|$)`);
+  const matched = String(content || "").match(regex);
+  return matched?.[1]?.trim() || "";
+}
+
+function buildExecutionOutputPreview(content: string, limit = 260) {
+  const source = [
+    extractMarkdownSection(content, "## Agent 输出正文"),
+    extractMarkdownSection(content, "## 项目摘要"),
+    extractMarkdownSection(content, "## 阶段目标"),
+    String(content || "")
+  ].find((item) => item && item.trim().length > 0) || "";
+
+  const normalized = source.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized;
+}
+
+type StageAgentExecutionInput = {
+  projectId: string;
+  action: string;
+  metadata?: Prisma.InputJsonValue;
+  projectName: string;
+  projectDescription: string;
+  parsedIntent: ParsedIntent;
+  stageType: StageType;
+  role: RoleType;
+  summary?: string;
+};
+
+type StageAgentExecutionRecord = {
+  id: string;
+  projectId: string;
+  stageType: string;
+  role: string;
+  action: string;
+  status: string;
+  provider?: string | null;
+  model?: string | null;
+  requestedMode?: string | null;
+  runtimeMode?: string | null;
+  promptSummary?: string | null;
+  outputPreview?: string | null;
+  errorMessage?: string | null;
+  latencyMs?: number | null;
+  metadata?: Prisma.JsonValue;
+  createdAt: string;
+  updatedAt: string;
+};
+
+async function persistProjectExecutionSafe(data: Prisma.ProjectExecutionUncheckedCreateInput) {
+  try {
+    const projectExists = await prisma.project.count({
+      where: { id: data.projectId }
+    });
+
+    if (!projectExists) {
+      return;
+    }
+
+    await prisma.projectExecution.create({ data });
+  } catch (error) {
+    console.warn(
+      `[projectExecution] failed to persist execution record for project=${data.projectId}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+export async function runProjectStageAgent(input: StageAgentExecutionInput) {
+  const startedAt = Date.now();
+  const runtime = await getRuntimeStatus();
+
+  try {
+    const run = await runStageAgent({
+      projectName: input.projectName,
+      projectDescription: input.projectDescription,
+      parsedIntent: input.parsedIntent,
+      stageType: input.stageType,
+      role: input.role,
+      summary: input.summary
+    });
+
+    await persistProjectExecutionSafe({
+      projectId: input.projectId,
+      stageType: input.stageType,
+      role: input.role,
+      action: input.action,
+      status: "success",
+      provider: run.provider,
+      model: run.model,
+      requestedMode: runtime.requestedMode,
+      runtimeMode: runtime.mode,
+      promptSummary: input.summary || null,
+      outputPreview: buildExecutionOutputPreview(run.body),
+      latencyMs: Math.max(0, Date.now() - startedAt),
+      metadata: input.metadata
+    });
+
+    return run;
+  } catch (error) {
+    await persistProjectExecutionSafe({
+      projectId: input.projectId,
+      stageType: input.stageType,
+      role: input.role,
+      action: input.action,
+      status: "failed",
+      provider: runtime.mode,
+      model: runtime.modelName,
+      requestedMode: runtime.requestedMode,
+      runtimeMode: runtime.mode,
+      promptSummary: input.summary || null,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      latencyMs: Math.max(0, Date.now() - startedAt),
+      metadata: input.metadata
+    });
+
+    throw error;
+  }
+}
+
+function needsDeliverableBackfill(content: string) {
+  const normalized = String(content ?? "").trim();
+  if (!normalized) {
+    return true;
+  }
+  if (normalized.length < MIN_DELIVERABLE_CONTENT_LENGTH) {
+    return true;
+  }
+  return !normalized.includes("## ");
+}
+
+function needsDeliverableAgentUpgrade(content: string, deliverableName: string) {
+  const normalized = String(content ?? "");
+  const trimmed = normalized.trim();
+  const name = String(deliverableName || "");
+  if (!trimmed) {
+    return true;
+  }
+
+  // Legacy auto templates: metadata exists but no runtime/model evidence.
+  if (trimmed.includes("## 交付物元信息") && !trimmed.includes("执行引擎:")) {
+    return true;
+  }
+
+  // Early automation payloads.
+  if (/^#\s*(设计阶段自动交付|自动提交-)/m.test(trimmed)) {
+    return true;
+  }
+
+  if (
+    /(项目排期|客户汇报|实施方案|需求分析|Demo|原型|官网演示|测试报告|回填)/i.test(name)
+    && !trimmed.includes("执行引擎:")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: ProjectRecord["deliverables"][number]) {
+  const stageType = (deliverable.stageType as StageType);
+  const stageLabel = STAGE_LABELS[stageType] || deliverable.stageType;
+  const stageTasks = project.tasks.filter((task) => task.stageType === deliverable.stageType).slice(0, 6);
+  const constraints = readStringArray(project.parsedConstraints).slice(0, 4);
+  const risks = readStringArray(project.parsedRisks).slice(0, 4);
+  const keywords = readStringArray(project.parsedKeywords).slice(0, 6);
+  const createdBy = String(deliverable.createdBy || "");
+
+  const taskLines = stageTasks.length > 0
+    ? stageTasks.map((task, index) => (
+      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "待补充"}`
+    ))
+    : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
+
+  const objective = STAGE_OBJECTIVES[stageType] || "围绕当前阶段目标沉淀可审阅产物。";
+  const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
+
+  return [
+    `# ${deliverable.name}`,
+    "",
+    "## 交付物元信息",
+    `- 项目: ${project.name} (${project.id})`,
+    `- 阶段: ${stageLabel} (${deliverable.stageType})`,
+    `- 当前状态: ${deliverable.status} · 版本 v${deliverable.version}`,
+    `- 产出角色: ${ROLE_LABELS[createdBy as RoleType] || createdBy || "系统"}`,
+    `- 更新时间: ${deliverable.updatedAt.toISOString()}`,
+    "",
+    "## 阶段目标",
+    `- ${objective}`,
+    "",
+    "## 当前任务清单",
+    ...taskLines,
+    "",
+    "## 关键约束",
+    ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
+    "",
+    "## 主要风险",
+    ...(risks.length > 0 ? risks.map((item) => `- ${item}`) : ["- 暂无显式风险，建议补充依赖、资源和时间风险。"]),
+    "",
+    "## 关键词上下文",
+    ...(keywords.length > 0 ? keywords.map((item) => `- ${item}`) : ["- 暂无关键词，可从需求原文中提取业务术语。"]),
+    "",
+    "## 下一阶段输入",
+    `- ${nextInput}`,
+    "- 如需变更目标或范围，请先在需求合同中更新后再推进。",
+    "",
+    "## 审阅与验收建议",
+    "- 审阅是否覆盖目标、范围、风险、任务与交付证据。",
+    "- 若信息不足，请在当前文档补全后再次提交阶段审批。"
+  ].join("\n");
+}
+
+function resolveStageType(value: string): StageType | null {
+  const normalized = String(value || "").toUpperCase();
+  return stageOrder.includes(normalized as StageType) ? (normalized as StageType) : null;
+}
+
+function buildDeliverableChecklist(deliverableName: string, stageType: StageType) {
+  const lowerName = String(deliverableName || "").toLowerCase();
+
+  if (/ppt|汇报|路演/.test(lowerName)) {
+    return [
+      "包含背景、目标、范围、里程碑、风险与下一步。",
+      "每页信息层级清晰，可直接用于客户汇报。",
+      "包含预约演示入口与可执行行动项。"
+    ];
+  }
+
+  if (/word|实施方案|执行方案|落地方案/.test(lowerName)) {
+    return [
+      "明确阶段拆解、负责人、输入输出与依赖关系。",
+      "补充交付标准、验收方式、风险与缓冲策略。",
+      "可直接作为研发执行基线，不依赖口头补充。"
+    ];
+  }
+
+  if (/demo|原型|演示|官网/.test(lowerName)) {
+    return [
+      "主流程可操作、可演示，关键交互有明确反馈。",
+      "支持桌面与移动端基础适配，保留核心 CTA。",
+      "能体现“需求到研发闭环、角色协作、实时监控”三条价值线。"
+    ];
+  }
+
+  if (/回填|验收|测试/.test(lowerName) || stageType === "ACCEPT") {
+    return [
+      "验收结论可追溯到需求目标与验收标准。",
+      "总结新增能力、影响范围与已知限制。",
+      "回填到产品说明文档并记录版本与时间戳。"
+    ];
+  }
+
+  if (stageType === "ANALYSIS") {
+    return [
+      "明确目标、范围、约束、风险与验收标准。",
+      "输出可执行排期与阶段交接条件。",
+      "让设计与研发角色可直接接力。"
+    ];
+  }
+
+  if (stageType === "DESIGN") {
+    return [
+      "输出视觉方向、版式策略、组件规范与 CTA 逻辑。",
+      "包含可访问性检查与审查结论。",
+      "支持直接进入开发实现。"
+    ];
+  }
+
+  if (stageType === "DEV") {
+    return [
+      "描述实现范围、核心模块与联调状态。",
+      "记录验证结果与遗留风险。",
+      "提供进入验收阶段的证据清单。"
+    ];
+  }
+
+  return [
+    "覆盖当前阶段目标与关键任务。",
+    "包含可执行下一步与责任归属。",
+    "提供可审阅证据，支持阶段决策。"
+  ];
+}
+
+async function buildDeliverableBackfillContentWithAgent(
+  project: ProjectRecord,
+  deliverable: ProjectRecord["deliverables"][number],
+  stageRunCache: Map<string, Awaited<ReturnType<typeof runStageAgent>>>
+) {
+  const stageType = resolveStageType(deliverable.stageType);
+  if (!stageType) {
+    return buildDeliverableBackfillContent(project, deliverable);
+  }
+
+  const stageLabel = STAGE_LABELS[stageType] || deliverable.stageType;
+  const stageTasks = project.tasks.filter((task) => task.stageType === deliverable.stageType).slice(0, 6);
+  const constraints = readStringArray(project.parsedConstraints).slice(0, 4);
+  const risks = readStringArray(project.parsedRisks).slice(0, 4);
+  const keywords = readStringArray(project.parsedKeywords).slice(0, 6);
+  const createdBy = String(deliverable.createdBy || "");
+  const stageRole = stageAssignees[stageType] || (createdBy as RoleType) || "ROLE_PM";
+  const parsedIntent = {
+    keywords: readStringArray(project.parsedKeywords),
+    constraints: readStringArray(project.parsedConstraints),
+    risks: readStringArray(project.parsedRisks),
+    suggestedTeam: readRoleArray(project.parsedSuggestedTeam),
+    summary: project.parsedSummary
+  };
+  const stageObjective = STAGE_OBJECTIVES[stageType] || "围绕当前阶段目标沉淀可审阅产物。";
+  const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
+  const taskLines = stageTasks.length > 0
+    ? stageTasks.map((task, index) => (
+      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "待补充"}`
+    ))
+    : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
+  const checklist = buildDeliverableChecklist(deliverable.name, stageType);
+
+  const runCacheKey = `${stageType}:${deliverable.name}`;
+  let run = stageRunCache.get(runCacheKey);
+  if (!run) {
+    run = await runProjectStageAgent({
+      projectId: project.id,
+      action: "deliverable.backfill",
+      metadata: {
+        deliverableId: deliverable.id,
+        deliverableName: deliverable.name
+      },
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent,
+      stageType,
+      role: stageRole,
+      summary: `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`
+    });
+    stageRunCache.set(runCacheKey, run);
+  }
+
+  return [
+    `# ${deliverable.name}`,
+    "",
+    "## 交付物元信息",
+    `- 项目: ${project.name} (${project.id})`,
+    `- 阶段: ${stageLabel} (${deliverable.stageType})`,
+    `- 当前状态: ${deliverable.status} · 版本 v${deliverable.version}`,
+    `- 产出角色: ${ROLE_LABELS[stageRole] || stageRole}`,
+    `- 执行引擎: ${run.provider} · 模型 ${run.model}`,
+    `- 更新时间: ${deliverable.updatedAt.toISOString()}`,
+    "",
+    "## 阶段目标",
+    `- ${stageObjective}`,
+    "",
+    "## 当前任务清单",
+    ...taskLines,
+    "",
+    "## Agent 输出正文",
+    run.body,
+    "",
+    "## 关键约束",
+    ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
+    "",
+    "## 主要风险",
+    ...(risks.length > 0 ? risks.map((item) => `- ${item}`) : ["- 暂无显式风险，建议补充依赖、资源和时间风险。"]),
+    "",
+    "## 关键词上下文",
+    ...(keywords.length > 0 ? keywords.map((item) => `- ${item}`) : ["- 暂无关键词，可从需求原文中提取业务术语。"]),
+    "",
+    "## 验收检查清单",
+    ...checklist.map((item) => `- ${item}`),
+    "",
+    "## 下一阶段输入",
+    `- ${nextInput}`,
+    "- 如需变更目标或范围，请先在需求合同中更新后再推进。"
+  ].join("\n");
+}
+
+async function reconcileProjectDeliverables(project: ProjectRecord) {
+  const stageStatusByType = new Map(project.stages.map((stage) => [stage.type, stage.status]));
+  const stageRunCache = new Map<string, Awaited<ReturnType<typeof runStageAgent>>>();
+  const updates: Array<{ id: string; content: string; status?: string }> = [];
+  const creates: Array<{
+    projectId: string;
+    stageType: string;
+    name: string;
+    type: string;
+    content: string;
+    version: number;
+    status: string;
+    createdBy: string;
+    updatedAt: Date;
+  }> = [];
+  const now = new Date();
+
+  for (const deliverable of project.deliverables) {
+    const stageStatus = stageStatusByType.get(deliverable.stageType);
+    const shouldPromoteStatus =
+      project.status === "completed"
+      && stageStatus === "completed"
+      && (deliverable.status === "draft" || deliverable.status === "submitted");
+
+    const needBackfill = needsDeliverableBackfill(deliverable.content)
+      || needsDeliverableAgentUpgrade(deliverable.content, deliverable.name);
+    if (!needBackfill && !shouldPromoteStatus) {
+      continue;
+    }
+
+    const backfilledContent = needBackfill
+      ? await buildDeliverableBackfillContentWithAgent(project, deliverable, stageRunCache)
+      : deliverable.content;
+
+    updates.push({
+      id: deliverable.id,
+      content: backfilledContent,
+      status: shouldPromoteStatus ? "approved" : undefined
+    });
+  }
+
+  for (const stage of project.stages) {
+    const hasStageDeliverable = project.deliverables.some((item) => item.stageType === stage.type);
+    if (hasStageDeliverable) {
+      continue;
+    }
+    const maxVersion = project.deliverables
+      .filter((item) => item.stageType === stage.type)
+      .reduce((max, item) => Math.max(max, item.version), 0);
+    const stageStatus = stage.status === "completed" ? "approved" : "draft";
+    const stageDraft = {
+      id: randomUUID(),
+      projectId: project.id,
+      stageType: stage.type,
+      name: `${STAGE_LABELS[stage.type as StageType] || stage.type}阶段交付物补全.md`,
+      type: "markdown",
+      content: buildDeliverableBackfillContent(project, {
+        id: randomUUID(),
+        projectId: project.id,
+        stageType: stage.type,
+        name: `${STAGE_LABELS[stage.type as StageType] || stage.type}阶段交付物补全.md`,
+        type: "markdown",
+        content: "",
+        version: maxVersion + 1,
+        status: stageStatus,
+        createdBy: stage.assignee,
+        createdAt: now,
+        updatedAt: now
+      }),
+      version: maxVersion + 1,
+      status: stageStatus,
+      createdBy: stage.assignee,
+      updatedAt: now
+    };
+    creates.push(stageDraft);
+  }
+
+  if (updates.length === 0 && creates.length === 0) {
+    return false;
+  }
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    for (const update of updates) {
+      await tx.deliverable.update({
+        where: { id: update.id },
+        data: {
+          content: update.content,
+          ...(update.status ? { status: update.status } : {}),
+          updatedAt: now
+        }
+      });
+    }
+
+    for (const create of creates) {
+      await tx.deliverable.create({ data: create });
+    }
+
+    await tx.timelineEvent.create({
+      data: {
+        projectId: project.id,
+        timestamp: now,
+        agentId: "ROLE_ASSISTANT",
+        type: "system",
+        title: "交付物内容已自动补全",
+        content: `系统已修复 ${updates.length} 份交付物内容/状态，并补齐 ${creates.length} 个阶段交付物占位文档。阶段执行调用 ${stageRunCache.size} 次。`,
+        priority: "normal"
+      }
+    });
+  });
+
+  return true;
 }
 
 export async function listProjects(): Promise<ProjectSummary[]> {
@@ -485,16 +1075,7 @@ export async function findAgent(roleId: RoleType): Promise<AgentProfile | undefi
 }
 
 export async function findProject(id: string): Promise<ProjectDetail | undefined> {
-  const project = await prisma.project.findUnique({
-    where: { id },
-    include: {
-      stages: { orderBy: { sortOrder: "asc" } },
-      tasks: { orderBy: [{ stageType: "asc" }, { sortOrder: "asc" }] },
-      deliverables: { orderBy: [{ updatedAt: "desc" }] },
-      timeline: { orderBy: { timestamp: "desc" } }
-    }
-  });
-
+  const project = await loadProjectRecord(id);
   return project ? toProjectDetail(project) : undefined;
 }
 
@@ -555,7 +1136,9 @@ export async function createProject(
   const currentStage: StageType = "ANALYSIS";
   const currentRole = stageAssignees[currentStage];
 
-  const run = await runStageAgent({
+  const run = await runProjectStageAgent({
+    projectId: id,
+    action: "project.create.bootstrap",
     projectName: input.name?.trim() || parsedIntent.keywords[0] || "未命名项目",
     projectDescription: input.description,
     parsedIntent,
@@ -593,12 +1176,29 @@ export async function createProject(
     agentId: currentRole,
     type: "thinking",
     title: "Agent 已接管阶段",
-    content: run.thinkingSummary,
+    content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
     priority: "normal"
   });
   enrichProjectWithRequirementContract(project, input.requirementContract);
 
   await persistProject(project);
+  await persistProjectExecutionSafe({
+    projectId: id,
+    stageType: currentStage,
+    role: currentRole,
+    action: "project.create.bootstrap",
+    status: "success",
+    provider: run.provider,
+    model: run.model,
+    requestedMode: runtimeMode,
+    runtimeMode,
+    promptSummary: "需求分析师已开始工作，你可以直接进入观测室查看实时输出。",
+    outputPreview: buildExecutionOutputPreview(run.body),
+    metadata: {
+      deferredWrite: true,
+      source: "createProject"
+    }
+  });
   return findProject(id).then((value) => value as ProjectDetail);
 }
 
@@ -622,6 +1222,21 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
 
   const currentIndex = stageOrder.indexOf(project.currentStage);
   const currentStage = project.stages[currentIndex];
+  const isFinalStage = currentIndex === stageOrder.length - 1;
+  const nextStage = isFinalStage ? null : stageOrder[currentIndex + 1];
+  const nextRole = nextStage ? stageAssignees[nextStage] : null;
+  const nextStageRun = nextStage && nextRole
+    ? await runProjectStageAgent({
+      projectId: id,
+      action: "project.approve.next-stage",
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: nextStage,
+      role: nextRole,
+      summary: `${ROLE_LABELS[nextRole]} 已开始 ${STAGE_LABELS[nextStage]} 阶段。`
+    })
+    : null;
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.stage.update({
@@ -660,7 +1275,7 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
       }
     });
 
-    if (currentIndex === stageOrder.length - 1) {
+    if (isFinalStage) {
       await tx.project.update({
         where: { id },
         data: {
@@ -679,19 +1294,8 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
       return;
     }
 
-    const nextStage = stageOrder[currentIndex + 1];
-    const nextRole = stageAssignees[nextStage];
-    const run = await runStageAgent({
-      projectName: project.name,
-      projectDescription: project.description,
-      parsedIntent: project.parsedIntent,
-      stageType: nextStage,
-      role: nextRole,
-      summary: `${ROLE_LABELS[nextRole]} 已开始 ${STAGE_LABELS[nextStage]} 阶段。`
-    });
-
     await tx.stage.update({
-      where: { projectId_type: { projectId: id, type: nextStage } },
+      where: { projectId_type: { projectId: id, type: nextStage as StageType } },
       data: {
         status: "active",
         progress: 18,
@@ -699,33 +1303,33 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
       }
     });
     await tx.task.updateMany({
-      where: { projectId: id, stageType: nextStage, sortOrder: 0 },
+      where: { projectId: id, stageType: nextStage as StageType, sortOrder: 0 },
       data: { status: "in_progress" }
     });
     await tx.task.updateMany({
-      where: { projectId: id, stageType: nextStage, sortOrder: { gt: 0 } },
+      where: { projectId: id, stageType: nextStage as StageType, sortOrder: { gt: 0 } },
       data: { status: "todo" }
     });
 
     await tx.project.update({
       where: { id },
       data: {
-        currentStage: nextStage,
-        currentRole: nextRole,
+        currentStage: nextStage as StageType,
+        currentRole: nextRole as RoleType,
         pendingApproval: false,
         progress: Math.min(100, project.progress + 20),
-        summary: `${ROLE_LABELS[nextRole]} 已开始 ${STAGE_LABELS[nextStage]} 阶段。`,
-        liveTitle: run.title,
-        liveBody: run.body,
-        liveProvider: run.provider,
+        summary: `${ROLE_LABELS[nextRole as RoleType]} 已开始 ${STAGE_LABELS[nextStage as StageType]} 阶段。`,
+        liveTitle: nextStageRun?.title || `${STAGE_LABELS[nextStage as StageType]} 阶段已启动`,
+        liveBody: nextStageRun?.body || "",
+        liveProvider: nextStageRun?.provider || "scripted",
         liveStartedAt: new Date()
       }
     });
 
     await ensureDraftDeliverable(tx, {
       projectId: id,
-      stageType: nextStage,
-      createdBy: nextRole
+      stageType: nextStage as StageType,
+      createdBy: nextRole as RoleType
     });
 
     await tx.timelineEvent.createMany({
@@ -733,19 +1337,19 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
         {
           projectId: id,
           timestamp: new Date(),
-          agentId: nextRole,
+          agentId: nextRole as RoleType,
           type: "stage_started",
-          title: `${STAGE_LABELS[nextStage]}阶段开始`,
-          content: `${ROLE_LABELS[nextRole]} 已自动接手下一阶段。`,
+          title: `${STAGE_LABELS[nextStage as StageType]}阶段开始`,
+          content: `${ROLE_LABELS[nextRole as RoleType]} 已自动接手下一阶段。`,
           priority: "normal"
         },
         {
           projectId: id,
           timestamp: new Date(),
-          agentId: nextRole,
+          agentId: nextRole as RoleType,
           type: "thinking",
           title: "阶段推演已启动",
-          content: run.thinkingSummary,
+          content: `${nextStageRun?.thinkingSummary || "阶段输出已生成"}\n执行引擎: ${nextStageRun?.provider || "scripted"} · 模型 ${nextStageRun?.model || "scripted-agent"}`,
           priority: "normal"
         }
       ]
@@ -772,7 +1376,9 @@ export async function rejectProjectStage(
   const currentStage = project.currentStage;
   const currentRole = project.currentRole;
   const reason = input.reason.trim();
-  const run = await runStageAgent({
+  const run = await runProjectStageAgent({
+    projectId: id,
+    action: "project.reject.rework",
     projectName: project.name,
     projectDescription: project.description,
     parsedIntent: project.parsedIntent,
@@ -838,7 +1444,7 @@ export async function rejectProjectStage(
           agentId: currentRole,
           type: "thinking",
           title: "Agent 已接收返工意见",
-          content: run.thinkingSummary,
+          content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
           priority: "normal"
         }
       ]
@@ -1097,7 +1703,9 @@ export async function postProjectMessage(
     return project;
   }
 
-  const run = await runStageAgent({
+  const run = await runProjectStageAgent({
+    projectId: id,
+    action: "project.message.followup",
     projectName: project.name,
     projectDescription: project.description,
     parsedIntent: project.parsedIntent,
@@ -1133,7 +1741,7 @@ export async function postProjectMessage(
           agentId: project.currentRole,
           type: "thinking",
           title: "Agent 正在根据你的消息调整",
-          content: run.thinkingSummary,
+          content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
           priority: "normal"
         }
       ]
@@ -1141,6 +1749,37 @@ export async function postProjectMessage(
   ]);
 
   return findProject(id);
+}
+
+export async function listProjectExecutions(
+  projectId: string,
+  limit = 100
+): Promise<StageAgentExecutionRecord[]> {
+  const rows = await prisma.projectExecution.findMany({
+    where: { projectId },
+    orderBy: { createdAt: "desc" },
+    take: Math.max(1, Math.min(limit, 500))
+  });
+
+  return rows.map((row) => ({
+    id: row.id,
+    projectId: row.projectId,
+    stageType: row.stageType,
+    role: row.role,
+    action: row.action,
+    status: row.status,
+    provider: row.provider,
+    model: row.model,
+    requestedMode: row.requestedMode,
+    runtimeMode: row.runtimeMode,
+    promptSummary: row.promptSummary,
+    outputPreview: row.outputPreview,
+    errorMessage: row.errorMessage,
+    latencyMs: row.latencyMs,
+    metadata: row.metadata,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString()
+  }));
 }
 
 export async function listProjectTasks(projectId?: string): Promise<Task[]> {
