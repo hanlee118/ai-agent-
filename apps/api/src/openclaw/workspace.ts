@@ -52,6 +52,11 @@ import type {
 import { promisify } from "node:util";
 import { prisma } from "../db.js";
 import {
+  DESIGN_MODEL_FALLBACKS,
+  DESIGN_MODEL_PRIMARY,
+  isDesignModelPreferred
+} from "../agents/design-model-policy.js";
+import {
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_ROOT,
   OPENCLAW_WORKSPACE_ROOT
@@ -788,14 +793,32 @@ export async function sendOpenClawAgentMessage(
   const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(
     `${agent.agentId} ${agent.name} ${agent.title} ${agent.responsibility}`
   );
-  const fallbackModel =
-    normalizeModelId(agent.commander.fallbackModel)
-    || normalizeModelId(process.env.OPENCLAW_AGENT_FALLBACK_MODEL)
-    || (isDesignAgent ? "openai/gpt-5.4" : "")
-    || "minima/MiniMax-M2.7-highspeed";
-  let switchedToFallback = false;
+  const designPrimaryModel = normalizeModelId(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
+  const defaultFallbackCandidates = dedupeStrings([
+    normalizeModelId(agent.commander.fallbackModel),
+    normalizeModelId(process.env.OPENCLAW_AGENT_FALLBACK_MODEL),
+    "minima/MiniMax-M2.7-highspeed"
+  ].filter((item): item is string => Boolean(item)));
+  const designFallbackCandidates = dedupeStrings([
+    normalizeModelId(process.env.DESIGN_FALLBACK_MODEL),
+    ...DESIGN_MODEL_FALLBACKS,
+    ...defaultFallbackCandidates
+  ].filter((item): item is string => Boolean(item)));
+  const fallbackCandidates = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates)
+    .filter((modelId) => modelId !== normalizeModelId(activeModel));
+  let fallbackCursor = 0;
   const maxAttempts = 3;
   let finalError: string | null = null;
+
+  if (isDesignAgent && designPrimaryModel && !isDesignModelPreferred(activeModel)) {
+    try {
+      await switchAgentModelForRetry(agentId, designPrimaryModel);
+      activeModel = designPrimaryModel;
+    } catch (switchError) {
+      const reason = switchError instanceof Error ? switchError.message : "primary model switch failed";
+      finalError = `[model-primary] ${reason}`;
+    }
+  }
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
@@ -837,22 +860,23 @@ export async function sendOpenClawAgentMessage(
 
       const isLockError = /session file locked|locked \(timeout|gateway closed/i.test(finalError);
       const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(finalError);
+      const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(finalError);
+      const nextFallbackModel = fallbackCandidates[fallbackCursor];
       const shouldRetryWithFallback =
-        isTokenError
-        && !switchedToFallback
-        && Boolean(fallbackModel)
-        && fallbackModel !== activeModel;
+        (isTokenError || isModelUnavailableError)
+        && Boolean(nextFallbackModel)
+        && nextFallbackModel !== activeModel;
 
       if (shouldRetryWithFallback) {
         try {
-          await switchAgentModelForRetry(agentId, fallbackModel);
+          await switchAgentModelForRetry(agentId, nextFallbackModel);
         } catch (switchError) {
           const reason = switchError instanceof Error ? switchError.message : "fallback switch failed";
           finalError = `${finalError}\n[model-fallback] ${reason}`;
           break;
         }
-        activeModel = fallbackModel;
-        switchedToFallback = true;
+        activeModel = nextFallbackModel;
+        fallbackCursor += 1;
         await sleep(450);
         continue;
       }
@@ -2176,18 +2200,18 @@ function recommendModelsByFamily(currentModel: string) {
   }
 
   if (normalized.includes("claude")) {
-    return ["claude-sonnet-4.5", "claude-opus-4.1", "claude-haiku-3.5"];
+    return ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3-5-haiku-20241022"];
   }
 
   if (normalized.includes("gpt") || normalized.includes("o3") || normalized.includes("o4")) {
-    return ["gpt-5.2", "gpt-5.4", "o4-mini"];
+    return ["gpt-5.4", "gpt-5.3-codex", "kimi-k2.5"];
   }
 
   if (normalized.includes("qwen")) {
     return ["qwen-max", "qwen-plus", "qwen2.5-coder-32b-instruct"];
   }
 
-  return ["gpt-5.2", "gemini-2.5-pro", "claude-sonnet-4.5"];
+  return ["gpt-5.4", "gpt-5.3-codex", "kimi-k2.5"];
 }
 
 function humanizeModelLabel(modelId: string) {
@@ -2399,6 +2423,13 @@ async function ensureManagedAgentConfigExists(
   title: string,
   model: string
 ) {
+  const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(`${agentId} ${displayName} ${title}`);
+  const designPrimaryModel = normalizeModelId(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
+  const designFallbackModel =
+    normalizeModelId(process.env.DESIGN_FALLBACK_MODEL)
+    || DESIGN_MODEL_FALLBACKS[0];
+  const selectedModel = isDesignAgent ? (designPrimaryModel || model) : model;
+
   await prisma.managedAgentConfig.upsert({
     where: { agentId },
     create: {
@@ -2407,8 +2438,9 @@ async function ensureManagedAgentConfigExists(
       title,
       intro: undefined,
       responsibility: undefined,
-      selectedModel: model,
-      defaultModel: model,
+      selectedModel,
+      defaultModel: selectedModel,
+      fallbackModel: isDesignAgent ? designFallbackModel : undefined,
       executionMode: "confirm_first",
       requireConfirmation: true,
       autoApproveMinorSteps: false,
@@ -2419,7 +2451,8 @@ async function ensureManagedAgentConfigExists(
     update: {
       displayName,
       title,
-      selectedModel: model
+      selectedModel,
+      fallbackModel: isDesignAgent ? designFallbackModel : undefined
     }
   });
 }

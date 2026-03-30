@@ -195,6 +195,7 @@ pnpm start:prod
 - [部署指南](docs/DEPLOYMENT_GUIDE.md)
 - [操作手册](docs/OPERATION_MANUAL.md)
 - [生产检查清单](docs/PRODUCTION_CHECKLIST.md)
+- [设计模型调用标准](docs/DESIGN_MODEL_POLICY.md)
 - [前端重构架构](docs/ARCHITECTURE.md)
 - [前端冒烟检查清单](docs/SMOKE_CHECKLIST.md)
 
