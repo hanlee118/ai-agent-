@@ -1,6 +1,6 @@
 import express from "express";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
-import { getProductContext, updateProductContext } from "../system/v1-method-store.js";
+import { getProductContext, removeRequirementBackfill, updateProductContext } from "../system/v1-method-store.js";
 
 interface UpdateContextBody {
   productName?: unknown;
@@ -50,6 +50,22 @@ export function createProductContextRouter() {
     });
 
     sendSuccess(res, updated);
+  }));
+
+  router.delete("/history/:historyId", asyncRoute(async (req, res) => {
+    const historyId = String(req.params.historyId ?? "").trim();
+    if (!historyId) {
+      sendError(res, 400, "VALIDATION_ERROR", "historyId is required");
+      return;
+    }
+
+    const result = await removeRequirementBackfill(historyId);
+    if (!result.removed) {
+      sendError(res, 404, "NOT_FOUND", `History not found: ${historyId}`);
+      return;
+    }
+
+    sendSuccess(res, { removed: true, historyId: result.historyId ?? historyId });
   }));
 
   return router;

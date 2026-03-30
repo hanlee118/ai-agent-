@@ -12,11 +12,13 @@ export async function runAnthropicCompatibleAgent(
   config: AnthropicCompatibleConfig,
   context: AgentRunContext
 ): Promise<AgentRunResult> {
+  const requestTimeoutMs = Math.max(8000, Number(process.env.ANTHROPIC_REQUEST_TIMEOUT_MS ?? process.env.MODEL_REQUEST_TIMEOUT_MS ?? 18000));
+  const maxAttempts = Math.max(1, Number(process.env.ANTHROPIC_REQUEST_MAX_ATTEMPTS ?? process.env.MODEL_REQUEST_MAX_ATTEMPTS ?? 2));
   let lastError: unknown;
 
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60000);
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
 
     try {
       const endpoint = buildAnthropicMessagesUrl(config.apiBaseUrl);
@@ -54,7 +56,15 @@ export async function runAnthropicCompatibleAgent(
       });
 
       if (!response.ok) {
-        throw new Error(`Anthropic request failed with status ${response.status}`);
+        const errorMessage = await extractErrorMessage(response);
+        if (isAuthStatus(response.status)) {
+          throw new Error(`AUTH_${response.status}: ${errorMessage || "Anthropic authentication failed"}`);
+        }
+        if (attempt < maxAttempts && isTransientStatus(response.status)) {
+          await waitBeforeRetry(attempt, response.headers.get("retry-after"));
+          continue;
+        }
+        throw new Error(`HTTP_${response.status}: ${errorMessage || `Anthropic request failed with status ${response.status}`}`);
       }
 
       const payload = (await response.json()) as {
@@ -69,7 +79,8 @@ export async function runAnthropicCompatibleAgent(
         .trim();
 
       const incomplete = isLikelyTruncatedHtml(content, payload.stop_reason);
-      if ((!content || incomplete) && attempt < 2) {
+      if ((!content || incomplete) && attempt < maxAttempts) {
+        await waitBeforeRetry(attempt);
         continue;
       }
 
@@ -86,7 +97,17 @@ export async function runAnthropicCompatibleAgent(
       };
     } catch (error) {
       lastError = error;
-      if (attempt < 2) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/^AUTH_\d+:/.test(message)) {
+        throw error;
+      }
+      const transientError = /aborted|timeout|timed out|fetch failed|network|gateway|reset|econnreset|socket hang up/i.test(message);
+      if (attempt < maxAttempts && transientError) {
+        await waitBeforeRetry(attempt);
+        continue;
+      }
+      if (attempt < maxAttempts) {
+        await waitBeforeRetry(attempt);
         continue;
       }
       throw error;
@@ -96,6 +117,38 @@ export async function runAnthropicCompatibleAgent(
   }
 
   throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "Anthropic request failed"));
+}
+
+async function extractErrorMessage(response: Response) {
+  const raw = await response.text();
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: string };
+      message?: string;
+    };
+    return String(parsed.error?.message ?? parsed.message ?? raw).trim();
+  } catch {
+    return String(raw).trim();
+  }
+}
+
+function isAuthStatus(status: number) {
+  return status === 401 || status === 403;
+}
+
+function isTransientStatus(status: number) {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504 || status === 524;
+}
+
+async function waitBeforeRetry(attempt: number, retryAfter?: string | null) {
+  const retryAfterSeconds = Number(retryAfter ?? "");
+  const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+    ? retryAfterSeconds * 1000
+    : undefined;
+  const backoffMs = Math.min(5000, 450 * Math.pow(2, attempt - 1));
+  const jitterMs = Math.floor(Math.random() * 220);
+  const delayMs = Math.max(retryAfterMs ?? 0, backoffMs + jitterMs);
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
 }
 
 function buildAnthropicMessagesUrl(apiBaseUrl: string) {
@@ -183,6 +236,60 @@ function buildOutputGuidance(context: AgentRunContext) {
       "- UX 原则（3条）",
       "- 可访问性检查清单（至少3条）",
       "- 审查结论（通过/不通过）",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.stageType === "ANALYSIS") {
+    return [
+      "请输出以下结构：",
+      "## 业务背景与问题定义",
+      "- 目标用户、核心痛点、业务价值",
+      "## 用户场景与关键旅程",
+      "- 至少 3 个关键场景",
+      "## PRD 功能清单（MVP / 增强）",
+      "- 每项包含目标、边界、验收口径",
+      "## 验收标准与指标",
+      "- 可测试、可量化",
+      "## 风险与依赖",
+      "- 风险等级 + 缓解策略",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.stageType === "DEV") {
+    return [
+      "请输出以下结构：",
+      "## 技术方案概览",
+      "- 模块边界、实现范围、关键权衡",
+      "## 数据与接口契约",
+      "- 关键字段、约束、错误处理",
+      "## 开发任务拆解",
+      "- 任务、负责人、依赖与里程碑",
+      "## 测试用例草案",
+      "- 功能、回归、异常三类用例",
+      "## 发布与回滚策略",
+      "- 灰度、监控、回滚触发条件",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.stageType === "ACCEPT") {
+    return [
+      "请输出以下结构：",
+      "## 测试范围与执行环境",
+      "- 环境、版本、依赖",
+      "## 测试用例矩阵",
+      "- 功能/回归/异常三类覆盖",
+      "## 执行结果与缺陷摘要",
+      "- 通过、失败、阻塞统计",
+      "## 需求一致性验证",
+      "- 对照需求目标标注一致/部分一致/不一致",
+      "## 产品文档回填建议",
+      "- 回填条目、版本号、时间戳",
       "## 下一步",
       "- 2 到 3 条可执行动作"
     ];

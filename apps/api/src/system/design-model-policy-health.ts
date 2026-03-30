@@ -40,6 +40,7 @@ type ModelProbeResult = {
 };
 
 type OpenClawConfigFile = {
+  env?: Record<string, string>;
   models?: {
     providers?: Record<string, { baseUrl?: string; apiKey?: string }>;
   };
@@ -49,6 +50,7 @@ export async function getDesignModelPolicyHealth() {
   const checkedAt = new Date().toISOString();
   const runtime = await getResolvedRuntimeExecutionConfig();
   const openclawProviders = await readOpenClawProviders();
+  const openclawEnv = await readOpenClawEnv();
 
   const runtimeChannel: ProbeChannel = {
     id: "runtime-selected",
@@ -68,6 +70,7 @@ export async function getDesignModelPolicyHealth() {
 
   const minimaProvider = openclawProviders.minima;
   const kimiProvider = openclawProviders.kimi;
+  const openaiProvider = openclawProviders.openai;
 
   const minimaChannel: ProbeChannel = {
     id: "openclaw-minima",
@@ -89,9 +92,20 @@ export async function getDesignModelPolicyHealth() {
     reason: !kimiProvider ? "openclaw.json 未配置 kimi provider" : undefined
   };
 
-  const primaryCandidates = dedupeChannels([runtimeChannel, minimaChannel]);
-  const fallbackOneCandidates = dedupeChannels([runtimeChannel, minimaChannel]);
-  const fallbackTwoCandidates = dedupeChannels([kimiChannel, runtimeChannel, minimaChannel]);
+  const openaiChannel: ProbeChannel = {
+    id: "openclaw-openai",
+    label: "OpenClaw Provider: openai",
+    source: "openclaw",
+    apiBaseUrl: String(openaiProvider?.baseUrl ?? "").trim(),
+    apiKey: String(openaiProvider?.apiKey ?? "").trim() || String(openclawEnv.OPENAI_API_KEY ?? "").trim(),
+    available: Boolean(String(openaiProvider?.baseUrl ?? "").trim())
+      && Boolean(String(openaiProvider?.apiKey ?? "").trim() || String(openclawEnv.OPENAI_API_KEY ?? "").trim()),
+    reason: !openaiProvider ? "openclaw.json 未配置 openai provider" : undefined
+  };
+
+  const primaryCandidates = dedupeChannels([openaiChannel, runtimeChannel, minimaChannel]);
+  const fallbackOneCandidates = dedupeChannels([openaiChannel, runtimeChannel, minimaChannel]);
+  const fallbackTwoCandidates = dedupeChannels([kimiChannel, openaiChannel, runtimeChannel, minimaChannel]);
 
   const probes: ModelProbeResult[] = [
     await probeModelAvailability(DESIGN_MODEL_PRIMARY, "primary", primaryCandidates),
@@ -163,6 +177,7 @@ export async function getDesignModelPolicyHealth() {
     },
     channels: [
       sanitizeChannel(runtimeChannel),
+      sanitizeChannel(openaiChannel),
       sanitizeChannel(minimaChannel),
       sanitizeChannel(kimiChannel)
     ],
@@ -349,7 +364,7 @@ async function sendProbeRequest(input: {
         Authorization: `Bearer ${input.apiKey}`
       },
       body: JSON.stringify({
-        model: input.model,
+        model: normalizeProbeModel(input.model),
         temperature: 0,
         max_tokens: 16,
         stream: input.stream,
@@ -490,11 +505,29 @@ function normalizeModel(value: string | null | undefined) {
   return normalized;
 }
 
+function normalizeProbeModel(model: string) {
+  const normalized = String(model ?? "").trim();
+  if (normalized.startsWith("openai/")) {
+    return normalized.slice("openai/".length);
+  }
+  return normalized;
+}
+
 async function readOpenClawProviders() {
   try {
     const content = await readFile(OPENCLAW_CONFIG_PATH, "utf8");
     const parsed = JSON.parse(content) as OpenClawConfigFile;
     return parsed.models?.providers ?? {};
+  } catch {
+    return {};
+  }
+}
+
+async function readOpenClawEnv() {
+  try {
+    const content = await readFile(OPENCLAW_CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(content) as OpenClawConfigFile;
+    return parsed.env ?? {};
   } catch {
     return {};
   }

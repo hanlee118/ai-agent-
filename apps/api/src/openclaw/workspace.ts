@@ -807,7 +807,8 @@ export async function sendOpenClawAgentMessage(
   const fallbackCandidates = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates)
     .filter((modelId) => modelId !== normalizeModelId(activeModel));
   let fallbackCursor = 0;
-  const maxAttempts = 3;
+  const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
+  const commandTimeoutMs = Math.max(30_000, Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 8 * 60 * 1000));
   let finalError: string | null = null;
 
   if (isDesignAgent && designPrimaryModel && !isDesignModelPreferred(activeModel)) {
@@ -830,7 +831,7 @@ export async function sendOpenClawAgentMessage(
         message,
         "--json"
       ], {
-        timeout: 10 * 60 * 1000,
+        timeout: commandTimeoutMs,
         maxBuffer: 1024 * 1024 * 8
       });
       stdout = result.stdout;
@@ -861,6 +862,7 @@ export async function sendOpenClawAgentMessage(
       const isLockError = /session file locked|locked \(timeout|gateway closed/i.test(finalError);
       const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(finalError);
       const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(finalError);
+      const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted/i.test(finalError);
       const nextFallbackModel = fallbackCandidates[fallbackCursor];
       const shouldRetryWithFallback =
         (isTokenError || isModelUnavailableError)
@@ -881,8 +883,8 @@ export async function sendOpenClawAgentMessage(
         continue;
       }
 
-      if (isLockError && attempt < maxAttempts) {
-        await sleep(500 * attempt);
+      if ((isLockError || isTransportError) && attempt < maxAttempts) {
+        await sleep(Math.min(2200, 450 * attempt));
         continue;
       }
 

@@ -57,13 +57,406 @@ function listToHtml(items: string[]) {
   return items.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
 }
 
+type VisualPreset = "apple" | "default";
+
+function detectVisualPreset(project: ProjectDetail, designContent: string): VisualPreset {
+  const source = [
+    project.name,
+    project.description,
+    project.parsedIntent?.summary,
+    designContent
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (/(苹果|apple|ios|macos|swiftui|human interface)/i.test(source)) {
+    return "apple";
+  }
+  return "default";
+}
+
+function renderAppleOfficialSiteHtml(input: {
+  project: ProjectDetail;
+  stageCompletionPercent: number;
+  completedStages: number;
+  analysisBullets: string[];
+  designBullets: string[];
+  devBullets: string[];
+  acceptBullets: string[];
+  signalCards: string;
+  stageTrack: string;
+  stageCards: string;
+  teamChips: string;
+}) {
+  const {
+    project,
+    stageCompletionPercent,
+    completedStages,
+    analysisBullets,
+    designBullets,
+    devBullets,
+    acceptBullets,
+    signalCards,
+    stageTrack,
+    stageCards,
+    teamChips
+  } = input;
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(project.name)} · 官方介绍页</title>
+  <style>
+    :root {
+      --bg: #f5f5f7;
+      --panel: rgba(255, 255, 255, 0.86);
+      --line: rgba(15, 23, 42, 0.08);
+      --text: #111827;
+      --muted: #4b5563;
+      --brand: #0071e3;
+      --brand-soft: #e8f3ff;
+      --ok: #16a34a;
+      --shadow: 0 24px 70px rgba(15, 23, 42, 0.12);
+      --radius-xl: 28px;
+      --radius-lg: 18px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Helvetica Neue", sans-serif;
+      background:
+        radial-gradient(760px 480px at 50% -30%, #d9ecff 0%, transparent 68%),
+        radial-gradient(560px 300px at 90% 0%, #eef6ff 0%, transparent 70%),
+        var(--bg);
+      min-height: 100vh;
+    }
+    .wrap {
+      width: min(1180px, 92vw);
+      margin: 0 auto;
+      padding: 48px 0 88px;
+    }
+    .hero {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-xl);
+      background: linear-gradient(150deg, rgba(255,255,255,0.93), rgba(255,255,255,0.7));
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(14px);
+      padding: 34px;
+      display: grid;
+      gap: 24px;
+      grid-template-columns: 1.35fr 0.65fr;
+    }
+    .badge {
+      display: inline-flex;
+      padding: 6px 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(0,113,227,0.28);
+      background: var(--brand-soft);
+      color: var(--brand);
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0.04em;
+    }
+    h1 {
+      margin: 14px 0 0;
+      font-size: clamp(32px, 4.8vw, 58px);
+      line-height: 1.02;
+      letter-spacing: -0.03em;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", sans-serif;
+      max-width: 820px;
+    }
+    .lead {
+      margin: 14px 0 0;
+      color: var(--muted);
+      line-height: 1.8;
+      font-size: 15px;
+      max-width: 760px;
+    }
+    .hero-side {
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255,255,255,0.8);
+      padding: 16px;
+    }
+    .hero-side h3 {
+      margin: 0;
+      font-size: 12px;
+      color: #334155;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .meter {
+      margin-top: 12px;
+      background: #eef2f7;
+      border-radius: 999px;
+      overflow: hidden;
+      height: 10px;
+    }
+    .meter span {
+      display: block;
+      width: ${stageCompletionPercent}%;
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #2d8cff, #0071e3);
+    }
+    .meter-label {
+      margin-top: 8px;
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #475569;
+    }
+    .mini-kpi {
+      margin-top: 12px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .mini-kpi article {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: rgba(255,255,255,0.92);
+    }
+    .mini-kpi strong {
+      display: block;
+      font-size: 20px;
+      letter-spacing: -0.02em;
+    }
+    .mini-kpi span {
+      font-size: 11px;
+      color: #64748b;
+    }
+    .kpis {
+      margin: 14px 0;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .kpi {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.88);
+      padding: 14px;
+    }
+    .kpi strong { display: block; font-size: 28px; letter-spacing: -0.03em; }
+    .kpi span { color: #64748b; font-size: 12px; }
+    .kpi .hint { font-size: 10px; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.06em; }
+    .signals {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+    .signal-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255,255,255,0.9);
+      padding: 14px;
+    }
+    .signal-index {
+      display: inline-flex;
+      font-size: 10px;
+      padding: 3px 7px;
+      border-radius: 999px;
+      background: #eef4ff;
+      color: #2563eb;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+    .signal-card p {
+      margin: 0;
+      line-height: 1.7;
+      color: #475569;
+      font-size: 14px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-lg);
+      background: rgba(255,255,255,0.9);
+      padding: 16px;
+    }
+    .card h3 { margin: 0 0 10px; font-size: 18px; letter-spacing: -0.01em; }
+    .card ul { margin: 0; padding-left: 18px; color: #475569; line-height: 1.85; }
+    .stage-track {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .track-node {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px;
+      background: #ffffff;
+      display: grid;
+      gap: 4px;
+    }
+    .track-node .dot {
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: #334155;
+      background: #e5edf7;
+    }
+    .track-node.done .dot {
+      color: #fff;
+      background: linear-gradient(120deg, #3397ff, #0071e3);
+    }
+    .track-node strong { font-size: 13px; }
+    .track-node em { font-style: normal; color: #64748b; font-size: 11px; }
+    .flow {
+      margin-top: 10px;
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 8px;
+    }
+    .stage-card {
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #ffffff;
+      padding: 10px;
+    }
+    .stage-card h4 { margin: 0 0 4px; font-size: 13px; color: #0f172a; }
+    .stage-card p { margin: 0; color: #64748b; font-size: 12px; }
+    .team {
+      margin-top: 12px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .chip {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+      font-size: 12px;
+      background: #fff;
+      color: #334155;
+    }
+    .cta {
+      margin-top: 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      text-decoration: none;
+      border-radius: 999px;
+      padding: 11px 17px;
+      font-weight: 600;
+      border: 1px solid transparent;
+    }
+    .btn-primary {
+      color: #fff;
+      background: linear-gradient(120deg, #2490ff, #0071e3);
+    }
+    .btn-ghost {
+      color: #334155;
+      border-color: #cdd7e4;
+      background: #fff;
+    }
+    .ok { color: var(--ok); font-weight: 700; }
+    @media (max-width: 980px) {
+      .hero { grid-template-columns: 1fr; }
+      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .signals { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr; }
+      .stage-track, .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 560px) {
+      .kpis { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <section class="hero">
+      <article>
+        <span class="badge">Apple Style · ${escapeHtml(project.id)}</span>
+        <h1>AI 协作平台<br/>让需求到研发闭环可追踪</h1>
+        <p class="lead">
+          面向真实项目执行的协作系统，从需求输入、角色协作、阶段验收到结果回填全链路可查证。
+          项目状态：<span class="ok">${escapeHtml(project.status)}（${project.progress}%）</span>。
+        </p>
+      </article>
+      <article class="hero-side">
+        <h3>Progress</h3>
+        <div class="meter"><span></span></div>
+        <div class="meter-label"><span>流程完成率</span><b>${stageCompletionPercent}%</b></div>
+        <div class="mini-kpi">
+          <article><strong>${completedStages}/${project.stages.length}</strong><span>阶段完成</span></article>
+          <article><strong>${project.deliverables.filter((item) => item.status === "approved").length}</strong><span>批准产物</span></article>
+          <article><strong>${project.tasks.filter((item) => item.status === "done").length}</strong><span>完成任务</span></article>
+          <article><strong>${project.team.length}</strong><span>协作角色</span></article>
+        </div>
+      </article>
+    </section>
+
+    <section class="kpis">
+      <article class="kpi"><strong>${project.stages.length}</strong><span>流程阶段</span><i class="hint">Workflow</i></article>
+      <article class="kpi"><strong>${project.deliverables.filter((item) => item.status === "approved").length}</strong><span>已批准交付物</span><i class="hint">Deliverables</i></article>
+      <article class="kpi"><strong>${project.tasks.filter((item) => item.status === "done").length}</strong><span>完成任务数</span><i class="hint">Execution</i></article>
+      <article class="kpi"><strong>${project.team.length}</strong><span>协作角色</span><i class="hint">Agent Team</i></article>
+    </section>
+
+    <section class="signals">${signalCards}</section>
+
+    <section class="grid">
+      <article class="card"><h3>需求分析</h3><ul>${listToHtml(analysisBullets)}</ul></article>
+      <article class="card"><h3>视觉设计</h3><ul>${listToHtml(designBullets)}</ul></article>
+      <article class="card"><h3>研发实现</h3><ul>${listToHtml(devBullets)}</ul></article>
+      <article class="card"><h3>验收回填</h3><ul>${listToHtml(acceptBullets)}</ul></article>
+    </section>
+
+    <section class="card" style="margin-top: 10px">
+      <h3>协作流程</h3>
+      <div class="stage-track">${stageTrack}</div>
+      <div class="flow">${stageCards}</div>
+      <div class="team">${teamChips}</div>
+      <div class="cta">
+        <a class="btn btn-primary" href="#demo">预约演示</a>
+        <a class="btn btn-ghost" href="/" target="_blank" rel="noreferrer">进入协作平台</a>
+      </div>
+    </section>
+
+    <section id="demo" class="card" style="margin-top: 10px">
+      <h3>演示预约入口</h3>
+      <ul>
+        <li>邮箱：demo@aicollab.local</li>
+        <li>请附带行业、团队规模、上线目标时间</li>
+        <li>我们将基于项目上下文提供专属演示脚本</li>
+      </ul>
+    </section>
+  </main>
+</body>
+</html>`;
+}
+
 function renderOfficialSiteHtml(project: ProjectDetail) {
+  const latestDesign = latestStageContent(project, "DESIGN");
+  const visualPreset = detectVisualPreset(project, latestDesign);
   const analysisBullets = extractBullets(latestStageContent(project, "ANALYSIS"), [
     "明确目标、范围、验收标准",
     "确定主路径与里程碑",
     "形成风险清单与边界约束"
   ]);
-  const designBullets = extractBullets(latestStageContent(project, "DESIGN"), [
+  const designBullets = extractBullets(latestDesign, [
     "完成视觉方向与品牌语气定义",
     "完成关键页面版式与组件清单",
     "通过可访问性检查并完成设计审查"
@@ -114,6 +507,22 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
     .join("");
   const winItems = quickWins.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
   const teamChips = teamLabels.map((label) => `<span class="chip">${escapeHtml(label)}</span>`).join("");
+
+  if (visualPreset === "apple") {
+    return renderAppleOfficialSiteHtml({
+      project,
+      stageCompletionPercent,
+      completedStages,
+      analysisBullets,
+      designBullets,
+      devBullets,
+      acceptBullets,
+      signalCards,
+      stageTrack,
+      stageCards,
+      teamChips
+    });
+  }
 
   return `<!doctype html>
 <html lang="zh-CN">

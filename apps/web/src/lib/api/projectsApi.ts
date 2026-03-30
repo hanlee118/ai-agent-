@@ -1,6 +1,8 @@
 import { request } from './core';
 import type { Deliverable, Pagination, Project, Stage } from './types';
 
+const toProjectPathId = (id: string) => encodeURIComponent(String(id || '').trim());
+
 export type ParsedProjectIntent = {
   name: string;
   description: string;
@@ -133,6 +135,17 @@ export type ProjectFinalArtifactsReport = {
   }>;
   missingRequired: string[];
   checklist: string[];
+  generation?: {
+    jobId: string;
+    projectId: string;
+    status: 'queued' | 'running' | 'completed' | 'failed';
+    progress: number;
+    step: string;
+    message?: string;
+    startedAt?: string;
+    finishedAt?: string;
+    error?: string;
+  };
 };
 
 export type ProjectCleanupCandidate = {
@@ -165,6 +178,21 @@ export type ProjectExecutionRecord = {
   updatedAt: string;
 };
 
+export type ProjectRequiredAction = {
+  id: string;
+  severity: 'critical' | 'warning' | 'info';
+  title: string;
+  detail: string;
+  action:
+    | 'submit_stage_deliverable'
+    | 'open_design_review'
+    | 'review_pending_stage'
+    | 'resolve_blocked_tasks'
+    | 'reconcile_deliverables'
+    | 'refresh_runtime';
+  ctaLabel: string;
+};
+
 export const projectsApi = {
   async list(params?: { status?: string; page?: number; limit?: number }) {
     const searchParams = new URLSearchParams();
@@ -176,15 +204,34 @@ export const projectsApi = {
   },
 
   async get(id: string) {
-    return request<Project>(`/projects/${id}`);
+    return request<Project>(`/projects/${toProjectPathId(id)}`);
   },
 
   async getAcceptanceReport(id: string) {
-    return request<ProjectAcceptanceReport>(`/projects/${id}/acceptance-report`);
+    return request<ProjectAcceptanceReport>(`/projects/${toProjectPathId(id)}/acceptance-report`);
   },
 
   async getFinalArtifacts(id: string) {
-    return request<ProjectFinalArtifactsReport>(`/projects/${id}/final-artifacts`);
+    return request<ProjectFinalArtifactsReport>(`/projects/${toProjectPathId(id)}/final-artifacts`);
+  },
+
+  async generateFinalArtifacts(id: string, force = false) {
+    return request<{
+      projectId: string;
+      queued: boolean;
+      generation: NonNullable<ProjectFinalArtifactsReport['generation']>;
+    }>(`/projects/${toProjectPathId(id)}/final-artifacts/generate`, {
+      method: 'POST',
+      body: JSON.stringify({ force }),
+    });
+  },
+
+  async getFinalArtifactsJob(id: string, jobId: string) {
+    return request<{
+      projectId: string;
+      generation: ProjectFinalArtifactsReport['generation'] | null;
+      report?: ProjectFinalArtifactsReport;
+    }>(`/projects/${toProjectPathId(id)}/final-artifacts/jobs/${encodeURIComponent(jobId)}`);
   },
 
   async getExecutions(id: string, limit = 120) {
@@ -192,7 +239,7 @@ export const projectsApi = {
       projectId: string;
       total: number;
       executions: ProjectExecutionRecord[];
-    }>(`/projects/${id}/executions?limit=${encodeURIComponent(String(limit))}`);
+    }>(`/projects/${toProjectPathId(id)}/executions?limit=${encodeURIComponent(String(limit))}`);
   },
 
   async getCleanupCandidates() {
@@ -212,7 +259,7 @@ export const projectsApi = {
   },
 
   async exportAcceptanceReportMarkdown(id: string) {
-    return request<string>(`/projects/${id}/acceptance-report.md`);
+    return request<string>(`/projects/${toProjectPathId(id)}/acceptance-report.md`);
   },
 
   async archiveAcceptanceReport(id: string, title?: string) {
@@ -220,7 +267,7 @@ export const projectsApi = {
       projectId: string;
       archived: boolean;
       deliverableName: string;
-    }>(`/projects/${id}/acceptance-report/archive`, {
+    }>(`/projects/${toProjectPathId(id)}/acceptance-report/archive`, {
       method: 'POST',
       body: JSON.stringify({ title }),
     });
@@ -275,7 +322,8 @@ export const projectsApi = {
         content: string;
         priority: 'low' | 'normal' | 'high' | 'urgent';
       }>;
-    }>(`/projects/${id}`);
+      requiredActions?: ProjectRequiredAction[];
+    }>(`/projects/${toProjectPathId(id)}`);
   },
 
   async create(data: {
@@ -298,18 +346,18 @@ export const projectsApi = {
   },
 
   async update(id: string, data: Partial<Project>) {
-    return request<Project>(`/projects/${id}`, {
+    return request<Project>(`/projects/${toProjectPathId(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(data),
     });
   },
 
   async getStages(id: string) {
-    return request<Stage[]>(`/projects/${id}/stages`);
+    return request<Stage[]>(`/projects/${toProjectPathId(id)}/stages`);
   },
 
   async getDeliverables(id: string) {
-    return request<Deliverable[]>(`/projects/${id}/deliverables`);
+    return request<Deliverable[]>(`/projects/${toProjectPathId(id)}/deliverables`);
   },
 
   async submitDeliverable(
@@ -321,39 +369,45 @@ export const projectsApi = {
       attachments?: string[];
     },
   ) {
-    return request<Deliverable>(`/projects/${projectId}/deliverables`, {
+    return request<Deliverable>(`/projects/${toProjectPathId(projectId)}/deliverables`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   },
 
   async intervene(id: string, command: string) {
-    return request(`/projects/${id}/intervene`, {
+    return request(`/projects/${toProjectPathId(id)}/intervene`, {
       method: 'POST',
       body: JSON.stringify({ command }),
     });
   },
 
   async resume(id: string) {
-    return request(`/projects/${id}/resume`, {
+    return request(`/projects/${toProjectPathId(id)}/resume`, {
       method: 'POST',
     });
   },
 
   async close(id: string) {
-    return request(`/projects/${id}/close`, {
+    return request(`/projects/${toProjectPathId(id)}/close`, {
       method: 'POST',
     });
   },
 
   async remove(id: string) {
-    return request<{ success: boolean; id: string }>(`/projects/${id}`, {
+    return request<{ success: boolean; id: string }>(`/projects/${toProjectPathId(id)}`, {
       method: 'DELETE',
     });
   },
 
   async advance(id: string) {
-    return request(`/projects/${id}/advance`, {
+    return request(`/projects/${toProjectPathId(id)}/advance`, {
+      method: 'POST',
+    });
+  },
+
+  async reconcileDeliverables(id: string) {
+    return request(`/projects/${toProjectPathId(id)}/reconcile-deliverables`, {
       method: 'POST',
     });
   },
@@ -412,20 +466,20 @@ export const projectsApi = {
       };
     },
   ) {
-    return request(`/projects/${id}/stages/submit`, {
+    return request(`/projects/${toProjectPathId(id)}/stages/submit`, {
       method: 'POST',
       body: JSON.stringify(data),
     });
   },
 
   async approve(id: string) {
-    return request(`/projects/${id}/approve`, {
+    return request(`/projects/${toProjectPathId(id)}/approve`, {
       method: 'POST',
     });
   },
 
   async reject(id: string, reason: string) {
-    return request(`/projects/${id}/reject`, {
+    return request(`/projects/${toProjectPathId(id)}/reject`, {
       method: 'POST',
       body: JSON.stringify({ reason }),
     });

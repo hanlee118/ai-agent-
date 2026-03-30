@@ -255,6 +255,30 @@ export default function App() {
   const { agents, projects, tasks, sessions, workspace, runtime, refresh, sendAgentMessage } = useRealData();
 
   useEffect(() => {
+    if (activeTab !== 'project-room') {
+      return;
+    }
+
+    if (projects.length === 0) {
+      if (selectedProjectId !== null) {
+        setSelectedProjectId(null);
+      }
+      setActiveTab('projects');
+      return;
+    }
+
+    if (!selectedProjectId) {
+      setSelectedProjectId(projects[0].id);
+      return;
+    }
+
+    const exists = projects.some((project) => project.id === selectedProjectId);
+    if (!exists) {
+      setSelectedProjectId(projects[0].id);
+    }
+  }, [activeTab, projects, selectedProjectId]);
+
+  useEffect(() => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -665,7 +689,20 @@ export default function App() {
               >
                 {activeTab === 'dashboard' && <DashboardPage onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
                 {activeTab === 'agent-commander' && <AgentCommanderPage agentId={selectedAgentId} addToast={addToast} sendCommand={sendAgentMessage} />}
-                {activeTab === 'project-room' && <ProjectRoomPage projectId={selectedProjectId} addToast={addToast} onRefreshData={refreshAllData} />}
+                {activeTab === 'project-room' && (
+                  <ProjectRoomPage
+                    projectId={selectedProjectId}
+                    addToast={addToast}
+                    onRefreshData={refreshAllData}
+                    onProjectMissing={(missingProjectId) => {
+                      if (selectedProjectId === missingProjectId) {
+                        setSelectedProjectId(null);
+                      }
+                      setActiveTab('projects');
+                      addToast('项目不存在或已删除，已返回项目列表', 'info');
+                    }}
+                  />
+                )}
                 {activeTab === 'system-health' && <SystemOpsPage onNavigate={handleNavigate} addToast={addToast} onRefreshData={refreshAllData} />}
                 {activeTab === 'model-nexus' && <ModelNexusPage addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} onRefreshData={refreshAllData} />}
                 {activeTab === 'monitoring' && <MonitoringPage addToast={addToast} onNavigate={handleNavigate} />}

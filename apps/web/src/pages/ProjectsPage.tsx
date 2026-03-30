@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, BarChart3, Briefcase, ChevronDown, Filter, Pause, Play, Plus, SkipForward, Trash2, XCircle } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { agents, projects } from '../lib/runtimeCollections';
-import { projectsApi, type ProjectCleanupCandidate } from '../lib/api';
+import { ApiRequestError, projectsApi, type ProjectCleanupCandidate, type ProjectRequiredAction } from '../lib/api';
 import { Badge } from './impl/GovernanceShared';
 import SurfaceModal from './impl/SurfaceModal';
 
@@ -33,6 +33,14 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
   const [cleanupCandidates, setCleanupCandidates] = useState<ProjectCleanupCandidate[]>([]);
   const [selectedCleanupIds, setSelectedCleanupIds] = useState<string[]>([]);
   const [cleanupMode, setCleanupMode] = useState<'candidates' | 'all'>('candidates');
+
+  const formatRequiredActionsHint = (actions: ProjectRequiredAction[]) => {
+    if (actions.length === 0) {
+      return '请先打开项目详情完成待补充事项。';
+    }
+    const head = actions.slice(0, 2).map((item) => item.title).join('；');
+    return actions.length > 2 ? `${head} 等 ${actions.length} 项` : head;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -65,6 +73,7 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
         await projectsApi.resume(projectId);
         addToast('项目已恢复执行', 'success');
       } else if (action === 'advance') {
+        addToast('正在推进项目阶段，可能需要 1-3 分钟，请稍候...', 'info');
         await projectsApi.advance(projectId);
         addToast('项目已手动推进一步', 'success');
       } else if (action === 'close') {
@@ -80,8 +89,20 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
       }
       await onRefreshData();
     } catch (error) {
-      const message = error instanceof Error ? error.message : '操作失败';
-      addToast(message, 'error');
+      if (error instanceof ApiRequestError && error.code === 'REQUIRES_USER_INTERVENTION') {
+        const requiredActions = Array.isArray(error.details?.requiredActions)
+          ? (error.details?.requiredActions as ProjectRequiredAction[])
+          : [];
+        addToast(error.message || '需要你先补充关键信息后才能继续推进', 'info');
+        addToast(`待处理事项: ${formatRequiredActionsHint(requiredActions)}`, 'info');
+        onSelectProject(projectId);
+      } else if (error instanceof ApiRequestError && error.code === 'NO_PENDING_APPROVAL') {
+        addToast(error.message || '当前没有待确认事项', 'info');
+        await onRefreshData();
+      } else {
+        const message = error instanceof Error ? error.message : '操作失败';
+        addToast(message, 'error');
+      }
     } finally {
       setActionKey(null);
     }

@@ -47,12 +47,13 @@ import {
   listProjects,
   runProjectStageAgent,
   postProjectMessage,
+  reconcileProjectDeliverablesNow,
   rejectProjectStage,
   resumeProject,
   submitCurrentStage,
   updateTaskStatus
 } from "./data/repository.js";
-import { getRuntimeStatus } from "./agents/runtime.js";
+import { getRuntimeStatus, getStageModelPolicy, previewStageModelPlan, getStageModelUsage } from "./agents/runtime.js";
 import {
   getRuntimeSettings,
   validateRuntimeSettings,
@@ -66,6 +67,10 @@ import {
   getDesignModelPolicyHealth,
   repairDesignModelPolicy
 } from "./system/design-model-policy-health.js";
+import {
+  buildDeliverableTemplatePromptBlock,
+  resolveDeliverableTemplate
+} from "./system/deliverable-templates.js";
 import {
   getCachedLocalAgentMonitorOverview,
   subscribeLocalAgentMonitor,
@@ -113,6 +118,8 @@ const app = express();
 const port = Number(process.env.PORT ?? 8787);
 const host = String(process.env.HOST ?? "127.0.0.1").trim() || "127.0.0.1";
 const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
+const webGeneratedPath = fileURLToPath(new URL("../../web/public/generated", import.meta.url));
+const siteGeneratedPath = fileURLToPath(new URL("../../../site/generated", import.meta.url));
 const projectAutoAdvanceIntervalMs = Math.max(5000, Number(process.env.PROJECT_AUTO_ADVANCE_INTERVAL_MS ?? 12000));
 
 const projectAutomationState: {
@@ -133,22 +140,456 @@ const projectAutomationState: {
 
 let projectAutomationTimer: ReturnType<typeof setInterval> | null = null;
 let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
+const projectAdvanceLocks = new Set<string>();
+
+const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
+  INIT: ["项目章程.md"],
+  ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
+  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md"],
+  DEV: ["技术方案与选型.md", "Demo原型说明.md"],
+  ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
+};
+
+type StageRunAttempt = {
+  stageType: StageType;
+  role: RoleType;
+  model: string;
+  route: string;
+  status: "success" | "failed" | "skipped";
+  elapsedMs: number;
+  startedAt: string;
+  error?: string;
+};
+
+type StageRunSnapshot = {
+  provider: string;
+  model: string;
+  body: string;
+  title: string;
+  thinkingSummary: string;
+  degraded?: boolean;
+  attempts?: StageRunAttempt[];
+};
+
+type AutoSubmissionQuality = {
+  pass: boolean;
+  score: number;
+  issues: string[];
+  diagnostics: string[];
+};
+
+type AutoStageSubmission = {
+  submission: StageSubmissionInput;
+  quality: AutoSubmissionQuality;
+};
+
+type ProjectRequiredAction = {
+  id: string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  detail: string;
+  action: "submit_stage_deliverable" | "open_design_review" | "review_pending_stage" | "resolve_blocked_tasks" | "reconcile_deliverables" | "refresh_runtime";
+  ctaLabel: string;
+};
+
+const GENERIC_OUTPUT_PATTERNS = [
+  /固定仪表盘、项目观测室、Agent 中心三大页面/,
+  /让实时输出始终成为视觉中心/,
+  /把审批与紧急介入做成明确的强动作/,
+  /避免常规 SaaS 模板感/,
+  /优先打通数据库、仓储和实时执行流/
+];
 
 function buildAutoStageTitle(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
-  if (project.currentStage === "ANALYSIS") return "项目排期方案.md";
-  if (project.currentStage === "DESIGN") return "客户汇报方案.ppt.md";
-  if (project.currentStage === "DEV") return "Demo原型说明.md";
-  if (project.currentStage === "ACCEPT") return "产品说明文档回填.md";
-  return `自动提交-${project.currentStage}阶段.md`;
+  return STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage]?.[0] || `自动提交-${project.currentStage}阶段.md`;
 }
 
-async function buildAutoStageSubmission(
+async function withProjectLock<T>(projectId: string, task: () => Promise<T>): Promise<T> {
+  if (projectAdvanceLocks.has(projectId)) {
+    throw new Error("PROJECT_ADVANCE_IN_PROGRESS");
+  }
+  projectAdvanceLocks.add(projectId);
+  try {
+    return await task();
+  } finally {
+    projectAdvanceLocks.delete(projectId);
+  }
+}
+
+function buildDesignReviewPayload(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  model: string
+): NonNullable<StageSubmissionInput["designReview"]> {
+  const keywordLine = project.parsedIntent.keywords.slice(0, 3).join(" / ");
+  const visualDirection = keywordLine || (/(苹果|apple)/i.test(`${project.name} ${project.description}`)
+    ? "Apple 风格极简官网（大留白、清晰层级、克制动效）"
+    : "围绕需求主链路的高可读信息架构");
+
+  return {
+    visualDirection,
+    brandTone: "专业、明确、可执行",
+    uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
+    accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
+    approvedBy: "系统自动审查",
+    approved: true,
+    notes: `自动推进生成，来源模型 ${model}`
+  };
+}
+
+function buildDesignRequiredSections(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  title: string
+) {
+  const keywordLine = project.parsedIntent.keywords.slice(0, 4).join(" / ") || "需求到研发闭环";
+  const isAppleStyle = /(苹果|apple)/i.test(`${project.name} ${project.description}`);
+  const visualTheme = isAppleStyle
+    ? "Apple 风格：克制、清晰、留白、强调内容优先"
+    : "可信执行风格：重点突出闭环路径与执行证据";
+
+  return [
+    "## 视觉方案",
+    `- 目标交付物：${title}`,
+    `- 视觉主题：${visualTheme}`,
+    `- 核心关键词：${keywordLine}`,
+    "- 视觉重心：把“需求输入→协作→执行→验收回填”主链路放在首屏可见区域。",
+    "## 版式策略",
+    "- 首屏采用价值主张 + 关键 CTA 双列布局，减少多余叙述。",
+    "- 中部用流程区块呈现阶段衔接关系，避免离散信息堆叠。",
+    "- 底部统一放置演示预约入口与验收证据跳转。",
+    "## 组件清单",
+    "- Hero 标题/副标题/双 CTA 组件",
+    "- 闭环流程时间线组件（5 阶段）",
+    "- 执行证据卡片组件（模型、角色、时间、状态）",
+    "- 验收与回填组件（产物链接、版本、状态）",
+    "## 品牌语气",
+    "- 文案风格直接、可执行、避免空泛和夸大。",
+    "- 所有模块优先回答“这个功能如何推进需求落地”。",
+    "- 结尾必须给出下一步行动与责任角色。"
+  ].join("\n");
+}
+
+function buildAutoSubmissionChecklist(
+  stageType: StageType,
+  title: string
+) {
+  const template = resolveDeliverableTemplate(title, stageType);
+  return template.acceptanceChecklist.map((item) => `- ${item}`);
+}
+
+function normalizeStageText(input: string) {
+  return String(input || "").replace(/\s+/g, " ").trim();
+}
+
+function countHits(source: string, items: string[]) {
+  if (!source || items.length === 0) {
+    return 0;
+  }
+  const lowered = source.toLowerCase();
+  return items.filter((item) => {
+    const normalized = String(item || "").trim().toLowerCase();
+    return normalized && lowered.includes(normalized);
+  }).length;
+}
+
+function buildStageTaskEvidence(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
+) {
+  const currentTasks = project.tasks
+    .filter((task) => task.stageType === project.currentStage)
+    .slice(0, 8);
+
+  if (currentTasks.length === 0) {
+    return ["- 当前阶段暂无任务，请先补充任务后再推进审批。"];
+  }
+
+  return currentTasks.map((task, index) => (
+    `- ${index + 1}. ${task.title}（${task.status} / 优先级 ${task.priority}）\n  - 说明: ${task.description || "待补充"}`
+  ));
+}
+
+function buildDeliverableSpecificSections(
+  stageType: StageType,
+  title: string,
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
+) {
+  const template = resolveDeliverableTemplate(title, stageType);
+  return [
+    "## 专业模板约束",
+    ...buildDeliverableTemplatePromptBlock(title, stageType, project.parsedIntent.keywords).map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
+    "",
+    "## 模板章节骨架（请结合 Agent 输出正文补全）",
+    ...template.requiredSections.flatMap((section) => ([
+      section,
+      "- 结合项目上下文补充该章节关键内容。"
+    ])),
+    "",
+    "## 交付细化说明",
+    "- 说明本交付物如何作为下一阶段输入。",
+    "- 说明可验证证据与审批关注点。"
+  ];
+}
+
+function summarizeModelAttempts(run: StageRunSnapshot) {
+  const attempts = Array.isArray(run.attempts) ? run.attempts : [];
+  if (attempts.length === 0) {
+    return ["- 无模型尝试记录（可能为脚本模式或旧版本运行）。"];
+  }
+  return attempts.slice(0, 6).map((attempt, index) => (
+    `- ${index + 1}. ${attempt.model} @ ${attempt.route} · ${attempt.status} · ${attempt.elapsedMs}ms${attempt.error ? ` · ${attempt.error}` : ""}`
+  ));
+}
+
+function evaluateAutoSubmissionQuality(input: {
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+  title: string;
+  stageType: StageType;
+  content: string;
+  run: StageRunSnapshot;
+}) {
+  const normalized = normalizeStageText(input.content);
+  const lowered = normalized.toLowerCase();
+  const issues: string[] = [];
+  const diagnostics: string[] = [];
+  let score = 100;
+  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true";
+
+  if (input.run.provider === "scripted") {
+    score -= strictRealModel ? 42 : 8;
+    diagnostics.push("执行模式: scripted（降级）");
+    if (strictRealModel) {
+      issues.push("当前输出来自 scripted 降级模式，不满足真实模型执行要求。");
+    }
+  }
+  if (input.run.degraded) {
+    score -= strictRealModel ? 28 : 6;
+    diagnostics.push("执行状态: degraded（真实模型失败后降级）");
+    if (strictRealModel) {
+      issues.push("真实模型调用失败后降级，内容可靠性不足。");
+    }
+  }
+
+  if (normalized.length < 900) {
+    score -= 20;
+    issues.push("正文内容长度不足，交付细节不够完整。");
+  }
+
+  const requiredSections = [
+    "## 自动推进元信息",
+    "## 需求对齐",
+    "## 本阶段任务证据",
+    "## Agent 输出正文",
+    "## 审阅要点"
+  ];
+  const missing = requiredSections.filter((section) => !input.content.includes(section));
+  if (missing.length > 0) {
+    score -= missing.length * 10;
+    issues.push(`缺少关键章节: ${missing.join("、")}`);
+  }
+
+  const keywordHits = countHits(lowered, input.project.parsedIntent.keywords.slice(0, 6));
+  diagnostics.push(`关键词命中: ${keywordHits}/${Math.max(1, input.project.parsedIntent.keywords.slice(0, 6).length)}`);
+  if (input.project.parsedIntent.keywords.length > 0 && keywordHits < Math.min(2, input.project.parsedIntent.keywords.length)) {
+    score -= 12;
+    issues.push("与原始需求关键词对齐不足。");
+  }
+
+  const constraints = input.project.parsedIntent.constraints.slice(0, 4);
+  const constraintHits = countHits(lowered, constraints);
+  diagnostics.push(`约束命中: ${constraintHits}/${Math.max(1, constraints.length)}`);
+  if (constraints.length > 0 && constraintHits === 0) {
+    score -= 10;
+    issues.push("未覆盖关键约束条件。");
+  }
+
+  const stageTasks = input.project.tasks
+    .filter((task) => task.stageType === input.stageType)
+    .slice(0, 6);
+  const taskTitleHits = countHits(lowered, stageTasks.map((task) => task.title));
+  diagnostics.push(`任务证据命中: ${taskTitleHits}/${Math.max(1, stageTasks.length)}`);
+  if (stageTasks.length > 0 && taskTitleHits < Math.min(2, stageTasks.length)) {
+    score -= 14;
+    issues.push("未充分引用本阶段任务证据，缺少可追溯性。");
+  }
+
+  const genericHits = GENERIC_OUTPUT_PATTERNS.filter((pattern) => pattern.test(input.content)).length;
+  if (genericHits >= 2) {
+    score -= 16;
+    issues.push("命中多条历史模板化文案，存在泛化输出风险。");
+  }
+
+  const template = resolveDeliverableTemplate(input.title, input.stageType);
+  const missingTemplateSections = template.requiredSections.filter((section) => !input.content.includes(section));
+  if (missingTemplateSections.length > 0) {
+    score -= Math.min(18, missingTemplateSections.length * 3);
+    issues.push(`未完整覆盖专业模板章节: ${missingTemplateSections.slice(0, 4).join("、")}${missingTemplateSections.length > 4 ? "..." : ""}`);
+  }
+
+  const pass = score >= 72 && issues.length === 0;
+  return {
+    pass,
+    score: Math.max(0, Math.min(100, score)),
+    issues,
+    diagnostics
+  } satisfies AutoSubmissionQuality;
+}
+
+function isAutoApprovalReady(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  const currentStageDeliverables = project.deliverables
+    .filter((item) => item.stageType === project.currentStage)
+    .sort((left, right) => right.version - left.version);
+  const latest = currentStageDeliverables[0];
+  if (!latest) {
+    return false;
+  }
+  const content = String(latest.content || "");
+  if (!content.includes("## 自动质检")) {
+    return false;
+  }
+  return /自动质检结论:\s*通过/.test(content);
+}
+
+function hasApprovedDesignReview(content: string) {
+  const source = String(content || "");
+  return source.includes("## 设计审查卡") && /审查结论:\s*通过/.test(source);
+}
+
+function buildProjectRequiredActions(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  runtime?: Awaited<ReturnType<typeof getRuntimeStatus>>
+) {
+  const actions: ProjectRequiredAction[] = [];
+  const currentStageDeliverables = project.deliverables
+    .filter((item) => item.stageType === project.currentStage)
+    .sort((left, right) => right.version - left.version);
+
+  if (project.pendingApproval) {
+    if (currentStageDeliverables.length === 0) {
+      actions.push({
+        id: "missing-stage-deliverable",
+        severity: "critical",
+        title: "当前阶段缺少交付物，无法验收",
+        detail: `请先提交 ${STAGE_LABELS[project.currentStage] || project.currentStage} 阶段交付物，再执行审批。`,
+        action: "submit_stage_deliverable",
+        ctaLabel: "前往提交交付物"
+      });
+    }
+
+    const notReady = currentStageDeliverables.filter((item) => !isDeliverableReadyForAcceptance({
+      status: item.status,
+      content: item.content
+    }));
+    if (notReady.length > 0) {
+      actions.push({
+        id: "deliverable-not-ready",
+        severity: "warning",
+        title: "交付物内容不完整或质检未通过",
+        detail: `待补足交付物：${notReady.map((item) => item.name).join("、")}。请补全内容并重新提交。`,
+        action: "reconcile_deliverables",
+        ctaLabel: "重建交付物内容"
+      });
+    }
+
+    if (project.currentStage === "DESIGN" && !currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
+      actions.push({
+        id: "design-review-required",
+        severity: "critical",
+        title: "设计阶段缺少通过的设计审查卡",
+        detail: "请补充完整设计审查卡（视觉方案、版式策略、组件清单、品牌语气）并通过审查。",
+        action: "open_design_review",
+        ctaLabel: "提交设计审查卡"
+      });
+    }
+
+    if (isAutoApprovalReady(project)) {
+      actions.push({
+        id: "ready-for-review",
+        severity: "info",
+        title: "当前阶段已具备验收条件",
+        detail: "请执行人工验收决策（通过或驳回），以推进下一阶段。",
+        action: "review_pending_stage",
+        ctaLabel: "执行阶段验收"
+      });
+    }
+  } else if (project.currentStage === "DESIGN" && currentStageDeliverables.length === 0) {
+    actions.push({
+      id: "design-phase-no-deliverable",
+      severity: "info",
+      title: "设计阶段尚未提交交付物",
+      detail: "建议先完成设计审查卡，再提交设计交付物，避免后续阶段返工。",
+      action: "open_design_review",
+      ctaLabel: "填写设计审查卡"
+    });
+  }
+
+  const blockedTasks = project.tasks.filter((task) => task.stageType === project.currentStage && task.status === "blocked");
+  if (blockedTasks.length > 0) {
+    actions.push({
+      id: "blocked-tasks",
+      severity: "warning",
+      title: "当前阶段存在阻塞任务",
+      detail: `阻塞任务 ${blockedTasks.length} 个：${blockedTasks.slice(0, 3).map((task) => task.title).join("、")}${blockedTasks.length > 3 ? "..." : ""}`,
+      action: "resolve_blocked_tasks",
+      ctaLabel: "前往处理阻塞任务"
+    });
+  }
+
+  if (runtime && runtime.requestedMode === "openai-compatible" && !runtime.configured) {
+    actions.push({
+      id: "runtime-not-configured",
+      severity: "critical",
+      title: "真实模型未配置完整，当前可能降级执行",
+      detail: "请补全 API Base URL / API Key / Model，确保阶段输出来自真实模型调用。",
+      action: "refresh_runtime",
+      ctaLabel: "检查运行时配置"
+    });
+  }
+
+  if (
+    runtime
+    && runtime.requestedMode === "openai-compatible"
+    && runtime.configured
+    && String(project.liveSession?.provider || "").trim().toLowerCase() === "scripted"
+  ) {
+    actions.push({
+      id: "runtime-degraded",
+      severity: "warning",
+      title: "当前阶段已降级到脚本输出",
+      detail: "真实模型调用连续失败（如 401/超时），请检查模型通道、密钥权限与可用模型策略后重试。",
+      action: "refresh_runtime",
+      ctaLabel: "修复模型通道"
+    });
+  }
+
+  return actions;
+}
+
+function formatRequiredActionsMessage(actions: ProjectRequiredAction[]) {
+  if (actions.length === 0) {
+    return "当前流程需要你补充信息后再继续。";
+  }
+  const lines = actions
+    .slice(0, 3)
+    .map((action, index) => `${index + 1}. ${action.title}（${action.ctaLabel}）`);
+  return `当前流程需要你先补足以下事项：\n${lines.join("\n")}`;
+}
+
+async function buildAutoStageSubmissions(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   options?: {
     action?: string;
     metadata?: Prisma.InputJsonValue;
   }
-) {
+): Promise<AutoStageSubmission[]> {
+  const titles = STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage] || [buildAutoStageTitle(project)];
+  const submissions: AutoStageSubmission[] = [];
+  const templateGuidance = titles.flatMap((title) => {
+    const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
+    return [
+      `[${title}] -> ${template.label}`,
+      ...buildDeliverableTemplatePromptBlock(title, project.currentStage as StageType, project.parsedIntent.keywords)
+        .map((line) => `  ${line}`)
+    ];
+  });
   const run = await runProjectStageAgent({
     projectId: project.id,
     action: options?.action || "stage.auto_submission",
@@ -158,66 +599,129 @@ async function buildAutoStageSubmission(
     parsedIntent: project.parsedIntent,
     stageType: project.currentStage as StageType,
     role: project.currentRole as RoleType,
-    summary: "请按当前阶段输出可直接审阅并可进入下一阶段执行的正式交付物。"
+    summary: [
+      `请围绕原始需求输出当前阶段完整交付内容，供以下交付物复用：${titles.join("、")}`,
+      "必须引用至少 3 个需求关键词、2 个当前阶段任务标题，并给出可验收条目与下一阶段输入。",
+      "以下是交付模板约束（请严格遵循）：",
+      ...templateGuidance
+    ].join("\n")
   });
+  const stageTaskEvidence = buildStageTaskEvidence(project);
+  const attemptsSummary = summarizeModelAttempts(run as StageRunSnapshot);
+  const runGeneratedAt = new Date().toISOString();
 
-  const title = buildAutoStageTitle(project);
-  const content = [
-    `# ${title}`,
-    "",
-    "## 自动推进元信息",
-    `- 项目: ${project.name} (${project.id})`,
-    `- 阶段: ${STAGE_LABELS[project.currentStage]} (${project.currentStage})`,
-    `- 执行角色: ${ROLE_LABELS[project.currentRole] || project.currentRole}`,
-    `- 执行引擎: ${run.provider} · 模型 ${run.model}`,
-    `- 生成时间: ${new Date().toISOString()}`,
-    "",
-    "## Agent 输出正文",
-    run.body,
-    "",
-    "## 审阅要点",
-    "- 请确认内容覆盖目标、范围、约束、风险与验收标准。",
-    "- 如需修订，请在当前文档补充后再次提交。",
-    "- 通过后系统将继续推进下一阶段。"
-  ].join("\n");
-
-  if (project.currentStage === "DESIGN") {
-    const designGuardSections = [
-      "## 视觉方案",
-      "- 主视觉强调“需求到研发闭环”，首页首屏展示五步流程。",
-      "- 主色采用高对比商务蓝系，强调可信与执行力。",
-      "- 关键 CTA（预约演示）在首屏和页尾双位置呈现。",
-      "## 版式策略",
-      "- 顶部采用价值主张 + 行动按钮双列布局。",
-      "- 中部采用卡片化展示角色协作与实时监控能力。",
-      "- 底部提供案例摘要、交付清单与下一步行动入口。",
-      "## 组件清单",
-      "- Hero 区块（标题、副标题、双 CTA）",
-      "- 协作流程时间线组件（5 步）",
-      "- 实时监控指标卡组件（状态、趋势、更新时间）",
-      "- 预约演示表单组件（姓名、联系方式、诉求）",
-      "## 品牌语气",
-      "- 文案语气专业、直接、可执行，避免空泛描述。",
-      "- 重点强调“真实执行证据”“可追溯交付”。",
-      "- 每个阶段均给出可验证的下一步动作。"
+  for (const title of titles) {
+    const checklist = buildAutoSubmissionChecklist(project.currentStage as StageType, title);
+    const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
+    const deliverableSpecificSections = buildDeliverableSpecificSections(project.currentStage as StageType, title, project);
+    let content = [
+      `# ${title}`,
+      "",
+      "## 自动推进元信息",
+      `- 项目: ${project.name} (${project.id})`,
+      `- 阶段: ${STAGE_LABELS[project.currentStage]} (${project.currentStage})`,
+      `- 执行角色: ${ROLE_LABELS[project.currentRole] || project.currentRole}`,
+      `- 执行引擎: ${run.provider} · 模型 ${run.model}`,
+      `- 生成时间: ${runGeneratedAt}`,
+      "",
+      "## 模型尝试轨迹",
+      ...attemptsSummary,
+      "",
+      "## 需求对齐",
+      `- 原始需求: ${project.description}`,
+      `- 关键词: ${project.parsedIntent.keywords.join(" / ") || "无"}`,
+      `- 约束: ${project.parsedIntent.constraints.join("；") || "无"}`,
+      `- 风险: ${project.parsedIntent.risks.join("；") || "无"}`,
+      "",
+      "## 本阶段任务证据",
+      ...stageTaskEvidence,
+      "",
+      "## Agent 输出正文",
+      run.body,
+      "",
+      "## 交付聚焦",
+      `- 当前交付物: ${title}`,
+      `- 交付目的: ${STAGE_LABELS[project.currentStage]}阶段可验收产物，支撑后续确认与推进`,
+      "",
+      "## 模板章节骨架（自动补齐）",
+      ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合本阶段任务证据与 Agent 正文完善本节。"])),
+      "",
+      "## 验收检查清单",
+      ...template.acceptanceChecklist.map((item) => `- ${item}`),
+      "",
+      ...deliverableSpecificSections,
+      "",
+      "## 审阅要点",
+      ...checklist
     ].join("\n");
 
-    return {
+    const quality = evaluateAutoSubmissionQuality({
+      project,
       title,
-      content: `${content}\n\n${designGuardSections}`,
-      designReview: {
-        visualDirection: project.parsedIntent.keywords.slice(0, 3).join(" / ") || "科技感 + 可信执行",
-        brandTone: "专业、明确、可落地",
-        uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
-        accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
-        approvedBy: "系统自动审查",
-        approved: true,
-        notes: `自动推进生成，来源模型 ${run.model}`
-      }
+      stageType: project.currentStage as StageType,
+      content,
+      run: run as StageRunSnapshot
+    });
+
+    content = [
+      content,
+      "",
+      "## 自动质检",
+      `- 自动质检结论: ${quality.pass ? "通过" : "待补充"}`,
+      `- 质量评分: ${quality.score}/100`,
+      ...quality.diagnostics.map((item) => `- ${item}`),
+      ...(quality.issues.length > 0 ? ["- 风险项:", ...quality.issues.map((item) => `  - ${item}`)] : ["- 风险项: 无"])
+    ].join("\n");
+
+    const submission: StageSubmissionInput = {
+      title,
+      content
     };
+
+    if (project.currentStage === "DESIGN") {
+      content = `${content}\n\n${buildDesignRequiredSections(project, title)}`;
+      submission.content = content;
+      submission.designReview = buildDesignReviewPayload(project, run.model);
+    }
+
+    submissions.push({
+      submission,
+      quality
+    });
   }
 
-  return { title, content };
+  return submissions;
+}
+
+async function buildAutoStageSubmission(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    action?: string;
+    metadata?: Prisma.InputJsonValue;
+  }
+) {
+  const submissions = await buildAutoStageSubmissions(project, options);
+  return submissions[0]?.submission || {
+    title: buildAutoStageTitle(project),
+    content: `# ${buildAutoStageTitle(project)}\n\n暂无自动内容，请手动补充。`
+  };
+}
+
+async function submitStageSubmissionBundle(
+  projectId: string,
+  submissions: AutoStageSubmission[]
+) {
+  if (submissions.length === 0) {
+    return;
+  }
+
+  for (let index = 0; index < submissions.length; index += 1) {
+    const submission = submissions[index].submission;
+    const isLast = index === submissions.length - 1;
+    await submitCurrentStage(projectId, submission, {
+      finalizeApproval: isLast
+    });
+  }
 }
 
 async function runProjectAutomationTick(options?: { force?: boolean }) {
@@ -238,60 +742,61 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
     let approved = 0;
     let skipped = 0;
     let failed = 0;
+    let awaitingConfirmation = 0;
     let firstError: string | null = null;
 
     for (const summary of activeProjects) {
-      try {
-        const project = await findProject(summary.id);
-        if (!project || project.status !== "active") {
-          skipped += 1;
-          continue;
-        }
+      if (projectAdvanceLocks.has(summary.id)) {
+        skipped += 1;
+        continue;
+      }
 
-        if (project.pendingApproval) {
-          try {
-            await approveProject(project.id);
-            approved += 1;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "approve failed";
-            if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:") && project.currentStage === "DESIGN") {
-              const repairSubmission = await buildAutoStageSubmission(project, {
-                action: "stage.auto_submission.repair",
-                metadata: {
-                  reason: "design_review_not_approved"
-                }
-              });
-              await submitCurrentStage(project.id, repairSubmission);
-              await approveProject(project.id);
-              approved += 1;
-              advanced += 1;
+      try {
+        await withProjectLock(summary.id, async () => {
+          const project = await findProject(summary.id);
+          if (!project || project.status !== "active") {
+            skipped += 1;
+            return;
+          }
+
+          if (project.pendingApproval) {
+            skipped += 1;
+            awaitingConfirmation += 1;
+            firstError = firstError ?? `project ${project.id} pending user confirmation`;
+            return;
+          }
+
+          const submissions = await buildAutoStageSubmissions(project, {
+            action: "stage.auto_submission.automation"
+          });
+          await submitStageSubmissionBundle(project.id, submissions);
+
+          const refreshed = await findProject(project.id);
+          if (refreshed?.pendingApproval) {
+            awaitingConfirmation += 1;
+            const qualityPass = submissions.every((item) => item.quality.pass);
+            if (!qualityPass) {
+              firstError = firstError ?? `project ${project.id} has pending quality issues, waiting for manual confirmation`;
             } else {
-              failed += 1;
-              firstError = firstError ?? message;
+              firstError = firstError ?? `project ${project.id} is waiting for manual stage confirmation`;
             }
           }
-          continue;
-        }
-
-        const submission = await buildAutoStageSubmission(project, {
-          action: "stage.auto_submission.automation"
+          advanced += 1;
         });
-        await submitCurrentStage(project.id, submission);
-
-        const refreshed = await findProject(project.id);
-        if (refreshed?.pendingApproval) {
-          await approveProject(project.id);
-        }
-        advanced += 1;
       } catch (error) {
-        failed += 1;
-        firstError = firstError ?? (error instanceof Error ? error.message : "project automation failed");
+        const message = error instanceof Error ? error.message : "project automation failed";
+        if (message === "PROJECT_ADVANCE_IN_PROGRESS") {
+          skipped += 1;
+        } else {
+          failed += 1;
+          firstError = firstError ?? message;
+        }
       }
     }
 
     projectAutomationState.lastRunAt = runStartedAt;
     projectAutomationState.lastError = firstError;
-    projectAutomationState.lastSummary = `active=${activeProjects.length}, advanced=${advanced}, approved=${approved}, skipped=${skipped}, failed=${failed}`;
+    projectAutomationState.lastSummary = `active=${activeProjects.length}, advanced=${advanced}, approved=${approved}, awaitingConfirmation=${awaitingConfirmation}, skipped=${skipped}, failed=${failed}`;
   } catch (error) {
     projectAutomationState.lastRunAt = runStartedAt;
     projectAutomationState.lastError = error instanceof Error ? error.message : "unknown automation error";
@@ -474,6 +979,29 @@ type ProjectFinalArtifactsReport = {
   artifacts: FinalArtifactRecord[];
   missingRequired: string[];
   checklist: string[];
+  generation?: FinalArtifactsJobProgress;
+};
+
+type FinalArtifactsJobStatus = "queued" | "running" | "completed" | "failed";
+
+type FinalArtifactsJobProgress = {
+  jobId: string;
+  projectId: string;
+  status: FinalArtifactsJobStatus;
+  progress: number;
+  step: string;
+  message?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+};
+
+type FinalArtifactsJobState = FinalArtifactsJobProgress & {
+  report?: ProjectFinalArtifactsReport;
+  officialSite?: {
+    url: string;
+    filePath?: string;
+  };
 };
 
 const FINAL_REQUIRED_ARTIFACTS: Array<{
@@ -514,6 +1042,220 @@ const FINAL_REQUIRED_ARTIFACTS: Array<{
   }
 ];
 
+const FINAL_ARTIFACT_JOB_RETENTION_MS = Math.max(10 * 60 * 1000, Number(process.env.FINAL_ARTIFACT_JOB_RETENTION_MS ?? 45 * 60 * 1000));
+const FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS = Math.max(8_000, Number(process.env.FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS ?? 25_000));
+const FINAL_ARTIFACT_SITE_TIMEOUT_MS = Math.max(8_000, Number(process.env.FINAL_ARTIFACT_SITE_TIMEOUT_MS ?? 25_000));
+const finalArtifactsJobsById = new Map<string, FinalArtifactsJobState>();
+const finalArtifactsLatestJobByProject = new Map<string, string>();
+
+function toFinalArtifactsJobProgress(job?: FinalArtifactsJobState | null): FinalArtifactsJobProgress | undefined {
+  if (!job) {
+    return undefined;
+  }
+  return {
+    jobId: job.jobId,
+    projectId: job.projectId,
+    status: job.status,
+    progress: job.progress,
+    step: job.step,
+    message: job.message,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    error: job.error
+  };
+}
+
+function getLatestFinalArtifactsJob(projectId: string) {
+  const jobId = finalArtifactsLatestJobByProject.get(projectId);
+  if (!jobId) {
+    return undefined;
+  }
+  const job = finalArtifactsJobsById.get(jobId);
+  if (!job) {
+    finalArtifactsLatestJobByProject.delete(projectId);
+    return undefined;
+  }
+  return job;
+}
+
+function purgeExpiredFinalArtifactsJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of finalArtifactsJobsById.entries()) {
+    const baseline = job.finishedAt || job.startedAt;
+    if (!baseline) {
+      continue;
+    }
+    if (now - new Date(baseline).getTime() <= FINAL_ARTIFACT_JOB_RETENTION_MS) {
+      continue;
+    }
+    finalArtifactsJobsById.delete(jobId);
+    if (finalArtifactsLatestJobByProject.get(job.projectId) === jobId) {
+      finalArtifactsLatestJobByProject.delete(job.projectId);
+    }
+  }
+}
+
+function attachFinalArtifactsGeneration(
+  report: ProjectFinalArtifactsReport,
+  job?: FinalArtifactsJobState
+): ProjectFinalArtifactsReport {
+  return {
+    ...report,
+    generation: toFinalArtifactsJobProgress(job)
+  };
+}
+
+async function withAsyncTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  try {
+    return await Promise.race<T | undefined>([promise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function runFinalArtifactsGenerationJob(jobId: string) {
+  const job = finalArtifactsJobsById.get(jobId);
+  if (!job) {
+    return;
+  }
+
+  const update = (patch: Partial<FinalArtifactsJobState>) => {
+    const current = finalArtifactsJobsById.get(jobId);
+    if (!current) {
+      return;
+    }
+    finalArtifactsJobsById.set(jobId, {
+      ...current,
+      ...patch
+    });
+  };
+
+  try {
+    update({
+      status: "running",
+      progress: 10,
+      step: "加载项目上下文",
+      message: "正在拉取项目和交付物数据...",
+      startedAt: job.startedAt || new Date().toISOString(),
+      finishedAt: undefined,
+      error: undefined
+    });
+
+    let project = await findProject(job.projectId);
+    if (!project) {
+      throw new Error("Project not found");
+    }
+
+    update({
+      progress: 38,
+      step: "补齐并校验交付物",
+      message: "正在执行交付物补齐与模板对齐..."
+    });
+
+    const reconciled = await withAsyncTimeout(
+      reconcileProjectDeliverablesNow(job.projectId),
+      FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS
+    );
+    if (reconciled) {
+      project = reconciled;
+    } else {
+      update({
+        message: `交付物补齐超时（>${FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS}ms），继续使用当前已产出内容。`
+      });
+    }
+
+    let officialSite: { url: string; filePath?: string } | undefined;
+    if (project.status === "completed") {
+      update({
+        progress: 72,
+        step: "生成最终演示站点",
+        message: "正在构建可访问的演示成果..."
+      });
+      try {
+        const artifact = await withAsyncTimeout(
+          generateOfficialSiteArtifact(project),
+          FINAL_ARTIFACT_SITE_TIMEOUT_MS
+        );
+        if (!artifact) {
+          update({
+            message: `演示站点生成超时（>${FINAL_ARTIFACT_SITE_TIMEOUT_MS}ms），先返回文档成果。`
+          });
+        } else {
+          officialSite = {
+            url: artifact.publicPath,
+            filePath: artifact.filePaths[0]
+          };
+        }
+      } catch (error) {
+        // 允许站点生成失败，不阻断报告本身。
+        update({
+          message: `演示站点生成失败，继续产出报告：${error instanceof Error ? error.message : String(error)}`
+        });
+      }
+    }
+
+    update({
+      progress: 92,
+      step: "汇总最终验收产物",
+      message: "正在生成最终验收报告..."
+    });
+    const report = buildProjectFinalArtifactsReport(project, officialSite);
+    const finishedAt = new Date().toISOString();
+    update({
+      status: "completed",
+      progress: 100,
+      step: "已完成",
+      message: "最终验收产物已生成，可开始验收。",
+      finishedAt,
+      report,
+      officialSite
+    });
+  } catch (error) {
+    update({
+      status: "failed",
+      progress: 100,
+      step: "生成失败",
+      message: "最终验收产物生成失败，请查看错误并重试。",
+      error: error instanceof Error ? error.message : String(error),
+      finishedAt: new Date().toISOString()
+    });
+  } finally {
+    purgeExpiredFinalArtifactsJobs();
+  }
+}
+
+function startFinalArtifactsGenerationJob(projectId: string, options?: { force?: boolean }) {
+  purgeExpiredFinalArtifactsJobs();
+  const latest = getLatestFinalArtifactsJob(projectId);
+  if (!options?.force && latest && (latest.status === "queued" || latest.status === "running")) {
+    return latest;
+  }
+
+  const nextJob: FinalArtifactsJobState = {
+    jobId: randomUUID(),
+    projectId,
+    status: "queued",
+    progress: 0,
+    step: "已入队",
+    message: "已创建生成任务，等待执行...",
+    startedAt: new Date().toISOString()
+  };
+  finalArtifactsJobsById.set(nextJob.jobId, nextJob);
+  finalArtifactsLatestJobByProject.set(projectId, nextJob.jobId);
+
+  setTimeout(() => {
+    void runFinalArtifactsGenerationJob(nextJob.jobId);
+  }, 0);
+
+  return nextJob;
+}
+
 function buildExcerpt(content: string, limit = 120) {
   const raw = String(content || "");
   const pickSection = (title: string) => {
@@ -543,11 +1285,18 @@ function isDeliverableReadyForAcceptance(input: {
   content?: string;
 }) {
   const status = String(input.status || "").toLowerCase();
-  const length = String(input.content || "").trim().length;
+  const content = String(input.content || "");
+  const length = content.trim().length;
   if (status === "draft" || !status) {
     return false;
   }
-  return length >= 120;
+  if (length < 120) {
+    return false;
+  }
+  if (content.includes("## 自动质检") && !/自动质检结论:\s*通过/.test(content)) {
+    return false;
+  }
+  return true;
 }
 
 function deliverableStatusScore(status: string) {
@@ -556,6 +1305,22 @@ function deliverableStatusScore(status: string) {
   if (status === "rejected") return 2;
   if (status === "draft") return 1;
   return 0;
+}
+
+function deliverableQualityScore(content: string) {
+  const normalized = String(content || "");
+  let score = 0;
+  if (normalized.includes("执行引擎:")) score += 2;
+  if (normalized.includes("## 本阶段任务证据")) score += 2;
+  if (normalized.includes("## 模型尝试轨迹")) score += 1;
+  if (normalized.includes("## 自动质检")) score += 2;
+  if (/自动质检结论:\s*通过/.test(normalized)) score += 3;
+  if (
+    /(固定仪表盘、项目观测室、Agent 中心三大页面|让实时输出始终成为视觉中心|把审批与紧急介入做成明确的强动作|避免常规 SaaS 模板感)/.test(normalized)
+  ) {
+    score -= 2;
+  }
+  return score;
 }
 
 function pickBestDeliverable(
@@ -570,6 +1335,10 @@ function pickBestDeliverable(
     const statusDelta = deliverableStatusScore(right.status) - deliverableStatusScore(left.status);
     if (statusDelta !== 0) {
       return statusDelta;
+    }
+    const qualityDelta = deliverableQualityScore(String(right.content || "")) - deliverableQualityScore(String(left.content || ""));
+    if (qualityDelta !== 0) {
+      return qualityDelta;
     }
     const contentDelta = String(right.content || "").trim().length - String(left.content || "").trim().length;
     if (contentDelta !== 0) {
@@ -824,6 +1593,23 @@ function buildSignoffHistory(
     .slice(0, 30);
 }
 
+function summarizeLatestSignoff(signoffHistory: AcceptanceSignoffRecord[]) {
+  const latestByStage = new Map<string, AcceptanceSignoffRecord>();
+  for (const record of signoffHistory) {
+    const key = record.stageType || record.stageLabel || record.id;
+    if (!latestByStage.has(key)) {
+      latestByStage.set(key, record);
+    }
+  }
+
+  const latestRecords = [...latestByStage.values()];
+  return {
+    approved: latestRecords.filter((item) => item.decision === "approved").length,
+    rejected: latestRecords.filter((item) => item.decision === "rejected").length,
+    pending: latestRecords.filter((item) => item.decision === "pending").length
+  };
+}
+
 function buildProjectAcceptanceReport(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ): ProjectAcceptanceReport {
@@ -868,9 +1654,10 @@ function buildProjectAcceptanceReport(
   const completedTasks = project.tasks.filter((task) => task.status === "done").length;
   const approvedDeliverables = project.deliverables.filter((item) => item.status === "approved").length;
   const signoffHistory = buildSignoffHistory(project);
-  const signoffApproved = signoffHistory.filter((item) => item.decision === "approved").length;
-  const signoffRejected = signoffHistory.filter((item) => item.decision === "rejected").length;
-  const signoffPending = signoffHistory.filter((item) => item.decision === "pending").length;
+  const signoffSummary = summarizeLatestSignoff(signoffHistory);
+  const signoffApproved = signoffSummary.approved;
+  const signoffRejected = signoffSummary.rejected;
+  const signoffPending = signoffSummary.pending;
   const archivedReportDeliverables = project.deliverables
     .filter((item) => item.stageType === "ACCEPT" && item.name.startsWith("阶段验收报告"))
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
@@ -1227,6 +2014,7 @@ app.use("/api", (req, res, next) => {
       || req.path.startsWith("/product-context")
       || req.path.startsWith("/issues")
       || req.path.startsWith("/system/design-model-policy/")
+      || req.path.startsWith("/system/stage-model-policy")
     )
   ) {
     next();
@@ -1319,6 +2107,30 @@ app.get("/api/system/readiness", asyncRoute(async (_req, res) => {
 app.get("/api/system/design-model-policy/health", asyncRoute(async (_req, res) => {
   const result = await getDesignModelPolicyHealth();
   res.status(result.ok ? 200 : 503).json(result);
+}));
+
+app.get("/api/system/stage-model-policy", asyncRoute(async (_req, res) => {
+  res.json({
+    success: true,
+    data: getStageModelPolicy()
+  });
+}));
+
+app.get("/api/system/stage-model-policy/preview", asyncRoute(async (req, res) => {
+  const role = String(req.query.role ?? "ROLE_DESIGN") as RoleType;
+  const stageType = String(req.query.stage ?? "DESIGN") as StageType;
+  const data = await previewStageModelPlan({ role, stageType });
+  res.json({ success: true, data });
+}));
+
+app.get("/api/system/stage-model-policy/usage", asyncRoute(async (req, res) => {
+  const lookbackHoursInput = Number(req.query.lookbackHours ?? 24);
+  const limitInput = Number(req.query.limit ?? 600);
+  const data = await getStageModelUsage({
+    lookbackHours: Number.isFinite(lookbackHoursInput) ? lookbackHoursInput : 24,
+    limit: Number.isFinite(limitInput) ? limitInput : 600
+  });
+  res.json({ success: true, data });
 }));
 
 app.post("/api/system/design-model-policy/repair", asyncRoute(async (req, res) => {
@@ -1817,6 +2629,18 @@ app.post("/api/projects", asyncRoute(async (req, res) => {
 
 app.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+
+  if (projectAdvanceLocks.has(projectId)) {
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "PROJECT_ADVANCE_IN_PROGRESS",
+        message: "该项目正在推进中，请稍后重试。"
+      }
+    });
+    return;
+  }
+
   const project = await findProject(projectId);
 
   if (!project) {
@@ -1829,23 +2653,129 @@ app.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
     return;
   }
 
-  if (project.pendingApproval) {
-    const approved = await approveProject(projectId);
-    res.json(approved);
+  let latest: Awaited<ReturnType<typeof findProject>> | null = null;
+  try {
+    latest = await withProjectLock(projectId, async () => {
+      const current = await findProject(projectId);
+      if (!current) {
+        return null;
+      }
+
+      if (current.pendingApproval) {
+        return current;
+      }
+
+      const submissions = await buildAutoStageSubmissions(current, {
+        action: "stage.auto_submission.manual_advance"
+      });
+      await submitStageSubmissionBundle(projectId, submissions);
+      return findProject(projectId);
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "advance failed";
+
+    if (message === "PROJECT_ADVANCE_IN_PROGRESS") {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "PROJECT_ADVANCE_IN_PROGRESS",
+          message: "该项目正在推进中，请稍后重试。"
+        }
+      });
+      return;
+    }
+
+    if (message.startsWith("DESIGN_REVIEW_REQUIRED:")) {
+      const latestProject = await findProject(projectId);
+      if (!latestProject) {
+        res.status(404).json({ message: "Project not found" });
+        return;
+      }
+
+      const runtime = await getRuntimeStatus();
+      const requiredActions = buildProjectRequiredActions(latestProject, runtime);
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "REQUIRES_USER_INTERVENTION",
+          message: formatRequiredActionsMessage(requiredActions),
+          requiredActions: requiredActions.length > 0
+            ? requiredActions
+            : [{
+              id: "design-review-required",
+              severity: "critical",
+              title: "设计阶段缺少设计审查卡",
+              detail: "请补充设计审查卡后再推进。",
+              action: "open_design_review",
+              ctaLabel: "提交设计审查卡"
+            }]
+        }
+      });
+      return;
+    }
+
+    throw error;
+  }
+
+  if (!latest) {
+    res.status(404).json({ message: "Project not found" });
     return;
   }
 
-  const submission = await buildAutoStageSubmission(project, {
-    action: "stage.auto_submission.manual_advance"
-  });
-  await submitCurrentStage(projectId, submission);
-  const refreshed = await findProject(projectId);
-  if (refreshed?.pendingApproval) {
-    await approveProject(projectId);
+  const runtime = await getRuntimeStatus();
+  const requiredActions = buildProjectRequiredActions(latest, runtime);
+  const blockedByUserIntervention = latest.pendingApproval;
+
+  if (blockedByUserIntervention) {
+    const actions = requiredActions.length > 0
+      ? requiredActions
+      : [{
+        id: "review-pending-stage",
+        severity: "info" as const,
+        title: "当前阶段待你确认",
+        detail: "请先执行阶段验收（通过或驳回）后再继续推进。",
+        action: "review_pending_stage" as const,
+        ctaLabel: "执行阶段验收"
+      }];
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "REQUIRES_USER_INTERVENTION",
+        message: formatRequiredActionsMessage(actions),
+        requiredActions: actions
+      }
+    });
+    return;
   }
 
-  const latest = await findProject(projectId);
-  res.json(latest);
+  res.json({
+    ...latest,
+    requiredActions
+  });
+}));
+
+app.post("/api/projects/:id/reconcile-deliverables", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await reconcileProjectDeliverablesNow(projectId);
+  if (!project) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "project.deliverables_reconciled",
+    resourceType: "project",
+    resourceId: project.id,
+    summary: `重建项目 ${project.id} 交付物内容`
+  });
+  const runtime = await getRuntimeStatus();
+  const requiredActions = buildProjectRequiredActions(project, runtime);
+  res.json({
+    ...project,
+    requiredActions
+  });
 }));
 
 app.get("/api/projects/:id", asyncRoute(async (req, res) => {
@@ -1857,7 +2787,12 @@ app.get("/api/projects/:id", asyncRoute(async (req, res) => {
     return;
   }
 
-  res.json(project);
+  const runtime = await getRuntimeStatus();
+  const requiredActions = buildProjectRequiredActions(project, runtime);
+  res.json({
+    ...project,
+    requiredActions
+  });
 }));
 
 app.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
@@ -1979,23 +2914,129 @@ app.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
     return;
   }
 
-  let officialSite: { url: string; filePath?: string } | undefined;
-  if (project.status === "completed") {
-    try {
-      const artifact = await generateOfficialSiteArtifact(project);
-      officialSite = {
-        url: artifact.publicPath,
-        filePath: artifact.filePaths[0]
-      };
-    } catch {
-      officialSite = undefined;
-    }
+  const autoGenerate = String(req.query.generate ?? "auto").toLowerCase() !== "false";
+  let activeJob = getLatestFinalArtifactsJob(projectId);
+  if (project.status === "completed" && autoGenerate && (!activeJob || activeJob.status === "failed")) {
+    activeJob = startFinalArtifactsGenerationJob(projectId, {
+      force: activeJob?.status === "failed"
+    });
   }
 
-  const report = buildProjectFinalArtifactsReport(project, officialSite);
+  const report = activeJob?.status === "completed" && activeJob.report
+    ? activeJob.report
+    : buildProjectFinalArtifactsReport(project, activeJob?.officialSite);
+
   res.json({
     success: true,
-    data: report
+    data: attachFinalArtifactsGeneration(report, activeJob)
+  });
+}));
+
+app.post("/api/projects/:id/final-artifacts/generate", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Project not found"
+      }
+    });
+    return;
+  }
+
+  const force = Boolean(req.body?.force);
+  const job = startFinalArtifactsGenerationJob(projectId, { force });
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "project.final_artifacts.generate",
+    resourceType: "project",
+    resourceId: projectId,
+    summary: `触发项目 ${projectId} 最终产物异步生成任务 ${job.jobId}`
+  });
+
+  res.json({
+    success: true,
+    data: {
+      projectId,
+      queued: true,
+      generation: toFinalArtifactsJobProgress(job)
+    }
+  });
+}));
+
+app.get("/api/projects/:id/final-artifacts/job", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Project not found"
+      }
+    });
+    return;
+  }
+
+  const latest = getLatestFinalArtifactsJob(projectId);
+  if (!latest) {
+    res.json({
+      success: true,
+      data: {
+        projectId,
+        generation: null
+      }
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    data: {
+      projectId,
+      generation: toFinalArtifactsJobProgress(latest),
+      report: latest.status === "completed" ? latest.report : undefined
+    }
+  });
+}));
+
+app.get("/api/projects/:id/final-artifacts/jobs/:jobId", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const jobId = String(req.params.jobId);
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Project not found"
+      }
+    });
+    return;
+  }
+
+  const job = finalArtifactsJobsById.get(jobId);
+  if (!job || job.projectId !== projectId) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Final artifacts job not found"
+      }
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    data: {
+      projectId,
+      generation: toFinalArtifactsJobProgress(job),
+      report: job.status === "completed" ? job.report : undefined
+    }
   });
 }));
 
@@ -2035,6 +3076,28 @@ app.get("/api/tasks", asyncRoute(async (_req, res) => {
 
 app.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  const current = await findProject(projectId);
+  if (!current) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+
+  if (!current.pendingApproval) {
+    const runtime = await getRuntimeStatus();
+    const requiredActions = buildProjectRequiredActions(current, runtime);
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "NO_PENDING_APPROVAL",
+        message: requiredActions.length > 0
+          ? formatRequiredActionsMessage(requiredActions)
+          : "当前阶段没有待确认事项，无需执行审批。",
+        requiredActions
+      }
+    });
+    return;
+  }
+
   let project;
   try {
     project = await approveProject(projectId);
@@ -2042,6 +3105,20 @@ app.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     const message = error instanceof Error ? error.message : "approve failed";
     if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:")) {
       res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
+      return;
+    }
+    if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {
+      // 自动触发一次交付物补齐，避免用户反复手动点击验收。
+      void reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
+        console.warn("Auto reconcile after template validation failed:", reconcileError);
+      });
+      res.status(422).json({
+        success: false,
+        error: {
+          code: "STAGE_TEMPLATE_VALIDATION_FAILED",
+          message: `${message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim()}（已自动触发交付物补齐，请稍后重试验收）`
+        }
+      });
       return;
     }
     throw error;
@@ -2065,6 +3142,28 @@ app.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
 
 app.post("/api/projects/:id/reject", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  const current = await findProject(projectId);
+  if (!current) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+
+  if (!current.pendingApproval) {
+    const runtime = await getRuntimeStatus();
+    const requiredActions = buildProjectRequiredActions(current, runtime);
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "NO_PENDING_APPROVAL",
+        message: requiredActions.length > 0
+          ? formatRequiredActionsMessage(requiredActions)
+          : "当前阶段没有待确认事项，无需驳回。",
+        requiredActions
+      }
+    });
+    return;
+  }
+
   const payload = req.body as StageRejectInput;
   const reason = String(payload?.reason ?? "").trim();
 
@@ -2208,6 +3307,16 @@ app.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
     }
     if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:")) {
       res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
+      return;
+    }
+    if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {
+      res.status(422).json({
+        success: false,
+        error: {
+          code: "STAGE_TEMPLATE_VALIDATION_FAILED",
+          message: message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim()
+        }
+      });
       return;
     }
     throw error;
@@ -2814,6 +3923,13 @@ app.get("/api/projects/:id/live", asyncRoute(async (req, res) => {
     res.end();
   });
 }));
+
+if (existsSync(webGeneratedPath)) {
+  app.use("/generated", express.static(webGeneratedPath));
+}
+if (existsSync(siteGeneratedPath)) {
+  app.use("/generated", express.static(siteGeneratedPath));
+}
 
 if (existsSync(webDistPath)) {
   app.use(express.static(webDistPath));

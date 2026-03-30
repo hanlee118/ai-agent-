@@ -87,6 +87,40 @@ export interface IssueSuggestedAnswer {
   reason: string;
 }
 
+export type IssueDebateTaskStatus = "queued" | "running" | "completed" | "failed";
+
+export interface IssueDebateOpinion {
+  id: string;
+  roleId: string;
+  roleLabel: string;
+  focus: string;
+  concern: string;
+  proposal: string;
+  provider: string;
+  model: string;
+  elapsedMs: number;
+  mode: "model" | "scripted" | "fallback";
+  rawPreview: string;
+}
+
+export interface IssueDebateResult {
+  mode: "model" | "fallback";
+  generatedAt: string;
+  consensus: string[];
+  divergences: string[];
+  opinions: IssueDebateOpinion[];
+  note?: string;
+}
+
+export interface IssueDiscussionItem {
+  id: string;
+  roleId: string;
+  roleLabel: string;
+  focus: string;
+  concern: string;
+  proposal: string;
+}
+
 export interface IssueHistoryReference {
   id: string;
   issueId: string;
@@ -114,6 +148,12 @@ export interface IssueRecord {
   suggestedAnswers?: IssueSuggestedAnswer[];
   relatedHistory?: IssueHistoryReference[];
   requirementContract?: RequirementContract;
+  discussion?: IssueDiscussionItem[];
+  debate?: IssueDebateResult | null;
+  debateStatus?: IssueDebateTaskStatus;
+  debateTaskId?: string;
+  debateError?: string;
+  debateUpdatedAt?: string;
   clarificationAnswers: Record<string, string>;
   conflictResolution?: string;
   status: IssueStatus;
@@ -328,6 +368,41 @@ export async function appendRequirementBackfill(input: {
   return nextItem;
 }
 
+export async function removeRequirementBackfill(historyId: string) {
+  const normalizedId = String(historyId ?? "").trim();
+  if (!normalizedId) {
+    return { removed: false } as const;
+  }
+
+  const store = await loadStoreOrDefault();
+  const context = store.productContext;
+  const currentHistory = context.requirementHistory ?? [];
+  const target = currentHistory.find((item) => item.id === normalizedId)
+    ?? currentHistory.find((item) => item.issueId === normalizedId)
+    ?? currentHistory.find((item) => item.projectId === normalizedId);
+
+  if (!target) {
+    return { removed: false } as const;
+  }
+  const nextHistory = currentHistory.filter((item) => item.id !== target.id);
+
+  const nextContext: ProductContext = {
+    ...context,
+    requirementHistory: nextHistory,
+    updatedAt: nowIso()
+  };
+
+  await saveStore({
+    ...store,
+    productContext: nextContext
+  });
+
+  return {
+    removed: true,
+    historyId: target.id
+  } as const;
+}
+
 export async function listIssues(status?: IssueStatus) {
   const store = await loadStoreOrDefault();
   const data = status ? store.issues.filter((item) => item.status === status) : store.issues;
@@ -359,6 +434,12 @@ export async function createIssueDraft(input: {
   suggestedAnswers?: IssueSuggestedAnswer[];
   relatedHistory?: IssueHistoryReference[];
   requirementContract?: RequirementContract;
+  discussion?: IssueDiscussionItem[];
+  debate?: IssueDebateResult | null;
+  debateStatus?: IssueDebateTaskStatus;
+  debateTaskId?: string;
+  debateError?: string;
+  debateUpdatedAt?: string;
 }) {
   const store = await loadStoreOrDefault();
   const now = nowIso();
@@ -378,6 +459,12 @@ export async function createIssueDraft(input: {
     suggestedAnswers: input.suggestedAnswers,
     relatedHistory: input.relatedHistory,
     requirementContract: input.requirementContract,
+    discussion: input.discussion,
+    debate: input.debate,
+    debateStatus: input.debateStatus,
+    debateTaskId: input.debateTaskId,
+    debateError: input.debateError,
+    debateUpdatedAt: input.debateUpdatedAt,
     clarificationAnswers: {},
     conflictResolution: "",
     status: "draft",

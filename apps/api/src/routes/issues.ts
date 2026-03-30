@@ -1,4 +1,5 @@
 import type { RoleType } from "@occ/shared";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { getRuntimeStatus } from "../agents/runtime.js";
 import { createProject } from "../data/repository.js";
@@ -19,6 +20,7 @@ import {
   inferIssueTitle,
   recommendRoles
 } from "../system/issue-engine.js";
+import { buildIssueRoleDebate, type IssueDebateResult as RuntimeIssueDebateResult } from "../system/issue-debate.js";
 import {
   appendRequirementBackfill,
   createIssueDraft,
@@ -27,6 +29,8 @@ import {
   listIssues,
   resolveRequirementMismatches,
   updateIssue,
+  type IssueDebateTaskStatus,
+  type IssueDiscussionItem,
   type IssueSourceType
 } from "../system/v1-method-store.js";
 
@@ -34,6 +38,7 @@ interface PreviewIssueBody {
   input?: unknown;
   industryCode?: unknown;
   sourceType?: unknown;
+  debateMode?: unknown;
 }
 
 interface ConfirmIssueBody {
@@ -64,6 +69,17 @@ function normalizeSourceType(input: unknown): IssueSourceType {
   return "text";
 }
 
+function normalizeDebateMode(input: unknown) {
+  const value = String(input ?? "").trim().toLowerCase();
+  if (value === "off") {
+    return "off" as const;
+  }
+  if (value === "model") {
+    return "model" as const;
+  }
+  return "auto" as const;
+}
+
 function normalizeRoleList(input: unknown) {
   if (!Array.isArray(input)) {
     return [] as RoleType[];
@@ -92,6 +108,144 @@ interface CreateIssuesRouterOptions {
   onProjectCreated?: (projectId: string) => void;
 }
 
+interface DebateTaskState {
+  taskId: string;
+  issueId: string;
+  status: IssueDebateTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  debate: RuntimeIssueDebateResult | null;
+  discussion: IssueDiscussionItem[];
+  error?: string;
+}
+
+const ISSUE_DEBATE_POLL_AFTER_MS = Math.max(800, Number(process.env.ISSUE_DEBATE_POLL_MS ?? 1500));
+const issueDebateTaskStore = new Map<string, DebateTaskState>();
+const issueLatestDebateTask = new Map<string, string>();
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function toDiscussionFromDebate(
+  debate: RuntimeIssueDebateResult | null | undefined,
+  fallback: IssueDiscussionItem[]
+) {
+  if (!debate || debate.opinions.length === 0) {
+    return fallback;
+  }
+
+  return debate.opinions.map((item) => ({
+    id: item.id,
+    roleId: item.roleId,
+    roleLabel: item.roleLabel,
+    focus: item.focus,
+    concern: item.concern,
+    proposal: item.proposal
+  }));
+}
+
+function createDebateTaskId(issueId: string) {
+  return `debate-${issueId}-${randomUUID().slice(0, 8)}`;
+}
+
+function startIssueDebateTask(input: {
+  taskId: string;
+  issueId: string;
+  rawInput: string;
+  title: string;
+  summary: string;
+  industryCode: string;
+  recommendedRoleIds: RoleType[];
+  soulRoleId: RoleType;
+  fallbackDiscussion: IssueDiscussionItem[];
+}) {
+  const startedAt = nowIso();
+  const queuedState: DebateTaskState = {
+    taskId: input.taskId,
+    issueId: input.issueId,
+    status: "queued",
+    createdAt: startedAt,
+    updatedAt: startedAt,
+    debate: null,
+    discussion: input.fallbackDiscussion
+  };
+  issueDebateTaskStore.set(input.taskId, queuedState);
+  issueLatestDebateTask.set(input.issueId, input.taskId);
+
+  void (async () => {
+    const runningAt = nowIso();
+    issueDebateTaskStore.set(input.taskId, {
+      ...queuedState,
+      status: "running",
+      updatedAt: runningAt
+    });
+
+    await updateIssue(input.issueId, (current) => ({
+      ...current,
+      debateStatus: "running",
+      debateTaskId: input.taskId,
+      debateError: "",
+      debateUpdatedAt: runningAt
+    }));
+
+    try {
+      const debate = await buildIssueRoleDebate({
+        input: input.rawInput,
+        title: input.title,
+        summary: input.summary,
+        recommendedRoleIds: input.recommendedRoleIds,
+        soulRoleId: input.soulRoleId,
+        industryCode: input.industryCode
+      });
+      const discussion = toDiscussionFromDebate(debate, input.fallbackDiscussion);
+      const completedAt = nowIso();
+      issueDebateTaskStore.set(input.taskId, {
+        taskId: input.taskId,
+        issueId: input.issueId,
+        status: "completed",
+        createdAt: startedAt,
+        updatedAt: completedAt,
+        debate,
+        discussion
+      });
+
+      await updateIssue(input.issueId, (current) => ({
+        ...current,
+        discussion,
+        debate,
+        debateStatus: "completed",
+        debateTaskId: input.taskId,
+        debateError: "",
+        debateUpdatedAt: completedAt
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Issue debate task failed";
+      const failedAt = nowIso();
+      issueDebateTaskStore.set(input.taskId, {
+        taskId: input.taskId,
+        issueId: input.issueId,
+        status: "failed",
+        createdAt: startedAt,
+        updatedAt: failedAt,
+        debate: null,
+        discussion: input.fallbackDiscussion,
+        error: message
+      });
+
+      await updateIssue(input.issueId, (current) => ({
+        ...current,
+        discussion: input.fallbackDiscussion,
+        debate: current.debate ?? null,
+        debateStatus: "failed",
+        debateTaskId: input.taskId,
+        debateError: message,
+        debateUpdatedAt: failedAt
+      }));
+    }
+  })();
+}
+
 export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
   const router = express.Router();
 
@@ -103,6 +257,41 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         : undefined
     );
     sendSuccess(res, data);
+  }));
+
+  router.get("/:issueId/debate", asyncRoute(async (req, res) => {
+    const issueId = String(req.params.issueId ?? "").trim();
+    const issue = await getIssue(issueId);
+    if (!issue) {
+      sendError(res, 404, "NOT_FOUND", `Issue not found: ${issueId}`);
+      return;
+    }
+
+    const requestedTaskId = String(req.query.taskId ?? "").trim();
+    const taskId = requestedTaskId || issueLatestDebateTask.get(issueId) || issue.debateTaskId || "";
+    const task = taskId ? issueDebateTaskStore.get(taskId) : null;
+    if (task && task.issueId !== issueId) {
+      sendError(res, 400, "VALIDATION_ERROR", "taskId does not belong to the issue");
+      return;
+    }
+
+    const status: IssueDebateTaskStatus = task?.status
+      ?? issue.debateStatus
+      ?? (issue.debate ? "completed" : "failed");
+    const discussion = task?.discussion?.length ? task.discussion : (issue.discussion ?? []);
+    const debate = task?.debate ?? issue.debate ?? null;
+    const error = task?.error || issue.debateError || "";
+
+    sendSuccess(res, {
+      issueId,
+      taskId: taskId || null,
+      status,
+      discussion,
+      debate,
+      error: error || null,
+      updatedAt: task?.updatedAt || issue.debateUpdatedAt || issue.updatedAt,
+      pollAfterMs: status === "queued" || status === "running" ? ISSUE_DEBATE_POLL_AFTER_MS : 0
+    });
   }));
 
   router.get("/:issueId", asyncRoute(async (req, res) => {
@@ -120,6 +309,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const input = String(payload.input ?? "").trim();
     const industryCode = String(payload.industryCode ?? "").trim().toLowerCase();
     const sourceType = normalizeSourceType(payload.sourceType);
+    const debateMode = normalizeDebateMode(payload.debateMode);
 
     if (!input) {
       sendError(res, 400, "VALIDATION_ERROR", "input is required");
@@ -135,27 +325,34 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const productContext = await getProductContext();
     const title = inferIssueTitle(input);
     const summary = inferIssueSummary(input);
-    const conflicts = detectConflicts(input, productContext);
+    const conflicts = detectConflicts(input, productContext, {
+      industryCode: config.roleSet.industryCode
+    });
     const questions = buildClarificationQuestions(input);
     const refinement = buildRequirementRefinement(input);
-    const contextAlignment = buildContextAlignment(input, productContext);
+    const contextAlignment = buildContextAlignment(input, productContext, {
+      industryCode: config.roleSet.industryCode
+    });
     const designBlueprint = buildDesignBlueprint({
       rawInput: input,
       refinement,
       alignment: contextAlignment
     });
     const recommendedRoleIds = recommendRoles(input, config);
-    const suggestedAnswers = buildSuggestedAnswers({
-      rawInput: input,
-      questions,
-      refinement,
-      alignment: contextAlignment
-    });
-    const discussion = buildIssueDiscussion(
+    const ruleDiscussion = buildIssueDiscussion(
       input,
       recommendedRoleIds as RoleType[],
       config.assemblyRule.soulRoleId
     );
+    const discussion = ruleDiscussion;
+    const suggestedAnswers = buildSuggestedAnswers({
+      rawInput: input,
+      questions,
+      refinement,
+      alignment: contextAlignment,
+      industryCode: config.roleSet.industryCode,
+      discussion
+    });
     const relatedHistory = buildRelatedHistory(input, productContext.requirementHistory ?? []);
     const expectedArtifacts = buildExpectedArtifacts();
     const requirementContract = buildRequirementContract({
@@ -164,6 +361,9 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       designBlueprint,
       expectedArtifacts
     });
+    const shouldCreateDebateTask = debateMode !== "off";
+    const debateTaskId = shouldCreateDebateTask ? createDebateTaskId(`issue-${Date.now()}`) : undefined;
+    const debateStatus: IssueDebateTaskStatus = shouldCreateDebateTask ? "queued" : "completed";
 
     const issue = await createIssueDraft({
       title,
@@ -179,8 +379,31 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       designBlueprint,
       suggestedAnswers,
       relatedHistory,
-      requirementContract
+      requirementContract,
+      discussion,
+      debate: null,
+      debateStatus,
+      debateTaskId,
+      debateError: "",
+      debateUpdatedAt: nowIso()
     });
+
+    const activeDebateTaskId = shouldCreateDebateTask
+      ? issue.debateTaskId || createDebateTaskId(issue.id)
+      : undefined;
+    if (shouldCreateDebateTask && activeDebateTaskId) {
+      startIssueDebateTask({
+        taskId: activeDebateTaskId,
+        issueId: issue.id,
+        rawInput: input,
+        title,
+        summary,
+        industryCode: config.roleSet.industryCode,
+        recommendedRoleIds: recommendedRoleIds as RoleType[],
+        soulRoleId: config.assemblyRule.soulRoleId,
+        fallbackDiscussion: ruleDiscussion
+      });
+    }
 
     sendSuccess(res, {
       issueId: issue.id,
@@ -198,6 +421,14 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       requirementContract,
       refinement,
       discussion,
+      debate: null,
+      debateTask: activeDebateTaskId
+        ? {
+            taskId: activeDebateTaskId,
+            status: "queued" as const,
+            pollAfterMs: ISSUE_DEBATE_POLL_AFTER_MS
+          }
+        : null,
       expectedArtifacts,
       workflow: config.workflows.find((item) => item.isDefault) ?? config.workflows[0] ?? null
     });
@@ -233,6 +464,11 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       return;
     }
     const hasCriticalConflict = issue.conflicts.some((conflict) => conflict.severity === "critical");
+    const hasSceneValidationFailure = issue.conflicts.some((conflict) => conflict.id === "crossborder-scene-not-hit");
+    if (hasSceneValidationFailure) {
+      sendError(res, 400, "VALIDATION_ERROR", "场景命中校验未通过：请补充跨境选品/跟品关键词后重新分析。");
+      return;
+    }
     if (hasCriticalConflict && !conflictResolution) {
       sendError(res, 400, "VALIDATION_ERROR", "missing required conflict resolution");
       return;
