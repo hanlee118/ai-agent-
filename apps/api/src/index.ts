@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -26,9 +27,10 @@ import type {
   StageRejectInput,
   StageSubmissionInput,
   TaskUpdateInput,
-  RoleType
+  RoleType,
+  StageType
 } from "@occ/shared";
-import { STAGE_LABELS } from "@occ/shared";
+import { ROLE_LABELS, STAGE_LABELS } from "@occ/shared";
 import {
   ensureSeedData,
   approveProject,
@@ -40,8 +42,10 @@ import {
   getSystemHealth,
   interveneProject,
   listProjectTasks,
+  listProjectExecutions,
   listTasks,
   listProjects,
+  runProjectStageAgent,
   postProjectMessage,
   rejectProjectStage,
   resumeProject,
@@ -58,6 +62,7 @@ import { listAuditLogs, writeAuditLog } from "./system/audit-log.js";
 import { listNotificationInbox, updateNotificationInboxState } from "./system/notifications.js";
 import { createPromptTemplate, listPromptTemplates, markPromptTemplateUsed } from "./system/prompt-templates.js";
 import { getSystemReadiness } from "./system/readiness.js";
+import { getDesignModelPolicyHealth } from "./system/design-model-policy-health.js";
 import {
   getCachedLocalAgentMonitorOverview,
   subscribeLocalAgentMonitor,
@@ -126,68 +131,90 @@ const projectAutomationState: {
 let projectAutomationTimer: ReturnType<typeof setInterval> | null = null;
 let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
 
-function buildAutoStageSubmission(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
-  const stageLabel = project.currentStage;
+function buildAutoStageTitle(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  if (project.currentStage === "ANALYSIS") return "项目排期方案.md";
+  if (project.currentStage === "DESIGN") return "客户汇报方案.ppt.md";
+  if (project.currentStage === "DEV") return "Demo原型说明.md";
+  if (project.currentStage === "ACCEPT") return "产品说明文档回填.md";
+  return `自动提交-${project.currentStage}阶段.md`;
+}
 
-  if (stageLabel === "DESIGN") {
+async function buildAutoStageSubmission(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    action?: string;
+    metadata?: Prisma.InputJsonValue;
+  }
+) {
+  const run = await runProjectStageAgent({
+    projectId: project.id,
+    action: options?.action || "stage.auto_submission",
+    metadata: options?.metadata,
+    projectName: project.name,
+    projectDescription: project.description,
+    parsedIntent: project.parsedIntent,
+    stageType: project.currentStage as StageType,
+    role: project.currentRole as RoleType,
+    summary: "请按当前阶段输出可直接审阅并可进入下一阶段执行的正式交付物。"
+  });
+
+  const title = buildAutoStageTitle(project);
+  const content = [
+    `# ${title}`,
+    "",
+    "## 自动推进元信息",
+    `- 项目: ${project.name} (${project.id})`,
+    `- 阶段: ${STAGE_LABELS[project.currentStage]} (${project.currentStage})`,
+    `- 执行角色: ${ROLE_LABELS[project.currentRole] || project.currentRole}`,
+    `- 执行引擎: ${run.provider} · 模型 ${run.model}`,
+    `- 生成时间: ${new Date().toISOString()}`,
+    "",
+    "## Agent 输出正文",
+    run.body,
+    "",
+    "## 审阅要点",
+    "- 请确认内容覆盖目标、范围、约束、风险与验收标准。",
+    "- 如需修订，请在当前文档补充后再次提交。",
+    "- 通过后系统将继续推进下一阶段。"
+  ].join("\n");
+
+  if (project.currentStage === "DESIGN") {
+    const designGuardSections = [
+      "## 视觉方案",
+      "- 主视觉强调“需求到研发闭环”，首页首屏展示五步流程。",
+      "- 主色采用高对比商务蓝系，强调可信与执行力。",
+      "- 关键 CTA（预约演示）在首屏和页尾双位置呈现。",
+      "## 版式策略",
+      "- 顶部采用价值主张 + 行动按钮双列布局。",
+      "- 中部采用卡片化展示角色协作与实时监控能力。",
+      "- 底部提供案例摘要、交付清单与下一步行动入口。",
+      "## 组件清单",
+      "- Hero 区块（标题、副标题、双 CTA）",
+      "- 协作流程时间线组件（5 步）",
+      "- 实时监控指标卡组件（状态、趋势、更新时间）",
+      "- 预约演示表单组件（姓名、联系方式、诉求）",
+      "## 品牌语气",
+      "- 文案语气专业、直接、可执行，避免空泛描述。",
+      "- 重点强调“真实执行证据”“可追溯交付”。",
+      "- 每个阶段均给出可验证的下一步动作。"
+    ].join("\n");
+
     return {
-      title: "自动设计阶段交付",
-      content: [
-        "# 设计阶段自动交付",
-        "",
-        "## 视觉方案",
-        "- 主色使用高对比科技蓝与中性色，突出平台可信感。",
-        "- 信息密度按“决策优先”组织，顶部显示关键状态与阻塞提示。",
-        "- 重点按钮采用统一强调色并保持状态可见。",
-        "",
-        "## 版式策略",
-        "- 首页采用三段式：价值主张、闭环流程、实时监控。",
-        "- 关键指标与任务流并排展示，减少上下跳转。",
-        "- 移动端改为单列并保留关键操作入口。",
-        "",
-        "## 组件清单",
-        "- 项目状态卡片（阶段、风险、负责人、下一步）。",
-        "- Agent 协作泳道（角色、任务、阻塞原因、动作按钮）。",
-        "- 实时事件流（SSE）与异常告警条。",
-        "- 预约演示表单（姓名、公司、联系方式、需求摘要）。",
-        "",
-        "## 品牌语气",
-        "- 专业直接，强调可执行与可追踪。",
-        "- 避免空泛宣传，所有陈述对应可验证能力。",
-        "",
-        "## 验收要点",
-        "- 视觉规范、交互路径、可访问性均已覆盖。",
-        "- 设计稿可直接交给开发执行并保持一致性。"
-      ].join("\n"),
+      title,
+      content: `${content}\n\n${designGuardSections}`,
       designReview: {
-        visualDirection: "科技感 + 可信执行",
+        visualDirection: project.parsedIntent.keywords.slice(0, 3).join(" / ") || "科技感 + 可信执行",
         brandTone: "专业、明确、可落地",
         uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
         accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
         approvedBy: "系统自动审查",
         approved: true,
-        notes: "自动推进模式下生成的设计审查卡"
+        notes: `自动推进生成，来源模型 ${run.model}`
       }
     };
   }
 
-  const genericContent = [
-    `# ${stageLabel}阶段自动交付`,
-    "",
-    `项目：${project.name}`,
-    "",
-    "本阶段已按当前需求合同自动生成交付内容，并准备进入下一阶段。",
-    "",
-    "## 当前结论",
-    "- 关键任务已结构化整理。",
-    "- 风险与约束已同步到阶段说明。",
-    "- 下一阶段输入已准备完毕。"
-  ].join("\n");
-
-  return {
-    title: `自动提交-${stageLabel}阶段`,
-    content: genericContent
-  };
+  return { title, content };
 }
 
 async function runProjectAutomationTick(options?: { force?: boolean }) {
@@ -225,7 +252,12 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
           } catch (error) {
             const message = error instanceof Error ? error.message : "approve failed";
             if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:") && project.currentStage === "DESIGN") {
-              const repairSubmission = buildAutoStageSubmission(project);
+              const repairSubmission = await buildAutoStageSubmission(project, {
+                action: "stage.auto_submission.repair",
+                metadata: {
+                  reason: "design_review_not_approved"
+                }
+              });
               await submitCurrentStage(project.id, repairSubmission);
               await approveProject(project.id);
               approved += 1;
@@ -238,7 +270,9 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
           continue;
         }
 
-        const submission = buildAutoStageSubmission(project);
+        const submission = await buildAutoStageSubmission(project, {
+          action: "stage.auto_submission.automation"
+        });
         await submitCurrentStage(project.id, submission);
 
         const refreshed = await findProject(project.id);
@@ -402,6 +436,273 @@ type ProjectAcceptanceReport = {
   }>;
   recommendations: string[];
 };
+
+type FinalArtifactRecord = {
+  key: string;
+  category: string;
+  required: boolean;
+  ready: boolean;
+  issue?: string;
+  source: "deliverable" | "link";
+  deliverableId?: string;
+  name: string;
+  stageType?: string;
+  status?: string;
+  version?: number;
+  updatedAt?: string;
+  content?: string;
+  excerpt?: string;
+  url?: string;
+  filePath?: string;
+};
+
+type ProjectFinalArtifactsReport = {
+  projectId: string;
+  projectName: string;
+  status: string;
+  currentStage: string;
+  generatedAt: string;
+  readyForAcceptance: boolean;
+  coverage: {
+    required: number;
+    provided: number;
+    missing: number;
+  };
+  artifacts: FinalArtifactRecord[];
+  missingRequired: string[];
+  checklist: string[];
+};
+
+const FINAL_REQUIRED_ARTIFACTS: Array<{
+  key: string;
+  category: string;
+  required: boolean;
+  patterns: RegExp[];
+}> = [
+  {
+    key: "schedule",
+    category: "项目排期",
+    required: true,
+    patterns: [/排期|里程碑|schedule/i]
+  },
+  {
+    key: "ppt",
+    category: "客户汇报方案（PPT）",
+    required: true,
+    patterns: [/ppt|汇报方案|路演|汇报/i]
+  },
+  {
+    key: "word",
+    category: "实施方案（Word）",
+    required: true,
+    patterns: [/word|实施方案|执行方案|落地方案/i]
+  },
+  {
+    key: "demo",
+    category: "Demo / 原型",
+    required: true,
+    patterns: [/demo|原型|演示页|官网演示/i]
+  },
+  {
+    key: "acceptance_report",
+    category: "验收报告",
+    required: true,
+    patterns: [/验收报告|测试报告|回填|acceptance/i]
+  }
+];
+
+function buildExcerpt(content: string, limit = 120) {
+  const raw = String(content || "");
+  const pickSection = (title: string) => {
+    const regex = new RegExp(`${title}\\n([\\s\\S]*?)(\\n##\\s|$)`);
+    const matched = raw.match(regex);
+    return matched?.[1]?.trim() || "";
+  };
+
+  const preferred = [
+    pickSection("## 验收检查清单"),
+    pickSection("## Agent 输出正文"),
+    pickSection("## 项目摘要"),
+    pickSection("## 当前结论"),
+    pickSection("## 阶段目标"),
+    pickSection("## 当前任务清单")
+  ].find((item) => item.length > 0) || raw;
+
+  const normalized = preferred.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "暂无正文";
+  }
+  return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized;
+}
+
+function isDeliverableReadyForAcceptance(input: {
+  status?: string;
+  content?: string;
+}) {
+  const status = String(input.status || "").toLowerCase();
+  const length = String(input.content || "").trim().length;
+  if (status === "draft" || !status) {
+    return false;
+  }
+  return length >= 120;
+}
+
+function deliverableStatusScore(status: string) {
+  if (status === "approved") return 4;
+  if (status === "submitted") return 3;
+  if (status === "rejected") return 2;
+  if (status === "draft") return 1;
+  return 0;
+}
+
+function pickBestDeliverable(
+  deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"],
+  patterns: RegExp[]
+) {
+  const candidates = deliverables.filter((item) => patterns.some((pattern) => pattern.test(item.name)));
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  return candidates.sort((left, right) => {
+    const statusDelta = deliverableStatusScore(right.status) - deliverableStatusScore(left.status);
+    if (statusDelta !== 0) {
+      return statusDelta;
+    }
+    const contentDelta = String(right.content || "").trim().length - String(left.content || "").trim().length;
+    if (contentDelta !== 0) {
+      return contentDelta;
+    }
+    const versionDelta = (right.version || 0) - (left.version || 0);
+    if (versionDelta !== 0) {
+      return versionDelta;
+    }
+    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+  })[0];
+}
+
+function buildProjectFinalArtifactsReport(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  officialSite?: { url: string; filePath?: string }
+): ProjectFinalArtifactsReport {
+  const deliverables = [...project.deliverables]
+    .sort((left, right) => {
+      const updatedDelta = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      if (updatedDelta !== 0) {
+        return updatedDelta;
+      }
+      return (right.version || 0) - (left.version || 0);
+    });
+
+  const artifacts: FinalArtifactRecord[] = [];
+  const missingRequired: string[] = [];
+
+  for (const target of FINAL_REQUIRED_ARTIFACTS) {
+    const matched = pickBestDeliverable(deliverables, target.patterns);
+    if (!matched) {
+      if (target.required) {
+        missingRequired.push(target.category);
+      }
+      continue;
+    }
+
+    const ready = isDeliverableReadyForAcceptance({
+      status: matched.status,
+      content: matched.content
+    });
+    if (target.required && !ready) {
+      missingRequired.push(target.category);
+    }
+
+    artifacts.push({
+      key: target.key,
+      category: target.category,
+      required: target.required,
+      ready,
+      issue: ready ? undefined : "当前仍为草稿或正文不足，尚不满足最终验收。",
+      source: "deliverable",
+      deliverableId: matched.id,
+      name: matched.name,
+      stageType: matched.stageType,
+      status: matched.status,
+      version: matched.version,
+      updatedAt: matched.updatedAt,
+      content: matched.content,
+      excerpt: buildExcerpt(matched.content)
+    });
+  }
+
+  const acceptedSummary = deliverables.find((item) => item.name.includes("产品说明文档回填"));
+  if (acceptedSummary && !artifacts.some((item) => item.deliverableId === acceptedSummary.id)) {
+    artifacts.push({
+      key: "backfill_doc",
+      category: "产品说明文档回填",
+      required: false,
+      ready: isDeliverableReadyForAcceptance({
+        status: acceptedSummary.status,
+        content: acceptedSummary.content
+      }),
+      source: "deliverable",
+      deliverableId: acceptedSummary.id,
+      name: acceptedSummary.name,
+      stageType: acceptedSummary.stageType,
+      status: acceptedSummary.status,
+      version: acceptedSummary.version,
+      updatedAt: acceptedSummary.updatedAt,
+      content: acceptedSummary.content,
+      excerpt: buildExcerpt(acceptedSummary.content)
+    });
+  }
+
+  if (officialSite?.url) {
+    artifacts.push({
+      key: "official_site",
+      category: "演示站点链接",
+      required: false,
+      ready: true,
+      source: "link",
+      name: "官网演示页",
+      stageType: "ACCEPT",
+      status: "approved",
+      updatedAt: new Date().toISOString(),
+      url: officialSite.url,
+      filePath: officialSite.filePath,
+      excerpt: officialSite.filePath ? `本地文件：${officialSite.filePath}` : "可直接打开在线演示页"
+    });
+  }
+
+  const required = FINAL_REQUIRED_ARTIFACTS.filter((item) => item.required).length;
+  const provided = FINAL_REQUIRED_ARTIFACTS
+    .filter((item) => item.required)
+    .reduce((count, item) => {
+      const matched = artifacts.find((artifact) => artifact.key === item.key);
+      return count + (matched?.ready ? 1 : 0);
+    }, 0);
+  const readyForAcceptance = missingRequired.length === 0
+    && project.status === "completed"
+    && project.currentStage === "ACCEPT";
+  const checklist = [
+    readyForAcceptance ? "关键验收产物齐全，可进入最终验收确认。" : "关键验收产物尚不完整，请先补齐缺失项。",
+    "请逐项打开并核对：目标一致性、内容完整性、可演示性。",
+    "确认无误后，建议执行“归档到交付物”并保留验收报告版本。"
+  ];
+
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    status: project.status,
+    currentStage: project.currentStage,
+    generatedAt: new Date().toISOString(),
+    readyForAcceptance,
+    coverage: {
+      required,
+      provided,
+      missing: missingRequired.length
+    },
+    artifacts,
+    missingRequired,
+    checklist
+  };
+}
 
 function computeStageAcceptanceResult(input: {
   approved: number;
@@ -918,9 +1219,11 @@ app.use("/api", (req, res, next) => {
     && (
       req.path.startsWith("/openclaw/")
       || req.path.startsWith("/projects")
+      || req.path.startsWith("/tasks")
       || req.path.startsWith("/role-sets")
       || req.path.startsWith("/product-context")
       || req.path.startsWith("/issues")
+      || req.path.startsWith("/system/design-model-policy/")
     )
   ) {
     next();
@@ -1008,6 +1311,11 @@ app.get("/api/system/health", asyncRoute(async (_req, res) => {
 
 app.get("/api/system/readiness", asyncRoute(async (_req, res) => {
   res.json(await getSystemReadiness());
+}));
+
+app.get("/api/system/design-model-policy/health", asyncRoute(async (_req, res) => {
+  const result = await getDesignModelPolicyHealth();
+  res.status(result.ok ? 200 : 503).json(result);
 }));
 
 app.get("/api/system/local-agent-monitor", asyncRoute(async (_req, res) => {
@@ -1241,6 +1549,160 @@ app.get("/api/projects", asyncRoute(async (_req, res) => {
   res.json(await listProjects());
 }));
 
+type ProjectCleanupCandidate = {
+  id: string;
+  name: string;
+  status: string;
+  currentStage: string;
+  updatedAt: string;
+  reasons: string[];
+  recommended: boolean;
+};
+
+const CLEANUP_TEST_NAME_PATTERN = /(复测|冒烟|测试|验证|巡检|高保真|闭环能力版|HTTP真实流转版|设计增强版|重新启用创建|创建即推进|阶段B-|验收版|\bV1\b)/i;
+
+function normalizeProjectNameForCleanup(input: string) {
+  return String(input || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[()（）\[\]【】]/g, "");
+}
+
+function buildProjectCleanupCandidates(
+  projects: Awaited<ReturnType<typeof listProjects>>,
+): ProjectCleanupCandidate[] {
+  const reasonMap = new Map<string, Set<string>>();
+  const addReason = (id: string, reason: string) => {
+    const current = reasonMap.get(id) || new Set<string>();
+    current.add(reason);
+    reasonMap.set(id, current);
+  };
+
+  for (const project of projects) {
+    if (project.status === "paused") {
+      addReason(project.id, "paused");
+    }
+    if (CLEANUP_TEST_NAME_PATTERN.test(project.name)) {
+      addReason(project.id, "test_like");
+    }
+  }
+
+  const grouped = new Map<string, typeof projects>();
+  for (const project of projects) {
+    const key = normalizeProjectNameForCleanup(project.name);
+    const list = grouped.get(key) || [];
+    list.push(project);
+    grouped.set(key, list);
+  }
+
+  for (const [, group] of grouped) {
+    if (group.length <= 1) {
+      continue;
+    }
+    const sorted = [...group].sort(
+      (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
+    );
+    for (const duplicate of sorted.slice(1)) {
+      addReason(duplicate.id, "duplicate_name");
+    }
+  }
+
+  return projects
+    .filter((project) => reasonMap.has(project.id))
+    .map((project) => {
+      const reasons = Array.from(reasonMap.get(project.id) || []);
+      const recommended = reasons.includes("paused") || reasons.includes("test_like") || reasons.includes("duplicate_name");
+      return {
+        id: project.id,
+        name: project.name,
+        status: project.status,
+        currentStage: project.currentStage,
+        updatedAt: project.updatedAt,
+        reasons,
+        recommended,
+      };
+    })
+    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
+}
+
+app.get("/api/projects/cleanup/candidates", asyncRoute(async (_req, res) => {
+  const projects = await listProjects();
+  const candidates = buildProjectCleanupCandidates(projects);
+  res.json({
+    success: true,
+    data: candidates,
+  });
+}));
+
+app.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
+  const idsInput = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]) : [];
+  const mode = String(req.body?.mode || "recommended");
+  const dryRun = Boolean(req.body?.dryRun);
+  const projects = await listProjects();
+  const candidates = buildProjectCleanupCandidates(projects);
+  const candidateIds = new Set(candidates.map((item) => item.id));
+  const projectNameById = new Map(projects.map((project) => [project.id, project.name]));
+
+  const idsFromBody: string[] = idsInput
+    .map((item: unknown) => String(item || "").trim())
+    .filter((item): item is string => Boolean(item));
+  const dedupedIds = Array.from(new Set<string>(idsFromBody));
+
+  const targetIds: string[] = idsFromBody.length > 0
+    ? dedupedIds.filter((id) => candidateIds.has(id))
+    : mode === "all_candidates"
+      ? candidates.map((item) => item.id)
+      : candidates.filter((item) => item.recommended).map((item) => item.id);
+
+  const deleted: Array<{ id: string; name: string }> = [];
+  const failed: Array<{ id: string; error: string }> = [];
+
+  if (!dryRun) {
+    for (const id of targetIds) {
+      try {
+        const removed = await deleteProject(id);
+        if (!removed) {
+          failed.push({ id, error: "not found" });
+          continue;
+        }
+        deleted.push({
+          id,
+          name: projectNameById.get(id) || id,
+        });
+      } catch (error) {
+        failed.push({
+          id,
+          error: error instanceof Error ? error.message : "delete failed",
+        });
+      }
+    }
+  }
+
+  const remaining = dryRun ? projects.length : (await listProjects()).length;
+
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "project.cleanup",
+    resourceType: "project",
+    summary: dryRun
+      ? `项目清理预览：候选 ${targetIds.length} 个`
+      : `项目清理执行：删除 ${deleted.length} 个，失败 ${failed.length} 个`,
+    detail: `mode=${mode}; dryRun=${dryRun}; requested=${targetIds.length}`,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      requested: targetIds.length,
+      deleted,
+      failed,
+      remaining,
+    },
+  });
+}));
+
 app.get("/api/projects/automation", asyncRoute(async (_req, res) => {
   res.json({
     enabled: projectAutomationState.enabled,
@@ -1356,7 +1818,9 @@ app.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
     return;
   }
 
-  const submission = buildAutoStageSubmission(project);
+  const submission = await buildAutoStageSubmission(project, {
+    action: "stage.auto_submission.manual_advance"
+  });
   await submitCurrentStage(projectId, submission);
   const refreshed = await findProject(projectId);
   if (refreshed?.pendingApproval) {
@@ -1377,6 +1841,28 @@ app.get("/api/projects/:id", asyncRoute(async (req, res) => {
   }
 
   res.json(project);
+}));
+
+app.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+
+  const limitInput = Number(req.query.limit ?? 120);
+  const limit = Number.isFinite(limitInput) ? Math.max(1, Math.min(500, Math.round(limitInput))) : 120;
+  const executions = await listProjectExecutions(projectId, limit);
+
+  res.json({
+    success: true,
+    data: {
+      projectId,
+      total: executions.length,
+      executions
+    }
+  });
 }));
 
 app.get("/api/projects/:id/acceptance-report", asyncRoute(async (req, res) => {
@@ -1458,6 +1944,41 @@ app.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req, r
       deliverableName: title || `阶段验收报告-${new Date().toISOString().slice(0, 10)}.md`,
       updated
     }
+  });
+}));
+
+app.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await findProject(projectId);
+
+  if (!project) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "Project not found"
+      }
+    });
+    return;
+  }
+
+  let officialSite: { url: string; filePath?: string } | undefined;
+  if (project.status === "completed") {
+    try {
+      const artifact = await generateOfficialSiteArtifact(project);
+      officialSite = {
+        url: artifact.publicPath,
+        filePath: artifact.filePaths[0]
+      };
+    } catch {
+      officialSite = undefined;
+    }
+  }
+
+  const report = buildProjectFinalArtifactsReport(project, officialSite);
+  res.json({
+    success: true,
+    data: report
   });
 }));
 

@@ -22,6 +22,13 @@
 - 失败类型包含鉴权/模型不可用时，会自动尝试后续备选。
 - 对历史配置中的设计 Agent，会在配置同步时写入上述主/备模型，减少旧配置漂移。
 
+## 一键体检接口
+- `GET /api/system/design-model-policy/health`
+- 返回项包含：
+  - 主模型/备选模型可用性
+  - 当前可用通道（runtime / openclaw providers）
+  - 降级链是否可执行（fallbackReady）
+  - `ROLE_DESIGN` 配置是否与策略对齐（policyAligned）
+
 ## 说明
 - 当前环境中 `gpt-5.3` 直连可用性不稳定，策略采用 `gpt-5.3-codex` 作为 5.3 系列标准备选。
-
