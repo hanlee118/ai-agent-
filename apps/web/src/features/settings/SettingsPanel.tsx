@@ -80,6 +80,17 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
     addToast('当前版本暂不支持在线改密，请通过初始化流程重置管理员密码。', 'info');
   };
 
+  const handleJumpToModelNexus = () => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const url = new URL(window.location.href);
+    url.searchParams.set('app_tab', 'model-nexus');
+    const nextPath = `${url.pathname}${url.search}${url.hash}`;
+    window.history.pushState(window.history.state, '', nextPath);
+    window.dispatchEvent(new PopStateEvent('popstate'));
+  };
+
   return (
     <div className="p-8 space-y-8 max-w-4xl mx-auto">
       <header className="flex justify-between items-end">
@@ -156,9 +167,15 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
           runtimeApiKeyPreview={runtime.runtimeApiKeyPreview}
           runtimeApiKeyConfigured={runtime.runtimeApiKeyConfigured}
           runtimeValidationHint={runtime.runtimeValidationHint}
+          runtimeConfigUpdatedAt={runtime.runtimeConfigUpdatedAt}
+          runtimeConfigSource={runtime.runtimeConfigSource}
+          registeredRuntimeModels={runtime.registeredRuntimeModels}
+          selectedRegisteredModelId={runtime.selectedRegisteredModelId}
           onProviderChange={runtime.setRuntimeProvider}
           onApiBaseUrlChange={runtime.setRuntimeApiBaseUrl}
           onModelNameChange={runtime.setRuntimeModelName}
+          onRegisteredModelChange={runtime.setSelectedRegisteredModelId}
+          onJumpToModelNexus={handleJumpToModelNexus}
           onApiKeyChange={runtime.setRuntimeApiKey}
           onClearApiKeyChange={runtime.setClearRuntimeApiKey}
           onReload={() => void runtime.loadRuntimeConfig()}

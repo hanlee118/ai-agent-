@@ -1,0 +1,153 @@
+import type { NewProjectModalController } from '../hooks/useNewProjectModalController';
+import type { Priority } from '../NewProjectModal.types';
+import { getAgentRoleId, roleLabel } from '../utils/newProjectHelpers';
+
+type Props = {
+  controller: NewProjectModalController;
+};
+
+export default function IssueInputPanel({ controller }: Props) {
+  const {
+    issueSourceType,
+    setIssueSourceType,
+    rawInput,
+    setRawInput,
+    handleParseInput,
+    isParsing,
+    isLoadingIndustryConfig,
+    showManualForm,
+    setShowManualForm,
+    formData,
+    setFormData,
+    industryAgents,
+    handleToggleManualAgent,
+    handleManualSubmit,
+    isCreating,
+  } = controller;
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">需求来源类型</label>
+        <select
+          value={issueSourceType}
+          onChange={(event) => setIssueSourceType(event.target.value as typeof issueSourceType)}
+          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+        >
+          <option value="text">一句话需求</option>
+          <option value="journey">用户旅程</option>
+          <option value="meeting_notes">会议纪要</option>
+          <option value="competitor">竞品分析</option>
+        </select>
+      </div>
+
+      <div className="space-y-2">
+        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目需求（自然语言）</label>
+        <textarea
+          rows={5}
+          value={rawInput}
+          onChange={(event) => setRawInput(event.target.value)}
+          placeholder="例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。"
+          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+        />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          onClick={() => void handleParseInput()}
+          disabled={isParsing || isLoadingIndustryConfig || !rawInput.trim()}
+          className="py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
+        >
+          {isParsing ? 'AI 分析中...' : isLoadingIndustryConfig ? '加载行业配置中...' : 'AI 分析并分配 Agent'}
+        </button>
+        <button
+          onClick={() => setShowManualForm((prev) => !prev)}
+          className="py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all"
+        >
+          {showManualForm ? '收起手动表单' : '手动填写'}
+        </button>
+      </div>
+
+      {showManualForm && (
+        <div className="space-y-4 p-4 bg-white/5 border border-border-subtle rounded-2xl">
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目名称</label>
+            <input
+              type="text"
+              value={formData.name}
+              onChange={(event) => setFormData((prev) => ({ ...prev, name: event.target.value }))}
+              placeholder="例如: 智能供应链优化"
+              className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+            />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目描述</label>
+            <textarea
+              rows={3}
+              value={formData.description}
+              onChange={(event) => setFormData((prev) => ({ ...prev, description: event.target.value }))}
+              placeholder="简述项目目标、范围和关键约束..."
+              className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">优先级</label>
+              <select
+                value={formData.priority}
+                onChange={(event) => setFormData((prev) => ({ ...prev, priority: event.target.value as Priority }))}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+              >
+                <option value="High">高 (High)</option>
+                <option value="Medium">中 (Medium)</option>
+                <option value="Low">低 (Low)</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">截止日期</label>
+              <input
+                type="date"
+                value={formData.dueDate}
+                onChange={(event) => setFormData((prev) => ({ ...prev, dueDate: event.target.value }))}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配团队</label>
+            <div className="flex flex-wrap gap-2">
+              {industryAgents.map((agent) => (
+                <label
+                  key={agent.id}
+                  className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors"
+                >
+                  <input
+                    type="checkbox"
+                    checked={formData.agentIds.includes(agent.id)}
+                    onChange={() => handleToggleManualAgent(agent.id)}
+                    className="accent-primary"
+                  />
+                  <span className="text-xs text-slate-300">{agent.name} · {roleLabel(getAgentRoleId(agent))}</span>
+                </label>
+              ))}
+              {industryAgents.length === 0 && (
+                <p className="text-xs text-slate-500">当前行业角色集中暂无可用 Agent</p>
+              )}
+            </div>
+          </div>
+
+          <button
+            onClick={handleManualSubmit}
+            disabled={isCreating}
+            className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-2 disabled:opacity-50"
+          >
+            生成确认卡
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}

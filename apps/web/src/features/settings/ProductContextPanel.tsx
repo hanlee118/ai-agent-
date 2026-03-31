@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { BookText } from 'lucide-react';
-import { productContextApi } from '../../lib/api';
+import { ApiRequestError, productContextApi } from '../../lib/api';
 
 type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -43,6 +43,7 @@ export default function ProductContextPanel({ addToast }: Props) {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
   const [history, setHistory] = useState<Array<{
     id: string;
     title: string;
@@ -61,55 +62,57 @@ export default function ProductContextPanel({ addToast }: Props) {
     completedAt?: string;
   }>>([]);
 
+  const loadContext = useCallback(async (signal?: { cancelled: boolean }) => {
+    setLoading(true);
+    try {
+      const context = await productContextApi.get();
+      if (signal?.cancelled) {
+        return;
+      }
+      setDraft({
+        productName: context.productName,
+        background: context.background,
+        mission: context.mission,
+        goals: toMultiline(context.goals),
+        principles: toMultiline(context.principles),
+        constraints: toMultiline(context.constraints),
+        forbiddenKeywords: toMultiline(context.forbiddenKeywords),
+        requiredKeywords: toMultiline(context.requiredKeywords),
+      });
+      setHistory(
+        (context.requirementHistory || []).map((item) => ({
+          id: item.id,
+          title: item.title,
+          status: item.status,
+          validationStatus: item.validationStatus || 'pending',
+          validationNote: item.validationNote,
+          implementationSummary: item.implementationSummary,
+          requirementContract: item.requirementContract,
+          createdAt: item.createdAt,
+          completedAt: item.completedAt,
+        })),
+      );
+    } catch (error) {
+      if (!signal?.cancelled) {
+        addToast(`加载产品说明文档失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      if (!signal?.cancelled) {
+        setLoading(false);
+      }
+    }
+  }, [addToast]);
+
   useEffect(() => {
     let cancelled = false;
+    const signal = { cancelled: false };
 
-    const load = async () => {
-      setLoading(true);
-      try {
-        const context = await productContextApi.get();
-        if (cancelled) {
-          return;
-        }
-        setDraft({
-          productName: context.productName,
-          background: context.background,
-          mission: context.mission,
-          goals: toMultiline(context.goals),
-          principles: toMultiline(context.principles),
-          constraints: toMultiline(context.constraints),
-          forbiddenKeywords: toMultiline(context.forbiddenKeywords),
-          requiredKeywords: toMultiline(context.requiredKeywords),
-        });
-        setHistory(
-          (context.requirementHistory || []).map((item) => ({
-            id: item.id,
-            title: item.title,
-            status: item.status,
-            validationStatus: item.validationStatus || 'pending',
-            validationNote: item.validationNote,
-            implementationSummary: item.implementationSummary,
-            requirementContract: item.requirementContract,
-            createdAt: item.createdAt,
-            completedAt: item.completedAt,
-          })),
-        );
-      } catch (error) {
-        if (!cancelled) {
-          addToast(`加载产品说明文档失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    };
-
-    void load();
+    void loadContext(signal);
     return () => {
       cancelled = true;
+      signal.cancelled = cancelled;
     };
-  }, [addToast]);
+  }, [loadContext]);
 
   const handleSave = async () => {
     if (!draft.productName.trim()) {
@@ -134,6 +137,32 @@ export default function ProductContextPanel({ addToast }: Props) {
       addToast(`保存产品说明文档失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleDeleteHistory = async (historyId: string) => {
+    if (!historyId) {
+      return;
+    }
+    const confirmed = window.confirm('确认删除这条长期记忆吗？删除后将不再参与需求对齐。');
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingHistoryId(historyId);
+    try {
+      await productContextApi.deleteHistory(historyId);
+      setHistory((prev) => prev.filter((item) => item.id !== historyId));
+      addToast('长期记忆已删除', 'success');
+    } catch (error) {
+      if (error instanceof ApiRequestError && error.status === 404) {
+        setHistory((prev) => prev.filter((item) => item.id !== historyId));
+        addToast('长期记忆不存在，已从列表移除', 'info');
+        return;
+      }
+      addToast(`删除长期记忆失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setDeletingHistoryId(null);
     }
   };
 
@@ -259,7 +288,16 @@ export default function ProductContextPanel({ addToast }: Props) {
             {history.length > 0 ? (
               history.slice(0, 5).map((item) => (
                 <div key={item.id} className="px-3 py-2 bg-white/5 border border-border-subtle rounded-xl text-xs">
-                  <p className="text-slate-200 font-medium">{item.title}</p>
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-slate-200 font-medium">{item.title}</p>
+                    <button
+                      onClick={() => void handleDeleteHistory(item.id)}
+                      disabled={deletingHistoryId === item.id}
+                      className="px-2 py-1 rounded-lg border border-danger/40 text-danger text-[10px] hover:bg-danger/10 disabled:opacity-50"
+                    >
+                      {deletingHistoryId === item.id ? '删除中...' : '删除'}
+                    </button>
+                  </div>
                   <p className="text-slate-500 mt-1">
                     状态: {item.status} · 校验: {item.validationStatus} · 创建于 {new Date(item.createdAt).toLocaleString('zh-CN')}
                   </p>

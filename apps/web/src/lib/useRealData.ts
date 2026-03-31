@@ -107,9 +107,10 @@ export function useRealData(): RealDataState {
       ]);
 
       setAgents(mergeAgents(managedAgents, data.agents));
-      setProjects(coreData.projects.length > 0 ? coreData.projects : data.projects);
-      setTasks(coreData.tasks.length > 0 ? coreData.tasks : data.tasks);
-      setSessions(coreData.sessions.length > 0 ? coreData.sessions : data.sessions);
+      // 项目主数据仅以 core API 为准，避免回退到 OpenClaw 工作区样例项目。
+      setProjects(coreData.projects);
+      setTasks(coreData.tasks);
+      setSessions(coreData.sessions);
       setWorkspace(data.workspace);
       setRuntime(data.runtime);
     } catch (err) {

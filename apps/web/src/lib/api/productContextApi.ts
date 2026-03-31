@@ -57,4 +57,10 @@ export const productContextApi = {
       body: JSON.stringify(payload),
     });
   },
+
+  async deleteHistory(historyId: string) {
+    return request<{ removed: boolean; historyId: string }>(`/product-context/history/${encodeURIComponent(historyId)}`, {
+      method: 'DELETE',
+    });
+  },
 };

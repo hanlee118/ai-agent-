@@ -19,11 +19,14 @@ import {
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
 import type { ProjectStatus, Task } from '../types';
+import { useSSE } from '../hooks/useSSE';
 import {
   projectsApi,
+  ApiRequestError,
   type ProjectAcceptanceReport,
   type ProjectExecutionRecord,
   type ProjectFinalArtifactsReport,
+  type ProjectRequiredAction,
 } from '../lib/api';
 import { agents, projects, tasks } from '../lib/runtimeCollections';
 import SurfaceModal from './impl/SurfaceModal';
@@ -82,6 +85,7 @@ type ProjectDetailResponse = {
     content: string;
     priority: 'low' | 'normal' | 'high' | 'urgent';
   }>;
+  requiredActions?: ProjectRequiredAction[];
 };
 
 type ProjectDeliverable = NonNullable<ProjectDetailResponse['deliverables']>[number];
@@ -93,6 +97,14 @@ type SideDeliverableItem = {
   deliverable?: ProjectDeliverable;
 };
 type FinalArtifactItem = ProjectFinalArtifactsReport['artifacts'][number];
+type ProjectRoomLogItem = {
+  id: string;
+  time: string;
+  actor: string;
+  message: string;
+  type: 'danger' | 'accent' | 'primary';
+  timestamp: number;
+};
 
 const ROLE_LABELS: Record<string, string> = {
   ROLE_ASSISTANT: '总助理',
@@ -143,6 +155,28 @@ const DELIVERABLE_STATUS_LABELS: Record<DeliverableStatus, string> = {
   rejected: '已驳回',
 };
 
+const DELIVERABLE_STATUS_RANK: Record<DeliverableStatus, number> = {
+  approved: 4,
+  submitted: 3,
+  rejected: 2,
+  draft: 1,
+};
+
+const normalizeDeliverableNameKey = (name: string) =>
+  String(name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/(?:[._-]v?\d+)(?:\.md|\.markdown|\.txt|\.pdf|\.docx?)?$/i, '')
+    .replace(/\.(md|markdown|txt|pdf|docx?)$/i, '');
+
+const toDeliverableVersion = (value?: number) => (Number.isFinite(value) ? Number(value) : 0);
+
+const toDeliverableTimestamp = (value?: string) => {
+  const time = new Date(String(value || '')).getTime();
+  return Number.isFinite(time) ? time : 0;
+};
+
 const toTaskStatus = (status: CoreTaskStatus): Task['status'] => {
   switch (status) {
     case 'done':
@@ -172,6 +206,8 @@ const toTaskProgress = (status: CoreTaskStatus) => {
 };
 
 const roleLabel = (roleId?: string) => ROLE_LABELS[String(roleId || '')] || roleId || '系统';
+const isProjectNotFoundError = (error: unknown) =>
+  /project not found/i.test(error instanceof Error ? error.message : String(error ?? ''));
 
 const Badge = ({ children, variant = 'default' }: any) => {
   const variants: any = {
@@ -206,16 +242,20 @@ const ProjectRoom = ({
   projectId,
   addToast,
   onRefreshData,
+  onProjectMissing,
 }: {
   projectId: string | null;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   onRefreshData?: () => Promise<void>;
+  onProjectMissing?: (projectId: string) => void;
 }) => {
   const [activeTab, setActiveTab] = useState<ProjectRoomTab>('任务');
   const [detail, setDetail] = useState<ProjectDetailResponse | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [isIntervening, setIsIntervening] = useState(false);
   const [isReviewingStage, setIsReviewingStage] = useState(false);
+  const [stageReviewAction, setStageReviewAction] = useState<'approve' | 'reject' | null>(null);
+  const [projectActionHint, setProjectActionHint] = useState<string | null>(null);
   const [isSubmittingDesignReview, setIsSubmittingDesignReview] = useState(false);
   const [isDesignReviewOpen, setIsDesignReviewOpen] = useState(false);
   const [isAcceptanceReportOpen, setIsAcceptanceReportOpen] = useState(false);
@@ -226,6 +266,7 @@ const ProjectRoom = ({
   const [finalArtifacts, setFinalArtifacts] = useState<ProjectFinalArtifactsReport | null>(null);
   const [executionRecords, setExecutionRecords] = useState<ProjectExecutionRecord[]>([]);
   const [isLoadingFinalArtifacts, setIsLoadingFinalArtifacts] = useState(false);
+  const [isTriggeringFinalArtifacts, setIsTriggeringFinalArtifacts] = useState(false);
   const [isLoadingExecutions, setIsLoadingExecutions] = useState(false);
   const [downloadingArtifactKey, setDownloadingArtifactKey] = useState<string | null>(null);
   const [downloadingDeliverableId, setDownloadingDeliverableId] = useState<string | null>(null);
@@ -236,9 +277,13 @@ const ProjectRoom = ({
   const [isExportingSignoffMarkdown, setIsExportingSignoffMarkdown] = useState(false);
   const [isExportingSignoffCsv, setIsExportingSignoffCsv] = useState(false);
   const [isCopyingSignoffLink, setIsCopyingSignoffLink] = useState(false);
+  const [sseLogs, setSseLogs] = useState<ProjectRoomLogItem[]>([]);
   const signoffAutoOpenKeyRef = useRef<string | null>(null);
   const projectRoomUrlStateAppliedRef = useRef<string | null>(null);
+  const lastSnapshotDigestRef = useRef<string>('');
+  const lastConnectedLogAtRef = useRef<number>(0);
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
+  const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
   const [designReviewHistory, setDesignReviewHistory] = useState<Array<{
     submittedAt: string;
     reviewer: string;
@@ -256,6 +301,18 @@ const ProjectRoom = ({
     notes: '',
     approved: true,
   });
+  const missingProjectHandledRef = useRef<string | null>(null);
+  const addToastRef = useRef(addToast);
+  const onProjectMissingRef = useRef(onProjectMissing);
+  const lastDetailErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
+
+  useEffect(() => {
+    addToastRef.current = addToast;
+  }, [addToast]);
+
+  useEffect(() => {
+    onProjectMissingRef.current = onProjectMissing;
+  }, [onProjectMissing]);
 
   const project = useMemo(
     () =>
@@ -284,13 +341,32 @@ const ProjectRoom = ({
     try {
       const next = await projectsApi.getDetail(effectiveProjectId);
       setDetail(next);
+      if (missingProjectHandledRef.current === effectiveProjectId) {
+        missingProjectHandledRef.current = null;
+      }
     } catch (error) {
-      setDetail(null);
-      addToast(`加载项目详情失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      if (isProjectNotFoundError(error)) {
+        if (missingProjectHandledRef.current !== effectiveProjectId) {
+          missingProjectHandledRef.current = effectiveProjectId;
+          onProjectMissingRef.current?.(effectiveProjectId);
+        }
+        return;
+      }
+      const message = `加载项目详情失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      const now = Date.now();
+      const previous = lastDetailErrorRef.current;
+      const isDuplicate = previous
+        && previous.projectId === effectiveProjectId
+        && previous.message === message
+        && now - previous.at < 10000;
+      if (!isDuplicate) {
+        addToastRef.current(message, 'error');
+        lastDetailErrorRef.current = { projectId: effectiveProjectId, message, at: now };
+      }
     } finally {
       setLoadingDetail(false);
     }
-  }, [effectiveProjectId, addToast]);
+  }, [effectiveProjectId]);
 
   useEffect(() => {
     void loadProjectDetail();
@@ -343,7 +419,57 @@ const ProjectRoom = ({
     ];
   }, [detail?.stages, project.phase, project.owner, project.progress]);
 
-  const deliverables = useMemo(() => (Array.isArray(detail?.deliverables) ? detail.deliverables : []), [detail?.deliverables]);
+  const rawDeliverables = useMemo(() => (Array.isArray(detail?.deliverables) ? detail.deliverables : []), [detail?.deliverables]);
+
+  const deliverables = useMemo(() => {
+    if (rawDeliverables.length <= 1) {
+      return rawDeliverables;
+    }
+
+    const latestByCore = new Map<string, ProjectDeliverable>();
+    for (const item of rawDeliverables) {
+      const coreKey = `${item.stageType}::${normalizeDeliverableNameKey(item.name)}`;
+      const existing = latestByCore.get(coreKey);
+      if (!existing) {
+        latestByCore.set(coreKey, item);
+        continue;
+      }
+
+      const itemTime = toDeliverableTimestamp(item.updatedAt);
+      const existingTime = toDeliverableTimestamp(existing.updatedAt);
+      if (itemTime > existingTime) {
+        latestByCore.set(coreKey, item);
+        continue;
+      }
+      if (itemTime < existingTime) {
+        continue;
+      }
+
+      const itemVersion = toDeliverableVersion(item.version);
+      const existingVersion = toDeliverableVersion(existing.version);
+      if (itemVersion > existingVersion) {
+        latestByCore.set(coreKey, item);
+        continue;
+      }
+      if (itemVersion < existingVersion) {
+        continue;
+      }
+
+      const itemStatusRank = DELIVERABLE_STATUS_RANK[item.status] || 0;
+      const existingStatusRank = DELIVERABLE_STATUS_RANK[existing.status] || 0;
+      if (itemStatusRank > existingStatusRank) {
+        latestByCore.set(coreKey, item);
+      }
+    }
+
+    return [...latestByCore.values()].sort((a, b) => {
+      const timeDelta = toDeliverableTimestamp(b.updatedAt) - toDeliverableTimestamp(a.updatedAt);
+      if (timeDelta !== 0) {
+        return timeDelta;
+      }
+      return toDeliverableVersion(b.version) - toDeliverableVersion(a.version);
+    });
+  }, [rawDeliverables]);
 
   const timelineItems = useMemo(
     () =>
@@ -410,7 +536,7 @@ const ProjectRoom = ({
       };
     });
 
-    const deliverableEvents = deliverables.map((item) => ({
+    const deliverableEvents = rawDeliverables.map((item) => ({
       id: `deliverable-${item.id}-${item.updatedAt}`,
       timestamp: item.updatedAt,
       agentId: item.createdBy,
@@ -423,7 +549,7 @@ const ProjectRoom = ({
     return [...stageEvents, ...taskEvents, ...deliverableEvents]
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
       .slice(0, 60);
-  }, [timelineItems, stageItems, effectiveProjectTasks, deliverables]);
+  }, [timelineItems, stageItems, effectiveProjectTasks, rawDeliverables]);
 
   const deliverablesByStage = useMemo(() => {
     const grouped = new Map<string, typeof deliverables>();
@@ -447,6 +573,22 @@ const ProjectRoom = ({
     () => (finalArtifacts?.artifacts || []).slice(0, 5),
     [finalArtifacts],
   );
+  const finalArtifactsGeneration = finalArtifacts?.generation;
+  const finalArtifactsRunning = finalArtifactsGeneration?.status === 'queued' || finalArtifactsGeneration?.status === 'running';
+  const finalArtifactsGenerationText = useMemo(() => {
+    if (!finalArtifactsGeneration) {
+      return null;
+    }
+    const progress = Number.isFinite(finalArtifactsGeneration.progress) ? Math.max(0, Math.min(100, Math.round(finalArtifactsGeneration.progress))) : 0;
+    const step = finalArtifactsGeneration.step || '处理中';
+    if (finalArtifactsGeneration.status === 'failed') {
+      return `生成失败：${finalArtifactsGeneration.error || finalArtifactsGeneration.message || '未知错误'}`;
+    }
+    if (finalArtifactsGeneration.status === 'completed') {
+      return '最终产物已生成完成';
+    }
+    return `${step} · ${progress}%`;
+  }, [finalArtifactsGeneration]);
 
   const executionSummary = useMemo(() => {
     const total = executionRecords.length;
@@ -457,6 +599,54 @@ const ProjectRoom = ({
     ).length;
     return { total, success, failed, realModelRuns };
   }, [executionRecords]);
+
+  const latestExecutionByStage = useMemo(() => {
+    const mapping = new Map<string, ProjectExecutionRecord>();
+    const timestampByStage = new Map<string, number>();
+    executionRecords.forEach((record) => {
+      const stageType = String(record.stageType || '').trim();
+      if (!stageType) {
+        return;
+      }
+      const timestamp = new Date(record.updatedAt || record.createdAt).getTime();
+      const normalizedTimestamp = Number.isFinite(timestamp) ? timestamp : 0;
+      const previous = timestampByStage.get(stageType) ?? -1;
+      if (normalizedTimestamp >= previous) {
+        timestampByStage.set(stageType, normalizedTimestamp);
+        mapping.set(stageType, record);
+      }
+    });
+    return mapping;
+  }, [executionRecords]);
+
+  const formatExecutionModelLabel = (record?: ProjectExecutionRecord | null) => {
+    if (!record) {
+      return '未知模型';
+    }
+    const model = String(record.model || '').trim() || 'n/a';
+    const provider = String(record.provider || record.runtimeMode || '').trim() || 'unknown';
+    return `${model} (${provider})`;
+  };
+
+  const isDesignLikeText = (text: string) => /(design|设计|视觉|交互|官网|landing|ui|ux)/i.test(String(text || '').toLowerCase());
+
+  const getStageModelLabel = (stageType?: string) => {
+    if (!stageType) {
+      return '未知模型';
+    }
+    return formatExecutionModelLabel(latestExecutionByStage.get(stageType));
+  };
+
+  const getArtifactModelLabel = (artifact: FinalArtifactItem) => {
+    if (artifact.stageType) {
+      return getStageModelLabel(artifact.stageType);
+    }
+    const isDesignArtifact = isDesignLikeText(`${artifact.category} ${artifact.name}`);
+    if (isDesignArtifact) {
+      return getStageModelLabel('DESIGN');
+    }
+    return '未知模型';
+  };
 
   const projectAgents = useMemo(() => {
     if (project.agents.length > 0) {
@@ -474,6 +664,11 @@ const ProjectRoom = ({
     交付物: deliverables.length,
     时间线: timelineEvents.length,
   }), [effectiveProjectTasks.length, stageItems.length, deliverables.length, timelineEvents.length]);
+
+  const requiredActions = useMemo<ProjectRequiredAction[]>(
+    () => (Array.isArray(detail?.requiredActions) ? detail.requiredActions : []),
+    [detail?.requiredActions],
+  );
 
   const isDesignPhase = useMemo(() => {
     const text = [project.phase, project.description, ...effectiveProjectTasks.map((task) => `${task.title} ${task.agent}`)]
@@ -500,8 +695,144 @@ const ProjectRoom = ({
     return normalized.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   };
 
+  const toLogTimestamp = (raw: string | Date | number | null | undefined) => {
+    if (!raw && raw !== 0) {
+      return Date.now();
+    }
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
+  };
+
+  const summarizeText = (text: string, max = 66) => {
+    const normalized = String(text || '').trim().replace(/\s+/g, ' ');
+    if (normalized.length <= max) {
+      return normalized;
+    }
+    return `${normalized.slice(0, max)}...`;
+  };
+
+  useEffect(() => {
+    setSseLogs([]);
+    lastSnapshotDigestRef.current = '';
+    lastConnectedLogAtRef.current = 0;
+  }, [effectiveProjectId]);
+
+  const appendSseLog = useCallback((item: ProjectRoomLogItem) => {
+    setSseLogs((prev) => {
+      if (prev[0]?.id === item.id) {
+        return prev;
+      }
+      return [item, ...prev].slice(0, 20);
+    });
+  }, []);
+
+  const handleProjectRoomSseEvent = useCallback((event: MessageEvent) => {
+    const eventType = event.type || 'message';
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = event.data ? JSON.parse(event.data) as Record<string, unknown> : {};
+    } catch {
+      payload = {};
+    }
+
+    if (eventType === 'heartbeat') {
+      return;
+    }
+
+    let actor = '系统';
+    let message = '';
+    let type: ProjectRoomLogItem['type'] = 'primary';
+    let timestamp = toLogTimestamp(payload.timestamp as string | undefined);
+
+    if (eventType === 'connected') {
+      const now = Date.now();
+      if (now - lastConnectedLogAtRef.current < 15000) {
+        return;
+      }
+      lastConnectedLogAtRef.current = now;
+      timestamp = now;
+      message = '实时通道已连接（SSE）';
+    } else if (eventType === 'snapshot') {
+      const digest = [
+        String(payload.activeAgents ?? ''),
+        String(payload.totalProjects ?? ''),
+        String(payload.blockedTasks ?? ''),
+        String(payload.inProgressTasks ?? ''),
+      ].join(':');
+      if (digest && digest === lastSnapshotDigestRef.current) {
+        return;
+      }
+      lastSnapshotDigestRef.current = digest;
+      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
+      message = `系统快照: 活跃Agent ${payload.activeAgents ?? 0} / 项目 ${payload.totalProjects ?? 0} / 进行中任务 ${payload.inProgressTasks ?? 0} / 阻塞任务 ${payload.blockedTasks ?? 0}`;
+      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'primary';
+    } else if (eventType === 'task_update') {
+      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
+      const blocked = Number(payload.blockedTasks ?? 0);
+      const inProgress = Number(payload.inProgressTasks ?? 0);
+      const total = Number(payload.totalTasks ?? 0);
+      message = blocked > 0
+        ? `任务变化: 共 ${total} 条，进行中 ${inProgress}，阻塞 ${blocked}（需处理）`
+        : `任务变化: 共 ${total} 条，进行中 ${inProgress}，阻塞 ${blocked}`;
+      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'accent';
+    } else if (eventType === 'project_progress') {
+      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
+      const changedProjects = Array.isArray(payload.changedProjects)
+        ? payload.changedProjects as Array<{ projectId?: string; name?: string; progress?: number; blockedTaskCount?: number }>
+        : [];
+      const related = changedProjects.find((item) => item.projectId === effectiveProjectId) || changedProjects[0];
+      if (!related) {
+        return;
+      }
+      actor = related.name || '项目';
+      message = `进度更新: ${related.progress ?? 0}% · 阻塞 ${related.blockedTaskCount ?? 0}`;
+      type = Number(related.blockedTaskCount ?? 0) > 0 ? 'danger' : 'accent';
+    } else if (eventType === 'agent_status') {
+      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
+      const changedAgents = Array.isArray(payload.changedAgents)
+        ? payload.changedAgents as Array<{ name?: string; status?: string; blockedTaskCount?: number; taskCount?: number }>
+        : [];
+      if (changedAgents.length === 0) {
+        return;
+      }
+      const latest = changedAgents[0];
+      actor = latest.name || 'Agent';
+      const taskText = typeof latest.taskCount === 'number' ? ` · 任务 ${latest.taskCount}` : '';
+      const blockedText = typeof latest.blockedTaskCount === 'number' ? ` · 阻塞 ${latest.blockedTaskCount}` : '';
+      message = `状态变更为 ${latest.status || 'unknown'}${taskText}${blockedText}`;
+      type = latest.status === 'attention' || latest.status === 'offline' ? 'danger' : 'primary';
+    } else if (eventType === 'system') {
+      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
+      const status = String(payload.status || 'ok');
+      message = String(payload.message || '系统状态更新');
+      type = status === 'degraded' ? 'danger' : 'primary';
+    } else {
+      return;
+    }
+
+    appendSseLog({
+      id: `${eventType}-${timestamp}-${actor}-${message}`,
+      time: formatProjectLogTime(new Date(timestamp)),
+      actor,
+      message,
+      type,
+      timestamp,
+    });
+  }, [appendSseLog, effectiveProjectId]);
+
+  const sseEvents = useMemo(
+    () => ['connected', 'snapshot', 'task_update', 'project_progress', 'agent_status', 'system', 'heartbeat'],
+    [],
+  );
+
+  useSSE('/api/openclaw/events', {
+    withCredentials: true,
+    events: sseEvents,
+    onEvent: handleProjectRoomSseEvent,
+  });
+
   const recentLogs = useMemo(() => {
-    const logs: Array<{ time: string; actor: string; message: string; type: 'danger' | 'accent' | 'primary'; timestamp: number }> = [];
+    const logs: ProjectRoomLogItem[] = [];
 
     effectiveProjectTasks
       .filter((task) => task.status === 'Blocked')
@@ -509,6 +840,7 @@ const ProjectRoom = ({
       .forEach((task) => {
         const timestamp = getTaskTimestamp(task);
         logs.push({
+          id: `task-blocked-${task.id}-${timestamp}`,
           time: formatProjectLogTime(new Date(timestamp)),
           actor: task.agent || '系统',
           message: `任务"${task.title}"被阻塞`,
@@ -523,6 +855,7 @@ const ProjectRoom = ({
       .forEach((task) => {
         const timestamp = getTaskTimestamp(task);
         logs.push({
+          id: `task-progress-${task.id}-${timestamp}`,
           time: formatProjectLogTime(new Date(timestamp)),
           actor: task.agent || '系统',
           message: `正在执行: ${task.title}`,
@@ -531,8 +864,33 @@ const ProjectRoom = ({
         });
       });
 
-    return logs.sort((a, b) => b.timestamp - a.timestamp).slice(0, 6);
-  }, [effectiveProjectTasks]);
+    timelineEvents.slice(0, 8).forEach((item) => {
+      const timestamp = toLogTimestamp(item.timestamp);
+      logs.push({
+        id: `timeline-${item.id}-${timestamp}`,
+        time: formatProjectLogTime(new Date(timestamp)),
+        actor: roleLabel(item.agentId),
+        message: `${item.title}${item.content ? ` · ${summarizeText(item.content)}` : ''}`,
+        type: item.priority === 'urgent' || item.priority === 'high' ? 'danger' : item.priority === 'normal' ? 'accent' : 'primary',
+        timestamp,
+      });
+    });
+
+    executionRecords.slice(0, 8).forEach((record) => {
+      const timestamp = toLogTimestamp(record.updatedAt || record.createdAt);
+      const modelLabel = record.model || record.provider || record.runtimeMode || 'unknown';
+      logs.push({
+        id: `execution-${record.id}-${timestamp}`,
+        time: formatProjectLogTime(new Date(timestamp)),
+        actor: roleLabel(record.role),
+        message: `${record.status === 'failed' ? '执行失败' : '执行完成'}: ${record.action} · ${modelLabel}`,
+        type: record.status === 'failed' ? 'danger' : 'accent',
+        timestamp,
+      });
+    });
+
+    return [...logs, ...sseLogs].sort((a, b) => b.timestamp - a.timestamp).slice(0, 20);
+  }, [effectiveProjectTasks, executionRecords, sseLogs, timelineEvents]);
 
   const projectDeliverablesSide = useMemo<SideDeliverableItem[]>(() => {
     if (deliverables.length > 0) {
@@ -767,6 +1125,9 @@ const ProjectRoom = ({
       setFinalArtifacts(report);
     } catch (error) {
       setFinalArtifacts(null);
+      if (isProjectNotFoundError(error)) {
+        return;
+      }
       if (!options?.silent) {
         addToast(`加载最终验收成果失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
       }
@@ -786,6 +1147,9 @@ const ProjectRoom = ({
       setExecutionRecords(report.executions || []);
     } catch (error) {
       setExecutionRecords([]);
+      if (isProjectNotFoundError(error)) {
+        return;
+      }
       if (!options?.silent) {
         addToast(`加载执行证据失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
       }
@@ -806,6 +1170,34 @@ const ProjectRoom = ({
   useEffect(() => {
     void loadFinalArtifacts({ silent: true });
   }, [loadFinalArtifacts]);
+
+  useEffect(() => {
+    if (!effectiveProjectId || !finalArtifactsRunning) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      void loadFinalArtifacts({ silent: true });
+    }, 2500);
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [effectiveProjectId, finalArtifactsGeneration?.jobId, finalArtifactsRunning, loadFinalArtifacts]);
+
+  const handleGenerateFinalArtifacts = useCallback(async (force = false) => {
+    if (!effectiveProjectId) {
+      return;
+    }
+    setIsTriggeringFinalArtifacts(true);
+    try {
+      await projectsApi.generateFinalArtifacts(effectiveProjectId, force);
+      addToast('最终验收产物生成任务已启动', 'success');
+      await loadFinalArtifacts({ silent: true });
+    } catch (error) {
+      addToast(`启动最终产物生成失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsTriggeringFinalArtifacts(false);
+    }
+  }, [effectiveProjectId, addToast, loadFinalArtifacts]);
 
   useEffect(() => {
     void loadExecutions({ silent: true });
@@ -1251,6 +1643,7 @@ const ProjectRoom = ({
       return;
     }
     setIsIntervening(true);
+    setProjectActionHint('正在触发紧急干预并等待 Agent 回写结果，预计 30-90 秒...');
     try {
       const command = projectBlockedCount > 0
         ? `紧急干预：项目 ${project.name} 当前有 ${projectBlockedCount} 个阻塞任务，请优先解除阻塞并同步最新 ETA。`
@@ -1259,9 +1652,13 @@ const ProjectRoom = ({
       await refreshProjectView();
       addToast('紧急干预已触发，系统正在同步项目状态', 'success');
     } catch (error) {
+      if (guideRequiredActionsFromError(error)) {
+        return;
+      }
       addToast(`紧急干预失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setIsIntervening(false);
+      setProjectActionHint(null);
     }
   };
 
@@ -1272,14 +1669,22 @@ const ProjectRoom = ({
     }
 
     setIsReviewingStage(true);
+    setStageReviewAction('approve');
+    setProjectActionHint('正在执行阶段验收通过并推进下一阶段，预计 1-3 分钟...');
+    addToast('正在执行阶段验收通过，预计 1-3 分钟，请稍候...', 'info');
     try {
       await projectsApi.approve(project.id);
       await refreshProjectView();
       addToast(`已通过 ${currentStageLabel} 阶段验收`, 'success');
     } catch (error) {
+      if (guideRequiredActionsFromError(error)) {
+        return;
+      }
       addToast(`阶段验收失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setIsReviewingStage(false);
+      setStageReviewAction(null);
+      setProjectActionHint(null);
     }
   };
 
@@ -1295,14 +1700,22 @@ const ProjectRoom = ({
     }
 
     setIsReviewingStage(true);
+    setStageReviewAction('reject');
+    setProjectActionHint('正在驳回当前阶段并回写返工建议，预计 30-90 秒...');
+    addToast('正在驳回当前阶段并生成返工建议，请稍候...', 'info');
     try {
       await projectsApi.reject(project.id, reason.trim());
       await refreshProjectView();
       addToast(`已驳回 ${currentStageLabel} 阶段并要求返工`, 'info');
     } catch (error) {
+      if (guideRequiredActionsFromError(error)) {
+        return;
+      }
       addToast(`驳回失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setIsReviewingStage(false);
+      setStageReviewAction(null);
+      setProjectActionHint(null);
     }
   };
 
@@ -1380,6 +1793,9 @@ const ProjectRoom = ({
       setIsDesignReviewOpen(false);
       addToast('设计审查卡已提交，待审批后可进入开发阶段', 'success');
     } catch (error) {
+      if (guideRequiredActionsFromError(error)) {
+        return;
+      }
       addToast(`提交设计审查卡失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setIsSubmittingDesignReview(false);
@@ -1392,6 +1808,95 @@ const ProjectRoom = ({
     '组件规范至少列出 Hero/能力卡/流程/案例/CTA',
     '无障碍清单至少包含对比度、键盘可达、语义结构',
   ];
+
+  const formatRequiredActionsHint = (actions: ProjectRequiredAction[]) => {
+    if (actions.length === 0) {
+      return '请先补全当前阶段信息后再继续。';
+    }
+    const head = actions.slice(0, 2).map((item) => item.title).join('；');
+    return actions.length > 2 ? `${head} 等 ${actions.length} 项` : head;
+  };
+
+  const guideRequiredActionsFromError = (error: unknown) => {
+    if (!(error instanceof ApiRequestError)) {
+      return false;
+    }
+    if (error.code === 'NO_PENDING_APPROVAL') {
+      addToast(error.message || '当前没有待确认事项', 'info');
+      void loadProjectDetail();
+      return true;
+    }
+    const required = Array.isArray(error.details?.requiredActions)
+      ? (error.details.requiredActions as ProjectRequiredAction[])
+      : [];
+    if (required.length === 0) {
+      return false;
+    }
+    addToast(error.message || '当前步骤需要你先补充信息', 'info');
+    addToast(`待处理事项: ${formatRequiredActionsHint(required)}`, 'info');
+    void loadProjectDetail();
+    return true;
+  };
+
+  const openRuntimeConfigHint = () => {
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('app_tab', 'settings');
+      window.history.replaceState(window.history.state, '', `${url.pathname}${url.search ? url.search : ''}${url.hash}`);
+    }
+    addToast('请前往设置页补全模型运行时配置（API Base URL / API Key / Model）', 'info');
+  };
+
+  const handleRequiredAction = async (action: ProjectRequiredAction) => {
+    setRequiredActionLoadingId(action.id);
+    try {
+      if (action.action === 'submit_stage_deliverable') {
+        setActiveTab('交付物');
+        addToast('请先补全并提交当前阶段交付物', 'info');
+        return;
+      }
+      if (action.action === 'open_design_review') {
+        setIsDesignReviewOpen(true);
+        addToast('请先完成设计审查卡，再继续推进', 'info');
+        return;
+      }
+      if (action.action === 'review_pending_stage') {
+        setActiveTab('阶段');
+        addToast('请在阶段验收中心执行通过或驳回', 'info');
+        return;
+      }
+      if (action.action === 'resolve_blocked_tasks') {
+        setActiveTab('任务');
+        addToast('请先处理阻塞任务，再继续推进', 'info');
+        return;
+      }
+      if (action.action === 'reconcile_deliverables') {
+        if (!project.id) {
+          addToast('当前项目不可用，无法重建交付物', 'error');
+          return;
+        }
+        setProjectActionHint('正在重建阶段交付物并校验必需成果，预计 30-90 秒...');
+        addToast('正在重建交付物，请稍候...', 'info');
+        await projectsApi.reconcileDeliverables(project.id);
+        await refreshProjectView();
+        addToast('已重建交付物，请检查后继续推进', 'success');
+        return;
+      }
+      if (action.action === 'refresh_runtime') {
+        openRuntimeConfigHint();
+        return;
+      }
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        addToast(error.message, 'error');
+      } else {
+        addToast(`处理失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      setRequiredActionLoadingId(null);
+      setProjectActionHint(null);
+    }
+  };
 
   return (
     <div className="h-full flex flex-col">
@@ -1409,7 +1914,9 @@ const ProjectRoom = ({
                 风险: {projectBlockedCount > 0 ? `${projectBlockedCount} 个任务阻塞` : '无阻塞风险'}
               </span>
               {loadingDetail ? <Badge variant="default">同步中</Badge> : null}
+              {projectActionHint ? <Badge variant="accent">执行中</Badge> : null}
             </div>
+            {projectActionHint ? <p className="mt-1 text-xs text-accent break-words">{projectActionHint}</p> : null}
           </div>
         </div>
         <div className="w-full xl:w-auto flex flex-wrap items-center justify-start xl:justify-end gap-2 sm:gap-3">
@@ -1442,6 +1949,39 @@ const ProjectRoom = ({
 
       <div className="flex-1 overflow-hidden flex">
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-8">
+          {requiredActions.length > 0 ? (
+            <section className="rounded-2xl border border-warning/40 bg-warning/10 p-4 sm:p-5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-warning">需要你补充与确认</h3>
+                <Badge variant="warning">{requiredActions.length} 项待处理</Badge>
+              </div>
+              <p className="text-xs text-warning/90">
+                当前流程存在不完整步骤，请按下面顺序补足后再继续推进。
+              </p>
+              <div className="space-y-2">
+                {requiredActions.map((action) => (
+                  <div key={action.id} className="rounded-xl border border-warning/40 bg-surface-soft/70 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm text-white font-medium">{action.title}</p>
+                      <Badge variant={action.severity === 'critical' ? 'danger' : action.severity === 'warning' ? 'warning' : 'accent'}>
+                        {action.severity === 'critical' ? '高优先级' : action.severity === 'warning' ? '需处理' : '提示'}
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-slate-300">{action.detail}</p>
+                    <button
+                      type="button"
+                      onClick={() => void handleRequiredAction(action)}
+                      disabled={requiredActionLoadingId === action.id}
+                      className="px-3 py-1.5 rounded-lg bg-primary text-slate-950 hover:bg-primary/90 text-xs font-semibold disabled:opacity-60"
+                    >
+                      {requiredActionLoadingId === action.id ? '处理中...' : action.ctaLabel}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           <div className="w-full overflow-x-auto scrollbar-hide">
             <div className="inline-flex min-w-max items-center gap-2 p-1 bg-white/5 rounded-xl border border-border-subtle">
               {(['任务', '阶段', '交付物', '时间线'] as ProjectRoomTab[]).map((tab) => (
@@ -1472,18 +2012,41 @@ const ProjectRoom = ({
                 <CheckCircle2 size={14} />
                 最终验收成果
               </h3>
-              {isLoadingFinalArtifacts ? (
-                <Badge variant="default">同步中</Badge>
-              ) : finalArtifacts ? (
-                <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
-                  {finalArtifacts.readyForAcceptance
-                    ? `已就绪 ${finalArtifacts.coverage.provided}/${finalArtifacts.coverage.required}`
-                    : `待补齐 ${finalArtifacts.coverage.missing} 项`}
-                </Badge>
-              ) : (
-                <Badge variant="default">暂无</Badge>
-              )}
+              <div className="flex items-center gap-2">
+                {isLoadingFinalArtifacts ? (
+                  <Badge variant="default">同步中</Badge>
+                ) : finalArtifacts ? (
+                  <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
+                    {finalArtifacts.readyForAcceptance
+                      ? `已就绪 ${finalArtifacts.coverage.provided}/${finalArtifacts.coverage.required}`
+                      : `待补齐 ${finalArtifacts.coverage.missing} 项`}
+                  </Badge>
+                ) : (
+                  <Badge variant="default">暂无</Badge>
+                )}
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateFinalArtifacts(finalArtifactsGeneration?.status === 'failed')}
+                  disabled={isTriggeringFinalArtifacts || finalArtifactsRunning}
+                  className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25 disabled:opacity-60"
+                >
+                  {isTriggeringFinalArtifacts ? '启动中...' : finalArtifactsRunning ? '生成中...' : '生成最终成果'}
+                </button>
+              </div>
             </div>
+
+            {finalArtifactsGenerationText ? (
+              <div className={cn(
+                'rounded-xl border p-3 text-xs',
+                finalArtifactsGeneration?.status === 'failed'
+                  ? 'border-danger/40 bg-danger/10 text-danger'
+                  : finalArtifactsRunning
+                    ? 'border-accent/40 bg-accent/10 text-accent'
+                    : 'border-primary/40 bg-primary/10 text-primary',
+              )}>
+                {finalArtifactsGenerationText}
+              </div>
+            ) : null}
 
             {finalArtifacts ? (
               <div className="space-y-3">
@@ -1504,6 +2067,9 @@ const ProjectRoom = ({
                       <p className="text-sm font-semibold text-white">{artifact.name}</p>
                       <p className="text-[11px] text-slate-500">
                         {artifact.stageType || '-'} · {artifact.status || '-'} · {artifact.updatedAt ? new Date(artifact.updatedAt).toLocaleString('zh-CN') : '-'}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        生成模型: {getArtifactModelLabel(artifact)}
                       </p>
                       <p className="text-[11px] text-slate-400 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
                       {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
@@ -1683,14 +2249,14 @@ const ProjectRoom = ({
                       disabled={isReviewingStage}
                       className="px-4 py-2 bg-primary text-slate-950 hover:bg-primary/90 rounded-lg text-sm font-semibold disabled:opacity-60"
                     >
-                      {isReviewingStage ? '处理中...' : '通过当前阶段验收'}
+                      {stageReviewAction === 'approve' ? '通过中...' : isReviewingStage ? '处理中...' : '通过当前阶段验收'}
                     </button>
                     <button
                       onClick={() => void handleRejectStage()}
                       disabled={isReviewingStage}
                       className="px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-sm font-semibold disabled:opacity-60"
                     >
-                      驳回并返工
+                      {stageReviewAction === 'reject' ? '驳回中...' : '驳回并返工'}
                     </button>
                   </div>
                 ) : null}
@@ -1728,6 +2294,9 @@ const ProjectRoom = ({
 
                       <p className="text-[11px] text-slate-500">
                         通过 {acceptanceStats.approved} · 驳回 {acceptanceStats.rejected} · 待处理 {acceptanceStats.submitted} · 草稿 {acceptanceStats.draft}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        生成模型: {getStageModelLabel(stage.type)}
                       </p>
                       <p className="text-[11px] text-slate-500">
                         可查阅 {acceptanceStats.readable} · 待补正文 {acceptanceStats.unreadable}
@@ -1779,6 +2348,9 @@ const ProjectRoom = ({
                       </div>
                       <p className="text-[11px] text-slate-500">
                         验收统计: 通过 {acceptanceStats.approved} · 驳回 {acceptanceStats.rejected} · 待处理 {acceptanceStats.submitted} · 可查阅 {acceptanceStats.readable}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        生成模型: {getStageModelLabel(stage.type)}
                       </p>
 
                       {stageDeliverables.length > 0 ? (
@@ -2068,14 +2640,37 @@ const ProjectRoom = ({
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-2">
                   <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">最终验收成果（可直接查阅）</h4>
-                  {finalArtifacts ? (
-                    <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
-                      {finalArtifacts.readyForAcceptance ? '可验收确认' : `缺失 ${finalArtifacts.coverage.missing} 项`}
-                    </Badge>
-                  ) : (
-                    <Badge variant="default">同步中</Badge>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {finalArtifacts ? (
+                      <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
+                        {finalArtifacts.readyForAcceptance ? '可验收确认' : `缺失 ${finalArtifacts.coverage.missing} 项`}
+                      </Badge>
+                    ) : (
+                      <Badge variant="default">同步中</Badge>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void handleGenerateFinalArtifacts(finalArtifactsGeneration?.status === 'failed')}
+                      disabled={isTriggeringFinalArtifacts || finalArtifactsRunning}
+                      className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25 disabled:opacity-60"
+                    >
+                      {isTriggeringFinalArtifacts ? '启动中...' : finalArtifactsRunning ? '生成中...' : '重建成果'}
+                    </button>
+                  </div>
                 </div>
+
+                {finalArtifactsGenerationText ? (
+                  <div className={cn(
+                    'rounded-xl border p-3 text-xs',
+                    finalArtifactsGeneration?.status === 'failed'
+                      ? 'border-danger/40 bg-danger/10 text-danger'
+                      : finalArtifactsRunning
+                        ? 'border-accent/40 bg-accent/10 text-accent'
+                        : 'border-primary/40 bg-primary/10 text-primary',
+                  )}>
+                    {finalArtifactsGenerationText}
+                  </div>
+                ) : null}
 
                 {finalArtifacts ? (
                   <>
@@ -2097,6 +2692,9 @@ const ProjectRoom = ({
                           <p className="text-sm font-semibold text-white">{artifact.name}</p>
                           <p className="text-[11px] text-slate-500">
                             {artifact.stageType || '-'} · {artifact.status || '-'} · {artifact.updatedAt ? new Date(artifact.updatedAt).toLocaleString('zh-CN') : '-'}
+                          </p>
+                          <p className="text-[11px] text-slate-500">
+                            生成模型: {getArtifactModelLabel(artifact)}
                           </p>
                           <p className="text-xs text-slate-300 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
                           {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
@@ -2498,6 +3096,7 @@ const ProjectRoom = ({
                   阶段: {STAGE_LABELS[previewDeliverable.stageType] || previewDeliverable.stageType} ·
                   版本 v{previewDeliverable.version ?? 1} ·
                   产出人 {roleLabel(previewDeliverable.createdBy)} ·
+                  生成模型 {getStageModelLabel(previewDeliverable.stageType)} ·
                   更新于 {new Date(previewDeliverable.updatedAt).toLocaleString('zh-CN')}
                 </span>
               </div>

@@ -2,6 +2,17 @@ import { request } from './core';
 
 export type IssueSourceType = 'text' | 'meeting_notes' | 'journey' | 'competitor';
 export type ConflictSeverity = 'critical' | 'warning' | 'info';
+export type IssueDebateTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
+
+export interface IssueListItem {
+  id: string;
+  title: string;
+  status: 'draft' | 'confirmed' | 'cancelled';
+  industryCode?: string;
+  createdProjectId?: string;
+  updatedAt?: string;
+  debateStatus?: IssueDebateTaskStatus | string;
+}
 
 export interface IssueConflict {
   id: string;
@@ -80,6 +91,31 @@ export interface IssuePreview {
     concern: string;
     proposal: string;
   }>;
+  debate?: {
+    mode: 'model' | 'fallback';
+    generatedAt: string;
+    consensus: string[];
+    divergences: string[];
+    note?: string;
+    opinions: Array<{
+      id: string;
+      roleId: string;
+      roleLabel: string;
+      focus: string;
+      concern: string;
+      proposal: string;
+      provider: string;
+      model: string;
+      elapsedMs: number;
+      mode: 'model' | 'scripted' | 'fallback';
+      rawPreview: string;
+    }>;
+  } | null;
+  debateTask?: {
+    taskId: string;
+    status: IssueDebateTaskStatus;
+    pollAfterMs?: number;
+  } | null;
   expectedArtifacts: Array<{
     id: string;
     name: string;
@@ -100,11 +136,28 @@ export interface IssuePreview {
   } | null;
 }
 
+export interface IssueDebatePollingResult {
+  issueId: string;
+  taskId: string | null;
+  status: IssueDebateTaskStatus;
+  discussion: IssuePreview['discussion'];
+  debate: IssuePreview['debate'];
+  error?: string | null;
+  updatedAt: string;
+  pollAfterMs?: number;
+}
+
 export const issuesApi = {
+  async list(status?: 'draft' | 'confirmed' | 'cancelled') {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    return request<IssueListItem[]>(`/issues${query}`);
+  },
+
   async preview(payload: {
     input: string;
     industryCode: string;
     sourceType?: IssueSourceType;
+    debateMode?: 'auto' | 'model' | 'off';
   }) {
     return request<IssuePreview>('/issues/preview', {
       method: 'POST',
@@ -143,5 +196,10 @@ export const issuesApi = {
     return request(`/issues/${encodeURIComponent(issueId)}/cancel`, {
       method: 'POST',
     });
+  },
+
+  async getDebate(issueId: string, taskId?: string) {
+    const query = taskId ? `?taskId=${encodeURIComponent(taskId)}` : '';
+    return request<IssueDebatePollingResult>(`/issues/${encodeURIComponent(issueId)}/debate${query}`);
   },
 };

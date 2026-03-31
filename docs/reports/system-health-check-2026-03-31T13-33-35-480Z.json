@@ -1,0 +1,60 @@
+{
+  "generatedAt": "2026-03-31T13:33:36.897Z",
+  "apiBase": "http://127.0.0.1:8787",
+  "summary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "ok": true
+  },
+  "checks": [
+    {
+      "name": "DB 连接",
+      "ok": true,
+      "detail": "Script executed successfully.",
+      "durationMs": 681
+    },
+    {
+      "name": "迁移状态",
+      "ok": true,
+      "detail": "> @occ/api@1.0.0 db:migrate:status /private/tmp/ai-agent-check/apps/api | > prisma migrate status | ",
+      "durationMs": 606
+    },
+    {
+      "name": "OpenAPI docs",
+      "ok": true,
+      "detail": "openapi=3.0.3",
+      "durationMs": 20
+    },
+    {
+      "name": "关键路由 /health",
+      "ok": true,
+      "detail": "HTTP 200",
+      "durationMs": 32
+    },
+    {
+      "name": "关键路由 /ready",
+      "ok": true,
+      "detail": "HTTP 200",
+      "durationMs": 31
+    },
+    {
+      "name": "关键路由 /api/openclaw/agents",
+      "ok": true,
+      "detail": "HTTP 200",
+      "durationMs": 40
+    },
+    {
+      "name": "关键路由 /api/projects",
+      "ok": true,
+      "detail": "HTTP 200",
+      "durationMs": 2
+    },
+    {
+      "name": "关键路由 /api/product-context",
+      "ok": true,
+      "detail": "HTTP 200",
+      "durationMs": 4
+    }
+  ]
+}

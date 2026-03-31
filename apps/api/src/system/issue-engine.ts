@@ -24,6 +24,35 @@ function normalizeText(input: string) {
   return input.trim().toLowerCase();
 }
 
+const INDUSTRY_LABELS: Record<string, string> = {
+  saas: "SaaS 企业服务",
+  ecommerce: "电商零售",
+  fintech: "金融科技"
+};
+
+const INDUSTRY_KEYWORD_HINTS: Record<string, string[]> = {
+  saas: ["saas", "企业服务", "企业软件", "crm", "erp", "b2b", "中后台", "中大型saas团队"],
+  ecommerce: ["电商", "零售", "商品", "sku", "订单", "店铺", "选品", "跨境", "直播", "供应链", "客服", "ecommerce", "e-commerce", "retail"],
+  fintech: ["金融", "支付", "风控", "合规", "授信", "交易", "反洗钱", "银行", "证券", "保险", "fintech"]
+};
+
+const CONTEXT_STOPWORDS = new Set([
+  "用户",
+  "需求",
+  "系统",
+  "项目",
+  "平台",
+  "团队",
+  "功能",
+  "流程",
+  "场景",
+  "产品",
+  "业务",
+  "实现",
+  "支持",
+  "优化"
+]);
+
 function includesAny(text: string, candidates: string[]) {
   return candidates.some((word) => text.includes(word.toLowerCase()));
 }
@@ -45,6 +74,29 @@ function tokenize(text: string) {
   }
 
   return Array.from(new Set([...latinTokens, ...hanBigrams]));
+}
+
+function detectIndustry(text: string) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return "";
+  }
+
+  const scores = Object.entries(INDUSTRY_KEYWORD_HINTS).map(([industryCode, keywords]) => ({
+    industryCode,
+    score: keywords.reduce((count, keyword) => (normalized.includes(keyword.toLowerCase()) ? count + 1 : count), 0)
+  }));
+  scores.sort((left, right) => right.score - left.score);
+  if ((scores[0]?.score ?? 0) <= 0) {
+    return "";
+  }
+  return scores[0].industryCode;
+}
+
+function hasContextTokenOverlap(rawInput: string, contextText: string) {
+  const inputTokens = tokenize(rawInput).filter((token) => !CONTEXT_STOPWORDS.has(token));
+  const contextTokens = new Set(tokenize(contextText).filter((token) => !CONTEXT_STOPWORDS.has(token)));
+  return inputTokens.some((token) => contextTokens.has(token));
 }
 
 export interface RequirementRefinement {
@@ -124,17 +176,94 @@ export function inferIssueTitle(rawInput: string) {
   return firstSentence.length > 48 ? `${firstSentence.slice(0, 48)}...` : firstSentence;
 }
 
+function trimSentenceTail(input: string) {
+  return String(input || "").trim().replace(/[。！？.!?；;，,]+$/g, "").trim();
+}
+
+function truncateText(input: string, limit: number) {
+  const normalized = String(input || "").replace(/\s+/g, " ").trim();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, limit)}...`;
+}
+
+function extractCrossBorderPlatformLabels(text: string) {
+  const normalized = normalizeText(text);
+  const candidates: Array<{ label: string; pattern: RegExp }> = [
+    { label: "TikTok", pattern: /tiktok|抖音国际|抖音海外/i },
+    { label: "亚马逊", pattern: /amazon|亚马逊/i },
+    { label: "Temu", pattern: /temu/i },
+    { label: "Shopee", pattern: /shopee/i },
+    { label: "Lazada", pattern: /lazada/i },
+    { label: "eBay", pattern: /ebay/i },
+    { label: "Shopify", pattern: /shopify/i }
+  ];
+
+  const labels = candidates
+    .filter((item) => item.pattern.test(normalized))
+    .map((item) => item.label);
+  return Array.from(new Set(labels));
+}
+
+function inferTrafficTrigger(text: string) {
+  const normalized = normalizeText(text);
+  if (/(突然|短时|瞬时|大爆|暴涨|飙升|爆发)/i.test(normalized) && /(流量|热度|销量|排名|搜索)/i.test(normalized)) {
+    return "当商品流量或热度短时爆增时";
+  }
+  if (/(流量|热度|销量|排名|搜索).*(增长|上升|上涨)/i.test(normalized)) {
+    return "当商品流量或热度持续上涨时";
+  }
+  return "当商品指标异常上涨时";
+}
+
+function inferIssueMissionAnchor(rawInput: string) {
+  const profile = detectScenarioProfile(rawInput);
+  if (profile.isCrossBorderEcomSelection) {
+    return "让跨境团队更快发现爆品、持续跟踪商品变化，并基于数据证据完成跟品决策。";
+  }
+  const headline = truncateText(trimSentenceTail(extractFirstSentence(rawInput)), 50);
+  if (!headline) {
+    return "让需求到研发闭环可追踪、可验收、可持续复用。";
+  }
+  return `围绕“${headline}”构建可追踪需求闭环，并确保交付可验收。`;
+}
+
 export function inferIssueSummary(rawInput: string) {
   const trimmed = rawInput.trim();
   if (!trimmed) {
     return "暂无描述";
   }
 
-  const normalized = trimmed.replace(/\s+/g, " ");
-  if (normalized.length <= 180) {
-    return normalized;
+  const profile = detectScenarioProfile(rawInput);
+  if (profile.isCrossBorderEcomSelection) {
+    const platforms = extractCrossBorderPlatformLabels(rawInput);
+    const platformText = platforms.length > 0 ? platforms.join("、") : "TikTok/亚马逊等跨境平台";
+    const trigger = inferTrafficTrigger(rawInput);
+    const summary = [
+      "目标：搭建跨境电商爆品选品跟品机器人，自动识别潜力商品并给出优先级排序。",
+      `触发：${trigger}（覆盖${platformText}）。`,
+      "产出：返回商品链接、排名变化与监控告警，支持实时跟品决策。"
+    ].join(" ");
+    return truncateText(summary, 220);
   }
-  return `${normalized.slice(0, 180)}...`;
+
+  const sentences = trimmed
+    .split(/[。！？.!?\n]/)
+    .map((item) => trimSentenceTail(item))
+    .filter(Boolean);
+
+  if (sentences.length >= 2) {
+    const first = sentences[0];
+    const second = sentences[1] && sentences[1] !== first ? sentences[1] : "";
+    const combined = second
+      ? `目标：${first}。补充：${second}。`
+      : `目标：${first}。`;
+    return truncateText(combined, 200);
+  }
+
+  const normalized = trimmed.replace(/\s+/g, " ");
+  return truncateText(normalized, 180);
 }
 
 export function recommendRoles(rawInput: string, config: IndustryTeamConfig) {
@@ -187,9 +316,15 @@ export function recommendRoles(rawInput: string, config: IndustryTeamConfig) {
   return selected.slice(0, config.assemblyRule.maxRoles ?? 8);
 }
 
-export function detectConflicts(rawInput: string, productContext: ProductContext): IssueConflict[] {
+export function detectConflicts(
+  rawInput: string,
+  productContext: ProductContext,
+  options?: { industryCode?: string }
+): IssueConflict[] {
   const text = normalizeText(rawInput);
   const conflicts: IssueConflict[] = [];
+  const profile = detectScenarioProfile(rawInput);
+  const selectedIndustryCode = String(options?.industryCode ?? "").trim().toLowerCase();
 
   const unresolvedMismatches = (productContext.requirementHistory ?? [])
     .filter((item) => item.validationStatus === "mismatch")
@@ -244,13 +379,48 @@ export function detectConflicts(rawInput: string, productContext: ProductContext
     });
   }
 
+  // 场景命中校验：电商行业默认要求命中跨境选品/跟品关键词，否则不允许通过确认。
+  if (selectedIndustryCode === "ecommerce" && !profile.isCrossBorderEcomSelection) {
+    conflicts.push({
+      id: "crossborder-scene-not-hit",
+      severity: "critical",
+      title: "场景命中校验未通过",
+      detail: "当前行业为电商零售，但需求未命中跨境选品/跟品关键词（如：跨境、选品、跟品、爆品、TikTok、亚马逊）。",
+      suggestion: "请补充跨境业务场景与目标平台后重新分析，否则不可进入确认创建。"
+    });
+  }
+
   return conflicts;
 }
 
 export function buildClarificationQuestions(rawInput: string): IssueQuestion[] {
   const text = normalizeText(rawInput);
+  const profile = detectScenarioProfile(rawInput);
   const hasTimelineHint = /(天|周|月|截止|排期|里程碑|deadline)/i.test(text);
   const hasAcceptanceHint = /(验收|指标|成功标准|kpi|sla|性能)/i.test(text);
+
+  if (profile.isCrossBorderEcomSelection) {
+    return [
+      {
+        id: "goal",
+        question: "这次选品跟品机器人最核心的业务目标是什么？",
+        required: true,
+        placeholder: "例如：30 天内把潜力款命中率提升到 25%，并把选品周期缩短到 24 小时内。"
+      },
+      {
+        id: "scope",
+        question: "本次必须覆盖哪些平台/类目，以及明确不做哪些自动化动作？",
+        required: true,
+        placeholder: "例如：覆盖 TikTok 美妆 + 亚马逊家居；不做自动下单与自动投放。"
+      },
+      {
+        id: "acceptance",
+        question: "请给出可验证的验收口径（抓取频率、TopN 质量、告警时效）",
+        required: true,
+        placeholder: "例如：每 6 小时更新一次榜单；每日输出 Top20；关键指标变化 10 分钟内告警。"
+      }
+    ];
+  }
 
   // V1 收敛：固定 3 个必答细化问题，避免流程发散。
   return [
@@ -286,8 +456,53 @@ function extractFirstSentence(rawInput: string) {
     .find(Boolean) ?? rawInput.trim();
 }
 
+type IssueScenarioProfile = {
+  isCrossBorderEcomSelection: boolean;
+  isMeetingLike: boolean;
+  isCompetitorLike: boolean;
+};
+
+function detectScenarioProfile(rawInput: string): IssueScenarioProfile {
+  const text = normalizeText(rawInput);
+  const isCrossBorderEcomSelection = /(跨境|跨境电商|选品|跟品|爆品|tiktok|亚马逊|amazon|temu|ebay|shopify|榜单|热卖|爆单)/i.test(text);
+  const isMeetingLike = /(会议|纪要|meeting)/i.test(text);
+  const isCompetitorLike = /(竞品|对标|competitor)/i.test(text);
+  return {
+    isCrossBorderEcomSelection,
+    isMeetingLike,
+    isCompetitorLike
+  };
+}
+
 export function buildRequirementRefinement(rawInput: string): RequirementRefinement {
   const summary = extractFirstSentence(rawInput);
+  const profile = detectScenarioProfile(rawInput);
+
+  if (profile.isCrossBorderEcomSelection) {
+    return {
+      problemStatement: "当前缺少一套可持续发现 TikTok/亚马逊/Temu 潜力爆品并自动跟踪变化的机制，导致选品滞后、上新命中率不稳定。",
+      expectedOutcome: "交付可演示的跨境电商选品跟品机器人 MVP，支持爆品发现、评分排序、异常告警与人工确认闭环。",
+      inScopeDraft: [
+        "接入至少 2 个平台（如 TikTok + 亚马逊/Temu）的榜单或商品信号数据",
+        "建立候选商品池与评分规则（热度、增速、竞争度、利润空间）",
+        "实现跟品监控（价格/排名/销量趋势）并输出变化告警",
+        "提供每日 Top N 候选清单与推荐理由（可追溯证据）",
+        "提供人工确认/忽略机制，避免全自动误判直接执行"
+      ],
+      outOfScopeDraft: [
+        "不包含自动下单、自动改价、自动投放广告等强执行动作",
+        "不建设完整 BI 数据仓库与多组织权限体系",
+        "不覆盖二期扩展（如供应链履约、客服自动化）"
+      ],
+      acceptanceDraft: [
+        "每日可自动生成不少于 20 条候选商品清单并给出评分与证据来源",
+        "支持对重点商品进行持续跟踪，关键指标变化可在约定时效内触发告警",
+        "至少完成 2 条从“发现→评估→确认”的真实样例闭环",
+        "输出可验收的交付物：选品策略说明、监控规则、Demo 演示与排期计划"
+      ]
+    };
+  }
+
   const text = normalizeText(rawInput);
 
   const inScopeDraft = [
@@ -299,10 +514,10 @@ export function buildRequirementRefinement(rawInput: string): RequirementRefinem
     "不扩展到二期及以后需求"
   ];
 
-  if (/(会议|纪要|meeting)/i.test(text)) {
+  if (profile.isMeetingLike || /(会议|纪要|meeting)/i.test(text)) {
     inScopeDraft.unshift("将会议纪要中的关键决议转成可执行需求条目");
   }
-  if (/(竞品|对标|competitor)/i.test(text)) {
+  if (profile.isCompetitorLike || /(竞品|对标|competitor)/i.test(text)) {
     inScopeDraft.push("输出与竞品差异点对应的功能落地方案");
   }
 
@@ -344,80 +559,209 @@ function firstSentence(rawInput: string) {
   );
 }
 
+type DiscussionSignals = {
+  platformsText: string;
+  trigger: string;
+  needsMonitoring: boolean;
+  needsRanking: boolean;
+  needsLinkTracking: boolean;
+  needsRealtime: boolean;
+};
+
+function inferDiscussionSignals(rawInput: string): DiscussionSignals {
+  const normalized = normalizeText(rawInput);
+  const platforms = extractCrossBorderPlatformLabels(rawInput);
+  return {
+    platformsText: platforms.length > 0 ? platforms.join("、") : "TikTok/亚马逊等跨境平台",
+    trigger: inferTrafficTrigger(rawInput),
+    needsMonitoring: /(监控|跟踪|追踪|watch|monitor)/i.test(normalized),
+    needsRanking: /(排名|榜单|top|排行|排序)/i.test(normalized),
+    needsLinkTracking: /(链接|link|跟品|同款|详情页)/i.test(normalized),
+    needsRealtime: /(实时|分钟|秒|及时|告警|预警)/i.test(normalized)
+  };
+}
+
+function buildCrossBorderDiscussion(
+  roleId: RoleType,
+  roleLabel: string,
+  index: number,
+  issue: string,
+  signals: DiscussionSignals
+): IssueDiscussionItem {
+  const outputUnits = [
+    signals.needsMonitoring ? "监控" : "",
+    signals.needsRanking ? "排名" : "",
+    signals.needsLinkTracking ? "跟品链接" : ""
+  ].filter(Boolean);
+  const outputText = outputUnits.length > 0 ? outputUnits.join(" + ") : "监控 + 排名 + 跟品链接";
+  const realtimeExpectation = signals.needsRealtime ? "实时/准实时告警" : "周期性告警";
+  const keyOpenQuestions = [
+    "抓取频率",
+    "TopN 阈值",
+    "告警触发阈值",
+    "人工确认规则"
+  ].join("、");
+
+  if (roleId === "ROLE_ANALYST") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "需求理解与业务信号拆解",
+      concern: `讨论识别到核心链路为“${signals.trigger} → ${outputText} → 决策跟进”，但${keyOpenQuestions}尚未明确。`,
+      proposal: `结论：先围绕 ${signals.platformsText} 建立最小闭环；待确认：${keyOpenQuestions}。`
+    };
+  }
+
+  if (roleId === "ROLE_PM") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "里程碑与推进节奏",
+      concern: `若首期同时扩展过多平台，交付会失去可控性，影响 ${realtimeExpectation} 达成。`,
+      proposal: `结论：MVP 首期聚焦 ${signals.platformsText} 与核心 TopN；二期再扩平台与策略。`
+    };
+  }
+
+  if (roleId === "ROLE_PRODUCT") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "价值定义与决策口径",
+      concern: `如果只给“热度”不附证据链，运营很难采信排名结果，导致“可用但不可决策”。`,
+      proposal: `结论：每条候选需附来源、增速、竞争度与利润空间解释，并支持一键跳转商品链接。`
+    };
+  }
+
+  if (roleId === "ROLE_DESIGN") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "决策界面与信息可读性",
+      concern: "若榜单、趋势、告警挤在一个视图里，会增加认知负担，降低跟品响应速度。",
+      proposal: "结论：拆分“发现榜单 / 商品详情 / 告警流”三层视图，保证 30 秒内可完成一次跟品判断。"
+    };
+  }
+
+  if (roleId === "ROLE_ARCH" || roleId === "ROLE_DEV") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "数据链路与实现可行性",
+      concern: `当前输入强调 ${realtimeExpectation}，需先确认数据来源稳定性、限频策略与异常重试机制。`,
+      proposal: "结论：先实现可追溯采集与规则引擎，再接告警与链接跳转，避免先做前端展示后补数据。"
+    };
+  }
+
+  if (roleId === "ROLE_QA") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "验收标准与质量门禁",
+      concern: "若缺少可量化标准，会出现“看起来有结果，但无法证明有效”的验收争议。",
+      proposal: "结论：按“命中率、时效、可追溯性”三维验收，并要求至少 2 条真实样例闭环。"
+    };
+  }
+
+  if (roleId === "ROLE_ASSISTANT") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "协同编排与待办收敛",
+      concern: `当前讨论已形成方向，但“${issue}”仍存在待确认项，直接执行会放大返工风险。`,
+      proposal: "结论：先锁定澄清项，再按角色下发任务并持续同步阶段结论。"
+    };
+  }
+
+  return {
+    id: `discussion-${roleId}-${index}`,
+    roleId,
+    roleLabel,
+    focus: "协同推进与风险控制",
+    concern: `围绕“${issue}”已形成初步方向，但仍需明确上下游依赖与阶段切换条件。`,
+    proposal: "结论：按 SOP 推进并在关键节点触发人工确认。"
+  };
+}
+
+function buildGenericDiscussion(
+  roleId: RoleType,
+  roleLabel: string,
+  index: number,
+  issue: string
+): IssueDiscussionItem {
+  if (roleId === "ROLE_PM") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "排期与依赖管理",
+      concern: `“${issue}”当前仍缺关键参数，若直接排期会造成阶段反复与返工。`,
+      proposal: "结论：先锁定必答澄清，再按里程碑拆分任务与负责人。"
+    };
+  }
+  if (roleId === "ROLE_PRODUCT") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "产品方案与价值定义",
+      concern: `对“${issue}”的业务目标与用户价值仍需进一步量化，否则产出容易偏离。`,
+      proposal: "结论：先锁定目标用户、核心场景与验收指标，再进入方案输出。"
+    };
+  }
+  if (roleId === "ROLE_DEV" || roleId === "ROLE_ARCH") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "实现路径与依赖评估",
+      concern: `当前需求存在边界不清风险，直接开发会造成返工。`,
+      proposal: "结论：先完成范围冻结与接口草案，再拆解研发任务。"
+    };
+  }
+  if (roleId === "ROLE_QA") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "验收一致性校验",
+      concern: "验收标准未量化时，无法判断结果是否满足预期。",
+      proposal: "结论：将验收条目写入任务卡，并与需求目标逐条对照。"
+    };
+  }
+  return {
+    id: `discussion-${roleId}-${index}`,
+    roleId,
+    roleLabel,
+    focus: roleId === "ROLE_ANALYST" ? "需求理解与边界识别" : "协同推进与风险控制",
+    concern: `需要确认“${issue}”的目标、范围边界和验收口径是否一致。`,
+    proposal: "结论：先完成关键澄清，再进入方案与研发分工。"
+  };
+}
+
 export function buildIssueDiscussion(
   rawInput: string,
   roleIds: RoleType[],
   soulRoleId: RoleType
 ): IssueDiscussionItem[] {
   const issue = firstSentence(rawInput) || "当前需求";
+  const profile = detectScenarioProfile(rawInput);
+  const signals = inferDiscussionSignals(rawInput);
   const focusedRoles = asUniqueRoleList(roleIds, soulRoleId)
     .filter((roleId) => ROLE_LABELS[roleId])
-    .slice(0, 5);
+    .slice(0, 6);
 
   return focusedRoles.map((roleId, index) => {
-    if (roleId === soulRoleId) {
-      return {
-        id: `discussion-${roleId}-${index}`,
-        roleId,
-        roleLabel: ROLE_LABELS[roleId],
-        focus: "需求理解与边界识别",
-        concern: `需要确认 "${issue}" 的目标、范围边界和验收口径是否一致。`,
-        proposal: "先完成 3 个必答澄清，再进入方案与研发分工。"
-      };
-    }
-
-    if (roleId === "ROLE_PRODUCT") {
-      return {
-        id: `discussion-${roleId}-${index}`,
-        roleId,
-        roleLabel: ROLE_LABELS[roleId],
-        focus: "产品方案与对外沟通产出",
-        concern: "若缺少业务目标与受众信息，PPT/Word 方案容易偏离预期。",
-        proposal: "在确认卡锁定目标后，输出客户汇报版方案与产品说明。"
-      };
-    }
-
-    if (roleId === "ROLE_DESIGN") {
-      return {
-        id: `discussion-${roleId}-${index}`,
-        roleId,
-        roleLabel: ROLE_LABELS[roleId],
-        focus: "视觉系统与交互审查",
-        concern: "若缺失视觉方向、品牌语气与可访问性清单，交付会退化成模板化页面。",
-        proposal: "在进入开发前完成设计审查卡，固化视觉规范、组件清单与无障碍要求。"
-      };
-    }
-
-    if (roleId === "ROLE_DEV" || roleId === "ROLE_ARCH") {
-      return {
-        id: `discussion-${roleId}-${index}`,
-        roleId,
-        roleLabel: ROLE_LABELS[roleId],
-        focus: "研发可执行性与原型实现",
-        concern: "若依赖与接口边界不清晰，Demo 原型与排期会失真。",
-        proposal: "按确认范围拆解任务，优先完成可演示闭环。"
-      };
-    }
-
-    if (roleId === "ROLE_QA") {
-      return {
-        id: `discussion-${roleId}-${index}`,
-        roleId,
-        roleLabel: ROLE_LABELS[roleId],
-        focus: "验收与一致性校验",
-        concern: "没有可验证标准时，无法判断结果是否符合需求目标。",
-        proposal: "将验收标准写入任务卡，并在回填前做一致性校验。"
-      };
-    }
-
-    return {
-      id: `discussion-${roleId}-${index}`,
-      roleId,
-      roleLabel: ROLE_LABELS[roleId],
-      focus: "协同推进与风险控制",
-      concern: "需要明确上下游依赖和阶段切换条件。",
-      proposal: "按 SOP 推进并在关键节点触发人工确认。"
-    };
+    const label = ROLE_LABELS[roleId];
+    return profile.isCrossBorderEcomSelection
+      ? buildCrossBorderDiscussion(roleId, label, index, issue, signals)
+      : buildGenericDiscussion(roleId, label, index, issue);
   });
 }
 
@@ -461,8 +805,13 @@ export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
   ];
 }
 
-export function buildContextAlignment(rawInput: string, productContext: ProductContext): IssueContextAlignment {
+export function buildContextAlignment(
+  rawInput: string,
+  productContext: ProductContext,
+  options?: { industryCode?: string }
+): IssueContextAlignment {
   const normalized = normalizeText(rawInput);
+  const profile = detectScenarioProfile(rawInput);
   const matchedGoals = (productContext.goals ?? [])
     .filter((goal) => {
       const key = goal.trim().toLowerCase();
@@ -483,17 +832,71 @@ export function buildContextAlignment(rawInput: string, productContext: ProductC
     })
     .slice(0, 3);
 
+  const selectedIndustryCode = String(options?.industryCode ?? "").trim().toLowerCase();
+  const inputIndustry = detectIndustry(rawInput) || detectIndustry(selectedIndustryCode);
+  const contextIndustry = detectIndustry(
+    [
+      productContext.background,
+      productContext.mission,
+      ...(productContext.goals ?? []),
+      ...(productContext.principles ?? [])
+    ].join(" ")
+  );
+  const hasIndustryMismatch = Boolean(inputIndustry && contextIndustry && inputIndustry !== contextIndustry);
+  const requiresCrossBorderScene = selectedIndustryCode === "ecommerce";
+  const sceneHitPassed = !requiresCrossBorderScene || profile.isCrossBorderEcomSelection;
+  const missionIndustry = detectIndustry(String(productContext.mission ?? ""));
+  const missionRelevant = Boolean(
+    String(productContext.mission ?? "").trim()
+    && (
+      hasContextTokenOverlap(rawInput, String(productContext.mission ?? ""))
+      || (inputIndustry && missionIndustry && missionIndustry === inputIndustry)
+    )
+  );
+  const shouldIncludeBackground = Boolean(
+    productContext.background
+    && !hasIndustryMismatch
+    && (
+      matchedGoals.length > 0
+      || matchedPrinciples.length > 0
+      || hasContextTokenOverlap(rawInput, productContext.background)
+    )
+  );
+  const shouldPreferIssueMission = Boolean(
+    !String(productContext.mission ?? "").trim()
+    || hasIndustryMismatch
+    || !sceneHitPassed
+    || (profile.isCrossBorderEcomSelection && !missionRelevant)
+    || (matchedGoals.length === 0 && matchedPrinciples.length === 0 && !missionRelevant)
+  );
+
   const contextNotes = [
-    productContext.background ? `背景: ${productContext.background}` : "",
-    productContext.mission ? `使命: ${productContext.mission}` : "",
+    shouldIncludeBackground ? `背景: ${productContext.background}` : "",
     productContext.constraints.length > 0 ? `约束: ${productContext.constraints.slice(0, 3).join("、")}` : ""
   ].filter(Boolean);
+  if (hasIndustryMismatch) {
+    const requestedLabel = INDUSTRY_LABELS[inputIndustry] ?? inputIndustry;
+    const contextLabel = INDUSTRY_LABELS[contextIndustry] ?? contextIndustry;
+    contextNotes.push(`检测到需求更偏向「${requestedLabel}」，当前产品说明文档背景更偏向「${contextLabel}」，建议先修正文档背景或确认本次跨行业策略。`);
+  }
+  if (shouldPreferIssueMission) {
+    contextNotes.push("本次草案已优先按当前需求语义生成，未直接复用历史使命表述。");
+  }
+  if (requiresCrossBorderScene) {
+    contextNotes.push(
+      sceneHitPassed
+        ? "场景命中校验: 通过（已命中跨境选品/跟品关键词）。"
+        : "场景命中校验: 未通过（缺少跨境选品/跟品关键词，当前需求不可直接通过）。"
+    );
+  }
 
   return {
     productName: productContext.productName || "未配置产品名称",
-    missionAnchor: productContext.mission || "请先完善产品使命，以便自动对齐设计策略。",
-    matchedGoals: matchedGoals.length > 0 ? matchedGoals : (productContext.goals ?? []).slice(0, 2),
-    matchedPrinciples: matchedPrinciples.length > 0 ? matchedPrinciples : (productContext.principles ?? []).slice(0, 2),
+    missionAnchor: shouldPreferIssueMission
+      ? inferIssueMissionAnchor(rawInput)
+      : (productContext.mission || inferIssueMissionAnchor(rawInput)),
+    matchedGoals: sceneHitPassed ? matchedGoals : [],
+    matchedPrinciples: sceneHitPassed ? matchedPrinciples : [],
     contextNotes
   };
 }
@@ -504,6 +907,33 @@ export function buildDesignBlueprint(input: {
   alignment: IssueContextAlignment;
 }): IssueDesignBlueprint {
   const normalized = normalizeText(input.rawInput);
+  const profile = detectScenarioProfile(input.rawInput);
+  if (profile.isCrossBorderEcomSelection) {
+    const platforms = extractCrossBorderPlatformLabels(input.rawInput);
+    const platformText = platforms.length > 0 ? platforms.join("、") : "TikTok、亚马逊等跨境平台";
+    return {
+      designTheme: `跨境爆品选品与跟品机器人（${platformText}）`,
+      valueNarrative: `围绕“${input.alignment.missionAnchor}”构建爆品发现 → 评分排序 → 跟品监控闭环，帮助团队更快决策并降低错判成本。`,
+      targetUsers: [
+        "跨境选品运营",
+        "商品分析/数据运营",
+        "品类负责人"
+      ],
+      coreScenarios: [
+        `多平台信号采集与爆发检测（${platformText}）`,
+        "候选商品评分排行与证据链展示",
+        "实时跟品监控（价格/排名/销量）与告警推送",
+        "一键查看商品链接并进入人工确认决策"
+      ],
+      proposedMilestones: [
+        "定义数据源与爆发判定规则（流量、增速、竞争度）",
+        "完成候选池、评分模型与 TopN 排行机制",
+        "上线跟品监控与告警链路，打通商品跳转链接",
+        "完成真实样例复盘并固化策略模板"
+      ]
+    };
+  }
+
   const targetUsers: string[] = [];
   if (/(客户|client|用户|user)/i.test(normalized)) {
     targetUsers.push("客户/终端用户");
@@ -542,29 +972,95 @@ export function buildSuggestedAnswers(input: {
   questions: IssueQuestion[];
   refinement: RequirementRefinement;
   alignment: IssueContextAlignment;
+  industryCode?: string;
+  discussion?: IssueDiscussionItem[];
 }): IssueSuggestedAnswer[] {
+  const profile = detectScenarioProfile(input.rawInput);
+  const platforms = extractCrossBorderPlatformLabels(input.rawInput);
+  const platformText = platforms.length > 0 ? platforms.join("、") : "TikTok/亚马逊等平台";
+
+  if (profile.isCrossBorderEcomSelection) {
+    const byId: Record<string, IssueSuggestedAnswer> = {
+      goal: {
+        questionId: "goal",
+        answer: "在保证人工可控的前提下，提升爆品发现命中率与跟品效率，缩短从发现到决策的响应时间。",
+        reason: "根据跨境选品场景目标（速度+准确率+可追溯）自动提炼。"
+      },
+      scope: {
+        questionId: "scope",
+        answer: `必须交付：覆盖${platformText}的信号监控、TopN 排名、商品链接追踪与告警；不做：自动下单、自动改价、自动投放。`,
+        reason: "根据风险可控原则与MVP收敛策略生成。"
+      },
+      acceptance: {
+        questionId: "acceptance",
+        answer: "验收标准：每日稳定输出候选商品清单并附证据链；关键指标异常可在约定时效内告警；至少完成2条真实样例闭环复盘。",
+        reason: "根据可验证交付标准自动生成。"
+      }
+    };
+
+    return input.questions
+      .filter((question) => Boolean(byId[question.id]))
+      .map((question) => byId[question.id]);
+  }
+
+  const normalizeIndustryCode = (value: string) => String(value ?? "").trim().toLowerCase();
+  const resolvedIndustry = normalizeIndustryCode(input.industryCode || detectIndustry(input.rawInput));
+  const missionAnchor = String(input.alignment.missionAnchor ?? "").trim();
+  const conciseMissionAnchor = missionAnchor.length > 36 ? "" : missionAnchor;
+  const discussionHints = (input.discussion ?? [])
+    .slice(0, 2)
+    .map((item) => `${item.roleLabel}:${item.proposal.replace(/^结论[:：]\s*/i, "")}`)
+    .join("；");
+
+  const industryDrafts: Record<string, { goal: string; scope: string; acceptance: string }> = {
+    ecommerce: {
+      goal: "围绕商品增长机会识别与转化效率，提升业务响应速度与选品决策质量。",
+      scope: "必须交付：核心业务链路的数据采集、候选评估与执行闭环；不做：与当前增长目标无关的外围系统扩展。",
+      acceptance: "验收标准：核心指标可量化（时效、命中率、转化贡献）；关键流程可演示并可追溯。"
+    },
+    fintech: {
+      goal: "在保障合规与风险可控前提下，提升业务处理效率与决策准确性。",
+      scope: "必须交付：核心业务流程、风险控制点与审计追踪；不做：未经审批的高风险自动化动作。",
+      acceptance: "验收标准：满足合规检查与审计追踪要求，关键风险场景有可验证测试结果。"
+    },
+    saas: {
+      goal: "提升需求落地效率与用户价值交付速度，减少跨角色协作返工。",
+      scope: "必须交付：面向核心用户场景的可执行闭环；不做：超出当前版本目标的横向能力扩张。",
+      acceptance: "验收标准：核心流程可演示、关键指标可验证、交付物可复用并可持续迭代。"
+    }
+  };
+  const industryDraft = industryDrafts[resolvedIndustry];
+
   const goalSuggestion =
-    input.alignment.matchedGoals[0]
+    industryDraft?.goal
+      ? `${industryDraft.goal}${conciseMissionAnchor ? ` 并保持与“${conciseMissionAnchor}”一致。` : " 并保持与产品使命一致。"}`
+      : input.alignment.matchedGoals[0]
       ? `围绕“${input.alignment.matchedGoals[0]}”提升核心业务指标，并保持与产品使命一致。`
       : "明确核心业务目标并确保与产品使命、阶段目标保持一致。";
-  const scopeSuggestion = `必须交付：${input.refinement.inScopeDraft.slice(0, 2).join("；")}。不做：${input.refinement.outOfScopeDraft.slice(0, 2).join("；")}。`;
-  const acceptanceSuggestion = `验收标准：${input.refinement.acceptanceDraft.join("；")}；并完成客户汇报方案、实施方案、Demo 与排期。`;
+  const scopeSuggestion = industryDraft?.scope
+    ? `${industryDraft.scope} 建议优先：${input.refinement.inScopeDraft.slice(0, 2).join("；")}。`
+    : `必须交付：${input.refinement.inScopeDraft.slice(0, 2).join("；")}。不做：${input.refinement.outOfScopeDraft.slice(0, 2).join("；")}。`;
+  const acceptanceSuggestion = industryDraft?.acceptance
+    ? `${industryDraft.acceptance} 建议补充：${input.refinement.acceptanceDraft.slice(0, 2).join("；")}。`
+    : `验收标准：${input.refinement.acceptanceDraft.join("；")}；并完成客户汇报方案、实施方案、Demo 与排期。`;
 
   const byId: Record<string, IssueSuggestedAnswer> = {
     goal: {
       questionId: "goal",
       answer: goalSuggestion,
-      reason: "根据产品目标/使命自动生成的建议口径。"
+      reason: discussionHints
+        ? `结合多角色讨论共识生成（${discussionHints}）。`
+        : "根据行业习惯与产品目标自动生成的建议口径。"
     },
     scope: {
       questionId: "scope",
       answer: scopeSuggestion,
-      reason: "根据需求细化草案自动提炼的范围边界。"
+      reason: "根据行业默认边界与需求细化草案自动提炼。"
     },
     acceptance: {
       questionId: "acceptance",
       answer: acceptanceSuggestion,
-      reason: "根据标准交付物与验收口径自动生成。"
+      reason: "根据行业验收口径与标准交付物自动生成。"
     }
   };
 

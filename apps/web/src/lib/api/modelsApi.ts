@@ -51,4 +51,19 @@ export const modelsApi = {
       { method: 'POST' },
     );
   },
+
+  async setDefault(id: string) {
+    return request<{
+      model: Model;
+      runtime: {
+        provider: string;
+        apiBaseUrl: string;
+        modelName: string;
+        apiKeyConfigured: boolean;
+        apiKeyPreview?: string;
+      };
+    }>(`/models/${id}/set-default`, {
+      method: 'POST',
+    });
+  },
 };

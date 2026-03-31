@@ -1,5 +1,13 @@
 import { request } from './core';
-import type { SystemHealth, SystemRuntime, SystemRuntimeConfig, SystemRuntimeConfigInput } from './types';
+import type {
+  DebateCompareLogInput,
+  DebateCompareLogResult,
+  RuntimeRouteHealthSnapshot,
+  SystemHealth,
+  SystemRuntime,
+  SystemRuntimeConfig,
+  SystemRuntimeConfigInput,
+} from './types';
 
 export const systemApi = {
   async getHealth() {
@@ -28,6 +36,17 @@ export const systemApi = {
   async validateRuntime() {
     return request<{ ok: boolean; message: string }>('/system/runtime/validate', {
       method: 'POST',
+    });
+  },
+
+  async getRouteHealth() {
+    return request<RuntimeRouteHealthSnapshot>('/system/stage-model-policy/routes/health');
+  },
+
+  async compareDebateAndLog(payload: DebateCompareLogInput) {
+    return request<DebateCompareLogResult>('/system/stage-model-policy/debate/compare-log', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     });
   },
 };

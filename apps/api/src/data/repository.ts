@@ -42,6 +42,10 @@ import {
   stageAssignees
 } from "./seed-data.js";
 import { previewRequirement } from "../utils/project-parser.js";
+import {
+  buildDeliverableTemplatePromptBlock,
+  resolveDeliverableTemplate
+} from "../system/deliverable-templates.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -50,16 +54,24 @@ const STAGE_OBJECTIVES: Record<StageType, string> = {
   INIT: "确认项目目标、边界与团队分工，建立执行基线。",
   ANALYSIS: "把输入需求转成结构化需求合同、约束与风险清单。",
   DESIGN: "输出可执行设计方案，明确信息架构、视觉方向与交互规则。",
-  DEV: "把设计与任务拆解落地为可运行实现，并完成联调验证。",
+  DEV: "先产出研发技术方案与关键选型，再把设计与任务拆解落地为可运行实现，并完成联调验证。",
   ACCEPT: "完成验收验证、结果总结与文档回填，形成可持续迭代闭环。"
 };
 
 const STAGE_NEXT_INPUT: Record<StageType, string> = {
   INIT: "将项目章程与角色分工交给分析阶段继续细化。",
   ANALYSIS: "把需求合同、排期和风险清单交给设计阶段产出方案。",
-  DESIGN: "把设计审查卡、方案文档和组件规范交给开发阶段执行。",
+  DESIGN: "把设计审查卡、实施方案与组件规范交给开发阶段，先完成技术方案与选型再进入实现。",
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
+};
+
+const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
+  INIT: ["项目章程.md"],
+  ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
+  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md"],
+  DEV: ["技术方案与选型.md", "Demo原型说明.md"],
+  ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
 
 function normalizeDesignReview(input: StageSubmissionInput["designReview"]) {
@@ -149,8 +161,183 @@ function renderDesignReviewCard(input: {
   return lines.join("\n");
 }
 
+function ensureDesignSubmissionContent(
+  content: string,
+  designReview: NonNullable<ReturnType<typeof normalizeDesignReview>>
+) {
+  let normalized = String(content || "").trim();
+  const hasSection = (title: string) => normalized.includes(title);
+  const appendSection = (title: string, lines: string[]) => {
+    const block = [title, ...lines].join("\n");
+    normalized = normalized ? `${normalized}\n\n${block}` : block;
+  };
+
+  if (!hasSection("## 视觉方案")) {
+    appendSection("## 视觉方案", [
+      `- 视觉方向: ${designReview.visualDirection}`,
+      `- 目标语气: ${designReview.brandTone}`
+    ]);
+  }
+
+  if (!hasSection("## 版式策略")) {
+    appendSection("## 版式策略", [
+      "- 首屏先展示价值主张，再展开能力与流程。",
+      "- 关键路径优先，减少用户在主流程中的跳转。"
+    ]);
+  }
+
+  if (!hasSection("## 组件清单")) {
+    appendSection("## 组件清单", [
+      "- Hero 区块（标题 + 副标题 + CTA）",
+      "- 能力卡片区块（3-4 项核心能力）",
+      "- 流程区块（需求到研发闭环）",
+      "- 预约演示 CTA 区块"
+    ]);
+  }
+
+  if (!hasSection("## 品牌语气")) {
+    appendSection("## 品牌语气", [
+      `- 文案语气: ${designReview.brandTone}`,
+      "- 表达方式: 专业、直接、可执行，避免空泛口号。"
+    ]);
+  }
+
+  if (!hasSection("## UX 原则")) {
+    appendSection("## UX 原则", designReview.uxPrinciples.map((item) => `- ${item}`));
+  }
+
+  if (!hasSection("## 可访问性检查")) {
+    appendSection("## 可访问性检查", designReview.accessibilityChecklist.map((item) => `- ${item}`));
+  }
+
+  const bulletCount = normalized
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("- "))
+    .length;
+
+  if (bulletCount < 8) {
+    appendSection("## 补充要点", [
+      "- 方案需可直接衔接开发实施与验收回填。",
+      "- 阶段交付需包含可追溯证据与验收口径。"
+    ]);
+  }
+
+  if (normalized.length < 260) {
+    appendSection("## 设计说明补充", [
+      `- 当前阶段目标: ${STAGE_OBJECTIVES.DESIGN}`,
+      `- 下一阶段输入: ${STAGE_NEXT_INPUT.DESIGN}`,
+      "- 本设计交付物用于驱动研发执行并减少返工风险。"
+    ]);
+  }
+
+  return normalized;
+}
+
 function hasApprovedDesignReview(content: string) {
   return content.includes(DESIGN_REVIEW_MARKER) && /审查结论:\s*通过/.test(content);
+}
+
+function normalizeDeliverableToken(value: string) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s._\-()（）【】\[\]{}]/g, "");
+}
+
+function isSameCoreDeliverable(
+  deliverableName: string,
+  expectedName: string,
+  stageType: StageType
+) {
+  const expectedTemplate = resolveDeliverableTemplate(expectedName, stageType);
+  const candidateTemplate = resolveDeliverableTemplate(deliverableName, stageType);
+  if (expectedTemplate.kind !== "generic" && candidateTemplate.kind === expectedTemplate.kind) {
+    return true;
+  }
+
+  const expectedToken = normalizeDeliverableToken(expectedName);
+  const candidateToken = normalizeDeliverableToken(deliverableName);
+  return candidateToken.includes(expectedToken) || expectedToken.includes(candidateToken);
+}
+
+function validateDeliverableTemplateGate(input: {
+  stageType: StageType;
+  deliverableName: string;
+  content: string;
+}) {
+  const normalized = String(input.content || "").trim();
+  const template = resolveDeliverableTemplate(input.deliverableName, input.stageType);
+  const issues: string[] = [];
+
+  if (normalized.length < MIN_DELIVERABLE_CONTENT_LENGTH) {
+    issues.push(`正文长度不足（至少 ${MIN_DELIVERABLE_CONTENT_LENGTH} 字）`);
+  }
+
+  const missingSections = template.requiredSections.filter((section) => !normalized.includes(section));
+  if (missingSections.length > 0) {
+    issues.push(`缺少模板章节: ${missingSections.slice(0, 6).join("、")}${missingSections.length > 6 ? "..." : ""}`);
+  }
+
+  if (!normalized.includes("## 验收检查清单")) {
+    issues.push("缺少“## 验收检查清单”章节");
+  } else {
+    const missingChecklist = template.acceptanceChecklist.filter((item) => !normalized.includes(item));
+    if (missingChecklist.length > 0) {
+      issues.push(`验收检查清单未命中: ${missingChecklist.slice(0, 4).join("、")}${missingChecklist.length > 4 ? "..." : ""}`);
+    }
+  }
+
+  return {
+    template,
+    passed: issues.length === 0,
+    issues
+  };
+}
+
+function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: StageType) {
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
+  if (expectedNames.length === 0) {
+    return;
+  }
+
+  const stageDeliverables = project.deliverables.filter((item) => item.stageType === stageType);
+  const errors: string[] = [];
+
+  for (const expectedName of expectedNames) {
+    const matched = stageDeliverables
+      .filter((item) => isSameCoreDeliverable(item.name, expectedName, stageType))
+      .sort((left, right) => {
+        const versionDelta = (right.version || 0) - (left.version || 0);
+        if (versionDelta !== 0) {
+          return versionDelta;
+        }
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      })[0];
+
+    if (!matched) {
+      errors.push(`缺少核心交付物: ${expectedName}`);
+      continue;
+    }
+
+    if (matched.status !== "submitted" && matched.status !== "approved") {
+      errors.push(`${matched.name} 状态为 ${matched.status}，未达到可审批状态`);
+      continue;
+    }
+
+    const gate = validateDeliverableTemplateGate({
+      stageType,
+      deliverableName: matched.name,
+      content: String(matched.content || "")
+    });
+    if (!gate.passed) {
+      errors.push(`${matched.name} 未通过模板校验: ${gate.issues.join("；")}`);
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${errors.join(" | ")}`);
+  }
 }
 
 function containsAny(input: string, patterns: RegExp[]) {
@@ -183,7 +370,11 @@ function evaluateRequirementAlignment(
   const deliverablesJoined = deliverableNames.join(" ").toLowerCase();
   const blockedTasks = project.tasks.filter((task) => task.status === "blocked");
 
-  const expectedArtifacts = (input.artifacts.length > 0 ? input.artifacts : ["项目排期", "客户汇报方案（PPT）", "实施方案（Word）", "Demo 原型"])
+  const expectedArtifacts = (
+    input.artifacts.length > 0
+      ? input.artifacts
+      : ["项目排期", "客户汇报方案（PPT）", "实施方案（Word）", "技术方案与选型", "Demo 原型"]
+  )
     .map((label) => {
       const pattern = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, ""), "i");
       const fallback =
@@ -191,6 +382,8 @@ function evaluateRequirementAlignment(
           ? /ppt|汇报方案/i
           : label.toLowerCase().includes("word")
             ? /word|实施方案/i
+            : /技术方案|选型|architecture|tech/i.test(label.toLowerCase())
+              ? /技术方案|选型|architecture|tech/i
             : label.toLowerCase().includes("demo")
               ? /demo|原型/i
               : /排期|schedule/i;
@@ -410,7 +603,11 @@ export async function ensureSeedData(runtimeMode: RuntimeMode) {
   }
 
   const existingProjects = await prisma.project.count();
-  if (existingProjects === 0) {
+  const enableProjectSeedOnEmpty =
+    process.env.ENABLE_PROJECT_SEED_ON_EMPTY === "true"
+    || process.env.ENABLE_PROJECT_SEED === "true";
+
+  if (existingProjects === 0 && enableProjectSeedOnEmpty) {
     const seeds = createSeedProjects(runtimeMode);
     for (const project of seeds) {
       await persistProject(project);
@@ -511,6 +708,15 @@ async function reconcileAllProjectsDeliverables() {
   }
 }
 
+export async function reconcileProjectDeliverablesNow(id: string): Promise<ProjectDetail | undefined> {
+  const record = await loadProjectRecord(id);
+  if (!record) {
+    return undefined;
+  }
+  await reconcileProjectDeliverables(record);
+  return findProject(id);
+}
+
 async function loadProjectRecord(id: string) {
   return prisma.project.findUnique({
     where: { id },
@@ -530,6 +736,72 @@ function formatTaskStatusLabel(status: string) {
   if (status === "in_progress") return "进行中";
   if (status === "blocked") return "阻塞";
   return "待处理";
+}
+
+function normalizeDeliverableName(name: string) {
+  return String(name || "").trim().toLowerCase();
+}
+
+function deliverableStatusRank(status: string) {
+  if (status === "approved") return 4;
+  if (status === "submitted") return 3;
+  if (status === "rejected") return 2;
+  if (status === "draft") return 1;
+  return 0;
+}
+
+function toDeliverableTimestamp(value: Date | string | null | undefined) {
+  const time = new Date(value || 0).getTime();
+  return Number.isFinite(time) ? time : 0;
+}
+
+function selectLatestDeliverablesByCoreName<T extends {
+  id: string;
+  stageType: string;
+  name: string;
+  version: number;
+  status: string;
+  updatedAt: Date;
+}>(deliverables: T[]) {
+  const latestByCore = new Map<string, T>();
+  for (const item of deliverables) {
+    const key = `${item.stageType}::${normalizeDeliverableName(item.name)}`;
+    const existing = latestByCore.get(key);
+    if (!existing) {
+      latestByCore.set(key, item);
+      continue;
+    }
+
+    const itemTs = toDeliverableTimestamp(item.updatedAt);
+    const existingTs = toDeliverableTimestamp(existing.updatedAt);
+    if (itemTs > existingTs) {
+      latestByCore.set(key, item);
+      continue;
+    }
+    if (itemTs < existingTs) {
+      continue;
+    }
+
+    if ((item.version || 0) > (existing.version || 0)) {
+      latestByCore.set(key, item);
+      continue;
+    }
+    if ((item.version || 0) < (existing.version || 0)) {
+      continue;
+    }
+
+    if (deliverableStatusRank(item.status) > deliverableStatusRank(existing.status)) {
+      latestByCore.set(key, item);
+    }
+  }
+
+  return [...latestByCore.values()].sort((left, right) => {
+    const ts = toDeliverableTimestamp(right.updatedAt) - toDeliverableTimestamp(left.updatedAt);
+    if (ts !== 0) {
+      return ts;
+    }
+    return (right.version || 0) - (left.version || 0);
+  });
 }
 
 function extractMarkdownSection(content: string, title: string) {
@@ -604,6 +876,36 @@ async function persistProjectExecutionSafe(data: Prisma.ProjectExecutionUnchecke
   }
 }
 
+function composeExecutionMetadata(
+  baseMetadata: Prisma.InputJsonValue | undefined,
+  extension: Record<string, Prisma.InputJsonValue | undefined>
+): Prisma.InputJsonValue | undefined {
+  const normalizedExtension = Object.entries(extension)
+    .filter(([, value]) => value !== undefined)
+    .reduce<Record<string, Prisma.InputJsonValue>>((acc, [key, value]) => {
+      if (value !== undefined) {
+        acc[key] = value;
+      }
+      return acc;
+    }, {});
+
+  if (Object.keys(normalizedExtension).length === 0) {
+    return baseMetadata;
+  }
+
+  if (baseMetadata && typeof baseMetadata === "object" && !Array.isArray(baseMetadata)) {
+    return {
+      ...(baseMetadata as Record<string, Prisma.InputJsonValue>),
+      ...normalizedExtension
+    };
+  }
+
+  return {
+    ...(baseMetadata !== undefined ? { sourceMetadata: baseMetadata } : {}),
+    ...normalizedExtension
+  };
+}
+
 export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   const startedAt = Date.now();
   const runtime = await getRuntimeStatus();
@@ -617,6 +919,9 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       role: input.role,
       summary: input.summary
     });
+    const runAttempts = Array.isArray((run as { attempts?: unknown }).attempts)
+      ? ((run as { attempts: Prisma.InputJsonValue[] }).attempts)
+      : [];
 
     await persistProjectExecutionSafe({
       projectId: input.projectId,
@@ -631,11 +936,17 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       promptSummary: input.summary || null,
       outputPreview: buildExecutionOutputPreview(run.body),
       latencyMs: Math.max(0, Date.now() - startedAt),
-      metadata: input.metadata
+      metadata: composeExecutionMetadata(input.metadata, {
+        modelAttempts: runAttempts,
+        degraded: (run as { degraded?: boolean }).degraded ? true : undefined
+      })
     });
 
     return run;
   } catch (error) {
+    const errorAttempts = Array.isArray((error as { attempts?: unknown })?.attempts)
+      ? ((error as { attempts: Prisma.InputJsonValue[] }).attempts)
+      : [];
     await persistProjectExecutionSafe({
       projectId: input.projectId,
       stageType: input.stageType,
@@ -649,7 +960,9 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       promptSummary: input.summary || null,
       errorMessage: error instanceof Error ? error.message : String(error),
       latencyMs: Math.max(0, Date.now() - startedAt),
-      metadata: input.metadata
+      metadata: composeExecutionMetadata(input.metadata, {
+        modelAttempts: errorAttempts.length > 0 ? errorAttempts : undefined
+      })
     });
 
     throw error;
@@ -667,10 +980,11 @@ function needsDeliverableBackfill(content: string) {
   return !normalized.includes("## ");
 }
 
-function needsDeliverableAgentUpgrade(content: string, deliverableName: string) {
+function needsDeliverableAgentUpgrade(content: string, deliverableName: string, stageType: StageType) {
   const normalized = String(content ?? "");
   const trimmed = normalized.trim();
   const name = String(deliverableName || "");
+  const template = resolveDeliverableTemplate(name, stageType);
   if (!trimmed) {
     return true;
   }
@@ -686,8 +1000,30 @@ function needsDeliverableAgentUpgrade(content: string, deliverableName: string) 
   }
 
   if (
-    /(项目排期|客户汇报|实施方案|需求分析|Demo|原型|官网演示|测试报告|回填)/i.test(name)
+    /(项目排期|客户汇报|实施方案|技术方案|选型|架构|需求分析|Demo|原型|官网演示|测试报告|回填)/i.test(name)
     && !trimmed.includes("执行引擎:")
+  ) {
+    return true;
+  }
+
+  if (
+    /(项目排期|客户汇报|实施方案|技术方案|选型|架构|需求分析|Demo|原型|官网演示|测试报告|回填)/i.test(name)
+    && !trimmed.includes("## 本阶段任务证据")
+  ) {
+    return true;
+  }
+
+  if (trimmed.includes("## 自动推进元信息") && !trimmed.includes("## 自动质检")) {
+    return true;
+  }
+
+  const missingTemplateSections = template.requiredSections.filter((section) => !trimmed.includes(section));
+  if (missingTemplateSections.length > 0) {
+    return true;
+  }
+
+  if (
+    /(固定仪表盘、项目观测室、Agent 中心三大页面|让实时输出始终成为视觉中心|把审批与紧急介入做成明确的强动作|避免常规 SaaS 模板感)/.test(trimmed)
   ) {
     return true;
   }
@@ -712,6 +1048,8 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
 
   const objective = STAGE_OBJECTIVES[stageType] || "围绕当前阶段目标沉淀可审阅产物。";
   const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
+  const template = resolveDeliverableTemplate(deliverable.name, stageType);
+  const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
 
   return [
     `# ${deliverable.name}`,
@@ -726,8 +1064,14 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "## 阶段目标",
     `- ${objective}`,
     "",
+    "## 专业模板约束",
+    ...templatePromptBlock.map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
+    "",
     "## 当前任务清单",
     ...taskLines,
+    "",
+    "## 模板章节骨架（请按模板补全）",
+    ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合任务证据、约束与风险完善本节。"])),
     "",
     "## 关键约束",
     ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
@@ -754,69 +1098,7 @@ function resolveStageType(value: string): StageType | null {
 }
 
 function buildDeliverableChecklist(deliverableName: string, stageType: StageType) {
-  const lowerName = String(deliverableName || "").toLowerCase();
-
-  if (/ppt|汇报|路演/.test(lowerName)) {
-    return [
-      "包含背景、目标、范围、里程碑、风险与下一步。",
-      "每页信息层级清晰，可直接用于客户汇报。",
-      "包含预约演示入口与可执行行动项。"
-    ];
-  }
-
-  if (/word|实施方案|执行方案|落地方案/.test(lowerName)) {
-    return [
-      "明确阶段拆解、负责人、输入输出与依赖关系。",
-      "补充交付标准、验收方式、风险与缓冲策略。",
-      "可直接作为研发执行基线，不依赖口头补充。"
-    ];
-  }
-
-  if (/demo|原型|演示|官网/.test(lowerName)) {
-    return [
-      "主流程可操作、可演示，关键交互有明确反馈。",
-      "支持桌面与移动端基础适配，保留核心 CTA。",
-      "能体现“需求到研发闭环、角色协作、实时监控”三条价值线。"
-    ];
-  }
-
-  if (/回填|验收|测试/.test(lowerName) || stageType === "ACCEPT") {
-    return [
-      "验收结论可追溯到需求目标与验收标准。",
-      "总结新增能力、影响范围与已知限制。",
-      "回填到产品说明文档并记录版本与时间戳。"
-    ];
-  }
-
-  if (stageType === "ANALYSIS") {
-    return [
-      "明确目标、范围、约束、风险与验收标准。",
-      "输出可执行排期与阶段交接条件。",
-      "让设计与研发角色可直接接力。"
-    ];
-  }
-
-  if (stageType === "DESIGN") {
-    return [
-      "输出视觉方向、版式策略、组件规范与 CTA 逻辑。",
-      "包含可访问性检查与审查结论。",
-      "支持直接进入开发实现。"
-    ];
-  }
-
-  if (stageType === "DEV") {
-    return [
-      "描述实现范围、核心模块与联调状态。",
-      "记录验证结果与遗留风险。",
-      "提供进入验收阶段的证据清单。"
-    ];
-  }
-
-  return [
-    "覆盖当前阶段目标与关键任务。",
-    "包含可执行下一步与责任归属。",
-    "提供可审阅证据，支持阶段决策。"
-  ];
+  return resolveDeliverableTemplate(deliverableName, stageType).acceptanceChecklist;
 }
 
 async function buildDeliverableBackfillContentWithAgent(
@@ -851,8 +1133,10 @@ async function buildDeliverableBackfillContentWithAgent(
     ))
     : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
   const checklist = buildDeliverableChecklist(deliverable.name, stageType);
+  const template = resolveDeliverableTemplate(deliverable.name, stageType);
+  const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
 
-  const runCacheKey = `${stageType}:${deliverable.name}`;
+  const runCacheKey = `${project.id}:${stageType}:shared`;
   let run = stageRunCache.get(runCacheKey);
   if (!run) {
     run = await runProjectStageAgent({
@@ -867,7 +1151,10 @@ async function buildDeliverableBackfillContentWithAgent(
       parsedIntent,
       stageType,
       role: stageRole,
-      summary: `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`
+      summary: [
+        `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`,
+        ...templatePromptBlock
+      ].join("\n")
     });
     stageRunCache.set(runCacheKey, run);
   }
@@ -886,8 +1173,14 @@ async function buildDeliverableBackfillContentWithAgent(
     "## 阶段目标",
     `- ${stageObjective}`,
     "",
+    "## 专业模板约束",
+    ...templatePromptBlock.map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
+    "",
     "## 当前任务清单",
     ...taskLines,
+    "",
+    "## 模板章节骨架（请按模板补全）",
+    ...template.requiredSections.flatMap((section) => ([section, "- 请结合 Agent 输出正文与任务证据补全本节。"])),
     "",
     "## Agent 输出正文",
     run.body,
@@ -913,6 +1206,8 @@ async function buildDeliverableBackfillContentWithAgent(
 async function reconcileProjectDeliverables(project: ProjectRecord) {
   const stageStatusByType = new Map(project.stages.map((stage) => [stage.type, stage.status]));
   const stageRunCache = new Map<string, Awaited<ReturnType<typeof runStageAgent>>>();
+  const currentStageType = resolveStageType(project.currentStage);
+  const currentStageIndex = currentStageType ? stageOrder.indexOf(currentStageType) : -1;
   const updates: Array<{ id: string; content: string; status?: string }> = [];
   const creates: Array<{
     projectId: string;
@@ -935,7 +1230,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       && (deliverable.status === "draft" || deliverable.status === "submitted");
 
     const needBackfill = needsDeliverableBackfill(deliverable.content)
-      || needsDeliverableAgentUpgrade(deliverable.content, deliverable.name);
+      || needsDeliverableAgentUpgrade(deliverable.content, deliverable.name, resolveStageType(deliverable.stageType) || "ACCEPT");
     if (!needBackfill && !shouldPromoteStatus) {
       continue;
     }
@@ -951,26 +1246,43 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
     });
   }
 
+  // 补齐每个阶段的标准产物，避免出现“阶段已完成但关键交付缺失”。
   for (const stage of project.stages) {
-    const hasStageDeliverable = project.deliverables.some((item) => item.stageType === stage.type);
-    if (hasStageDeliverable) {
+    const stageType = resolveStageType(stage.type);
+    if (!stageType) {
       continue;
     }
-    const maxVersion = project.deliverables
-      .filter((item) => item.stageType === stage.type)
-      .reduce((max, item) => Math.max(max, item.version), 0);
-    const stageStatus = stage.status === "completed" ? "approved" : "draft";
-    const stageDraft = {
-      id: randomUUID(),
-      projectId: project.id,
-      stageType: stage.type,
-      name: `${STAGE_LABELS[stage.type as StageType] || stage.type}阶段交付物补全.md`,
-      type: "markdown",
-      content: buildDeliverableBackfillContent(project, {
+    const stageIndex = stageOrder.indexOf(stageType);
+    if (currentStageIndex >= 0 && stageIndex > currentStageIndex) {
+      // 不允许为未来阶段提前生成占位交付物，避免流程错位。
+      continue;
+    }
+    const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
+    if (expectedNames.length === 0) {
+      continue;
+    }
+
+    const existingStageDeliverables = project.deliverables.filter((item) => item.stageType === stage.type);
+    const existingNames = new Set(existingStageDeliverables.map((item) => normalizeDeliverableName(item.name)));
+    const scheduledNames = new Set(
+      creates
+        .filter((item) => item.stageType === stage.type)
+        .map((item) => normalizeDeliverableName(item.name))
+    );
+
+    for (const expectedName of expectedNames) {
+      const normalizedExpectedName = normalizeDeliverableName(expectedName);
+      if (existingNames.has(normalizedExpectedName) || scheduledNames.has(normalizedExpectedName)) {
+        continue;
+      }
+
+      const maxVersion = existingStageDeliverables.reduce((max, item) => Math.max(max, item.version), 0);
+      const stageStatus = stage.status === "completed" ? "approved" : "draft";
+      const templateDeliverable = {
         id: randomUUID(),
         projectId: project.id,
         stageType: stage.type,
-        name: `${STAGE_LABELS[stage.type as StageType] || stage.type}阶段交付物补全.md`,
+        name: expectedName,
         type: "markdown",
         content: "",
         version: maxVersion + 1,
@@ -978,13 +1290,14 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         createdBy: stage.assignee,
         createdAt: now,
         updatedAt: now
-      }),
-      version: maxVersion + 1,
-      status: stageStatus,
-      createdBy: stage.assignee,
-      updatedAt: now
-    };
-    creates.push(stageDraft);
+      };
+      const content = await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
+      creates.push({
+        ...templateDeliverable,
+        content
+      });
+      scheduledNames.add(normalizedExpectedName);
+    }
   }
 
   if (updates.length === 0 && creates.length === 0) {
@@ -1136,17 +1449,6 @@ export async function createProject(
   const currentStage: StageType = "ANALYSIS";
   const currentRole = stageAssignees[currentStage];
 
-  const run = await runProjectStageAgent({
-    projectId: id,
-    action: "project.create.bootstrap",
-    projectName: input.name?.trim() || parsedIntent.keywords[0] || "未命名项目",
-    projectDescription: input.description,
-    parsedIntent,
-    stageType: currentStage,
-    role: currentRole,
-    summary: "需求分析师已开始工作，你可以直接进入观测室查看实时输出。"
-  });
-
   const project = createSeedProject(
     {
       id,
@@ -1163,43 +1465,188 @@ export async function createProject(
     runtimeMode
   );
 
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const initDeliverable = project.deliverables.find((item) => item.stageType === "INIT");
+
+  project.stages = project.stages.map((stage) => {
+    if (stage.type === "INIT") {
+      return {
+        ...stage,
+        status: "completed",
+        progress: 100,
+        startedAt: nowIso,
+        endedAt: nowIso
+      };
+    }
+    if (stage.type === currentStage) {
+      return {
+        ...stage,
+        status: "active",
+        progress: 48,
+        startedAt: nowIso,
+        endedAt: undefined
+      };
+    }
+    return {
+      ...stage,
+      status: "pending",
+      progress: 0,
+      startedAt: undefined,
+      endedAt: undefined
+    };
+  });
+
+  const stageTaskOrder = new Map<string, number>();
+  project.tasks = project.tasks.map((task) => {
+    const index = stageTaskOrder.get(task.stageType) ?? 0;
+    stageTaskOrder.set(task.stageType, index + 1);
+
+    let status = task.status;
+    if (task.stageType === "INIT") {
+      status = "done";
+    } else if (task.stageType === currentStage) {
+      status = index === 0 ? "in_progress" : "todo";
+    } else {
+      status = "todo";
+    }
+
+    return {
+      ...task,
+      status,
+      updatedAt: nowIso
+    };
+  });
+
+  project.deliverables = [
+    {
+      id: initDeliverable?.id || randomUUID(),
+      name: "项目章程.md",
+      type: "markdown",
+      content: [
+        "# 项目章程",
+        "",
+        `项目 ${id} 已创建。`,
+        `项目名称：${project.name}`,
+        "",
+        "## 原始需求",
+        input.description,
+        "",
+        "## 当前阶段",
+        `- ${STAGE_LABELS[currentStage]} (${currentStage})`,
+        `- 负责人：${ROLE_LABELS[currentRole] || currentRole}`
+      ].join("\n"),
+      version: 1,
+      status: "approved",
+      stageType: "INIT",
+      createdBy: "ROLE_PM",
+      updatedAt: nowIso
+    }
+  ];
+
   project.liveSession = {
     activeRole: currentRole,
-    title: run.title,
-    body: run.body,
-    provider: run.provider,
-    startedAt: new Date().toISOString()
+    title: `${STAGE_LABELS[currentStage]}阶段已启动`,
+    body: [
+      `## ${STAGE_LABELS[currentStage]}阶段准备中`,
+      "",
+      `- 当前负责人: ${ROLE_LABELS[currentRole] || currentRole}`,
+      "- 已完成项目初始化与上下文注入。",
+      "- 正在后台触发真实模型分析，请稍后查看实时输出流。"
+    ].join("\n"),
+    provider: runtimeMode,
+    startedAt: nowIso
   };
-  project.timeline.unshift({
-    id: randomUUID(),
-    timestamp: new Date().toISOString(),
-    agentId: currentRole,
-    type: "thinking",
-    title: "Agent 已接管阶段",
-    content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
-    priority: "normal"
-  });
+  project.timeline = [
+    {
+      id: randomUUID(),
+      timestamp: new Date(now.getTime() - 90 * 1000).toISOString(),
+      agentId: "ROLE_PM",
+      type: "project_created",
+      title: "项目已创建",
+      content: `${id} 已由项目经理立项并开始推进。`,
+      priority: "normal"
+    },
+    {
+      id: randomUUID(),
+      timestamp: new Date(now.getTime() - 30 * 1000).toISOString(),
+      agentId: currentRole,
+      type: "stage_started",
+      title: `${STAGE_LABELS[currentStage]}阶段启动`,
+      content: `${ROLE_LABELS[currentRole]} 已接手当前阶段。`,
+      priority: "normal"
+    },
+    {
+      id: randomUUID(),
+      timestamp: nowIso,
+      agentId: currentRole,
+      type: "thinking",
+      title: "Agent 已接管阶段",
+      content: "分析阶段已启动，正在后台预热模型并生成需求分析内容。",
+      priority: "normal"
+    }
+  ];
   enrichProjectWithRequirementContract(project, input.requirementContract);
 
   await persistProject(project);
-  await persistProjectExecutionSafe({
-    projectId: id,
-    stageType: currentStage,
-    role: currentRole,
-    action: "project.create.bootstrap",
-    status: "success",
-    provider: run.provider,
-    model: run.model,
-    requestedMode: runtimeMode,
-    runtimeMode,
-    promptSummary: "需求分析师已开始工作，你可以直接进入观测室查看实时输出。",
-    outputPreview: buildExecutionOutputPreview(run.body),
-    metadata: {
-      deferredWrite: true,
-      source: "createProject"
+  const created = await findProject(id).then((value) => value as ProjectDetail);
+  void warmupProjectAfterCreate(created);
+  return created;
+}
+
+async function warmupProjectAfterCreate(project: ProjectDetail) {
+  const stageType: StageType = "ANALYSIS";
+  const role = stageAssignees[stageType];
+
+  try {
+    const run = await runProjectStageAgent({
+      projectId: project.id,
+      action: "project.create.bootstrap.async",
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType,
+      role,
+      summary: "需求分析师已开始工作，你可以直接进入观测室查看实时输出。"
+    });
+
+    const now = new Date();
+    const update = await prisma.project.updateMany({
+      where: {
+        id: project.id,
+        status: "active",
+        currentStage: stageType,
+        currentRole: role,
+        pendingApproval: false
+      },
+      data: {
+        liveTitle: run.title,
+        liveBody: run.body,
+        liveProvider: run.provider,
+        liveStartedAt: now,
+        updatedAt: now
+      }
+    });
+
+    if (update.count > 0) {
+      await prisma.timelineEvent.create({
+        data: {
+          projectId: project.id,
+          timestamp: now,
+          agentId: role,
+          type: "thinking",
+          title: "需求分析已生成",
+          content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
+          priority: "normal"
+        }
+      });
     }
-  });
-  return findProject(id).then((value) => value as ProjectDetail);
+  } catch (error) {
+    console.warn(
+      `[project] initial analysis warmup failed for ${project.id}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
 }
 
 export async function approveProject(id: string): Promise<ProjectDetail | undefined> {
@@ -1220,23 +1667,13 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     }
   }
 
+  assertCoreDeliverablesTemplateGate(project, project.currentStage);
+
   const currentIndex = stageOrder.indexOf(project.currentStage);
   const currentStage = project.stages[currentIndex];
   const isFinalStage = currentIndex === stageOrder.length - 1;
   const nextStage = isFinalStage ? null : stageOrder[currentIndex + 1];
   const nextRole = nextStage ? stageAssignees[nextStage] : null;
-  const nextStageRun = nextStage && nextRole
-    ? await runProjectStageAgent({
-      projectId: id,
-      action: "project.approve.next-stage",
-      projectName: project.name,
-      projectDescription: project.description,
-      parsedIntent: project.parsedIntent,
-      stageType: nextStage,
-      role: nextRole,
-      summary: `${ROLE_LABELS[nextRole]} 已开始 ${STAGE_LABELS[nextStage]} 阶段。`
-    })
-    : null;
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.stage.update({
@@ -1319,17 +1756,17 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
         pendingApproval: false,
         progress: Math.min(100, project.progress + 20),
         summary: `${ROLE_LABELS[nextRole as RoleType]} 已开始 ${STAGE_LABELS[nextStage as StageType]} 阶段。`,
-        liveTitle: nextStageRun?.title || `${STAGE_LABELS[nextStage as StageType]} 阶段已启动`,
-        liveBody: nextStageRun?.body || "",
-        liveProvider: nextStageRun?.provider || "scripted",
+        liveTitle: `${STAGE_LABELS[nextStage as StageType]} 阶段已启动`,
+        liveBody: [
+          `## ${STAGE_LABELS[nextStage as StageType]}阶段准备中`,
+          "",
+          `- 当前负责人: ${ROLE_LABELS[nextRole as RoleType]}`,
+          "- 系统已接收上一阶段审批结果并切换阶段。",
+          "- 正在后台触发真实模型预热，稍后将更新实时输出流。"
+        ].join("\n"),
+        liveProvider: "system",
         liveStartedAt: new Date()
       }
-    });
-
-    await ensureDraftDeliverable(tx, {
-      projectId: id,
-      stageType: nextStage as StageType,
-      createdBy: nextRole as RoleType
     });
 
     await tx.timelineEvent.createMany({
@@ -1349,7 +1786,7 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
           agentId: nextRole as RoleType,
           type: "thinking",
           title: "阶段推演已启动",
-          content: `${nextStageRun?.thinkingSummary || "阶段输出已生成"}\n执行引擎: ${nextStageRun?.provider || "scripted"} · 模型 ${nextStageRun?.model || "scripted-agent"}`,
+          content: "阶段已切换，正在后台预热模型并生成实时推演内容。",
           priority: "normal"
         }
       ]
@@ -1357,10 +1794,73 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
   });
 
   const updated = await findProject(id);
+  if (updated?.status === "completed") {
+    void reconcileProjectDeliverablesNow(updated.id).catch(() => {
+      // 验收补齐在后台执行，避免阻塞审批响应。
+    });
+  }
+  if (updated && nextStage && nextRole) {
+    void warmupNextStageAfterApprove(updated, nextStage, nextRole);
+  }
   if (updated) {
     await syncRequirementBackfillOnProjectCompleted(updated);
   }
   return updated;
+}
+
+async function warmupNextStageAfterApprove(
+  project: ProjectDetail,
+  nextStage: StageType,
+  nextRole: RoleType
+) {
+  try {
+    const run = await runProjectStageAgent({
+      projectId: project.id,
+      action: "project.approve.next-stage.warmup",
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: nextStage,
+      role: nextRole,
+      summary: `${ROLE_LABELS[nextRole]} 已开始 ${STAGE_LABELS[nextStage]} 阶段（后台预热）。`
+    });
+
+    const now = new Date();
+    const update = await prisma.project.updateMany({
+      where: {
+        id: project.id,
+        status: "active",
+        currentStage: nextStage,
+        currentRole: nextRole,
+        pendingApproval: false
+      },
+      data: {
+        liveTitle: run.title,
+        liveBody: run.body,
+        liveProvider: run.provider,
+        liveStartedAt: now
+      }
+    });
+
+    if (update.count > 0) {
+      await prisma.timelineEvent.create({
+        data: {
+          projectId: project.id,
+          timestamp: now,
+          agentId: nextRole,
+          type: "thinking",
+          title: `${STAGE_LABELS[nextStage]}阶段预热完成`,
+          content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
+          priority: "normal"
+        }
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[project] next-stage warmup failed for ${project.id}/${nextStage}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
 }
 
 export async function rejectProjectStage(
@@ -1591,7 +2091,10 @@ export async function deleteProject(id: string): Promise<boolean> {
 
 export async function submitCurrentStage(
   id: string,
-  input: StageSubmissionInput
+  input: StageSubmissionInput,
+  options?: {
+    finalizeApproval?: boolean;
+  }
 ): Promise<ProjectDetail | undefined> {
   const project = await findProject(id);
   if (!project) {
@@ -1607,6 +2110,9 @@ export async function submitCurrentStage(
   const nextVersion = (versions.length ? Math.max(...versions) : 0) + 1;
   const deliverableName = input.title?.trim() || `${stageLabel}交付物 v${nextVersion}.md`;
   const normalizedDesignReview = currentStageType === "DESIGN" ? normalizeDesignReview(input.designReview) : null;
+  const normalizedDesignContent = currentStageType === "DESIGN" && normalizedDesignReview
+    ? ensureDesignSubmissionContent(input.content, normalizedDesignReview)
+    : input.content;
   if (currentStageType === "DESIGN") {
     if (!normalizedDesignReview) {
       throw new Error("DESIGN_REVIEW_REQUIRED: 设计阶段提交必须包含完整设计审查卡。");
@@ -1614,14 +2120,23 @@ export async function submitCurrentStage(
     if (!normalizedDesignReview.approved) {
       throw new Error("DESIGN_REVIEW_NOT_APPROVED: 设计审查卡未通过，禁止提交阶段交付。");
     }
-    const designErrors = validateDesignSubmission(input.content);
+    const designErrors = validateDesignSubmission(normalizedDesignContent);
     if (designErrors.length > 0) {
       throw new Error(`DESIGN_REVIEW_REQUIRED: ${designErrors.join("；")}`);
     }
   }
   const submittedContent = normalizedDesignReview
-    ? `${input.content}\n\n${renderDesignReviewCard(normalizedDesignReview)}`
-    : input.content;
+    ? `${normalizedDesignContent}\n\n${renderDesignReviewCard(normalizedDesignReview)}`
+    : normalizedDesignContent;
+  const templateGate = validateDeliverableTemplateGate({
+    stageType: currentStageType,
+    deliverableName,
+    content: submittedContent
+  });
+  if (!templateGate.passed) {
+    throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${deliverableName} 未通过模板校验（${templateGate.issues.join("；")}）`);
+  }
+  const finalizeApproval = options?.finalizeApproval !== false;
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.deliverable.create({
@@ -1653,8 +2168,10 @@ export async function submitCurrentStage(
     await tx.project.update({
       where: { id },
       data: {
-        pendingApproval: true,
-        summary: `${stageLabel}阶段交付物已提交，等待你的审批。`,
+        pendingApproval: finalizeApproval,
+        summary: finalizeApproval
+          ? `${stageLabel}阶段交付物已提交，等待你的审批。`
+          : `${stageLabel}阶段交付物持续补充中，正在整合验收材料。`,
         liveTitle: `${ROLE_LABELS[currentRole]}已提交${stageLabel}阶段交付物`,
         liveBody: submittedContent,
         liveProvider: project.liveSession.provider,
@@ -1662,27 +2179,31 @@ export async function submitCurrentStage(
       }
     });
 
+    const timelineData: Prisma.TimelineEventCreateManyInput[] = [
+      {
+        projectId: id,
+        timestamp: new Date(),
+        agentId: currentRole,
+        type: "deliverable_submitted",
+        title: "阶段交付物已提交",
+        content: `${deliverableName} 已提交，版本 v${nextVersion}。`,
+        priority: "high"
+      }
+    ];
+    if (finalizeApproval) {
+      timelineData.push({
+        projectId: id,
+        timestamp: new Date(),
+        agentId: "ROLE_PM",
+        type: "approval_required",
+        title: `${stageLabel}阶段等待审批`,
+        content: `${stageLabel}阶段已完成输出，请决定是否进入下一阶段。`,
+        priority: "high"
+      });
+    }
+
     await tx.timelineEvent.createMany({
-      data: [
-        {
-          projectId: id,
-          timestamp: new Date(),
-          agentId: currentRole,
-          type: "deliverable_submitted",
-          title: "阶段交付物已提交",
-          content: `${deliverableName} 已提交，版本 v${nextVersion}。`,
-          priority: "high"
-        },
-        {
-          projectId: id,
-          timestamp: new Date(),
-          agentId: "ROLE_PM",
-          type: "approval_required",
-          title: `${stageLabel}阶段等待审批`,
-          content: `${stageLabel}阶段已完成输出，请决定是否进入下一阶段。`,
-          priority: "high"
-        }
-      ]
+      data: timelineData
     });
   });
 
@@ -2068,6 +2589,8 @@ function toProjectDetail(project: {
     priority: string;
   }>;
 }): ProjectDetail {
+  const latestDeliverables = selectLatestDeliverablesByCoreName(project.deliverables);
+
   const stages: Stage[] = project.stages.map((stage) => ({
     type: stage.type as StageType,
     label: stage.label,
@@ -2110,7 +2633,7 @@ function toProjectDetail(project: {
     openTaskCount: project.tasks.filter((task) => task.status !== "done").length,
     stages,
     tasks: project.tasks.map(toTask),
-    deliverables: project.deliverables.map((deliverable) => ({
+    deliverables: latestDeliverables.map((deliverable) => ({
       id: deliverable.id,
       name: deliverable.name,
       type: deliverable.type as "markdown" | "pdf" | "code",

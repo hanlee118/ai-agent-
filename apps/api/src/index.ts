@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import swaggerUi from "swagger-ui-express";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -47,12 +48,13 @@ import {
   listProjects,
   runProjectStageAgent,
   postProjectMessage,
+  reconcileProjectDeliverablesNow,
   rejectProjectStage,
   resumeProject,
   submitCurrentStage,
   updateTaskStatus
 } from "./data/repository.js";
-import { getRuntimeStatus } from "./agents/runtime.js";
+import { getRuntimeStatus, getStageModelPolicy, previewStageModelPlan, getStageModelUsage } from "./agents/runtime.js";
 import {
   getRuntimeSettings,
   validateRuntimeSettings,
@@ -66,6 +68,10 @@ import {
   getDesignModelPolicyHealth,
   repairDesignModelPolicy
 } from "./system/design-model-policy-health.js";
+import {
+  buildDeliverableTemplatePromptBlock,
+  resolveDeliverableTemplate
+} from "./system/deliverable-templates.js";
 import {
   getCachedLocalAgentMonitorOverview,
   subscribeLocalAgentMonitor,
@@ -108,12 +114,21 @@ import { createTeamRouter } from "./routes/team.js";
 import { createRoleSetsRouter } from "./routes/role-sets.js";
 import { createProductContextRouter } from "./routes/product-context.js";
 import { createIssuesRouter } from "./routes/issues.js";
+import { createSystemRouter } from "./routes/system.js";
+import { createNotificationsRouter } from "./routes/notifications.js";
+import { createOpenClawRouter } from "./routes/openclaw.js";
+import { createProjectsRouter } from "./routes/projects.js";
+import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js";
+import { buildOpenApiSpec } from "./system/openapi.js";
 
 const app = express();
 const port = Number(process.env.PORT ?? 8787);
 const host = String(process.env.HOST ?? "127.0.0.1").trim() || "127.0.0.1";
 const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
+const webGeneratedPath = fileURLToPath(new URL("../../web/public/generated", import.meta.url));
+const siteGeneratedPath = fileURLToPath(new URL("../../../site/generated", import.meta.url));
 const projectAutoAdvanceIntervalMs = Math.max(5000, Number(process.env.PROJECT_AUTO_ADVANCE_INTERVAL_MS ?? 12000));
+const GITLAB_HARNESS_SYNC_STAGES = new Set<StageType>(["DEV", "ACCEPT"]);
 
 const projectAutomationState: {
   enabled: boolean;
@@ -133,22 +148,509 @@ const projectAutomationState: {
 
 let projectAutomationTimer: ReturnType<typeof setInterval> | null = null;
 let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
+const projectAdvanceLocks = new Set<string>();
+const projectAdvanceJobs = new Map<string, Promise<void>>();
+const projectAdvanceJobErrors = new Map<string, { message: string; at: string }>();
+
+const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
+  INIT: ["项目章程.md"],
+  ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
+  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md"],
+  DEV: ["技术方案与选型.md", "Demo原型说明.md"],
+  ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
+};
+
+type StageRunAttempt = {
+  stageType: StageType;
+  role: RoleType;
+  model: string;
+  route: string;
+  status: "success" | "failed" | "skipped";
+  elapsedMs: number;
+  startedAt: string;
+  error?: string;
+};
+
+type StageRunSnapshot = {
+  provider: string;
+  model: string;
+  body: string;
+  title: string;
+  thinkingSummary: string;
+  degraded?: boolean;
+  attempts?: StageRunAttempt[];
+};
+
+type AutoSubmissionQuality = {
+  pass: boolean;
+  score: number;
+  issues: string[];
+  diagnostics: string[];
+};
+
+type AutoStageSubmission = {
+  submission: StageSubmissionInput;
+  quality: AutoSubmissionQuality;
+};
+
+type ProjectRequiredAction = {
+  id: string;
+  severity: "critical" | "warning" | "info";
+  title: string;
+  detail: string;
+  action: "submit_stage_deliverable" | "open_design_review" | "review_pending_stage" | "resolve_blocked_tasks" | "reconcile_deliverables" | "refresh_runtime";
+  ctaLabel: string;
+};
+
+const GENERIC_OUTPUT_PATTERNS = [
+  /固定仪表盘、项目观测室、Agent 中心三大页面/,
+  /让实时输出始终成为视觉中心/,
+  /把审批与紧急介入做成明确的强动作/,
+  /避免常规 SaaS 模板感/,
+  /优先打通数据库、仓储和实时执行流/
+];
 
 function buildAutoStageTitle(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
-  if (project.currentStage === "ANALYSIS") return "项目排期方案.md";
-  if (project.currentStage === "DESIGN") return "客户汇报方案.ppt.md";
-  if (project.currentStage === "DEV") return "Demo原型说明.md";
-  if (project.currentStage === "ACCEPT") return "产品说明文档回填.md";
-  return `自动提交-${project.currentStage}阶段.md`;
+  return STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage]?.[0] || `自动提交-${project.currentStage}阶段.md`;
 }
 
-async function buildAutoStageSubmission(
+async function withProjectLock<T>(projectId: string, task: () => Promise<T>): Promise<T> {
+  if (projectAdvanceLocks.has(projectId)) {
+    throw new Error("PROJECT_ADVANCE_IN_PROGRESS");
+  }
+  projectAdvanceLocks.add(projectId);
+  try {
+    return await task();
+  } finally {
+    projectAdvanceLocks.delete(projectId);
+  }
+}
+
+function summarizeAdvanceError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "advance failed");
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 260 ? `${normalized.slice(0, 260)}...` : normalized;
+}
+
+async function executeManualAdvanceCycle(projectId: string) {
+  await withProjectLock(projectId, async () => {
+    const current = await findProject(projectId);
+    if (!current || current.status !== "active" || current.pendingApproval) {
+      return;
+    }
+
+    const submissions = await buildAutoStageSubmissions(current, {
+      action: "stage.auto_submission.manual_advance"
+    });
+    await submitStageSubmissionBundle(projectId, submissions);
+  });
+}
+
+function ensureManualAdvanceJob(projectId: string) {
+  const existing = projectAdvanceJobs.get(projectId);
+  if (existing) {
+    return existing;
+  }
+
+  const job = (async () => {
+    try {
+      await executeManualAdvanceCycle(projectId);
+      projectAdvanceJobErrors.delete(projectId);
+    } catch (error) {
+      const message = summarizeAdvanceError(error);
+      // A transient lock race means another worker is already advancing this project.
+      // Treat it as in-progress instead of persisting a failure signal.
+      if (message === "PROJECT_ADVANCE_IN_PROGRESS") {
+        return;
+      }
+      projectAdvanceJobErrors.set(projectId, {
+        message,
+        at: new Date().toISOString()
+      });
+      console.warn(`[project.advance] ${projectId} failed: ${message}`);
+    }
+  })().finally(() => {
+    projectAdvanceJobs.delete(projectId);
+  });
+
+  projectAdvanceJobs.set(projectId, job);
+  return job;
+}
+
+function buildDesignReviewPayload(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  model: string
+): NonNullable<StageSubmissionInput["designReview"]> {
+  const keywordLine = project.parsedIntent.keywords.slice(0, 3).join(" / ");
+  const visualDirection = keywordLine || (/(苹果|apple)/i.test(`${project.name} ${project.description}`)
+    ? "Apple 风格极简官网（大留白、清晰层级、克制动效）"
+    : "围绕需求主链路的高可读信息架构");
+
+  return {
+    visualDirection,
+    brandTone: "专业、明确、可执行",
+    uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
+    accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
+    approvedBy: "系统自动审查",
+    approved: true,
+    notes: `自动推进生成，来源模型 ${model}`
+  };
+}
+
+function buildDesignRequiredSections(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  title: string
+) {
+  const keywordLine = project.parsedIntent.keywords.slice(0, 4).join(" / ") || "需求到研发闭环";
+  const isAppleStyle = /(苹果|apple)/i.test(`${project.name} ${project.description}`);
+  const visualTheme = isAppleStyle
+    ? "Apple 风格：克制、清晰、留白、强调内容优先"
+    : "可信执行风格：重点突出闭环路径与执行证据";
+
+  return [
+    "## 视觉方案",
+    `- 目标交付物：${title}`,
+    `- 视觉主题：${visualTheme}`,
+    `- 核心关键词：${keywordLine}`,
+    "- 视觉重心：把“需求输入→协作→执行→验收回填”主链路放在首屏可见区域。",
+    "## 版式策略",
+    "- 首屏采用价值主张 + 关键 CTA 双列布局，减少多余叙述。",
+    "- 中部用流程区块呈现阶段衔接关系，避免离散信息堆叠。",
+    "- 底部统一放置演示预约入口与验收证据跳转。",
+    "## 组件清单",
+    "- Hero 标题/副标题/双 CTA 组件",
+    "- 闭环流程时间线组件（5 阶段）",
+    "- 执行证据卡片组件（模型、角色、时间、状态）",
+    "- 验收与回填组件（产物链接、版本、状态）",
+    "## 品牌语气",
+    "- 文案风格直接、可执行、避免空泛和夸大。",
+    "- 所有模块优先回答“这个功能如何推进需求落地”。",
+    "- 结尾必须给出下一步行动与责任角色。"
+  ].join("\n");
+}
+
+function buildAutoSubmissionChecklist(
+  stageType: StageType,
+  title: string
+) {
+  const template = resolveDeliverableTemplate(title, stageType);
+  return template.acceptanceChecklist.map((item) => `- ${item}`);
+}
+
+function normalizeStageText(input: string) {
+  return String(input || "").replace(/\s+/g, " ").trim();
+}
+
+function countHits(source: string, items: string[]) {
+  if (!source || items.length === 0) {
+    return 0;
+  }
+  const lowered = source.toLowerCase();
+  return items.filter((item) => {
+    const normalized = String(item || "").trim().toLowerCase();
+    return normalized && lowered.includes(normalized);
+  }).length;
+}
+
+function buildStageTaskEvidence(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
+) {
+  const currentTasks = project.tasks
+    .filter((task) => task.stageType === project.currentStage)
+    .slice(0, 8);
+
+  if (currentTasks.length === 0) {
+    return ["- 当前阶段暂无任务，请先补充任务后再推进审批。"];
+  }
+
+  return currentTasks.map((task, index) => (
+    `- ${index + 1}. ${task.title}（${task.status} / 优先级 ${task.priority}）\n  - 说明: ${task.description || "待补充"}`
+  ));
+}
+
+function buildDeliverableSpecificSections(
+  stageType: StageType,
+  title: string,
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
+) {
+  const template = resolveDeliverableTemplate(title, stageType);
+  return [
+    "## 专业模板约束",
+    ...buildDeliverableTemplatePromptBlock(title, stageType, project.parsedIntent.keywords).map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
+    "",
+    "## 模板章节骨架（请结合 Agent 输出正文补全）",
+    ...template.requiredSections.flatMap((section) => ([
+      section,
+      "- 结合项目上下文补充该章节关键内容。"
+    ])),
+    "",
+    "## 交付细化说明",
+    "- 说明本交付物如何作为下一阶段输入。",
+    "- 说明可验证证据与审批关注点。"
+  ];
+}
+
+function summarizeModelAttempts(run: StageRunSnapshot) {
+  const attempts = Array.isArray(run.attempts) ? run.attempts : [];
+  if (attempts.length === 0) {
+    return ["- 无模型尝试记录（可能为脚本模式或旧版本运行）。"];
+  }
+  return attempts.slice(0, 6).map((attempt, index) => (
+    `- ${index + 1}. ${attempt.model} @ ${attempt.route} · ${attempt.status} · ${attempt.elapsedMs}ms${attempt.error ? ` · ${attempt.error}` : ""}`
+  ));
+}
+
+function evaluateAutoSubmissionQuality(input: {
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+  title: string;
+  stageType: StageType;
+  content: string;
+  run: StageRunSnapshot;
+}) {
+  const normalized = normalizeStageText(input.content);
+  const lowered = normalized.toLowerCase();
+  const issues: string[] = [];
+  const diagnostics: string[] = [];
+  let score = 100;
+  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true";
+
+  if (input.run.provider === "scripted") {
+    score -= strictRealModel ? 42 : 8;
+    diagnostics.push("执行模式: scripted（降级）");
+    if (strictRealModel) {
+      issues.push("当前输出来自 scripted 降级模式，不满足真实模型执行要求。");
+    }
+  }
+  if (input.run.degraded) {
+    score -= strictRealModel ? 28 : 6;
+    diagnostics.push("执行状态: degraded（真实模型失败后降级）");
+    if (strictRealModel) {
+      issues.push("真实模型调用失败后降级，内容可靠性不足。");
+    }
+  }
+
+  if (normalized.length < 900) {
+    score -= 20;
+    issues.push("正文内容长度不足，交付细节不够完整。");
+  }
+
+  const requiredSections = [
+    "## 自动推进元信息",
+    "## 需求对齐",
+    "## 本阶段任务证据",
+    "## Agent 输出正文",
+    "## 审阅要点"
+  ];
+  const missing = requiredSections.filter((section) => !input.content.includes(section));
+  if (missing.length > 0) {
+    score -= missing.length * 10;
+    issues.push(`缺少关键章节: ${missing.join("、")}`);
+  }
+
+  const keywordHits = countHits(lowered, input.project.parsedIntent.keywords.slice(0, 6));
+  diagnostics.push(`关键词命中: ${keywordHits}/${Math.max(1, input.project.parsedIntent.keywords.slice(0, 6).length)}`);
+  if (input.project.parsedIntent.keywords.length > 0 && keywordHits < Math.min(2, input.project.parsedIntent.keywords.length)) {
+    score -= 12;
+    issues.push("与原始需求关键词对齐不足。");
+  }
+
+  const constraints = input.project.parsedIntent.constraints.slice(0, 4);
+  const constraintHits = countHits(lowered, constraints);
+  diagnostics.push(`约束命中: ${constraintHits}/${Math.max(1, constraints.length)}`);
+  if (constraints.length > 0 && constraintHits === 0) {
+    score -= 10;
+    issues.push("未覆盖关键约束条件。");
+  }
+
+  const stageTasks = input.project.tasks
+    .filter((task) => task.stageType === input.stageType)
+    .slice(0, 6);
+  const taskTitleHits = countHits(lowered, stageTasks.map((task) => task.title));
+  diagnostics.push(`任务证据命中: ${taskTitleHits}/${Math.max(1, stageTasks.length)}`);
+  if (stageTasks.length > 0 && taskTitleHits < Math.min(2, stageTasks.length)) {
+    score -= 14;
+    issues.push("未充分引用本阶段任务证据，缺少可追溯性。");
+  }
+
+  const genericHits = GENERIC_OUTPUT_PATTERNS.filter((pattern) => pattern.test(input.content)).length;
+  if (genericHits >= 2) {
+    score -= 16;
+    issues.push("命中多条历史模板化文案，存在泛化输出风险。");
+  }
+
+  const template = resolveDeliverableTemplate(input.title, input.stageType);
+  const missingTemplateSections = template.requiredSections.filter((section) => !input.content.includes(section));
+  if (missingTemplateSections.length > 0) {
+    score -= Math.min(18, missingTemplateSections.length * 3);
+    issues.push(`未完整覆盖专业模板章节: ${missingTemplateSections.slice(0, 4).join("、")}${missingTemplateSections.length > 4 ? "..." : ""}`);
+  }
+
+  const pass = score >= 72 && issues.length === 0;
+  return {
+    pass,
+    score: Math.max(0, Math.min(100, score)),
+    issues,
+    diagnostics
+  } satisfies AutoSubmissionQuality;
+}
+
+function isAutoApprovalReady(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  const currentStageDeliverables = project.deliverables
+    .filter((item) => item.stageType === project.currentStage)
+    .sort((left, right) => right.version - left.version);
+  const latest = currentStageDeliverables[0];
+  if (!latest) {
+    return false;
+  }
+  const content = String(latest.content || "");
+  if (!content.includes("## 自动质检")) {
+    return false;
+  }
+  return /自动质检结论:\s*通过/.test(content);
+}
+
+function hasApprovedDesignReview(content: string) {
+  const source = String(content || "");
+  return source.includes("## 设计审查卡") && /审查结论:\s*通过/.test(source);
+}
+
+function buildProjectRequiredActions(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  runtime?: Awaited<ReturnType<typeof getRuntimeStatus>>
+) {
+  const actions: ProjectRequiredAction[] = [];
+  const currentStageDeliverables = project.deliverables
+    .filter((item) => item.stageType === project.currentStage)
+    .sort((left, right) => right.version - left.version);
+
+  if (project.pendingApproval) {
+    if (currentStageDeliverables.length === 0) {
+      actions.push({
+        id: "missing-stage-deliverable",
+        severity: "critical",
+        title: "当前阶段缺少交付物，无法验收",
+        detail: `请先提交 ${STAGE_LABELS[project.currentStage] || project.currentStage} 阶段交付物，再执行审批。`,
+        action: "submit_stage_deliverable",
+        ctaLabel: "前往提交交付物"
+      });
+    }
+
+    const notReady = currentStageDeliverables.filter((item) => !isDeliverableReadyForAcceptance({
+      status: item.status,
+      content: item.content
+    }));
+    if (notReady.length > 0) {
+      actions.push({
+        id: "deliverable-not-ready",
+        severity: "warning",
+        title: "交付物内容不完整或质检未通过",
+        detail: `待补足交付物：${notReady.map((item) => item.name).join("、")}。请补全内容并重新提交。`,
+        action: "reconcile_deliverables",
+        ctaLabel: "重建交付物内容"
+      });
+    }
+
+    if (project.currentStage === "DESIGN" && !currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
+      actions.push({
+        id: "design-review-required",
+        severity: "critical",
+        title: "设计阶段缺少通过的设计审查卡",
+        detail: "请补充完整设计审查卡（视觉方案、版式策略、组件清单、品牌语气）并通过审查。",
+        action: "open_design_review",
+        ctaLabel: "提交设计审查卡"
+      });
+    }
+
+    if (isAutoApprovalReady(project)) {
+      actions.push({
+        id: "ready-for-review",
+        severity: "info",
+        title: "当前阶段已具备验收条件",
+        detail: "请执行人工验收决策（通过或驳回），以推进下一阶段。",
+        action: "review_pending_stage",
+        ctaLabel: "执行阶段验收"
+      });
+    }
+  } else if (project.currentStage === "DESIGN" && currentStageDeliverables.length === 0) {
+    actions.push({
+      id: "design-phase-no-deliverable",
+      severity: "info",
+      title: "设计阶段尚未提交交付物",
+      detail: "建议先完成设计审查卡，再提交设计交付物，避免后续阶段返工。",
+      action: "open_design_review",
+      ctaLabel: "填写设计审查卡"
+    });
+  }
+
+  const blockedTasks = project.tasks.filter((task) => task.stageType === project.currentStage && task.status === "blocked");
+  if (blockedTasks.length > 0) {
+    actions.push({
+      id: "blocked-tasks",
+      severity: "warning",
+      title: "当前阶段存在阻塞任务",
+      detail: `阻塞任务 ${blockedTasks.length} 个：${blockedTasks.slice(0, 3).map((task) => task.title).join("、")}${blockedTasks.length > 3 ? "..." : ""}`,
+      action: "resolve_blocked_tasks",
+      ctaLabel: "前往处理阻塞任务"
+    });
+  }
+
+  if (runtime && runtime.requestedMode === "openai-compatible" && !runtime.configured) {
+    actions.push({
+      id: "runtime-not-configured",
+      severity: "critical",
+      title: "真实模型未配置完整，当前可能降级执行",
+      detail: "请补全 API Base URL / API Key / Model，确保阶段输出来自真实模型调用。",
+      action: "refresh_runtime",
+      ctaLabel: "检查运行时配置"
+    });
+  }
+
+  if (
+    runtime
+    && runtime.requestedMode === "openai-compatible"
+    && runtime.configured
+    && String(project.liveSession?.provider || "").trim().toLowerCase() === "scripted"
+  ) {
+    actions.push({
+      id: "runtime-degraded",
+      severity: "warning",
+      title: "当前阶段已降级到脚本输出",
+      detail: "真实模型调用连续失败（如 401/超时），请检查模型通道、密钥权限与可用模型策略后重试。",
+      action: "refresh_runtime",
+      ctaLabel: "修复模型通道"
+    });
+  }
+
+  return actions;
+}
+
+function formatRequiredActionsMessage(actions: ProjectRequiredAction[]) {
+  if (actions.length === 0) {
+    return "当前流程需要你补充信息后再继续。";
+  }
+  const lines = actions
+    .slice(0, 3)
+    .map((action, index) => `${index + 1}. ${action.title}（${action.ctaLabel}）`);
+  return `当前流程需要你先补足以下事项：\n${lines.join("\n")}`;
+}
+
+async function buildAutoStageSubmissions(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   options?: {
     action?: string;
     metadata?: Prisma.InputJsonValue;
   }
-) {
+): Promise<AutoStageSubmission[]> {
+  const titles = STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage] || [buildAutoStageTitle(project)];
+  const submissions: AutoStageSubmission[] = [];
+  const templateGuidance = titles.flatMap((title) => {
+    const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
+    return [
+      `[${title}] -> ${template.label}`,
+      ...buildDeliverableTemplatePromptBlock(title, project.currentStage as StageType, project.parsedIntent.keywords)
+        .map((line) => `  ${line}`)
+    ];
+  });
   const run = await runProjectStageAgent({
     projectId: project.id,
     action: options?.action || "stage.auto_submission",
@@ -158,66 +660,160 @@ async function buildAutoStageSubmission(
     parsedIntent: project.parsedIntent,
     stageType: project.currentStage as StageType,
     role: project.currentRole as RoleType,
-    summary: "请按当前阶段输出可直接审阅并可进入下一阶段执行的正式交付物。"
+    summary: [
+      `请围绕原始需求输出当前阶段完整交付内容，供以下交付物复用：${titles.join("、")}`,
+      "必须引用至少 3 个需求关键词、2 个当前阶段任务标题，并给出可验收条目与下一阶段输入。",
+      "以下是交付模板约束（请严格遵循）：",
+      ...templateGuidance
+    ].join("\n")
   });
+  const stageTaskEvidence = buildStageTaskEvidence(project);
+  const attemptsSummary = summarizeModelAttempts(run as StageRunSnapshot);
+  const runGeneratedAt = new Date().toISOString();
 
-  const title = buildAutoStageTitle(project);
-  const content = [
-    `# ${title}`,
-    "",
-    "## 自动推进元信息",
-    `- 项目: ${project.name} (${project.id})`,
-    `- 阶段: ${STAGE_LABELS[project.currentStage]} (${project.currentStage})`,
-    `- 执行角色: ${ROLE_LABELS[project.currentRole] || project.currentRole}`,
-    `- 执行引擎: ${run.provider} · 模型 ${run.model}`,
-    `- 生成时间: ${new Date().toISOString()}`,
-    "",
-    "## Agent 输出正文",
-    run.body,
-    "",
-    "## 审阅要点",
-    "- 请确认内容覆盖目标、范围、约束、风险与验收标准。",
-    "- 如需修订，请在当前文档补充后再次提交。",
-    "- 通过后系统将继续推进下一阶段。"
-  ].join("\n");
-
-  if (project.currentStage === "DESIGN") {
-    const designGuardSections = [
-      "## 视觉方案",
-      "- 主视觉强调“需求到研发闭环”，首页首屏展示五步流程。",
-      "- 主色采用高对比商务蓝系，强调可信与执行力。",
-      "- 关键 CTA（预约演示）在首屏和页尾双位置呈现。",
-      "## 版式策略",
-      "- 顶部采用价值主张 + 行动按钮双列布局。",
-      "- 中部采用卡片化展示角色协作与实时监控能力。",
-      "- 底部提供案例摘要、交付清单与下一步行动入口。",
-      "## 组件清单",
-      "- Hero 区块（标题、副标题、双 CTA）",
-      "- 协作流程时间线组件（5 步）",
-      "- 实时监控指标卡组件（状态、趋势、更新时间）",
-      "- 预约演示表单组件（姓名、联系方式、诉求）",
-      "## 品牌语气",
-      "- 文案语气专业、直接、可执行，避免空泛描述。",
-      "- 重点强调“真实执行证据”“可追溯交付”。",
-      "- 每个阶段均给出可验证的下一步动作。"
+  for (const title of titles) {
+    const checklist = buildAutoSubmissionChecklist(project.currentStage as StageType, title);
+    const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
+    const deliverableSpecificSections = buildDeliverableSpecificSections(project.currentStage as StageType, title, project);
+    let content = [
+      `# ${title}`,
+      "",
+      "## 自动推进元信息",
+      `- 项目: ${project.name} (${project.id})`,
+      `- 阶段: ${STAGE_LABELS[project.currentStage]} (${project.currentStage})`,
+      `- 执行角色: ${ROLE_LABELS[project.currentRole] || project.currentRole}`,
+      `- 执行引擎: ${run.provider} · 模型 ${run.model}`,
+      `- 生成时间: ${runGeneratedAt}`,
+      "",
+      "## 模型尝试轨迹",
+      ...attemptsSummary,
+      "",
+      "## 需求对齐",
+      `- 原始需求: ${project.description}`,
+      `- 关键词: ${project.parsedIntent.keywords.join(" / ") || "无"}`,
+      `- 约束: ${project.parsedIntent.constraints.join("；") || "无"}`,
+      `- 风险: ${project.parsedIntent.risks.join("；") || "无"}`,
+      "",
+      "## 本阶段任务证据",
+      ...stageTaskEvidence,
+      "",
+      "## Agent 输出正文",
+      run.body,
+      "",
+      "## 交付聚焦",
+      `- 当前交付物: ${title}`,
+      `- 交付目的: ${STAGE_LABELS[project.currentStage]}阶段可验收产物，支撑后续确认与推进`,
+      "",
+      "## 模板章节骨架（自动补齐）",
+      ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合本阶段任务证据与 Agent 正文完善本节。"])),
+      "",
+      "## 验收检查清单",
+      ...template.acceptanceChecklist.map((item) => `- ${item}`),
+      "",
+      ...deliverableSpecificSections,
+      "",
+      "## 审阅要点",
+      ...checklist
     ].join("\n");
 
-    return {
+    const quality = evaluateAutoSubmissionQuality({
+      project,
       title,
-      content: `${content}\n\n${designGuardSections}`,
-      designReview: {
-        visualDirection: project.parsedIntent.keywords.slice(0, 3).join(" / ") || "科技感 + 可信执行",
-        brandTone: "专业、明确、可落地",
-        uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
-        accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
-        approvedBy: "系统自动审查",
-        approved: true,
-        notes: `自动推进生成，来源模型 ${run.model}`
-      }
+      stageType: project.currentStage as StageType,
+      content,
+      run: run as StageRunSnapshot
+    });
+
+    content = [
+      content,
+      "",
+      "## 自动质检",
+      `- 自动质检结论: ${quality.pass ? "通过" : "待补充"}`,
+      `- 质量评分: ${quality.score}/100`,
+      ...quality.diagnostics.map((item) => `- ${item}`),
+      ...(quality.issues.length > 0 ? ["- 风险项:", ...quality.issues.map((item) => `  - ${item}`)] : ["- 风险项: 无"])
+    ].join("\n");
+
+    const submission: StageSubmissionInput = {
+      title,
+      content
     };
+
+    if (project.currentStage === "DESIGN") {
+      content = `${content}\n\n${buildDesignRequiredSections(project, title)}`;
+      submission.content = content;
+      submission.designReview = buildDesignReviewPayload(project, run.model);
+    }
+
+    submissions.push({
+      submission,
+      quality
+    });
   }
 
-  return { title, content };
+  return submissions;
+}
+
+async function buildAutoStageSubmission(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    action?: string;
+    metadata?: Prisma.InputJsonValue;
+  }
+) {
+  const submissions = await buildAutoStageSubmissions(project, options);
+  return submissions[0]?.submission || {
+    title: buildAutoStageTitle(project),
+    content: `# ${buildAutoStageTitle(project)}\n\n暂无自动内容，请手动补充。`
+  };
+}
+
+async function submitStageSubmissionBundle(
+  projectId: string,
+  submissions: AutoStageSubmission[]
+) {
+  if (submissions.length === 0) {
+    return;
+  }
+
+  for (let index = 0; index < submissions.length; index += 1) {
+    const submission = submissions[index].submission;
+    const isLast = index === submissions.length - 1;
+    await submitCurrentStage(projectId, submission, {
+      finalizeApproval: isLast
+    });
+  }
+}
+
+async function trySyncGitLabHarnessForProject(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    stageType?: string;
+    closeOnComplete?: boolean;
+    reason?: string;
+  }
+) {
+  const normalizedStage = String(options?.stageType || project.currentStage || "").trim().toUpperCase();
+  const closeOnComplete = Boolean(options?.closeOnComplete || project.status === "completed");
+  const shouldSync = GITLAB_HARNESS_SYNC_STAGES.has(normalizedStage as StageType) || closeOnComplete;
+
+  if (!shouldSync) {
+    return;
+  }
+
+  try {
+    const result = await syncProjectGitLabHarness({
+      projectId: project.id,
+      stageType: normalizedStage || undefined,
+      closeOnComplete
+    });
+    if (!result.ok) {
+      console.warn(`[GitLab Harness] sync skipped (${options?.reason || "automation"}): ${result.code} ${result.message}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    console.warn(`[GitLab Harness] sync failed (${options?.reason || "automation"}): ${message}`);
+  }
 }
 
 async function runProjectAutomationTick(options?: { force?: boolean }) {
@@ -238,60 +834,66 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
     let approved = 0;
     let skipped = 0;
     let failed = 0;
+    let awaitingConfirmation = 0;
     let firstError: string | null = null;
 
     for (const summary of activeProjects) {
-      try {
-        const project = await findProject(summary.id);
-        if (!project || project.status !== "active") {
-          skipped += 1;
-          continue;
-        }
+      if (projectAdvanceLocks.has(summary.id)) {
+        skipped += 1;
+        continue;
+      }
 
-        if (project.pendingApproval) {
-          try {
-            await approveProject(project.id);
-            approved += 1;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : "approve failed";
-            if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:") && project.currentStage === "DESIGN") {
-              const repairSubmission = await buildAutoStageSubmission(project, {
-                action: "stage.auto_submission.repair",
-                metadata: {
-                  reason: "design_review_not_approved"
-                }
-              });
-              await submitCurrentStage(project.id, repairSubmission);
-              await approveProject(project.id);
-              approved += 1;
-              advanced += 1;
+      try {
+        await withProjectLock(summary.id, async () => {
+          const project = await findProject(summary.id);
+          if (!project || project.status !== "active") {
+            skipped += 1;
+            return;
+          }
+
+          if (project.pendingApproval) {
+            skipped += 1;
+            awaitingConfirmation += 1;
+            firstError = firstError ?? `project ${project.id} pending user confirmation`;
+            return;
+          }
+
+          const submissions = await buildAutoStageSubmissions(project, {
+            action: "stage.auto_submission.automation"
+          });
+          await submitStageSubmissionBundle(project.id, submissions);
+
+          const refreshed = await findProject(project.id);
+          if (refreshed) {
+            await trySyncGitLabHarnessForProject(refreshed, {
+              reason: "project.automation_tick"
+            });
+          }
+          if (refreshed?.pendingApproval) {
+            awaitingConfirmation += 1;
+            const qualityPass = submissions.every((item) => item.quality.pass);
+            if (!qualityPass) {
+              firstError = firstError ?? `project ${project.id} has pending quality issues, waiting for manual confirmation`;
             } else {
-              failed += 1;
-              firstError = firstError ?? message;
+              firstError = firstError ?? `project ${project.id} is waiting for manual stage confirmation`;
             }
           }
-          continue;
-        }
-
-        const submission = await buildAutoStageSubmission(project, {
-          action: "stage.auto_submission.automation"
+          advanced += 1;
         });
-        await submitCurrentStage(project.id, submission);
-
-        const refreshed = await findProject(project.id);
-        if (refreshed?.pendingApproval) {
-          await approveProject(project.id);
-        }
-        advanced += 1;
       } catch (error) {
-        failed += 1;
-        firstError = firstError ?? (error instanceof Error ? error.message : "project automation failed");
+        const message = error instanceof Error ? error.message : "project automation failed";
+        if (message === "PROJECT_ADVANCE_IN_PROGRESS") {
+          skipped += 1;
+        } else {
+          failed += 1;
+          firstError = firstError ?? message;
+        }
       }
     }
 
     projectAutomationState.lastRunAt = runStartedAt;
     projectAutomationState.lastError = firstError;
-    projectAutomationState.lastSummary = `active=${activeProjects.length}, advanced=${advanced}, approved=${approved}, skipped=${skipped}, failed=${failed}`;
+    projectAutomationState.lastSummary = `active=${activeProjects.length}, advanced=${advanced}, approved=${approved}, awaitingConfirmation=${awaitingConfirmation}, skipped=${skipped}, failed=${failed}`;
   } catch (error) {
     projectAutomationState.lastRunAt = runStartedAt;
     projectAutomationState.lastError = error instanceof Error ? error.message : "unknown automation error";
@@ -474,6 +1076,29 @@ type ProjectFinalArtifactsReport = {
   artifacts: FinalArtifactRecord[];
   missingRequired: string[];
   checklist: string[];
+  generation?: FinalArtifactsJobProgress;
+};
+
+type FinalArtifactsJobStatus = "queued" | "running" | "completed" | "failed";
+
+type FinalArtifactsJobProgress = {
+  jobId: string;
+  projectId: string;
+  status: FinalArtifactsJobStatus;
+  progress: number;
+  step: string;
+  message?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  error?: string;
+};
+
+type FinalArtifactsJobState = FinalArtifactsJobProgress & {
+  report?: ProjectFinalArtifactsReport;
+  officialSite?: {
+    url: string;
+    filePath?: string;
+  };
 };
 
 const FINAL_REQUIRED_ARTIFACTS: Array<{
@@ -514,6 +1139,220 @@ const FINAL_REQUIRED_ARTIFACTS: Array<{
   }
 ];
 
+const FINAL_ARTIFACT_JOB_RETENTION_MS = Math.max(10 * 60 * 1000, Number(process.env.FINAL_ARTIFACT_JOB_RETENTION_MS ?? 45 * 60 * 1000));
+const FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS = Math.max(8_000, Number(process.env.FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS ?? 25_000));
+const FINAL_ARTIFACT_SITE_TIMEOUT_MS = Math.max(8_000, Number(process.env.FINAL_ARTIFACT_SITE_TIMEOUT_MS ?? 25_000));
+const finalArtifactsJobsById = new Map<string, FinalArtifactsJobState>();
+const finalArtifactsLatestJobByProject = new Map<string, string>();
+
+function toFinalArtifactsJobProgress(job?: FinalArtifactsJobState | null): FinalArtifactsJobProgress | undefined {
+  if (!job) {
+    return undefined;
+  }
+  return {
+    jobId: job.jobId,
+    projectId: job.projectId,
+    status: job.status,
+    progress: job.progress,
+    step: job.step,
+    message: job.message,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    error: job.error
+  };
+}
+
+function getLatestFinalArtifactsJob(projectId: string) {
+  const jobId = finalArtifactsLatestJobByProject.get(projectId);
+  if (!jobId) {
+    return undefined;
+  }
+  const job = finalArtifactsJobsById.get(jobId);
+  if (!job) {
+    finalArtifactsLatestJobByProject.delete(projectId);
+    return undefined;
+  }
+  return job;
+}
+
+function purgeExpiredFinalArtifactsJobs() {
+  const now = Date.now();
+  for (const [jobId, job] of finalArtifactsJobsById.entries()) {
+    const baseline = job.finishedAt || job.startedAt;
+    if (!baseline) {
+      continue;
+    }
+    if (now - new Date(baseline).getTime() <= FINAL_ARTIFACT_JOB_RETENTION_MS) {
+      continue;
+    }
+    finalArtifactsJobsById.delete(jobId);
+    if (finalArtifactsLatestJobByProject.get(job.projectId) === jobId) {
+      finalArtifactsLatestJobByProject.delete(job.projectId);
+    }
+  }
+}
+
+function attachFinalArtifactsGeneration(
+  report: ProjectFinalArtifactsReport,
+  job?: FinalArtifactsJobState
+): ProjectFinalArtifactsReport {
+  return {
+    ...report,
+    generation: toFinalArtifactsJobProgress(job)
+  };
+}
+
+async function withAsyncTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), timeoutMs);
+  });
+  try {
+    return await Promise.race<T | undefined>([promise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+async function runFinalArtifactsGenerationJob(jobId: string) {
+  const job = finalArtifactsJobsById.get(jobId);
+  if (!job) {
+    return;
+  }
+
+  const update = (patch: Partial<FinalArtifactsJobState>) => {
+    const current = finalArtifactsJobsById.get(jobId);
+    if (!current) {
+      return;
+    }
+    finalArtifactsJobsById.set(jobId, {
+      ...current,
+      ...patch
+    });
+  };
+
+  try {
+    update({
+      status: "running",
+      progress: 10,
+      step: "加载项目上下文",
+      message: "正在拉取项目和交付物数据...",
+      startedAt: job.startedAt || new Date().toISOString(),
+      finishedAt: undefined,
+      error: undefined
+    });
+
+    let project = await findProject(job.projectId);
+    if (!project) {
+      throw new Error("Project not found");
+    }
+
+    update({
+      progress: 38,
+      step: "补齐并校验交付物",
+      message: "正在执行交付物补齐与模板对齐..."
+    });
+
+    const reconciled = await withAsyncTimeout(
+      reconcileProjectDeliverablesNow(job.projectId),
+      FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS
+    );
+    if (reconciled) {
+      project = reconciled;
+    } else {
+      update({
+        message: `交付物补齐超时（>${FINAL_ARTIFACT_RECONCILE_TIMEOUT_MS}ms），继续使用当前已产出内容。`
+      });
+    }
+
+    let officialSite: { url: string; filePath?: string } | undefined;
+    if (project.status === "completed") {
+      update({
+        progress: 72,
+        step: "生成最终演示站点",
+        message: "正在构建可访问的演示成果..."
+      });
+      try {
+        const artifact = await withAsyncTimeout(
+          generateOfficialSiteArtifact(project),
+          FINAL_ARTIFACT_SITE_TIMEOUT_MS
+        );
+        if (!artifact) {
+          update({
+            message: `演示站点生成超时（>${FINAL_ARTIFACT_SITE_TIMEOUT_MS}ms），先返回文档成果。`
+          });
+        } else {
+          officialSite = {
+            url: artifact.publicPath,
+            filePath: artifact.filePaths[0]
+          };
+        }
+      } catch (error) {
+        // 允许站点生成失败，不阻断报告本身。
+        update({
+          message: `演示站点生成失败，继续产出报告：${error instanceof Error ? error.message : String(error)}`
+        });
+      }
+    }
+
+    update({
+      progress: 92,
+      step: "汇总最终验收产物",
+      message: "正在生成最终验收报告..."
+    });
+    const report = buildProjectFinalArtifactsReport(project, officialSite);
+    const finishedAt = new Date().toISOString();
+    update({
+      status: "completed",
+      progress: 100,
+      step: "已完成",
+      message: "最终验收产物已生成，可开始验收。",
+      finishedAt,
+      report,
+      officialSite
+    });
+  } catch (error) {
+    update({
+      status: "failed",
+      progress: 100,
+      step: "生成失败",
+      message: "最终验收产物生成失败，请查看错误并重试。",
+      error: error instanceof Error ? error.message : String(error),
+      finishedAt: new Date().toISOString()
+    });
+  } finally {
+    purgeExpiredFinalArtifactsJobs();
+  }
+}
+
+function startFinalArtifactsGenerationJob(projectId: string, options?: { force?: boolean }) {
+  purgeExpiredFinalArtifactsJobs();
+  const latest = getLatestFinalArtifactsJob(projectId);
+  if (!options?.force && latest && (latest.status === "queued" || latest.status === "running")) {
+    return latest;
+  }
+
+  const nextJob: FinalArtifactsJobState = {
+    jobId: randomUUID(),
+    projectId,
+    status: "queued",
+    progress: 0,
+    step: "已入队",
+    message: "已创建生成任务，等待执行...",
+    startedAt: new Date().toISOString()
+  };
+  finalArtifactsJobsById.set(nextJob.jobId, nextJob);
+  finalArtifactsLatestJobByProject.set(projectId, nextJob.jobId);
+
+  setTimeout(() => {
+    void runFinalArtifactsGenerationJob(nextJob.jobId);
+  }, 0);
+
+  return nextJob;
+}
+
 function buildExcerpt(content: string, limit = 120) {
   const raw = String(content || "");
   const pickSection = (title: string) => {
@@ -543,11 +1382,18 @@ function isDeliverableReadyForAcceptance(input: {
   content?: string;
 }) {
   const status = String(input.status || "").toLowerCase();
-  const length = String(input.content || "").trim().length;
+  const content = String(input.content || "");
+  const length = content.trim().length;
   if (status === "draft" || !status) {
     return false;
   }
-  return length >= 120;
+  if (length < 120) {
+    return false;
+  }
+  if (content.includes("## 自动质检") && !/自动质检结论:\s*通过/.test(content)) {
+    return false;
+  }
+  return true;
 }
 
 function deliverableStatusScore(status: string) {
@@ -556,6 +1402,22 @@ function deliverableStatusScore(status: string) {
   if (status === "rejected") return 2;
   if (status === "draft") return 1;
   return 0;
+}
+
+function deliverableQualityScore(content: string) {
+  const normalized = String(content || "");
+  let score = 0;
+  if (normalized.includes("执行引擎:")) score += 2;
+  if (normalized.includes("## 本阶段任务证据")) score += 2;
+  if (normalized.includes("## 模型尝试轨迹")) score += 1;
+  if (normalized.includes("## 自动质检")) score += 2;
+  if (/自动质检结论:\s*通过/.test(normalized)) score += 3;
+  if (
+    /(固定仪表盘、项目观测室、Agent 中心三大页面|让实时输出始终成为视觉中心|把审批与紧急介入做成明确的强动作|避免常规 SaaS 模板感)/.test(normalized)
+  ) {
+    score -= 2;
+  }
+  return score;
 }
 
 function pickBestDeliverable(
@@ -570,6 +1432,10 @@ function pickBestDeliverable(
     const statusDelta = deliverableStatusScore(right.status) - deliverableStatusScore(left.status);
     if (statusDelta !== 0) {
       return statusDelta;
+    }
+    const qualityDelta = deliverableQualityScore(String(right.content || "")) - deliverableQualityScore(String(left.content || ""));
+    if (qualityDelta !== 0) {
+      return qualityDelta;
     }
     const contentDelta = String(right.content || "").trim().length - String(left.content || "").trim().length;
     if (contentDelta !== 0) {
@@ -824,6 +1690,23 @@ function buildSignoffHistory(
     .slice(0, 30);
 }
 
+function summarizeLatestSignoff(signoffHistory: AcceptanceSignoffRecord[]) {
+  const latestByStage = new Map<string, AcceptanceSignoffRecord>();
+  for (const record of signoffHistory) {
+    const key = record.stageType || record.stageLabel || record.id;
+    if (!latestByStage.has(key)) {
+      latestByStage.set(key, record);
+    }
+  }
+
+  const latestRecords = [...latestByStage.values()];
+  return {
+    approved: latestRecords.filter((item) => item.decision === "approved").length,
+    rejected: latestRecords.filter((item) => item.decision === "rejected").length,
+    pending: latestRecords.filter((item) => item.decision === "pending").length
+  };
+}
+
 function buildProjectAcceptanceReport(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ): ProjectAcceptanceReport {
@@ -868,9 +1751,10 @@ function buildProjectAcceptanceReport(
   const completedTasks = project.tasks.filter((task) => task.status === "done").length;
   const approvedDeliverables = project.deliverables.filter((item) => item.status === "approved").length;
   const signoffHistory = buildSignoffHistory(project);
-  const signoffApproved = signoffHistory.filter((item) => item.decision === "approved").length;
-  const signoffRejected = signoffHistory.filter((item) => item.decision === "rejected").length;
-  const signoffPending = signoffHistory.filter((item) => item.decision === "pending").length;
+  const signoffSummary = summarizeLatestSignoff(signoffHistory);
+  const signoffApproved = signoffSummary.approved;
+  const signoffRejected = signoffSummary.rejected;
+  const signoffPending = signoffSummary.pending;
   const archivedReportDeliverables = project.deliverables
     .filter((item) => item.stageType === "ACCEPT" && item.name.startsWith("阶段验收报告"))
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
@@ -1210,8 +2094,26 @@ app.get("/ready", asyncRoute(async (_req, res) => {
   });
 }));
 
+const enableApiDocs = process.env.ENABLE_API_DOCS !== "false";
+if (enableApiDocs) {
+  const openApiSpec = buildOpenApiSpec({ host, port });
+  app.get("/api/docs.json", (_req, res) => {
+    res.json(openApiSpec);
+  });
+  app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(openApiSpec, {
+    explorer: true,
+    customSiteTitle: "OCC API Docs"
+  }));
+}
+
 app.use("/api", (req, res, next) => {
   if (req.path.startsWith("/auth/")) {
+    next();
+    return;
+  }
+
+  // GitLab Webhook 需支持外部系统直连，不依赖后台登录态。
+  if (req.path === "/gitlab/webhook") {
     next();
     return;
   }
@@ -1223,10 +2125,12 @@ app.use("/api", (req, res, next) => {
       req.path.startsWith("/openclaw/")
       || req.path.startsWith("/projects")
       || req.path.startsWith("/tasks")
+      || req.path.startsWith("/gitlab")
       || req.path.startsWith("/role-sets")
       || req.path.startsWith("/product-context")
       || req.path.startsWith("/issues")
       || req.path.startsWith("/system/design-model-policy/")
+      || req.path.startsWith("/system/stage-model-policy")
     )
   ) {
     next();
@@ -1266,1554 +2170,54 @@ app.use("/api/issues", createIssuesRouter({
     kickProjectAutomationTick();
   }
 }));
-
-app.get("/api/system/runtime", asyncRoute(async (_req, res) => {
-  res.json(await getRuntimeStatus());
+app.use("/api/system", createSystemRouter({
+  asyncRoute,
+  safeAudit,
+  sendEvent
 }));
-
-app.get("/api/system/runtime/config", asyncRoute(async (_req, res) => {
-  res.json(await getRuntimeSettings());
-}));
-
-app.put("/api/system/runtime/config", asyncRoute(async (req, res) => {
-  const payload = req.body as RuntimeSettingsInput;
-
-  if (!payload?.provider) {
-    res.status(400).json({ message: "provider is required" });
-    return;
-  }
-
-  const result = await updateRuntimeSettings(payload);
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "runtime.config.updated",
-    resourceType: "runtime",
-    summary: `运行配置已更新为 ${result.provider}`,
-    detail: `model=${result.modelName || "未设置"} apiBaseUrl=${result.apiBaseUrl || "未设置"}`
-  });
-  res.json(result);
-}));
-
-app.post("/api/system/runtime/validate", asyncRoute(async (_req, res) => {
-  const result = await validateRuntimeSettings();
-  await safeAudit(_req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "runtime.config.validated",
-    resourceType: "runtime",
-    summary: result.ok ? "运行配置校验通过" : "运行配置校验失败",
-    detail: result.message
-  });
-  res.status(result.ok ? 200 : 422).json(result);
-}));
-
-app.get("/api/system/health", asyncRoute(async (_req, res) => {
-  res.json(await getSystemHealth());
-}));
-
-app.get("/api/system/readiness", asyncRoute(async (_req, res) => {
-  res.json(await getSystemReadiness());
-}));
-
-app.get("/api/system/design-model-policy/health", asyncRoute(async (_req, res) => {
-  const result = await getDesignModelPolicyHealth();
-  res.status(result.ok ? 200 : 503).json(result);
-}));
-
-app.post("/api/system/design-model-policy/repair", asyncRoute(async (req, res) => {
-  const result = await repairDesignModelPolicy();
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "design_model_policy.repaired",
-    resourceType: "runtime",
-    resourceId: "ROLE_DESIGN",
-    summary: "已执行设计模型策略一键修复",
-    detail: `selected=${result.after.designAgentConfig.selectedModel} fallback=${result.after.designAgentConfig.fallbackModel}`
-  });
-  res.status(result.ok ? 200 : 202).json(result);
-}));
-
-app.get("/api/system/local-agent-monitor", asyncRoute(async (_req, res) => {
-  res.json(await getCachedLocalAgentMonitorOverview());
-}));
-
-app.get("/api/system/local-agent-monitor/live", asyncRoute(async (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  const initial = await getCachedLocalAgentMonitorOverview();
-  sendEvent(res, "snapshot", initial);
-
-  const unsubscribe = subscribeLocalAgentMonitor((overview) => {
-    sendEvent(res, "snapshot", overview);
-  });
-
-  const heartbeat = setInterval(() => {
-    sendEvent(res, "heartbeat", { timestamp: new Date().toISOString() });
-  }, 20000);
-
-  req.on("close", () => {
-    clearInterval(heartbeat);
-    unsubscribe();
-    res.end();
-  });
-}));
-
-app.get("/api/system/audit-logs", asyncRoute(async (req, res) => {
-  const limit = Number(req.query.limit ?? 50);
-  res.json(await listAuditLogs(Number.isFinite(limit) ? limit : 50));
-}));
-
-app.get("/api/notifications", asyncRoute(async (req, res) => {
-  const locale = req.query.locale === "en-US" ? "en-US" : "zh-CN";
-  res.json(await listNotificationInbox(locale));
-}));
-
-app.patch("/api/notifications/:sourceKey", asyncRoute(async (req, res) => {
-  const payload = req.body as NotificationInboxUpdateInput;
-  const sourceKey = decodeURIComponent(String(req.params.sourceKey ?? "").trim());
-
-  if (!sourceKey) {
-    res.status(400).json({ message: "sourceKey is required" });
-    return;
-  }
-
-  const updated = await updateNotificationInboxState(sourceKey, payload);
-  if (!updated) {
-    res.status(404).json({ message: "notification not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "notification.updated",
-    resourceType: "notification",
-    resourceId: sourceKey,
-    summary: `通知状态已更新：${updated.title}`,
-    detail: `read=${updated.read} assignedTo=${updated.assignedTo ?? ""} confirmedBy=${updated.confirmedBy ?? ""} workflowStatus=${updated.workflowStatus}`
-  });
-
-  res.json(updated);
-}));
-
-app.get("/api/prompt-templates", asyncRoute(async (req, res) => {
-  const channel = String(req.query.channel ?? "").trim() as PromptTemplateChannel;
-  const locale = req.query.locale === "en-US" ? "en-US" : "zh-CN";
-  const projectId = String(req.query.projectId ?? "").trim() || undefined;
-
-  if (!channel) {
-    res.status(400).json({ message: "channel is required" });
-    return;
-  }
-
-  res.json(await listPromptTemplates({ channel, locale, projectId }));
-}));
-
-app.post("/api/prompt-templates", asyncRoute(async (req, res) => {
-  const payload = req.body as PromptTemplateUpsertInput;
-  if (!payload?.title || !payload?.content || !payload?.channel) {
-    res.status(400).json({ message: "title, content, and channel are required" });
-    return;
-  }
-
-  const created = await createPromptTemplate(payload);
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: payload.ownerLabel || "管理员",
-    action: "prompt_template.created",
-    resourceType: "prompt_template",
-    resourceId: created.id,
-    summary: `已创建模板：${created.title}`,
-    detail: `${created.channel} / ${created.scope}`
-  });
-  res.status(201).json(created);
-}));
-
-app.post("/api/prompt-templates/:templateId/use", asyncRoute(async (req, res) => {
-  const templateId = String(req.params.templateId ?? "").trim();
-  if (!templateId) {
-    res.status(400).json({ message: "templateId is required" });
-    return;
-  }
-
-  res.json(await markPromptTemplateUsed(templateId));
+app.use("/api/gitlab", createGitLabRouter());
+app.use("/api", createNotificationsRouter({
+  asyncRoute,
+  safeAudit
 }));
 
 
-type ProjectParsePriority = "High" | "Medium" | "Low";
+app.use(createProjectsRouter({
+  asyncRoute,
+  safeAudit,
+  sendEvent,
+  splitScript,
+  projectAutomationState,
+  restartProjectAutomationTicker,
+  runProjectAutomationTick,
+  kickProjectAutomationTick,
+  projectAdvanceLocks,
+  projectAdvanceJobs,
+  projectAdvanceJobErrors,
+  ensureManualAdvanceJob,
+  buildProjectRequiredActions,
+  formatRequiredActionsMessage,
+  buildProjectAcceptanceReport,
+  renderAcceptanceReportMarkdown,
+  getLatestFinalArtifactsJob,
+  startFinalArtifactsGenerationJob,
+  buildProjectFinalArtifactsReport,
+  attachFinalArtifactsGeneration,
+  toFinalArtifactsJobProgress,
+  finalArtifactsJobsById
+}));
 
-const PROJECT_PARSE_ROLE_LABELS: Record<RoleType, string> = {
-  ROLE_ASSISTANT: "总助理",
-  ROLE_PM: "项目经理",
-  ROLE_ANALYST: "需求分析师",
-  ROLE_PRODUCT: "产品总监",
-  ROLE_DESIGN: "视觉设计总监",
-  ROLE_ARCH: "研发总监",
-  ROLE_DEV: "研发经理",
-  ROLE_QA: "测试工程师",
-  ROLE_HR: "HR总监"
-};
+app.use("/api/openclaw", createOpenClawRouter({
+  asyncRoute,
+  safeAudit
+}));
 
-const PROJECT_PARSE_ROLE_HINTS: Array<{ role: RoleType; patterns: RegExp[] }> = [
-  { role: "ROLE_PM", patterns: [/项目经理/, /pm/, /排期/, /里程碑/] },
-  { role: "ROLE_ANALYST", patterns: [/需求/, /分析/, /调研/] },
-  { role: "ROLE_PRODUCT", patterns: [/产品/, /原型/, /交互/, /体验/] },
-  { role: "ROLE_DESIGN", patterns: [/视觉/, /设计/, /品牌/, /ui/, /ux/, /页面/, /官网/] },
-  { role: "ROLE_ARCH", patterns: [/架构/, /基础设施/, /infra/, /系统设计/] },
-  { role: "ROLE_DEV", patterns: [/研发/, /开发/, /编码/, /后端/, /前端/, /联调/] },
-  { role: "ROLE_QA", patterns: [/测试/, /验收/, /qa/, /质量/] },
-  { role: "ROLE_HR", patterns: [/招聘/, /人力/, /hr/] }
-];
-
-function inferProjectPriority(input: string): ProjectParsePriority {
-  if (/紧急|马上|立即|asap|今天|本周|高优先|关键/.test(input)) {
-    return "High";
-  }
-  if (/低优先|不着急|后续|有空|慢慢/.test(input)) {
-    return "Low";
-  }
-  return "Medium";
+if (existsSync(webGeneratedPath)) {
+  app.use("/generated", express.static(webGeneratedPath));
 }
-
-function inferProjectPhase(input: string): string {
-  if (/验收|测试|上线|发布|交付/.test(input)) {
-    return "验收";
-  }
-  if (/开发|编码|实现|联调|后端|前端/.test(input)) {
-    return "开发";
-  }
-  if (/设计|原型|界面|交互|架构/.test(input)) {
-    return "设计";
-  }
-  return "分析";
+if (existsSync(siteGeneratedPath)) {
+  app.use("/generated", express.static(siteGeneratedPath));
 }
-
-function inferProjectName(input: string, keywords: string[]): string {
-  const quoted = input.match(/["“](.{2,40})["”]/);
-  if (quoted?.[1]) {
-    return quoted[1].trim();
-  }
-
-  const candidate = input
-    .replace(/(请|帮我|我们|需要|想要|希望|做一个|做个|创建|搭建|开发|实现|一个|项目|系统)/g, " ")
-    .replace(/[，。,.!?]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 4)
-    .join("");
-
-  if (candidate) {
-    return candidate.slice(0, 16) + "项目";
-  }
-
-  if (keywords[0]) {
-    return keywords[0] + "项目";
-  }
-
-  return "新项目";
-}
-
-function inferProjectTeam(input: string, suggestedTeam: RoleType[]): RoleType[] {
-  const matched = PROJECT_PARSE_ROLE_HINTS
-    .filter((entry) => entry.patterns.some((pattern) => pattern.test(input)))
-    .map((entry) => entry.role);
-
-  if (matched.length > 0) {
-    return Array.from(new Set(matched));
-  }
-
-  return suggestedTeam.length > 0 ? suggestedTeam.slice(0, 6) : ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"];
-}
-
-app.post("/api/projects/parse", asyncRoute(async (req, res) => {
-  const input = String(req.body?.input ?? req.body?.description ?? "").trim();
-
-  if (!input) {
-    res.status(400).json({ message: "input is required" });
-    return;
-  }
-
-  const parsedIntent = previewRequirement(input);
-  const team = inferProjectTeam(input, parsedIntent.suggestedTeam);
-
-  res.json({
-    name: inferProjectName(input, parsedIntent.keywords),
-    description: parsedIntent.summary || input,
-    phase: inferProjectPhase(input),
-    agents: team.map((role) => PROJECT_PARSE_ROLE_LABELS[role]),
-    team,
-    priority: inferProjectPriority(input)
-  });
-}));
-
-app.post("/api/projects/preview", asyncRoute(async (req, res) => {
-  const description = String(req.body?.description ?? "").trim();
-
-  if (!description) {
-    res.status(400).json({ message: "description is required" });
-    return;
-  }
-
-  res.json(previewRequirement(description));
-}));
-
-app.get("/api/projects", asyncRoute(async (_req, res) => {
-  res.json(await listProjects());
-}));
-
-type ProjectCleanupCandidate = {
-  id: string;
-  name: string;
-  status: string;
-  currentStage: string;
-  updatedAt: string;
-  reasons: string[];
-  recommended: boolean;
-};
-
-const CLEANUP_TEST_NAME_PATTERN = /(复测|冒烟|测试|验证|巡检|高保真|闭环能力版|HTTP真实流转版|设计增强版|重新启用创建|创建即推进|阶段B-|验收版|\bV1\b)/i;
-
-function normalizeProjectNameForCleanup(input: string) {
-  return String(input || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, "")
-    .replace(/[()（）\[\]【】]/g, "");
-}
-
-function buildProjectCleanupCandidates(
-  projects: Awaited<ReturnType<typeof listProjects>>,
-): ProjectCleanupCandidate[] {
-  const reasonMap = new Map<string, Set<string>>();
-  const addReason = (id: string, reason: string) => {
-    const current = reasonMap.get(id) || new Set<string>();
-    current.add(reason);
-    reasonMap.set(id, current);
-  };
-
-  for (const project of projects) {
-    if (project.status === "paused") {
-      addReason(project.id, "paused");
-    }
-    if (CLEANUP_TEST_NAME_PATTERN.test(project.name)) {
-      addReason(project.id, "test_like");
-    }
-  }
-
-  const grouped = new Map<string, typeof projects>();
-  for (const project of projects) {
-    const key = normalizeProjectNameForCleanup(project.name);
-    const list = grouped.get(key) || [];
-    list.push(project);
-    grouped.set(key, list);
-  }
-
-  for (const [, group] of grouped) {
-    if (group.length <= 1) {
-      continue;
-    }
-    const sorted = [...group].sort(
-      (left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime(),
-    );
-    for (const duplicate of sorted.slice(1)) {
-      addReason(duplicate.id, "duplicate_name");
-    }
-  }
-
-  return projects
-    .filter((project) => reasonMap.has(project.id))
-    .map((project) => {
-      const reasons = Array.from(reasonMap.get(project.id) || []);
-      const recommended = reasons.includes("paused") || reasons.includes("test_like") || reasons.includes("duplicate_name");
-      return {
-        id: project.id,
-        name: project.name,
-        status: project.status,
-        currentStage: project.currentStage,
-        updatedAt: project.updatedAt,
-        reasons,
-        recommended,
-      };
-    })
-    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
-}
-
-app.get("/api/projects/cleanup/candidates", asyncRoute(async (_req, res) => {
-  const projects = await listProjects();
-  const candidates = buildProjectCleanupCandidates(projects);
-  res.json({
-    success: true,
-    data: candidates,
-  });
-}));
-
-app.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
-  const idsInput = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]) : [];
-  const mode = String(req.body?.mode || "recommended");
-  const dryRun = Boolean(req.body?.dryRun);
-  const projects = await listProjects();
-  const candidates = buildProjectCleanupCandidates(projects);
-  const candidateIds = new Set(candidates.map((item) => item.id));
-  const projectNameById = new Map(projects.map((project) => [project.id, project.name]));
-
-  const idsFromBody: string[] = idsInput
-    .map((item: unknown) => String(item || "").trim())
-    .filter((item): item is string => Boolean(item));
-  const dedupedIds = Array.from(new Set<string>(idsFromBody));
-
-  const targetIds: string[] = idsFromBody.length > 0
-    ? dedupedIds.filter((id) => candidateIds.has(id))
-    : mode === "all_candidates"
-      ? candidates.map((item) => item.id)
-      : candidates.filter((item) => item.recommended).map((item) => item.id);
-
-  const deleted: Array<{ id: string; name: string }> = [];
-  const failed: Array<{ id: string; error: string }> = [];
-
-  if (!dryRun) {
-    for (const id of targetIds) {
-      try {
-        const removed = await deleteProject(id);
-        if (!removed) {
-          failed.push({ id, error: "not found" });
-          continue;
-        }
-        deleted.push({
-          id,
-          name: projectNameById.get(id) || id,
-        });
-      } catch (error) {
-        failed.push({
-          id,
-          error: error instanceof Error ? error.message : "delete failed",
-        });
-      }
-    }
-  }
-
-  const remaining = dryRun ? projects.length : (await listProjects()).length;
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.cleanup",
-    resourceType: "project",
-    summary: dryRun
-      ? `项目清理预览：候选 ${targetIds.length} 个`
-      : `项目清理执行：删除 ${deleted.length} 个，失败 ${failed.length} 个`,
-    detail: `mode=${mode}; dryRun=${dryRun}; requested=${targetIds.length}`,
-  });
-
-  res.json({
-    success: true,
-    data: {
-      requested: targetIds.length,
-      deleted,
-      failed,
-      remaining,
-    },
-  });
-}));
-
-app.get("/api/projects/automation", asyncRoute(async (_req, res) => {
-  res.json({
-    enabled: projectAutomationState.enabled,
-    intervalMs: projectAutomationState.intervalMs,
-    running: projectAutomationState.running,
-    lastRunAt: projectAutomationState.lastRunAt,
-    lastError: projectAutomationState.lastError,
-    lastSummary: projectAutomationState.lastSummary
-  });
-}));
-
-app.put("/api/projects/automation", asyncRoute(async (req, res) => {
-  const enabled = req.body?.enabled;
-  const intervalMsInput = Number(req.body?.intervalMs ?? projectAutomationState.intervalMs);
-
-  if (typeof enabled !== "boolean") {
-    res.status(400).json({ message: "enabled must be boolean" });
-    return;
-  }
-
-  projectAutomationState.enabled = enabled;
-  projectAutomationState.intervalMs = Number.isFinite(intervalMsInput)
-    ? Math.max(5000, Math.round(intervalMsInput))
-    : projectAutomationState.intervalMs;
-  restartProjectAutomationTicker();
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.automation.updated",
-    resourceType: "project",
-    summary: `自动推进已${enabled ? "开启" : "关闭"}`,
-    detail: `intervalMs=${projectAutomationState.intervalMs}`
-  });
-
-  res.json({
-    enabled: projectAutomationState.enabled,
-    intervalMs: projectAutomationState.intervalMs,
-    running: projectAutomationState.running,
-    lastRunAt: projectAutomationState.lastRunAt,
-    lastError: projectAutomationState.lastError,
-    lastSummary: projectAutomationState.lastSummary
-  });
-}));
-
-app.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
-  await runProjectAutomationTick({ force: true });
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.automation.run_once",
-    resourceType: "project",
-    summary: "手动触发自动推进执行一轮"
-  });
-
-  res.json({
-    enabled: projectAutomationState.enabled,
-    intervalMs: projectAutomationState.intervalMs,
-    running: projectAutomationState.running,
-    lastRunAt: projectAutomationState.lastRunAt,
-    lastError: projectAutomationState.lastError,
-    lastSummary: projectAutomationState.lastSummary
-  });
-}));
-
-app.post("/api/projects", asyncRoute(async (req, res) => {
-  const description = String(req.body?.description ?? "").trim();
-
-  if (!description) {
-    res.status(400).json({ message: "description is required" });
-    return;
-  }
-
-  const project = await createProject(
-    {
-      name: req.body?.name,
-      description,
-      team: req.body?.team
-    },
-    (await getRuntimeStatus()).mode
-  );
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.created",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `创建项目 ${project.name}`
-  });
-  kickProjectAutomationTick();
-  res.status(201).json(project);
-}));
-
-app.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  if (project.status !== "active") {
-    res.status(409).json({ message: "Project is not active" });
-    return;
-  }
-
-  if (project.pendingApproval) {
-    const approved = await approveProject(projectId);
-    res.json(approved);
-    return;
-  }
-
-  const submission = await buildAutoStageSubmission(project, {
-    action: "stage.auto_submission.manual_advance"
-  });
-  await submitCurrentStage(projectId, submission);
-  const refreshed = await findProject(projectId);
-  if (refreshed?.pendingApproval) {
-    await approveProject(projectId);
-  }
-
-  const latest = await findProject(projectId);
-  res.json(latest);
-}));
-
-app.get("/api/projects/:id", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  res.json(project);
-}));
-
-app.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  const limitInput = Number(req.query.limit ?? 120);
-  const limit = Number.isFinite(limitInput) ? Math.max(1, Math.min(500, Math.round(limitInput))) : 120;
-  const executions = await listProjectExecutions(projectId, limit);
-
-  res.json({
-    success: true,
-    data: {
-      projectId,
-      total: executions.length,
-      executions
-    }
-  });
-}));
-
-app.get("/api/projects/:id/acceptance-report", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "NOT_FOUND",
-        message: "Project not found"
-      }
-    });
-    return;
-  }
-
-  const report = buildProjectAcceptanceReport(project);
-  res.json({
-    success: true,
-    data: report
-  });
-}));
-
-app.get("/api/projects/:id/acceptance-report.md", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).type("text/plain; charset=utf-8").send("Project not found");
-    return;
-  }
-
-  const report = buildProjectAcceptanceReport(project);
-  const markdown = renderAcceptanceReportMarkdown(report);
-
-  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
-  res.setHeader(
-    "Content-Disposition",
-    `attachment; filename=\"acceptance-report-${project.id}.md\"`
-  );
-  res.send(markdown);
-}));
-
-app.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "NOT_FOUND",
-        message: "Project not found"
-      }
-    });
-    return;
-  }
-
-  const report = buildProjectAcceptanceReport(project);
-  const markdown = renderAcceptanceReportMarkdown(report);
-  const title = String(req.body?.title ?? "").trim() || undefined;
-  const updated = await archiveProjectAcceptanceReport(projectId, markdown, title);
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.acceptance_report.archived",
-    resourceType: "project",
-    resourceId: projectId,
-    summary: `项目 ${projectId} 验收报告已归档`
-  });
-
-  res.json({
-    success: true,
-    data: {
-      projectId,
-      archived: true,
-      deliverableName: title || `阶段验收报告-${new Date().toISOString().slice(0, 10)}.md`,
-      updated
-    }
-  });
-}));
-
-app.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "NOT_FOUND",
-        message: "Project not found"
-      }
-    });
-    return;
-  }
-
-  let officialSite: { url: string; filePath?: string } | undefined;
-  if (project.status === "completed") {
-    try {
-      const artifact = await generateOfficialSiteArtifact(project);
-      officialSite = {
-        url: artifact.publicPath,
-        filePath: artifact.filePaths[0]
-      };
-    } catch {
-      officialSite = undefined;
-    }
-  }
-
-  const report = buildProjectFinalArtifactsReport(project, officialSite);
-  res.json({
-    success: true,
-    data: report
-  });
-}));
-
-app.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).json({ message: "project not found" });
-    return;
-  }
-
-  if (project.status !== "completed") {
-    res.status(409).json({ message: "project is not completed yet" });
-    return;
-  }
-
-  const artifact = await generateOfficialSiteArtifact(project);
-  res.json({
-    success: true,
-    data: {
-      projectId,
-      url: artifact.publicPath,
-      files: artifact.filePaths
-    }
-  });
-}));
-
-app.get("/api/projects/:id/tasks", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  res.json(await listProjectTasks(projectId));
-}));
-
-app.get("/api/tasks", asyncRoute(async (_req, res) => {
-  res.json(await listTasks());
-}));
-
-app.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  let project;
-  try {
-    project = await approveProject(projectId);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "approve failed";
-    if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:")) {
-      res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
-      return;
-    }
-    throw error;
-  }
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.approved",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `批准项目阶段 ${project.currentStage}`
-  });
-  res.json(project);
-}));
-
-app.post("/api/projects/:id/reject", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const payload = req.body as StageRejectInput;
-  const reason = String(payload?.reason ?? "").trim();
-
-  if (!reason) {
-    res.status(400).json({ message: "reason is required" });
-    return;
-  }
-
-  const project = await rejectProjectStage(projectId, { reason });
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.rejected",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `退回项目阶段 ${project.currentStage}`,
-    detail: reason
-  });
-  res.json(project);
-}));
-
-app.post("/api/projects/:id/intervene", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const payload = req.body as InterventionInput;
-  const command = String(payload?.command ?? "").trim();
-
-  if (!command) {
-    res.status(400).json({ message: "command is required" });
-    return;
-  }
-
-  const project = await interveneProject(projectId, command);
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.intervened",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `项目 ${project.id} 已被人工介入`,
-    detail: command
-  });
-  res.json(project);
-}));
-
-app.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await resumeProject(projectId);
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.resumed",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `项目 ${project.id} 已恢复执行`
-  });
-  kickProjectAutomationTick();
-  res.json(project);
-}));
-
-app.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await closeProject(projectId);
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.closed",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `项目 ${project.id} 已关闭`
-  });
-  res.json(project);
-}));
-
-app.delete("/api/projects/:id", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const deleted = await deleteProject(projectId);
-
-  if (!deleted) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.deleted",
-    resourceType: "project",
-    resourceId: projectId,
-    summary: `项目 ${projectId} 已删除`
-  });
-
-  res.json({ success: true, id: projectId });
-}));
-
-app.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const payload = req.body as StageSubmissionInput;
-  const content = String(payload?.content ?? "").trim();
-
-  if (!content) {
-    res.status(400).json({ message: "content is required" });
-    return;
-  }
-
-  let project;
-  try {
-    project = await submitCurrentStage(projectId, {
-      title: payload?.title,
-      content,
-      designReview: payload?.designReview
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "submit failed";
-    if (message.startsWith("DESIGN_REVIEW_REQUIRED:")) {
-      res.status(422).json({ message: message.replace("DESIGN_REVIEW_REQUIRED:", "").trim() });
-      return;
-    }
-    if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:")) {
-      res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
-      return;
-    }
-    throw error;
-  }
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.stage_submitted",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `提交项目 ${project.id} 当前阶段交付物`
-  });
-  res.json(project);
-}));
-
-app.post("/api/projects/:id/messages", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const payload = req.body as ProjectMessageInput;
-  const message = String(payload?.message ?? "").trim();
-
-  if (!message) {
-    res.status(400).json({ message: "message is required" });
-    return;
-  }
-
-  const project = await postProjectMessage(projectId, { message });
-
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.message_sent",
-    resourceType: "project",
-    resourceId: project.id,
-    summary: `向项目 ${project.id} 发送指导`,
-    detail: message
-  });
-  res.json(project);
-}));
-
-app.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
-  const taskId = String(req.params.taskId);
-  const payload = req.body as TaskUpdateInput;
-  const status = payload?.status;
-
-  if (!status) {
-    res.status(400).json({ message: "status is required" });
-    return;
-  }
-
-  const task = await updateTaskStatus(taskId, status);
-
-  if (!task) {
-    res.status(404).json({ message: "Task not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "task.updated",
-    resourceType: "task",
-    resourceId: task.id,
-    summary: `任务 ${task.id} 状态更新为 ${task.status}`
-  });
-  res.json(task);
-}));
-
-app.get("/api/openclaw/workspace", asyncRoute(async (_req, res) => {
-  res.json(await getOpenClawWorkspace());
-}));
-
-app.get("/api/openclaw/status", asyncRoute(async (req, res) => {
-  const forceRefresh = String(req.query.refresh ?? "") === "true";
-  res.json(await getOpenClawStatusSummary(forceRefresh));
-}));
-
-app.get("/api/openclaw/projects", asyncRoute(async (_req, res) => {
-  res.json(await listOpenClawProjects());
-}));
-
-app.get("/api/openclaw/projects/:projectId", asyncRoute(async (req, res) => {
-  const project = await findOpenClawProject(String(req.params.projectId));
-
-  if (!project) {
-    res.status(404).json({ message: "OpenClaw project not found" });
-    return;
-  }
-
-  res.json(project);
-}));
-
-app.patch("/api/openclaw/projects/:projectId/tasks/:taskId", asyncRoute(async (req, res) => {
-  const payload = req.body as OpenClawTaskUpdateInput;
-  const project = await updateOpenClawProjectTask(
-    String(req.params.projectId),
-    String(req.params.taskId),
-    payload
-  );
-
-  if (!project) {
-    res.status(404).json({ message: "OpenClaw project task not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.project.task.updated",
-    resourceType: "openclaw-project",
-    resourceId: String(req.params.projectId),
-    summary: `更新 OpenClaw 项目任务 ${String(req.params.taskId)}`
-  });
-  res.json(project);
-}));
-
-app.patch("/api/openclaw/projects/:projectId/tasks", asyncRoute(async (req, res) => {
-  const payload = req.body as OpenClawBatchTaskUpdateInput;
-  const updates = Array.isArray(payload?.updates) ? payload.updates : [];
-
-  if (updates.length === 0) {
-    res.status(400).json({ message: "updates is required" });
-    return;
-  }
-
-  const project = await updateOpenClawProjectTasks(String(req.params.projectId), payload);
-
-  if (!project) {
-    res.status(404).json({ message: "OpenClaw project task not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.project.tasks.batch_updated",
-    resourceType: "openclaw-project",
-    resourceId: String(req.params.projectId),
-    summary: `批量更新 ${updates.length} 个 OpenClaw 项目任务`
-  });
-  res.json(project);
-}));
-
-app.get("/api/openclaw/projects/:projectId/report", asyncRoute(async (req, res) => {
-  const report = await buildOpenClawProjectReport(String(req.params.projectId));
-
-  if (!report) {
-    res.status(404).json({ message: "OpenClaw project not found" });
-    return;
-  }
-
-  res.json(report);
-}));
-
-app.get("/api/openclaw/agents", asyncRoute(async (_req, res) => {
-  res.json(await listOpenClawAgents());
-}));
-
-app.post("/api/openclaw/agents", asyncRoute(async (req, res) => {
-  const payload = req.body as OpenClawCreateAgentInput;
-  const agent = await createOpenClawAgent(payload);
-
-  if (!agent) {
-    res.status(500).json({ message: "failed to create OpenClaw agent" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.created",
-    resourceType: "openclaw-agent",
-    resourceId: agent.agentId,
-    summary: `创建 OpenClaw Agent ${agent.name}`,
-    detail: `model=${agent.model}`
-  });
-  res.status(201).json(agent);
-}));
-
-app.get("/api/openclaw/agents/:agentId", asyncRoute(async (req, res) => {
-  const agent = await findOpenClawAgent(String(req.params.agentId));
-
-  if (!agent) {
-    res.status(404).json({ message: "OpenClaw agent not found" });
-    return;
-  }
-
-  res.json(agent);
-}));
-
-app.put("/api/openclaw/agents/:agentId/settings", asyncRoute(async (req, res) => {
-  const agentId = String(req.params.agentId);
-  const payload = req.body as OpenClawAgentSettingsInput;
-  const agent = await updateOpenClawAgentSettings(agentId, payload);
-
-  if (!agent) {
-    res.status(404).json({ message: "OpenClaw agent not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.settings.updated",
-    resourceType: "openclaw-agent",
-    resourceId: agentId,
-    summary: `更新 OpenClaw Agent ${agent.name} 的指挥设置`,
-    detail: JSON.stringify({
-      selectedModel: payload.selectedModel,
-      defaultModel: payload.defaultModel,
-      fallbackModel: payload.fallbackModel,
-      executionMode: payload.executionMode
-    })
-  });
-  res.json(agent);
-}));
-
-app.post("/api/openclaw/agents/:agentId/preview", asyncRoute(async (req, res) => {
-  const agentId = String(req.params.agentId);
-  const payload = req.body as OpenClawInstructionPreviewInput;
-  const preview = await previewOpenClawAgentInstruction(agentId, payload);
-
-  if (!preview) {
-    res.status(404).json({ message: "OpenClaw agent not found" });
-    return;
-  }
-
-  res.json(preview);
-}));
-
-app.put("/api/openclaw/agents/:agentId/soul", asyncRoute(async (req, res) => {
-  const agentId = String(req.params.agentId);
-  const payload = req.body as OpenClawDocumentUpdateInput;
-  const content = String(payload?.content ?? "").trim();
-
-  if (!content) {
-    res.status(400).json({ message: "content is required" });
-    return;
-  }
-
-  const agent = await updateOpenClawAgentDocument(agentId, "soul", payload);
-  if (!agent) {
-    res.status(404).json({ message: "OpenClaw agent not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.soul.updated",
-    resourceType: "openclaw-agent",
-    resourceId: agentId,
-    summary: `更新 OpenClaw Agent ${agent.name} 的 SOUL`
-  });
-  res.json(agent);
-}));
-
-app.put("/api/openclaw/agents/:agentId/sop", asyncRoute(async (req, res) => {
-  const agentId = String(req.params.agentId);
-  const payload = req.body as OpenClawDocumentUpdateInput;
-  const content = String(payload?.content ?? "").trim();
-
-  if (!content) {
-    res.status(400).json({ message: "content is required" });
-    return;
-  }
-
-  const agent = await updateOpenClawAgentDocument(agentId, "sop", payload);
-  if (!agent) {
-    res.status(404).json({ message: "OpenClaw agent not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.sop.updated",
-    resourceType: "openclaw-agent",
-    resourceId: agentId,
-    summary: `更新 OpenClaw Agent ${agent.name} 的 SOP`
-  });
-  res.json(agent);
-}));
-
-app.post("/api/openclaw/agents/:agentId/message", asyncRoute(async (req, res) => {
-  const payload = req.body as OpenClawAgentMessageInput;
-  const message = String(payload?.message ?? "").trim();
-
-  if (!message) {
-    res.status(400).json({ message: "message is required" });
-    return;
-  }
-
-  const result = await sendOpenClawAgentMessage(String(req.params.agentId), { message });
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.message.sent",
-    resourceType: "openclaw-agent",
-    resourceId: String(req.params.agentId),
-    summary: `向 OpenClaw Agent ${String(req.params.agentId)} 下发指令`,
-    detail: message
-  });
-  res.json(result);
-}));
-
-app.post("/api/openclaw/agents/batch-message", asyncRoute(async (req, res) => {
-  const payload = req.body as OpenClawBatchAgentMessageInput;
-  const message = String(payload?.message ?? "").trim();
-  const agentIds = Array.isArray(payload?.agentIds) ? payload.agentIds.map((item) => String(item)) : [];
-
-  if (!message) {
-    res.status(400).json({ message: "message is required" });
-    return;
-  }
-
-  if (agentIds.length === 0) {
-    res.status(400).json({ message: "agentIds is required" });
-    return;
-  }
-
-  const result = await sendOpenClawBatchAgentMessage({ agentIds, message });
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.batch_message.sent",
-    resourceType: "openclaw-agent",
-    summary: `批量向 ${result.requestedAgentIds.length} 个 OpenClaw Agent 下发指令`,
-    detail: message
-  });
-  res.json(result);
-}));
-
-app.post("/api/openclaw/agents/:agentId/memory", asyncRoute(async (req, res) => {
-  const agentId = String(req.params.agentId);
-  const payload = req.body as OpenClawMemoryEntryInput;
-  const agent = await addOpenClawAgentMemory(agentId, payload);
-
-  if (!agent) {
-    res.status(404).json({ message: "OpenClaw agent not found" });
-    return;
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "openclaw.agent.memory.created",
-    resourceType: "openclaw-agent",
-    resourceId: agentId,
-    summary: `为 OpenClaw Agent ${agent.name} 新增长期记忆`,
-    detail: payload.summary
-  });
-  res.status(201).json(agent);
-}));
-
-app.get("/api/openclaw/sla", asyncRoute(async (_req, res) => {
-  res.json(await listOpenClawAgentSla());
-}));
-
-type OpenClawRealtimeSnapshot = {
-  timestamp: string;
-  totalAgents: number;
-  activeAgents: number;
-  attentionAgents: number;
-  offlineAgents: number;
-  totalProjects: number;
-  blockedProjects: number;
-  completedProjects: number;
-  totalTasks: number;
-  blockedTasks: number;
-  inProgressTasks: number;
-  averageProjectProgress: number;
-};
-
-function buildOpenClawRealtimeSnapshot(
-  agentList: Awaited<ReturnType<typeof listOpenClawAgents>>,
-  projectList: Awaited<ReturnType<typeof listOpenClawProjects>>
-): OpenClawRealtimeSnapshot {
-  const totalTasks = projectList.reduce((sum, project) => sum + (project.taskCount || 0), 0);
-  const blockedTasks = projectList.reduce((sum, project) => sum + (project.blockedTaskCount || 0), 0);
-  const inProgressTasks = projectList.reduce(
-    (sum, project) => sum + project.tasks.filter((task) => task.status === "in_progress").length,
-    0
-  );
-  const averageProjectProgress = projectList.length > 0
-    ? Math.round(projectList.reduce((sum, project) => sum + (project.progress || 0), 0) / projectList.length)
-    : 0;
-
-  return {
-    timestamp: new Date().toISOString(),
-    totalAgents: agentList.length,
-    activeAgents: agentList.filter((agent) => agent.status === "active").length,
-    attentionAgents: agentList.filter((agent) => agent.status === "attention").length,
-    offlineAgents: agentList.filter((agent) => agent.status === "offline").length,
-    totalProjects: projectList.length,
-    blockedProjects: projectList.filter((project) => project.status === "blocked").length,
-    completedProjects: projectList.filter((project) => project.status === "completed").length,
-    totalTasks,
-    blockedTasks,
-    inProgressTasks,
-    averageProjectProgress
-  };
-}
-
-// SSE 实时事件端点
-app.get("/api/openclaw/events", (req, res) => {
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.flushHeaders();
-
-  let closed = false;
-  let previousSnapshot: OpenClawRealtimeSnapshot | null = null;
-  let previousAgentState = new Map<string, string>();
-  let previousProjectState = new Map<string, string>();
-
-  const emit = (event: string, payload: unknown) => {
-    if (closed) {
-      return;
-    }
-    res.write(`event: ${event}\n`);
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
-  };
-
-  const emitRealtimeEvents = async () => {
-    try {
-      const [agentList, projectList] = await Promise.all([
-        listOpenClawAgents(),
-        listOpenClawProjects()
-      ]);
-
-      const snapshot = buildOpenClawRealtimeSnapshot(agentList, projectList);
-      emit("snapshot", snapshot);
-
-      const changedAgents = agentList
-        .map((agent) => ({
-          agentId: agent.agentId,
-          name: agent.name,
-          status: agent.status,
-          blockedTaskCount: agent.blockedTaskCount,
-          taskCount: agent.taskCount
-        }))
-        .filter((agent) => previousAgentState.has(agent.agentId) && previousAgentState.get(agent.agentId) !== agent.status);
-
-      if (changedAgents.length > 0) {
-        emit("agent_status", {
-          timestamp: snapshot.timestamp,
-          changedAgents
-        });
-      }
-
-      const changedProjects = projectList
-        .map((project) => ({
-          projectId: project.id,
-          name: project.name,
-          status: project.status,
-          progress: project.progress,
-          blockedTaskCount: project.blockedTaskCount
-        }))
-        .filter((project) => {
-          const previous = previousProjectState.get(project.projectId);
-          const current = `${project.status}:${project.progress}:${project.blockedTaskCount}`;
-          return Boolean(previous) && previous !== current;
-        });
-
-      if (changedProjects.length > 0) {
-        emit("project_progress", {
-          timestamp: snapshot.timestamp,
-          changedProjects
-        });
-      }
-
-      if (
-        previousSnapshot
-        && (
-          previousSnapshot.blockedTasks !== snapshot.blockedTasks
-          || previousSnapshot.inProgressTasks !== snapshot.inProgressTasks
-          || previousSnapshot.totalTasks !== snapshot.totalTasks
-        )
-      ) {
-        emit("task_update", {
-          timestamp: snapshot.timestamp,
-          totalTasks: snapshot.totalTasks,
-          blockedTasks: snapshot.blockedTasks,
-          inProgressTasks: snapshot.inProgressTasks
-        });
-      }
-
-      previousSnapshot = snapshot;
-      previousAgentState = new Map(agentList.map((agent) => [agent.agentId, agent.status]));
-      previousProjectState = new Map(
-        projectList.map((project) => [
-          project.id,
-          `${project.status}:${project.progress}:${project.blockedTaskCount}`
-        ])
-      );
-    } catch (error) {
-      emit("system", {
-        timestamp: new Date().toISOString(),
-        status: "degraded",
-        message: error instanceof Error ? error.message : "failed to load realtime openclaw state"
-      });
-    }
-  };
-
-  emit("connected", { status: "ok" });
-  void emitRealtimeEvents();
-
-  // 每 30 秒心跳
-  const heartbeat = setInterval(() => {
-    emit("heartbeat", { time: new Date().toISOString() });
-  }, 30000);
-
-  // 每 5 秒轮询并基于真实数据推送事件
-  const poller = setInterval(() => {
-    void emitRealtimeEvents();
-  }, 5000);
-
-  req.on("close", () => {
-    closed = true;
-    clearInterval(heartbeat);
-    clearInterval(poller);
-    res.end();
-  });
-});
-
-app.get("/api/projects/:id/live", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-
-  if (!project) {
-    res.status(404).end();
-    return;
-  }
-
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
-  res.setHeader("Connection", "keep-alive");
-  res.flushHeaders();
-
-  const fragments = splitScript(project.liveSession.body, 18);
-  let index = 0;
-
-  sendEvent(res, "session", {
-    title: project.liveSession.title,
-    activeRole: project.liveSession.activeRole,
-    startedAt: project.liveSession.startedAt,
-    provider: project.liveSession.provider
-  });
-
-  const interval = setInterval(async () => {
-    const currentProject = await findProject(projectId);
-
-    if (!currentProject) {
-      clearInterval(interval);
-      res.end();
-      return;
-    }
-
-    if (currentProject.status === "paused") {
-      sendEvent(res, "system", {
-        title: "项目已暂停",
-        content: "等待你的进一步指令。"
-      });
-      return;
-    }
-
-    if (index >= fragments.length) {
-      sendEvent(res, "heartbeat", { done: true, timestamp: new Date().toISOString() });
-      clearInterval(interval);
-      return;
-    }
-
-    const delta = fragments[index];
-    sendEvent(res, "agent_typing", {
-      delta,
-      activeRole: currentProject.liveSession.activeRole,
-      timestamp: new Date().toISOString()
-    });
-
-    if (index === Math.floor(fragments.length / 2)) {
-      sendEvent(res, "thinking_step", {
-        content: "Agent 已完成半程推演，正在收敛结构与结论。",
-        activeRole: currentProject.liveSession.activeRole
-      });
-    }
-
-    index += 1;
-  }, 600);
-
-  req.on("close", () => {
-    clearInterval(interval);
-    res.end();
-  });
-}));
 
 if (existsSync(webDistPath)) {
   app.use(express.static(webDistPath));
@@ -2865,6 +2269,19 @@ async function start() {
   });
 }
 
+function isDirectExecution() {
+  const entry = process.argv[1];
+  if (!entry) {
+    return false;
+  }
+
+  try {
+    return path.resolve(entry) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+}
+
 async function safeAudit(
   req: express.Request,
   res: express.Response,
@@ -2912,4 +2329,8 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
   });
 });
 
-void start();
+if (isDirectExecution()) {
+  void start();
+}
+
+export { app, start };

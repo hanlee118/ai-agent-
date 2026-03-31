@@ -266,6 +266,10 @@ export function buildStages(currentStage: StageType, pendingApproval: boolean): 
 }
 
 export function buildDeliverables(currentStage: StageType, projectId: string): Deliverable[] {
+  const order = stageOrder();
+  const currentStageIndex = order.indexOf(currentStage);
+  const hasReached = (stage: StageType) => currentStageIndex >= order.indexOf(stage);
+
   const all: Deliverable[] = [
     {
       id: randomUUID(),
@@ -280,7 +284,7 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
     }
   ];
 
-  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
+  if (hasReached("ANALYSIS")) {
     all.push({
       id: randomUUID(),
       name: "需求分析文档.md",
@@ -305,7 +309,7 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
     });
   }
 
-  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
+  if (hasReached("DESIGN")) {
     all.push({
       id: randomUUID(),
       name: "产品方案草案.md",
@@ -353,7 +357,18 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
     });
   }
 
-  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
+  if (hasReached("DEV")) {
+    all.push({
+      id: randomUUID(),
+      name: "技术方案与选型.md",
+      type: "markdown",
+      content: "# 技术方案与选型\n\n明确架构边界、关键技术选型、权衡与风险缓解策略。",
+      version: 1,
+      status: currentStage === "DEV" ? "submitted" : "approved",
+      stageType: "DEV",
+      createdBy: "ROLE_DEV",
+      updatedAt: baseDate.toISOString()
+    });
     all.push({
       id: randomUUID(),
       name: "研发任务拆解.md",
@@ -388,14 +403,14 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
     });
   }
 
-  if (["ANALYSIS", "DESIGN", "DEV", "ACCEPT"].includes(currentStage)) {
+  if (hasReached("ACCEPT")) {
     all.push({
       id: randomUUID(),
       name: "测试报告.md",
       type: "markdown",
       content: "# 测试报告\n\n主流程已走通，建议进入归档。",
       version: 1,
-      status: currentStage === "ACCEPT" ? "approved" : "draft",
+      status: "approved",
       stageType: "ACCEPT",
       createdBy: "ROLE_QA",
       updatedAt: baseDate.toISOString()
@@ -406,7 +421,7 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
       type: "markdown",
       content: "# 回填记录\n\n已校验实施结果与需求目标一致，并完成产品说明文档回填。",
       version: 1,
-      status: currentStage === "ACCEPT" ? "approved" : "draft",
+      status: "approved",
       stageType: "ACCEPT",
       createdBy: "ROLE_ASSISTANT",
       updatedAt: baseDate.toISOString()
@@ -439,7 +454,8 @@ export function buildTasks(
       { title: "输出组件与接口草案", description: "为开发阶段准备结构化输入。" }
     ],
     DEV: [
-      { title: "打通主链路", description: "完成创建、审批、返工、观测四条主链路。" },
+      { title: "输出技术方案与选型", description: "明确系统架构、技术选型、取舍理由和风险缓解策略。" },
+      { title: "打通主链路", description: "基于技术方案完成创建、审批、返工、观测四条主链路实现。" },
       { title: "实现 Demo 原型", description: "完成可演示的核心用户路径原型。" },
       { title: "补全仓储与接口", description: "让任务、交付物和时间轴全部落库。" }
     ],
@@ -540,7 +556,7 @@ export function buildStageLiveSession(input: {
     INIT: `## 项目立项\n\n- 整理需求原文\n- 生成项目编号\n- 初始化阶段与团队配置\n- 准备进入分析阶段`,
     ANALYSIS: `## 需求分析\n\n- 提炼项目目标与核心用户场景\n- 识别隐含约束与时间风险\n- 收敛 MVP 边界，避免范围失控\n- 输出需求分析文档等待审批\n\n### 当前项目\n${input.projectName}`,
     DESIGN: `## 视觉与交互设计\n\n- 绘制仪表盘与观测室信息结构\n- 明确品牌语气、视觉层级与动效规则\n- 输出设计审查卡（含可访问性清单）\n- 为开发阶段准备组件清单与接口契约\n\n### 当前聚焦\n${input.summary}`,
-    DEV: `## 开发阶段\n\n- 建立前后端目录与共享类型\n- 接入数据库和持久化仓储\n- 接入 Agent 运行抽象与实时流\n- 完成主要页面与操作链路`,
+    DEV: `## 开发阶段\n\n- 先输出技术方案与关键选型（架构、依赖、权衡、风险）\n- 建立前后端目录与共享类型\n- 接入数据库和持久化仓储\n- 接入 Agent 运行抽象与实时流\n- 完成主要页面与操作链路`,
     ACCEPT: `## 验收阶段\n\n- 校验创建、审批、干预、恢复主路径\n- 检查时间轴与交付物展示\n- 汇总结论并准备归档复盘`
   };
 

@@ -18,9 +18,17 @@
     "daemon:stop": "./scripts/daemon-stop.sh",
     "daemon:status": "./scripts/daemon-status.sh",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "gen:api-types": "node scripts/generate-api-types.mjs",
+    "gen:api-types:web": "OPENAPI_TYPES_OUT=apps/web/src/lib/api/openapi.generated.ts node scripts/generate-api-types.mjs",
+    "db:baseline": "node scripts/prisma-baseline.mjs",
+    "db:baseline:apply": "node scripts/prisma-baseline.mjs --mark-applied",
+    "health:check": "node scripts/health-check.mjs"
   },
   "dependencies": {
     "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0"
   }
 }
