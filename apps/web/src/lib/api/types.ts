@@ -5,6 +5,8 @@ export interface Model {
   apiKey?: string;
   apiBaseUrl?: string;
   status: 'Healthy' | 'Degraded' | 'Offline';
+  isRuntimeDefault?: boolean;
+  source?: 'registry' | 'runtime';
   totalTokens: number;
   dailyTokens: number;
   tokenLimit: number;
@@ -206,8 +208,11 @@ export interface SystemRuntime {
   configured?: boolean;
   provider?: string;
   modelName?: string;
+  configSource?: 'database' | 'environment' | 'default';
   version?: string;
   lastValidationStatus?: string;
+  lastValidatedAt?: string;
+  lastValidationError?: string | null;
   features?: Record<string, unknown>;
 }
 

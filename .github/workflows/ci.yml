@@ -32,6 +32,15 @@ jobs:
       - name: Sync database schema
         run: pnpm --filter @occ/api db:push
 
+      - name: DB baseline preflight
+        run: pnpm db:baseline
+
+      - name: DB migration status preflight
+        run: pnpm --filter @occ/api db:migrate:status
+
+      - name: API route tests
+        run: pnpm --filter @occ/api test:routes
+
       - name: Typecheck
         run: pnpm typecheck
 
@@ -50,6 +59,9 @@ jobs:
           echo "OCC API failed to start" >&2
           cat /tmp/occ-api.log >&2 || true
           exit 1
+
+      - name: System health preflight
+        run: pnpm health:check
 
       - name: Smoke test runtime
         run: pnpm test:smoke

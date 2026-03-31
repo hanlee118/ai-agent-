@@ -83,6 +83,48 @@ pnpm --filter @occ/api db:bootstrap
 pnpm --filter @occ/api db:seed
 ```
 
+### 数据库策略（当前建议）
+
+- 当前保持 `SQLite + Prisma`，对现阶段规模（几千级项目/任务）足够，迭代成本最低。
+- 所有业务访问统一走 `apps/api/src/db.ts` 导出的 Prisma Client，不在业务代码里散落数据库实例。
+- 查询统一走 Prisma API，避免在业务路径引入原始 SQL。
+- 现在就保留 PostgreSQL 切换能力（但不立即切换），等到并发/容量达到阈值后再迁移。
+
+PostgreSQL 迁移时建议步骤：
+
+```bash
+# 1) 更新 DATABASE_URL 为 postgresql://...
+# 2) 将 prisma/schema.prisma 的 datasource provider 从 sqlite 改为 postgresql
+pnpm --filter @occ/api db:generate
+pnpm --filter @occ/api db:migrate:deploy
+```
+
+补充：
+
+- 本仓库当前以 `db:push` 为主流程；若要正式采用迁移文件流，先在目标环境前完成一次基线迁移梳理。
+
+### 数据库基线与体检（快捷入口）
+
+在日常开发、联调与发布前，建议固定执行以下三步：
+
+```bash
+cd /tmp/ai-agent-check
+pnpm db:baseline
+pnpm --filter @occ/api db:migrate:status
+pnpm health:check
+```
+
+说明：
+
+- `pnpm db:baseline`：确保当前 Prisma schema 有可部署的基线迁移文件。
+- `pnpm --filter @occ/api db:migrate:status`：确认迁移状态为 up to date。
+- `pnpm health:check`：一键检查 DB、OpenAPI、关键路由可用性，并输出报告到 `docs/reports/`。
+
+相关文档：
+
+- [Prisma 迁移基线](docs/PRISMA_MIGRATION_BASELINE.md)
+- [PostgreSQL 切换手册](docs/POSTGRESQL_SWITCH_RUNBOOK.md)
+
 ### 3. 本地开发
 
 ```bash

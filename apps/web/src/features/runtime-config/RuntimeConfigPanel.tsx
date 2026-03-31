@@ -12,9 +12,20 @@ type RuntimeConfigPanelProps = {
   runtimeApiKeyPreview: string;
   runtimeApiKeyConfigured: boolean;
   runtimeValidationHint: string;
+  runtimeConfigUpdatedAt: string;
+  runtimeConfigSource: 'database' | 'environment' | 'default' | 'unknown';
+  registeredRuntimeModels: Array<{
+    id: string;
+    name: string;
+    provider: string;
+    isRuntimeDefault?: boolean;
+  }>;
+  selectedRegisteredModelId: string;
   onProviderChange: (value: 'scripted' | 'openai-compatible') => void;
   onApiBaseUrlChange: (value: string) => void;
   onModelNameChange: (value: string) => void;
+  onRegisteredModelChange: (modelId: string) => void;
+  onJumpToModelNexus: () => void;
   onApiKeyChange: (value: string) => void;
   onClearApiKeyChange: (value: boolean) => void;
   onReload: () => void;
@@ -33,14 +44,32 @@ export default function RuntimeConfigPanel({
   runtimeApiKeyPreview,
   runtimeApiKeyConfigured,
   runtimeValidationHint,
+  runtimeConfigUpdatedAt,
+  runtimeConfigSource,
+  registeredRuntimeModels,
+  selectedRegisteredModelId,
   onProviderChange,
   onApiBaseUrlChange,
   onModelNameChange,
+  onRegisteredModelChange,
+  onJumpToModelNexus,
   onApiKeyChange,
   onClearApiKeyChange,
   onReload,
   onValidate,
 }: RuntimeConfigPanelProps) {
+  const sourceLabel =
+    runtimeConfigSource === 'database'
+      ? '模型中心 / 后台配置'
+      : runtimeConfigSource === 'environment'
+        ? '环境变量'
+        : runtimeConfigSource === 'default'
+          ? '系统默认值'
+          : '未知';
+  const syncTimeLabel = runtimeConfigUpdatedAt
+    ? new Date(runtimeConfigUpdatedAt).toLocaleString('zh-CN')
+    : '暂无';
+
   return (
     <section className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
       <div className="px-6 py-4 border-b border-border-subtle bg-white/5 flex items-center justify-between">
@@ -58,6 +87,36 @@ export default function RuntimeConfigPanel({
       </div>
       <div className="p-6 space-y-5">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className="space-y-2 md:col-span-2">
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">模型中心已注册模型</label>
+              <button
+                type="button"
+                onClick={onJumpToModelNexus}
+                className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[10px] font-semibold text-slate-200 hover:bg-white/10"
+              >
+                跳转模型中心
+              </button>
+            </div>
+            <select
+              value={selectedRegisteredModelId}
+              onChange={(event) => onRegisteredModelChange(event.target.value)}
+              className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50 appearance-none"
+            >
+              <option value="">手动输入（不绑定模型中心）</option>
+              {registeredRuntimeModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name} · {model.provider}{model.isRuntimeDefault ? '（当前默认）' : ''}
+                </option>
+              ))}
+            </select>
+            <p className="text-[10px] text-slate-500">
+              选择后会自动回填运行模型参数，并在保存时与“模型中心默认模型”双向同步。
+            </p>
+            <p className="text-[10px] text-slate-500">
+              最后同步: {syncTimeLabel} · 同步来源: {sourceLabel}
+            </p>
+          </div>
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">运行模式</label>
             <select
