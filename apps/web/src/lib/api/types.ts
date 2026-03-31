@@ -213,6 +213,9 @@ export interface SystemRuntime {
   lastValidationStatus?: string;
   lastValidatedAt?: string;
   lastValidationError?: string | null;
+  roleSetToggles?: {
+    hrRoleEnabledByIndustry?: Record<string, boolean>;
+  };
   features?: Record<string, unknown>;
 }
 
@@ -226,6 +229,9 @@ export interface SystemRuntimeConfig {
   lastValidatedAt?: string;
   lastValidationStatus?: string;
   lastValidationError?: string | null;
+  roleSetToggles?: {
+    hrRoleEnabledByIndustry?: Record<string, boolean>;
+  };
 }
 
 export interface SystemRuntimeConfigInput {
@@ -234,6 +240,59 @@ export interface SystemRuntimeConfigInput {
   modelName?: string;
   apiKey?: string;
   clearApiKey?: boolean;
+  roleSetToggles?: {
+    hrRoleEnabledByIndustry?: Record<string, boolean>;
+  };
+}
+
+export interface RuntimeRouteHealthItem {
+  route: string;
+  source: string;
+  host: string;
+  penaltyScore: number;
+  authFailures: number;
+  transientFailures: number;
+  routeCooldownRemainingMs: number;
+  sourceDemotionRemainingMs: number;
+  updatedAt?: string;
+  status: 'healthy' | 'degraded' | 'demoted' | 'cooldown';
+}
+
+export interface RuntimeRouteHealthSnapshot {
+  generatedAt: string;
+  routeCount: number;
+  routes: RuntimeRouteHealthItem[];
+}
+
+export interface DebateCompareLogInput {
+  baselineIssueId: string;
+  compareIssueId: string;
+  label?: string;
+}
+
+export interface DebateCompareRoleDiff {
+  roleId: string;
+  roleLabel: string;
+  modelChanged: boolean;
+  focusChanged: boolean;
+  proposalChanged: boolean;
+}
+
+export interface DebateCompareLogResult {
+  label: string;
+  baselineIssueId: string;
+  compareIssueId: string;
+  roleComparison: DebateCompareRoleDiff[];
+  changedRoleCount: number;
+  roleCount: number;
+  baseline: {
+    debateStatus: string | null;
+    debateMode: string | null;
+  };
+  compare: {
+    debateStatus: string | null;
+    debateMode: string | null;
+  };
 }
 
 export interface Pagination {

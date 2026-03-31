@@ -4,6 +4,16 @@ export type IssueSourceType = 'text' | 'meeting_notes' | 'journey' | 'competitor
 export type ConflictSeverity = 'critical' | 'warning' | 'info';
 export type IssueDebateTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
 
+export interface IssueListItem {
+  id: string;
+  title: string;
+  status: 'draft' | 'confirmed' | 'cancelled';
+  industryCode?: string;
+  createdProjectId?: string;
+  updatedAt?: string;
+  debateStatus?: IssueDebateTaskStatus | string;
+}
+
 export interface IssueConflict {
   id: string;
   severity: ConflictSeverity;
@@ -138,6 +148,11 @@ export interface IssueDebatePollingResult {
 }
 
 export const issuesApi = {
+  async list(status?: 'draft' | 'confirmed' | 'cancelled') {
+    const query = status ? `?status=${encodeURIComponent(status)}` : '';
+    return request<IssueListItem[]>(`/issues${query}`);
+  },
+
   async preview(payload: {
     input: string;
     industryCode: string;

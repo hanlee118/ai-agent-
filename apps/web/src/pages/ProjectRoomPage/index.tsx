@@ -13,7 +13,6 @@ import {
 import { motion } from 'motion/react';
 import { cn } from '../../lib/utils';
 import type { ProjectStatus, Task } from '../../types';
-import { useSSE } from '../../hooks/useSSE';
 import {
   issuesApi,
   projectsApi,
@@ -40,12 +39,14 @@ import DesignReviewHistoryPanel, { type ProjectRoomDesignReviewHistoryItem } fro
 import ProjectAgentsPanel from './ProjectAgentsPanel';
 import AcceptanceReportModal from './AcceptanceReportModal';
 import DesignReviewModal, { type ProjectRoomDesignReviewForm } from './DesignReviewModal';
+import { useProjectRoomSseLogs } from './hooks/useProjectRoomSseLogs';
+import { useProjectRoomUrlState } from './hooks/useProjectRoomUrlState';
+import { useProjectRoomFinalArtifacts } from './hooks/useProjectRoomFinalArtifacts';
+import { useProjectRoomAcceptanceReportActions } from './hooks/useProjectRoomAcceptanceReportActions';
 import {
   CORE_STAGE_STATUS_LABELS,
   DELIVERABLE_STATUS_LABELS,
   DELIVERABLE_STATUS_RANK,
-  PROJECT_ROOM_PARAM_TO_TAB,
-  PROJECT_ROOM_TAB_TO_PARAM,
   STAGE_LABELS,
   STAGE_ORDER,
   formatExecutionModelLabel,
@@ -70,7 +71,6 @@ import {
   type CoreTaskStatus,
   type DeliverableStatus,
   type ProjectRoomTab,
-  type ProjectRoomTabParam,
 } from './projectRoomShared';
 
 type ProjectDetailResponse = {
@@ -157,13 +157,8 @@ const ProjectRoom = ({
   const [isDesignReviewOpen, setIsDesignReviewOpen] = useState(false);
   const [isAcceptanceReportOpen, setIsAcceptanceReportOpen] = useState(false);
   const [isLoadingAcceptanceReport, setIsLoadingAcceptanceReport] = useState(false);
-  const [isExportingAcceptanceReport, setIsExportingAcceptanceReport] = useState(false);
-  const [isArchivingAcceptanceReport, setIsArchivingAcceptanceReport] = useState(false);
   const [acceptanceReport, setAcceptanceReport] = useState<ProjectAcceptanceReport | null>(null);
-  const [finalArtifacts, setFinalArtifacts] = useState<ProjectFinalArtifactsReport | null>(null);
   const [executionRecords, setExecutionRecords] = useState<ProjectExecutionRecord[]>([]);
-  const [isLoadingFinalArtifacts, setIsLoadingFinalArtifacts] = useState(false);
-  const [isTriggeringFinalArtifacts, setIsTriggeringFinalArtifacts] = useState(false);
   const [isLoadingExecutions, setIsLoadingExecutions] = useState(false);
   const [downloadingArtifactKey, setDownloadingArtifactKey] = useState<string | null>(null);
   const [downloadingDeliverableId, setDownloadingDeliverableId] = useState<string | null>(null);
@@ -174,11 +169,6 @@ const ProjectRoom = ({
   const [isExportingSignoffMarkdown, setIsExportingSignoffMarkdown] = useState(false);
   const [isExportingSignoffCsv, setIsExportingSignoffCsv] = useState(false);
   const [isCopyingSignoffLink, setIsCopyingSignoffLink] = useState(false);
-  const [sseLogs, setSseLogs] = useState<ProjectRoomLogItem[]>([]);
-  const signoffAutoOpenKeyRef = useRef<string | null>(null);
-  const projectRoomUrlStateAppliedRef = useRef<string | null>(null);
-  const lastSnapshotDigestRef = useRef<string>('');
-  const lastConnectedLogAtRef = useRef<number>(0);
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
   const [templateGatePrecheck, setTemplateGatePrecheck] = useState<ProjectTemplateGatePrecheck | null>(null);
@@ -231,6 +221,35 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectId = projectId || project.id;
+  const { sseLogs, appendSseLog } = useProjectRoomSseLogs(effectiveProjectId);
+  const {
+    readSignoffFiltersFromUrl,
+    consumeAutoOpenAcceptanceReportSignal,
+    buildSignoffFilterShareUrl,
+  } = useProjectRoomUrlState({
+    projectId: project.id,
+    activeTab,
+    isAcceptanceReportOpen,
+    signoffStageFilter,
+    signoffDecisionFilter,
+    signoffTimeFilter,
+    signoffKeyword,
+    onApplyTabFromUrl: setActiveTab,
+  });
+  const {
+    finalArtifacts,
+    isLoadingFinalArtifacts,
+    isTriggeringFinalArtifacts,
+    finalArtifactsGeneration,
+    finalArtifactsRunning,
+    finalArtifactsGenerationText,
+    quickFinalArtifacts,
+    loadFinalArtifacts,
+    handleGenerateFinalArtifacts,
+  } = useProjectRoomFinalArtifacts({
+    effectiveProjectId,
+    addToast,
+  });
 
   const loadProjectDetail = useCallback(async () => {
     if (!effectiveProjectId) {
@@ -531,27 +550,6 @@ const ProjectRoom = ({
     return mapping;
   }, [deliverables]);
 
-  const quickFinalArtifacts = useMemo(
-    () => (finalArtifacts?.artifacts || []).slice(0, 5),
-    [finalArtifacts],
-  );
-  const finalArtifactsGeneration = finalArtifacts?.generation;
-  const finalArtifactsRunning = finalArtifactsGeneration?.status === 'queued' || finalArtifactsGeneration?.status === 'running';
-  const finalArtifactsGenerationText = useMemo(() => {
-    if (!finalArtifactsGeneration) {
-      return null;
-    }
-    const progress = Number.isFinite(finalArtifactsGeneration.progress) ? Math.max(0, Math.min(100, Math.round(finalArtifactsGeneration.progress))) : 0;
-    const step = finalArtifactsGeneration.step || '处理中';
-    if (finalArtifactsGeneration.status === 'failed') {
-      return `生成失败：${finalArtifactsGeneration.error || finalArtifactsGeneration.message || '未知错误'}`;
-    }
-    if (finalArtifactsGeneration.status === 'completed') {
-      return '最终产物已生成完成';
-    }
-    return `${step} · ${progress}%`;
-  }, [finalArtifactsGeneration]);
-
   const executionSummary = useMemo(() => {
     const total = executionRecords.length;
     const success = executionRecords.filter((item) => item.status === 'success').length;
@@ -638,126 +636,6 @@ const ProjectRoom = ({
       .toLowerCase();
     return /(design|设计|视觉|交互|页面|官网)/i.test(text);
   }, [project.phase, project.description, effectiveProjectTasks]);
-
-  useEffect(() => {
-    setSseLogs([]);
-    lastSnapshotDigestRef.current = '';
-    lastConnectedLogAtRef.current = 0;
-  }, [effectiveProjectId]);
-
-  const appendSseLog = useCallback((item: ProjectRoomLogItem) => {
-    setSseLogs((prev) => {
-      if (prev[0]?.id === item.id) {
-        return prev;
-      }
-      return [item, ...prev].slice(0, 20);
-    });
-  }, []);
-
-  const handleProjectRoomSseEvent = useCallback((event: MessageEvent) => {
-    const eventType = event.type || 'message';
-    let payload: Record<string, unknown> = {};
-    try {
-      payload = event.data ? JSON.parse(event.data) as Record<string, unknown> : {};
-    } catch {
-      payload = {};
-    }
-
-    if (eventType === 'heartbeat') {
-      return;
-    }
-
-    let actor = '系统';
-    let message = '';
-    let type: ProjectRoomLogItem['type'] = 'primary';
-    let timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-
-    if (eventType === 'connected') {
-      const now = Date.now();
-      if (now - lastConnectedLogAtRef.current < 15000) {
-        return;
-      }
-      lastConnectedLogAtRef.current = now;
-      timestamp = now;
-      message = '实时通道已连接（SSE）';
-    } else if (eventType === 'snapshot') {
-      const digest = [
-        String(payload.activeAgents ?? ''),
-        String(payload.totalProjects ?? ''),
-        String(payload.blockedTasks ?? ''),
-        String(payload.inProgressTasks ?? ''),
-      ].join(':');
-      if (digest && digest === lastSnapshotDigestRef.current) {
-        return;
-      }
-      lastSnapshotDigestRef.current = digest;
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      message = `系统快照: 活跃Agent ${payload.activeAgents ?? 0} / 项目 ${payload.totalProjects ?? 0} / 进行中任务 ${payload.inProgressTasks ?? 0} / 阻塞任务 ${payload.blockedTasks ?? 0}`;
-      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'primary';
-    } else if (eventType === 'task_update') {
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      const blocked = Number(payload.blockedTasks ?? 0);
-      const inProgress = Number(payload.inProgressTasks ?? 0);
-      const total = Number(payload.totalTasks ?? 0);
-      message = blocked > 0
-        ? `任务变化: 共 ${total} 条，进行中 ${inProgress}，阻塞 ${blocked}（需处理）`
-        : `任务变化: 共 ${total} 条，进行中 ${inProgress}，阻塞 ${blocked}`;
-      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'accent';
-    } else if (eventType === 'project_progress') {
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      const changedProjects = Array.isArray(payload.changedProjects)
-        ? payload.changedProjects as Array<{ projectId?: string; name?: string; progress?: number; blockedTaskCount?: number }>
-        : [];
-      const related = changedProjects.find((item) => item.projectId === effectiveProjectId) || changedProjects[0];
-      if (!related) {
-        return;
-      }
-      actor = related.name || '项目';
-      message = `进度更新: ${related.progress ?? 0}% · 阻塞 ${related.blockedTaskCount ?? 0}`;
-      type = Number(related.blockedTaskCount ?? 0) > 0 ? 'danger' : 'accent';
-    } else if (eventType === 'agent_status') {
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      const changedAgents = Array.isArray(payload.changedAgents)
-        ? payload.changedAgents as Array<{ name?: string; status?: string; blockedTaskCount?: number; taskCount?: number }>
-        : [];
-      if (changedAgents.length === 0) {
-        return;
-      }
-      const latest = changedAgents[0];
-      actor = latest.name || 'Agent';
-      const taskText = typeof latest.taskCount === 'number' ? ` · 任务 ${latest.taskCount}` : '';
-      const blockedText = typeof latest.blockedTaskCount === 'number' ? ` · 阻塞 ${latest.blockedTaskCount}` : '';
-      message = `状态变更为 ${latest.status || 'unknown'}${taskText}${blockedText}`;
-      type = latest.status === 'attention' || latest.status === 'offline' ? 'danger' : 'primary';
-    } else if (eventType === 'system') {
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      const status = String(payload.status || 'ok');
-      message = String(payload.message || '系统状态更新');
-      type = status === 'degraded' ? 'danger' : 'primary';
-    } else {
-      return;
-    }
-
-    appendSseLog({
-      id: `${eventType}-${timestamp}-${actor}-${message}`,
-      time: formatProjectLogTime(new Date(timestamp)),
-      actor,
-      message,
-      type,
-      timestamp,
-    });
-  }, [appendSseLog, effectiveProjectId]);
-
-  const sseEvents = useMemo(
-    () => ['connected', 'snapshot', 'task_update', 'project_progress', 'agent_status', 'system', 'heartbeat'],
-    [],
-  );
-
-  useSSE('/api/openclaw/events', {
-    withCredentials: true,
-    events: sseEvents,
-    onEvent: handleProjectRoomSseEvent,
-  });
 
   const recentLogs = useMemo(() => {
     const logs: ProjectRoomLogItem[] = [];
@@ -941,136 +819,6 @@ const ProjectRoom = ({
     });
   }, [acceptanceReport, signoffDecisionFilter, signoffKeyword, signoffStageFilter, signoffTimeFilter]);
 
-  const readSignoffFiltersFromUrl = () => {
-    if (typeof window === 'undefined') {
-      return null;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const urlProjectId = params.get('signoff_project_id') || params.get('project_id');
-    if (urlProjectId && project.id && urlProjectId !== project.id) {
-      return null;
-    }
-
-    const stage = params.get('signoff_stage') || 'all';
-    const decision = params.get('signoff_decision') || 'all';
-    const time = params.get('signoff_time') || 'all';
-    const keyword = params.get('signoff_keyword') || '';
-
-    const safeDecision = ['all', 'approved', 'rejected', 'pending'].includes(decision)
-      ? (decision as 'all' | 'approved' | 'rejected' | 'pending')
-      : 'all';
-    const safeTime = ['all', '24h', '7d', '30d'].includes(time)
-      ? (time as 'all' | '24h' | '7d' | '30d')
-      : 'all';
-
-    return {
-      stage: stage || 'all',
-      decision: safeDecision,
-      time: safeTime,
-      keyword: keyword.trim(),
-    };
-  };
-
-  const shouldAutoOpenAcceptanceReportFromUrl = () => {
-    if (typeof window === 'undefined' || !project.id) {
-      return false;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const urlProjectId = params.get('signoff_project_id') || params.get('project_id');
-    if (!urlProjectId || urlProjectId !== project.id) {
-      return false;
-    }
-
-    if (params.get('pr_modal') === 'acceptance-report') {
-      return true;
-    }
-
-    return ['signoff_stage', 'signoff_decision', 'signoff_time', 'signoff_keyword']
-      .some((key) => params.has(key));
-  };
-
-  const readProjectRoomStateFromUrl = () => {
-    if (typeof window === 'undefined') {
-      return null;
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const urlProjectId = params.get('signoff_project_id') || params.get('project_id');
-    if (urlProjectId && project.id && urlProjectId !== project.id) {
-      return null;
-    }
-
-    const tabParam = params.get('pr_tab') as ProjectRoomTabParam | null;
-    const modalParam = params.get('pr_modal');
-    const tab = tabParam && tabParam in PROJECT_ROOM_PARAM_TO_TAB
-      ? PROJECT_ROOM_PARAM_TO_TAB[tabParam]
-      : null;
-    const modal = modalParam === 'acceptance-report' ? 'acceptance-report' : null;
-
-    return { tab, modal };
-  };
-
-  const syncProjectRoomUrlState = useCallback((options?: { withSignoffFilters?: boolean; modal?: 'acceptance-report' | null }) => {
-    if (typeof window === 'undefined' || !project.id) {
-      return;
-    }
-
-    const url = new URL(window.location.href);
-    const params = url.searchParams;
-    const withFilters = Boolean(options?.withSignoffFilters);
-
-    params.set('app_tab', 'project-room');
-    params.set('project_id', project.id);
-    params.set('signoff_project_id', project.id);
-    params.set('pr_tab', PROJECT_ROOM_TAB_TO_PARAM[activeTab]);
-
-    if (options?.modal === 'acceptance-report') {
-      params.set('pr_modal', 'acceptance-report');
-    } else if (options?.modal === null) {
-      params.delete('pr_modal');
-    }
-
-    if (withFilters) {
-      params.set('signoff_stage', signoffStageFilter);
-      params.set('signoff_decision', signoffDecisionFilter);
-      params.set('signoff_time', signoffTimeFilter);
-      const keyword = signoffKeyword.trim();
-      if (keyword) {
-        params.set('signoff_keyword', keyword);
-      } else {
-        params.delete('signoff_keyword');
-      }
-    }
-
-    const nextSearch = params.toString();
-    const nextUrl = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`;
-    window.history.replaceState(window.history.state, '', nextUrl);
-  }, [activeTab, project.id, signoffDecisionFilter, signoffKeyword, signoffStageFilter, signoffTimeFilter]);
-
-  const loadFinalArtifacts = useCallback(async (options?: { silent?: boolean }) => {
-    if (!effectiveProjectId) {
-      setFinalArtifacts(null);
-      return;
-    }
-    setIsLoadingFinalArtifacts(true);
-    try {
-      const report = await projectsApi.getFinalArtifacts(effectiveProjectId);
-      setFinalArtifacts(report);
-    } catch (error) {
-      setFinalArtifacts(null);
-      if (isProjectNotFoundError(error)) {
-        return;
-      }
-      if (!options?.silent) {
-        addToast(`加载最终验收成果失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-      }
-    } finally {
-      setIsLoadingFinalArtifacts(false);
-    }
-  }, [effectiveProjectId, addToast]);
-
   const loadExecutions = useCallback(async (options?: { silent?: boolean }) => {
     if (!effectiveProjectId) {
       setExecutionRecords([]);
@@ -1104,51 +852,21 @@ const ProjectRoom = ({
   }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadTemplateGatePrecheck]);
 
   useEffect(() => {
-    void loadFinalArtifacts({ silent: true });
-  }, [loadFinalArtifacts]);
-
-  useEffect(() => {
-    if (!effectiveProjectId || !finalArtifactsRunning) {
-      return undefined;
-    }
-    const timer = window.setInterval(() => {
-      void loadFinalArtifacts({ silent: true });
-    }, 2500);
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, [effectiveProjectId, finalArtifactsGeneration?.jobId, finalArtifactsRunning, loadFinalArtifacts]);
-
-  const handleGenerateFinalArtifacts = useCallback(async (force = false) => {
-    if (!effectiveProjectId) {
-      return;
-    }
-    setIsTriggeringFinalArtifacts(true);
-    try {
-      await projectsApi.generateFinalArtifacts(effectiveProjectId, force);
-      addToast('最终验收产物生成任务已启动', 'success');
-      await loadFinalArtifacts({ silent: true });
-    } catch (error) {
-      addToast(`启动最终产物生成失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-    } finally {
-      setIsTriggeringFinalArtifacts(false);
-    }
-  }, [effectiveProjectId, addToast, loadFinalArtifacts]);
-
-  useEffect(() => {
     void loadExecutions({ silent: true });
   }, [loadExecutions]);
 
-  useEffect(() => {
-    if (!project.id) {
-      return;
-    }
-
-    syncProjectRoomUrlState({
-      withSignoffFilters: isAcceptanceReportOpen,
-      modal: isAcceptanceReportOpen ? 'acceptance-report' : null,
-    });
-  }, [activeTab, isAcceptanceReportOpen, project.id, signoffDecisionFilter, signoffKeyword, signoffStageFilter, signoffTimeFilter, syncProjectRoomUrlState]);
+  const {
+    isExportingAcceptanceReport,
+    isArchivingAcceptanceReport,
+    handleExportAcceptanceReport,
+    handleArchiveAcceptanceReport,
+  } = useProjectRoomAcceptanceReportActions({
+    projectId: project.id,
+    addToast,
+    refreshProjectView,
+    loadFinalArtifacts,
+    setAcceptanceReport,
+  });
 
   const handleOpenAcceptanceReport = async () => {
     if (!project.id) {
@@ -1182,93 +900,11 @@ const ProjectRoom = ({
     if (!project.id || isAcceptanceReportOpen) {
       return;
     }
-    const roomState = readProjectRoomStateFromUrl();
-    if (roomState?.tab) {
-      setActiveTab(roomState.tab);
-    }
-    if (!shouldAutoOpenAcceptanceReportFromUrl()) {
+    if (!consumeAutoOpenAcceptanceReportSignal()) {
       return;
     }
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    const autoOpenKey = `${project.id}|${window.location.search}`;
-    if (signoffAutoOpenKeyRef.current === autoOpenKey) {
-      return;
-    }
-
-    signoffAutoOpenKeyRef.current = autoOpenKey;
     void handleOpenAcceptanceReport();
-  }, [isAcceptanceReportOpen, project.id, signoffKeyword, signoffDecisionFilter, signoffStageFilter, signoffTimeFilter]);
-
-  useEffect(() => {
-    if (!project.id || typeof window === 'undefined') {
-      return;
-    }
-
-    const state = readProjectRoomStateFromUrl();
-    if (!state?.tab) {
-      return;
-    }
-
-    const applyKey = `${project.id}|${window.location.search}|${state.tab}`;
-    if (projectRoomUrlStateAppliedRef.current === applyKey) {
-      return;
-    }
-
-    projectRoomUrlStateAppliedRef.current = applyKey;
-    setActiveTab(state.tab);
-  }, [project.id]);
-
-  const handleExportAcceptanceReport = async () => {
-    if (!project.id) {
-      addToast('当前项目不可用，无法导出验收报告', 'error');
-      return;
-    }
-
-    setIsExportingAcceptanceReport(true);
-    try {
-      const markdown = await projectsApi.exportAcceptanceReportMarkdown(project.id);
-      const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
-      const url = window.URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = `acceptance-report-${project.id}.md`;
-      document.body.appendChild(anchor);
-      anchor.click();
-      document.body.removeChild(anchor);
-      window.URL.revokeObjectURL(url);
-      addToast('验收报告已导出', 'success');
-    } catch (error) {
-      addToast(`导出验收报告失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-    } finally {
-      setIsExportingAcceptanceReport(false);
-    }
-  };
-
-  const handleArchiveAcceptanceReport = async () => {
-    if (!project.id) {
-      addToast('当前项目不可用，无法归档验收报告', 'error');
-      return;
-    }
-
-    setIsArchivingAcceptanceReport(true);
-    try {
-      const response = await projectsApi.archiveAcceptanceReport(project.id);
-      await refreshProjectView();
-      addToast(`验收报告已归档: ${response.deliverableName}`, 'success');
-      const [report] = await Promise.all([
-        projectsApi.getAcceptanceReport(project.id),
-        loadFinalArtifacts({ silent: true }),
-      ]);
-      setAcceptanceReport(report);
-    } catch (error) {
-      addToast(`归档验收报告失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-    } finally {
-      setIsArchivingAcceptanceReport(false);
-    }
-  };
+  }, [consumeAutoOpenAcceptanceReportSignal, handleOpenAcceptanceReport, isAcceptanceReportOpen, project.id]);
 
   const handleInspectSignoffStage = (stageType?: string) => {
     if (!stageType || stageType === 'UNKNOWN') {
@@ -1541,23 +1177,11 @@ const ProjectRoom = ({
 
     setIsCopyingSignoffLink(true);
     try {
-      const url = new URL(window.location.href);
-      const params = url.searchParams;
-      params.set('app_tab', 'project-room');
-      params.set('project_id', project.id);
-      params.set('pr_tab', PROJECT_ROOM_TAB_TO_PARAM[activeTab]);
-      params.set('pr_modal', 'acceptance-report');
-      params.set('signoff_project_id', project.id);
-      params.set('signoff_stage', signoffStageFilter);
-      params.set('signoff_decision', signoffDecisionFilter);
-      params.set('signoff_time', signoffTimeFilter);
-      const keyword = signoffKeyword.trim();
-      if (keyword) {
-        params.set('signoff_keyword', keyword);
-      } else {
-        params.delete('signoff_keyword');
+      const link = buildSignoffFilterShareUrl();
+      if (!link) {
+        addToast('当前筛选链接不可用', 'error');
+        return;
       }
-      const link = url.toString();
 
       if (navigator.clipboard?.writeText) {
         await navigator.clipboard.writeText(link);

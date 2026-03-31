@@ -193,6 +193,49 @@ export type ProjectRequiredAction = {
   ctaLabel: string;
 };
 
+export type ProjectTemplateGatePrecheck = {
+  projectId: string;
+  stageType: string;
+  stageLabel: string;
+  pass: boolean;
+  generatedAt: string;
+  expectedNames: string[];
+  items: Array<{
+    expectedName: string;
+    pass: boolean;
+    reason: string;
+    matched?: {
+      id: string;
+      name: string;
+      stageType: string;
+      version: number;
+      status: string;
+      createdBy: string;
+      updatedAt: string;
+      matchScore: number;
+    };
+    gate?: {
+      templateKind: string;
+      templateLabel: string;
+      pass: boolean;
+      issues: string[];
+      missingSections: string[];
+      missingChecklist: string[];
+      hasChecklistHeading: boolean;
+      contentLength: number;
+    };
+    candidates: Array<{
+      id: string;
+      name: string;
+      stageType: string;
+      version: number;
+      status: string;
+      updatedAt: string;
+      matchScore: number;
+    }>;
+  }>;
+};
+
 export const projectsApi = {
   async list(params?: { status?: string; page?: number; limit?: number }) {
     const searchParams = new URLSearchParams();
@@ -382,6 +425,13 @@ export const projectsApi = {
     });
   },
 
+  async sendMessage(id: string, message: string) {
+    return request(`/projects/${toProjectPathId(id)}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    });
+  },
+
   async resume(id: string) {
     return request(`/projects/${toProjectPathId(id)}/resume`, {
       method: 'POST',
@@ -410,6 +460,10 @@ export const projectsApi = {
     return request(`/projects/${toProjectPathId(id)}/reconcile-deliverables`, {
       method: 'POST',
     });
+  },
+
+  async getTemplateGatePrecheck(id: string) {
+    return request<ProjectTemplateGatePrecheck>(`/projects/${toProjectPathId(id)}/template-gate-precheck`);
   },
 
   async getAutomation() {
