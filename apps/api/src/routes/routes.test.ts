@@ -3,7 +3,7 @@ import { execSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import express from "express";
 import request from "supertest";
@@ -19,9 +19,13 @@ const dbPath = path.join(tempDir, "test.db");
 process.env.NODE_ENV = "test";
 process.env.MODEL_PROVIDER = "scripted";
 process.env.DATABASE_URL = `file:${dbPath}`;
+process.env.PROJECT_AUTO_ADVANCE = "false";
+process.env.PROJECT_WARMUP = "false";
+process.env.ENABLE_API_DOCS = "false";
 
 let app: express.Express;
-let prismaClient: { $disconnect: () => Promise<void> } | undefined;
+let fullApp: express.Express;
+let prismaClient: any;
 
 after(async () => {
   if (prismaClient) {
@@ -70,6 +74,21 @@ before(async () => {
       "  \"steps\" TEXT NOT NULL,",
       "  \"updatedAt\" DATETIME NOT NULL",
       ");",
+      "PRAGMA foreign_keys = OFF;",
+      "DELETE FROM \"AuthSession\";",
+      "DELETE FROM \"ProjectExecution\";",
+      "DELETE FROM \"TimelineEvent\";",
+      "DELETE FROM \"Deliverable\";",
+      "DELETE FROM \"Stage\";",
+      "DELETE FROM \"Task\";",
+      "DELETE FROM \"Project\";",
+      "DELETE FROM \"AuditLog\";",
+      "UPDATE \"SystemConfig\"",
+      "SET \"adminPasswordHash\" = '',",
+      "    \"adminPasswordSalt\" = '',",
+      "    \"adminPasswordUpdatedAt\" = NULL,",
+      "    \"updatedAt\" = CURRENT_TIMESTAMP;",
+      "PRAGMA foreign_keys = ON;",
       "SQL"
     ].join("\n"),
     {
@@ -78,24 +97,31 @@ before(async () => {
     }
   );
 
-  const [modelsMod, agentsMod, teamMod, dbMod] = await Promise.all([
+  const [modelsMod, agentsMod, teamMod, roleSetsMod, issuesMod, dbMod, indexMod] = await Promise.all([
     import("./models.js"),
     import("./agents.js"),
     import("./team.js"),
-    import("../db.js")
+    import("./role-sets.js"),
+    import("./issues.js"),
+    import("../db.js"),
+    import("../index.js")
   ]);
 
   prismaClient = dbMod.prisma;
+  fullApp = indexMod.app;
 
   app = express();
   app.use(express.json());
   app.use("/api/models", modelsMod.createModelsRouter());
   app.use("/api/agents", agentsMod.createAgentsRouter());
   app.use("/api/team", teamMod.createTeamRouter());
+  app.use("/api/role-sets", roleSetsMod.createRoleSetsRouter());
+  app.use("/api/issues", issuesMod.createIssuesRouter());
 });
 
-describe("Routes: unified response", () => {
-  it("returns validation error with unified format", async () => {
+describe("Error Matrix: models/agents/team", () => {
+  describe("400 VALIDATION_ERROR", () => {
+    it("[400][VALIDATION_ERROR] returns unified validation format", async () => {
     const res = await request(app)
       .post("/api/models")
       .send({ provider: "OpenAI" });
@@ -104,9 +130,11 @@ describe("Routes: unified response", () => {
     assert.equal(res.body.success, false);
     assert.equal(res.body.error.code, "VALIDATION_ERROR");
     assert.match(String(res.body.error.message), /name and provider are required/i);
+    });
   });
 
-  it("supports model CRUD basic flow", async () => {
+  describe("200/201 SUCCESS", () => {
+    it("[200/201][SUCCESS] supports model CRUD basic flow", async () => {
     const createRes = await request(app)
       .post("/api/models")
       .send({
@@ -144,13 +172,19 @@ describe("Routes: unified response", () => {
     assert.equal(healthRes.body.success, true);
     assert.equal(typeof healthRes.body.data.reachable, "boolean");
 
-    const logsRes = await request(app).get(`/api/models/${modelId}/logs?type=system&limit=10`);
-    assert.equal(logsRes.status, 200);
-    assert.equal(logsRes.body.success, true);
-    assert.ok(Array.isArray(logsRes.body.data));
-  });
+      const logsRes = await request(app).get(`/api/models/${modelId}/logs?type=system&limit=10`);
+      assert.equal(logsRes.status, 200);
+      assert.equal(logsRes.body.success, true);
+      assert.ok(Array.isArray(logsRes.body.data));
 
-  it("supports agent config and team topology", async () => {
+      const setDefaultRes = await request(app).post(`/api/models/${modelId}/set-default`);
+      assert.equal(setDefaultRes.status, 200);
+      assert.equal(setDefaultRes.body.success, true);
+      assert.equal(setDefaultRes.body.data.model.id, modelId);
+      assert.equal(setDefaultRes.body.data.runtime.modelName, "GPT-4 Turbo");
+    });
+
+    it("[200/201][SUCCESS] supports agent config and team topology", async () => {
     const modelRes = await request(app)
       .post("/api/models")
       .send({
@@ -209,5 +243,463 @@ describe("Routes: unified response", () => {
     assert.equal(topologyRes.body.success, true);
     assert.ok(Array.isArray(topologyRes.body.data.nodes));
     assert.ok(Array.isArray(topologyRes.body.data.edges));
+    });
+  });
+});
+
+describe("Error Matrix: auth + projects", () => {
+  describe("400/401 AUTH", () => {
+    it("[400/401][AUTH] setup/login/logout flow with invalid + valid branches", async () => {
+    const weakRes = await request(fullApp)
+      .post("/api/auth/setup")
+      .send({ password: "short" });
+    assert.equal(weakRes.status, 400);
+
+    const password = "Aa1!occStrongPwd";
+    const setupRes = await request(fullApp)
+      .post("/api/auth/setup")
+      .send({ password });
+    assert.equal(setupRes.status, 201);
+    assert.equal(setupRes.body.setupComplete, true);
+    assert.equal(setupRes.body.authenticated, true);
+
+    const setupCookie = setupRes.headers["set-cookie"]?.[0];
+    assert.ok(setupCookie);
+
+    const statusWithCookie = await request(fullApp)
+      .get("/api/auth/status")
+      .set("Cookie", setupCookie ?? "");
+    assert.equal(statusWithCookie.status, 200);
+    assert.equal(statusWithCookie.body.setupComplete, true);
+    assert.equal(statusWithCookie.body.authenticated, true);
+
+    const missingPasswordLogin = await request(fullApp)
+      .post("/api/auth/login")
+      .send({});
+    assert.equal(missingPasswordLogin.status, 400);
+
+    const wrongPasswordLogin = await request(fullApp)
+      .post("/api/auth/login")
+      .send({ password: "wrong-password" });
+    assert.equal(wrongPasswordLogin.status, 401);
+
+    const logoutRes = await request(fullApp)
+      .post("/api/auth/logout")
+      .set("Cookie", setupCookie ?? "");
+    assert.equal(logoutRes.status, 200);
+    assert.equal(logoutRes.body.ok, true);
+
+    const validLogin = await request(fullApp)
+      .post("/api/auth/login")
+      .send({ password });
+    assert.equal(validLogin.status, 200);
+    assert.equal(validLogin.body.setupComplete, true);
+    assert.equal(validLogin.body.authenticated, true);
+    assert.ok(validLogin.headers["set-cookie"]?.[0]);
+    });
+  });
+
+  describe("400/404 PROJECTS", () => {
+    it("[400/404][PROJECTS] create/list/get/delete flow with validation + not-found", async () => {
+    const invalidCreate = await request(fullApp)
+      .post("/api/projects")
+      .send({ name: "无描述项目" });
+    assert.equal(invalidCreate.status, 400);
+    assert.match(String(invalidCreate.body.message), /description is required/i);
+
+    const createRes = await request(fullApp)
+      .post("/api/projects")
+      .send({
+        name: "测试项目-跨境监控",
+        description: "构建跨境选品监控与跟品系统，覆盖 TikTok 与亚马逊。",
+        team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DEV", "ROLE_QA"]
+      });
+
+    assert.equal(createRes.status, 201);
+    assert.ok(createRes.body.id);
+    const projectId = String(createRes.body.id);
+
+    const listRes = await request(fullApp).get("/api/projects");
+    assert.equal(listRes.status, 200);
+    assert.ok(Array.isArray(listRes.body));
+    assert.ok(listRes.body.some((item: { id: string }) => item.id === projectId));
+
+    const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+    assert.equal(detailRes.status, 200);
+    assert.equal(detailRes.body.id, projectId);
+    assert.equal(typeof detailRes.body.requiredActions?.length, "number");
+
+    const deleteRes = await request(fullApp).delete(`/api/projects/${projectId}`);
+    assert.equal(deleteRes.status, 200);
+    assert.equal(deleteRes.body.success, true);
+    assert.equal(deleteRes.body.id, projectId);
+
+    const notFoundRes = await request(fullApp).get(`/api/projects/${projectId}`);
+    assert.equal(notFoundRes.status, 404);
+    });
+  });
+
+  describe("400/404/409 PROJECT_ACTIONS", () => {
+    it("[400/404/409][PROJECT_ACTIONS] approve/reject/intervene/advance error branches", async () => {
+    const createRes = await request(fullApp)
+      .post("/api/projects")
+      .send({
+        name: "测试项目-分支异常覆盖",
+        description: "用于覆盖项目动作分支异常的测试项目。",
+        team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DEV"]
+      });
+
+    assert.equal(createRes.status, 201);
+    const projectId = String(createRes.body.id);
+
+    const advanceMissing = await request(fullApp).post("/api/projects/not-found-project/advance");
+    assert.equal(advanceMissing.status, 404);
+
+    const approveNoPending = await request(fullApp).post(`/api/projects/${projectId}/approve`);
+    assert.equal(approveNoPending.status, 409);
+    assert.equal(approveNoPending.body.success, false);
+    assert.equal(approveNoPending.body.error.code, "NO_PENDING_APPROVAL");
+
+    const rejectNoPending = await request(fullApp)
+      .post(`/api/projects/${projectId}/reject`)
+      .send({ reason: "无待审批时应返回冲突" });
+    assert.equal(rejectNoPending.status, 409);
+    assert.equal(rejectNoPending.body.success, false);
+    assert.equal(rejectNoPending.body.error.code, "NO_PENDING_APPROVAL");
+
+    const interveneMissingCommand = await request(fullApp)
+      .post(`/api/projects/${projectId}/intervene`)
+      .send({});
+    assert.equal(interveneMissingCommand.status, 400);
+    assert.match(String(interveneMissingCommand.body.message), /command is required/i);
+
+    const interveneMissingProject = await request(fullApp)
+      .post("/api/projects/not-found-project/intervene")
+      .send({ command: "resume now" });
+    assert.equal(interveneMissingProject.status, 404);
+
+    await prismaClient.project.update({
+      where: { id: projectId },
+      data: { pendingApproval: true }
+    });
+
+    const rejectMissingReason = await request(fullApp)
+      .post(`/api/projects/${projectId}/reject`)
+      .send({});
+    assert.equal(rejectMissingReason.status, 400);
+    assert.match(String(rejectMissingReason.body.message), /reason is required/i);
+
+    const advancePendingApproval = await request(fullApp)
+      .post(`/api/projects/${projectId}/advance`);
+    assert.equal(advancePendingApproval.status, 409);
+    assert.equal(advancePendingApproval.body.success, false);
+    assert.equal(advancePendingApproval.body.error.code, "REQUIRES_USER_INTERVENTION");
+
+    await prismaClient.project.update({
+      where: { id: projectId },
+      data: { pendingApproval: false, status: "paused" }
+    });
+
+    const advancePaused = await request(fullApp)
+      .post(`/api/projects/${projectId}/advance`);
+    assert.equal(advancePaused.status, 409);
+    assert.match(String(advancePaused.body.message), /not active/i);
+    });
+  });
+
+  describe("404/422 PROJECT_ACTIONS", () => {
+    it("[404/422][PROJECT_ACTIONS] deeper branches with real-model gate failure", async () => {
+    const createRes = await request(fullApp)
+      .post("/api/projects")
+      .send({
+        name: "测试项目-动作分支深化",
+        description: "用于覆盖 approve/reject/intervene 深化分支。",
+        team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DEV"]
+      });
+    assert.equal(createRes.status, 201);
+    const projectId = String(createRes.body.id);
+
+    const approveMissing = await request(fullApp).post("/api/projects/not-exists/approve");
+    assert.equal(approveMissing.status, 404);
+
+    const rejectMissing = await request(fullApp)
+      .post("/api/projects/not-exists/reject")
+      .send({ reason: "missing project" });
+    assert.equal(rejectMissing.status, 404);
+
+    await prismaClient.project.update({
+      where: { id: projectId },
+      data: { pendingApproval: true }
+    });
+
+    const oldGateValue = process.env.ENFORCE_REAL_MODEL_GATE;
+    process.env.ENFORCE_REAL_MODEL_GATE = "true";
+    const approveGateFail = await request(fullApp).post(`/api/projects/${projectId}/approve`);
+    assert.equal(approveGateFail.status, 422);
+    assert.equal(approveGateFail.body.success, false);
+    assert.equal(approveGateFail.body.error.code, "REAL_MODEL_GATE_FAILED");
+    if (oldGateValue === undefined) {
+      delete process.env.ENFORCE_REAL_MODEL_GATE;
+    } else {
+      process.env.ENFORCE_REAL_MODEL_GATE = oldGateValue;
+    }
+
+    const rejectSuccess = await request(fullApp)
+      .post(`/api/projects/${projectId}/reject`)
+      .send({ reason: "人工确认退回补充材料" });
+    assert.equal(rejectSuccess.status, 200);
+    assert.equal(rejectSuccess.body.pendingApproval, false);
+
+    const interveneSuccess = await request(fullApp)
+      .post(`/api/projects/${projectId}/intervene`)
+      .send({ command: "暂停执行，等待产品补充输入" });
+    assert.equal(interveneSuccess.status, 200);
+    assert.equal(interveneSuccess.body.id, projectId);
+    });
+  });
+});
+
+describe("Error Matrix: issues + role-sets", () => {
+  describe("200 SUCCESS", () => {
+    it("[200][SUCCESS] returns dynamic role sets", async () => {
+    const listRes = await request(app).get("/api/role-sets");
+    assert.equal(listRes.status, 200);
+    assert.equal(listRes.body.success, true);
+    assert.ok(Array.isArray(listRes.body.data));
+    assert.ok(listRes.body.data.length > 0);
+
+    const detailRes = await request(app).get("/api/role-sets/ecommerce");
+    assert.equal(detailRes.status, 200);
+    assert.equal(detailRes.body.success, true);
+    assert.equal(detailRes.body.data.roleSet.industryCode, "ecommerce");
+    });
+  });
+
+  describe("400 VALIDATION_ERROR", () => {
+    it("[400][VALIDATION_ERROR] issue preview + confirm required-boundary", async () => {
+    const missingInput = await request(app)
+      .post("/api/issues/preview")
+      .send({});
+    assert.equal(missingInput.status, 400);
+    assert.equal(missingInput.body.success, false);
+    assert.equal(missingInput.body.error.code, "VALIDATION_ERROR");
+
+    const previewRes = await request(app)
+      .post("/api/issues/preview")
+      .send({
+        input: "帮我搭建一个跨境电商爆品监控系统，当某个商品在 TikTok 或亚马逊流量暴涨时自动预警并给出跟品链接。",
+        industryCode: "ecommerce",
+        sourceType: "meeting_notes",
+        debateMode: "off"
+      });
+
+    assert.equal(previewRes.status, 200);
+    assert.equal(previewRes.body.success, true);
+    assert.ok(previewRes.body.data.issueId);
+    assert.ok(Array.isArray(previewRes.body.data.questions));
+
+    const issueId = String(previewRes.body.data.issueId);
+    const missingRequiredConfirm = await request(app)
+      .post(`/api/issues/${issueId}/confirm`)
+      .send({
+        clarificationAnswers: {}
+      });
+    assert.equal(missingRequiredConfirm.status, 400);
+    assert.equal(missingRequiredConfirm.body.success, false);
+    assert.equal(missingRequiredConfirm.body.error.code, "VALIDATION_ERROR");
+
+    const requiredQuestions = (previewRes.body.data.questions as Array<{ id: string; required?: boolean }>)
+      .filter((item) => item.required)
+      .map((item) => item.id);
+    const clarificationAnswers = requiredQuestions.reduce<Record<string, string>>((acc, id) => {
+      acc[id] = `回答-${id}`;
+      return acc;
+    }, {});
+
+    const confirmRes = await request(app)
+      .post(`/api/issues/${issueId}/confirm`)
+      .send({
+        clarificationAnswers,
+        finalName: "跨境电商爆品跟品机器人",
+        finalDescription: "基于 TikTok/亚马逊热点波动实现爆品监控与跟品。",
+        conflictResolution: "以当前 issue 场景为准，覆盖长期记忆中的冲突项。"
+      });
+
+    assert.equal(confirmRes.status, 200);
+    assert.equal(confirmRes.body.success, true);
+    assert.ok(confirmRes.body.data.issue);
+    assert.ok(confirmRes.body.data.project);
+    assert.equal(confirmRes.body.data.issue.status, "confirmed");
+    });
+  });
+
+  describe("400/404 CONFLICT_GUARD", () => {
+    it("[400/404][CONFLICT_GUARD] issue conflict and missing issue cases", async () => {
+    const previewSceneMiss = await request(app)
+      .post("/api/issues/preview")
+      .send({
+        input: "帮我做公司内部 OA 报销系统，并优化部门审批流。",
+        industryCode: "ecommerce",
+        sourceType: "text",
+        debateMode: "off"
+      });
+
+    assert.equal(previewSceneMiss.status, 200);
+    const sceneMissIssueId = String(previewSceneMiss.body.data.issueId);
+    const conflicts = previewSceneMiss.body.data.conflicts as Array<{ id: string }>;
+    assert.ok(conflicts.some((item) => item.id === "crossborder-scene-not-hit"));
+
+    const requiredQuestions = (previewSceneMiss.body.data.questions as Array<{ id: string; required?: boolean }>)
+      .filter((item) => item.required)
+      .map((item) => item.id);
+    const fullAnswers = requiredQuestions.reduce<Record<string, string>>((acc, id) => {
+      acc[id] = `回答-${id}`;
+      return acc;
+    }, {});
+
+    const confirmSceneMiss = await request(app)
+      .post(`/api/issues/${sceneMissIssueId}/confirm`)
+      .send({
+        clarificationAnswers: fullAnswers,
+        conflictResolution: "先按输入需求继续"
+      });
+    assert.equal(confirmSceneMiss.status, 400);
+    assert.equal(confirmSceneMiss.body.success, false);
+    assert.match(String(confirmSceneMiss.body.error.message), /场景命中校验未通过/);
+
+    const confirmMissingIssue = await request(app)
+      .post("/api/issues/not-exists/confirm")
+      .send({ clarificationAnswers: {} });
+    assert.equal(confirmMissingIssue.status, 404);
+    assert.equal(confirmMissingIssue.body.success, false);
+    assert.equal(confirmMissingIssue.body.error.code, "NOT_FOUND");
+    });
+  });
+});
+
+type GitLabRouterEnv = {
+  token?: string;
+  secret?: string;
+  baseUrl?: string;
+  defaultProject?: string;
+};
+
+async function createGitLabRouterTestApp(
+  env: GitLabRouterEnv,
+  fetchMock?: typeof fetch
+) {
+  const previousEnv = {
+    GITLAB_TOKEN: process.env.GITLAB_TOKEN,
+    GITLAB_WEBHOOK_SECRET: process.env.GITLAB_WEBHOOK_SECRET,
+    GITLAB_BASE_URL: process.env.GITLAB_BASE_URL,
+    GITLAB_DEFAULT_PROJECT: process.env.GITLAB_DEFAULT_PROJECT
+  };
+  const previousFetch = globalThis.fetch;
+
+  process.env.GITLAB_TOKEN = env.token ?? "";
+  process.env.GITLAB_WEBHOOK_SECRET = env.secret ?? "";
+  process.env.GITLAB_BASE_URL = env.baseUrl ?? "https://gitlab.example.com";
+  process.env.GITLAB_DEFAULT_PROJECT = env.defaultProject ?? "group/repo";
+
+  if (fetchMock) {
+    globalThis.fetch = fetchMock;
+  }
+
+  const gitlabModuleUrl = new URL(
+    `${pathToFileURL(path.join(__dirname, "gitlab.js")).href}?t=${Date.now()}-${Math.random()}`,
+  );
+  const { createGitLabRouter } = await import(gitlabModuleUrl.href);
+
+  const gitlabApp = express();
+  gitlabApp.use(express.json());
+  gitlabApp.use("/api/gitlab", createGitLabRouter());
+
+  const restore = () => {
+    process.env.GITLAB_TOKEN = previousEnv.GITLAB_TOKEN;
+    process.env.GITLAB_WEBHOOK_SECRET = previousEnv.GITLAB_WEBHOOK_SECRET;
+    process.env.GITLAB_BASE_URL = previousEnv.GITLAB_BASE_URL;
+    process.env.GITLAB_DEFAULT_PROJECT = previousEnv.GITLAB_DEFAULT_PROJECT;
+    globalThis.fetch = previousFetch;
+  };
+
+  return { gitlabApp, restore };
+}
+
+describe("Error Matrix: gitlab routes", () => {
+  it("[503][SERVICE_UNAVAILABLE] returns unified error when GITLAB_TOKEN is missing", async () => {
+    const { gitlabApp, restore } = await createGitLabRouterTestApp({
+      token: ""
+    });
+    try {
+      const res = await request(gitlabApp).get("/api/gitlab/projects/group%2Frepo/issues?state=opened");
+      assert.equal(res.status, 503);
+      assert.equal(res.body.success, false);
+      assert.equal(res.body.error.code, "SERVICE_UNAVAILABLE");
+    } finally {
+      restore();
+    }
+  });
+
+  it("[401][FORBIDDEN] maps upstream 401 to unified FORBIDDEN error", async () => {
+    const fetch401: typeof fetch = async () =>
+      new Response(JSON.stringify({ message: "unauthorized" }), {
+        status: 401,
+        headers: { "content-type": "application/json" }
+      });
+
+    const { gitlabApp, restore } = await createGitLabRouterTestApp(
+      { token: "test-token" },
+      fetch401
+    );
+    try {
+      const res = await request(gitlabApp).get("/api/gitlab/projects/group%2Frepo/issues?state=opened");
+      assert.equal(res.status, 401);
+      assert.equal(res.body.success, false);
+      assert.equal(res.body.error.code, "FORBIDDEN");
+      assert.match(String(res.body.error.message), /GitLab API error/i);
+    } finally {
+      restore();
+    }
+  });
+
+  it("[403][FORBIDDEN] rejects webhook when secret is configured but token mismatched", async () => {
+    const { gitlabApp, restore } = await createGitLabRouterTestApp({
+      secret: "abc"
+    });
+    try {
+      const res = await request(gitlabApp)
+        .post("/api/gitlab/webhook")
+        .set("X-Gitlab-Event", "Issue Hook")
+        .send({
+          object_attributes: { iid: 1, state: "opened", title: "demo" },
+          project: { path_with_namespace: "group/repo" }
+        });
+      assert.equal(res.status, 403);
+      assert.equal(res.body.success, false);
+      assert.equal(res.body.error.code, "FORBIDDEN");
+    } finally {
+      restore();
+    }
+  });
+
+  it("[200][SUCCESS] accepts webhook when secret matches", async () => {
+    const { gitlabApp, restore } = await createGitLabRouterTestApp({
+      secret: "abc"
+    });
+    try {
+      const res = await request(gitlabApp)
+        .post("/api/gitlab/webhook")
+        .set("X-Gitlab-Event", "Issue Hook")
+        .set("X-Gitlab-Token", "abc")
+        .send({
+          object_attributes: { iid: 2, state: "opened", title: "demo-ok" },
+          project: { path_with_namespace: "group/repo" }
+        });
+      assert.equal(res.status, 200);
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.data.ok, true);
+    } finally {
+      restore();
+    }
   });
 });
