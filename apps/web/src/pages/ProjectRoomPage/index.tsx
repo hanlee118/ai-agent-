@@ -15,12 +15,16 @@ import { cn } from '../../lib/utils';
 import type { ProjectStatus, Task } from '../../types';
 import { useSSE } from '../../hooks/useSSE';
 import {
+  issuesApi,
   projectsApi,
+  systemApi,
   ApiRequestError,
+  type IssueListItem,
   type ProjectAcceptanceReport,
   type ProjectExecutionRecord,
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
+  type ProjectTemplateGatePrecheck,
 } from '../../lib/api';
 import { agents, projects, tasks } from '../../lib/runtimeCollections';
 import SurfaceModal from '../impl/SurfaceModal';
@@ -36,12 +40,38 @@ import DesignReviewHistoryPanel, { type ProjectRoomDesignReviewHistoryItem } fro
 import ProjectAgentsPanel from './ProjectAgentsPanel';
 import AcceptanceReportModal from './AcceptanceReportModal';
 import DesignReviewModal, { type ProjectRoomDesignReviewForm } from './DesignReviewModal';
-
-type ProjectRoomTab = '任务' | '阶段' | '交付物' | '时间线';
-type ProjectRoomTabParam = 'tasks' | 'stages' | 'deliverables' | 'timeline';
-type CoreStageStatus = 'pending' | 'active' | 'completed' | 'blocked' | 'rejected';
-type CoreTaskStatus = 'todo' | 'in_progress' | 'blocked' | 'done';
-type DeliverableStatus = 'draft' | 'submitted' | 'approved' | 'rejected';
+import {
+  CORE_STAGE_STATUS_LABELS,
+  DELIVERABLE_STATUS_LABELS,
+  DELIVERABLE_STATUS_RANK,
+  PROJECT_ROOM_PARAM_TO_TAB,
+  PROJECT_ROOM_TAB_TO_PARAM,
+  STAGE_LABELS,
+  STAGE_ORDER,
+  formatExecutionModelLabel,
+  formatIssueUpdatedAbsolute,
+  formatIssueUpdatedRelative,
+  formatProjectLogTime,
+  getStageApprovalBlockReason,
+  getTaskTimestamp,
+  isDesignLikeText,
+  isProjectNotFoundError,
+  normalizeDeliverableNameKey,
+  roleLabel,
+  statusVariantByDeliverable,
+  statusVariantByStage,
+  summarizeText,
+  toDeliverableTimestamp,
+  toDeliverableVersion,
+  toLogTimestamp,
+  toTaskProgress,
+  toTaskStatus,
+  type CoreStageStatus,
+  type CoreTaskStatus,
+  type DeliverableStatus,
+  type ProjectRoomTab,
+  type ProjectRoomTabParam,
+} from './projectRoomShared';
 
 type ProjectDetailResponse = {
   id: string;
@@ -105,123 +135,6 @@ type ProjectRoomLogItem = {
   timestamp: number;
 };
 
-const ROLE_LABELS: Record<string, string> = {
-  ROLE_ASSISTANT: '总助理',
-  ROLE_PM: '项目经理',
-  ROLE_ANALYST: '需求分析师',
-  ROLE_PRODUCT: '产品总监',
-  ROLE_DESIGN: '视觉设计总监',
-  ROLE_ARCH: '研发总监',
-  ROLE_DEV: '研发经理',
-  ROLE_QA: '测试工程师',
-  ROLE_HR: 'HR总监',
-};
-
-const STAGE_LABELS: Record<string, string> = {
-  INIT: '立项',
-  ANALYSIS: '分析',
-  DESIGN: '设计',
-  DEV: '开发',
-  ACCEPT: '验收',
-};
-
-const STAGE_ORDER = ['INIT', 'ANALYSIS', 'DESIGN', 'DEV', 'ACCEPT'];
-const PROJECT_ROOM_TAB_TO_PARAM: Record<ProjectRoomTab, ProjectRoomTabParam> = {
-  任务: 'tasks',
-  阶段: 'stages',
-  交付物: 'deliverables',
-  时间线: 'timeline',
-};
-const PROJECT_ROOM_PARAM_TO_TAB: Record<ProjectRoomTabParam, ProjectRoomTab> = {
-  tasks: '任务',
-  stages: '阶段',
-  deliverables: '交付物',
-  timeline: '时间线',
-};
-
-const CORE_STAGE_STATUS_LABELS: Record<CoreStageStatus, string> = {
-  pending: '待开始',
-  active: '进行中',
-  completed: '已完成',
-  blocked: '阻塞',
-  rejected: '已驳回',
-};
-
-const DELIVERABLE_STATUS_LABELS: Record<DeliverableStatus, string> = {
-  draft: '草稿',
-  submitted: '已提交',
-  approved: '已通过',
-  rejected: '已驳回',
-};
-
-const DELIVERABLE_STATUS_RANK: Record<DeliverableStatus, number> = {
-  approved: 4,
-  submitted: 3,
-  rejected: 2,
-  draft: 1,
-};
-
-const normalizeDeliverableNameKey = (name: string) =>
-  String(name || '')
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, '')
-    .replace(/(?:[._-]v?\d+)(?:\.md|\.markdown|\.txt|\.pdf|\.docx?)?$/i, '')
-    .replace(/\.(md|markdown|txt|pdf|docx?)$/i, '');
-
-const toDeliverableVersion = (value?: number) => (Number.isFinite(value) ? Number(value) : 0);
-
-const toDeliverableTimestamp = (value?: string) => {
-  const time = new Date(String(value || '')).getTime();
-  return Number.isFinite(time) ? time : 0;
-};
-
-const toTaskStatus = (status: CoreTaskStatus): Task['status'] => {
-  switch (status) {
-    case 'done':
-      return 'Completed';
-    case 'in_progress':
-      return 'In Progress';
-    case 'blocked':
-      return 'Blocked';
-    case 'todo':
-    default:
-      return 'Pending';
-  }
-};
-
-const toTaskProgress = (status: CoreTaskStatus) => {
-  switch (status) {
-    case 'done':
-      return 100;
-    case 'in_progress':
-      return 60;
-    case 'blocked':
-      return 35;
-    case 'todo':
-    default:
-      return 0;
-  }
-};
-
-const roleLabel = (roleId?: string) => ROLE_LABELS[String(roleId || '')] || roleId || '系统';
-const isProjectNotFoundError = (error: unknown) =>
-  /project not found/i.test(error instanceof Error ? error.message : String(error ?? ''));
-
-const statusVariantByStage = (status: CoreStageStatus) => {
-  if (status === 'completed') return 'primary';
-  if (status === 'active') return 'accent';
-  if (status === 'blocked' || status === 'rejected') return 'danger';
-  return 'default';
-};
-
-const statusVariantByDeliverable = (status: DeliverableStatus) => {
-  if (status === 'approved') return 'primary';
-  if (status === 'submitted') return 'accent';
-  if (status === 'rejected') return 'danger';
-  return 'default';
-};
-
 const ProjectRoom = ({
   projectId,
   addToast,
@@ -268,6 +181,9 @@ const ProjectRoom = ({
   const lastConnectedLogAtRef = useRef<number>(0);
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
+  const [templateGatePrecheck, setTemplateGatePrecheck] = useState<ProjectTemplateGatePrecheck | null>(null);
+  const [isLoadingTemplateGatePrecheck, setIsLoadingTemplateGatePrecheck] = useState(false);
+  const [isRegeneratingTemplateGate, setIsRegeneratingTemplateGate] = useState(false);
   const [designReviewHistory, setDesignReviewHistory] = useState<ProjectRoomDesignReviewHistoryItem[]>([]);
   const [designReviewForm, setDesignReviewForm] = useState<ProjectRoomDesignReviewForm>({
     visualDirection: '',
@@ -280,6 +196,11 @@ const ProjectRoom = ({
     notes: '',
     approved: true,
   });
+  const [relatedIssues, setRelatedIssues] = useState<IssueListItem[]>([]);
+  const [isWritingDebateCompareAudit, setIsWritingDebateCompareAudit] = useState(false);
+  const [isDebateCompareModalOpen, setIsDebateCompareModalOpen] = useState(false);
+  const [debateBaselineIssueId, setDebateBaselineIssueId] = useState('');
+  const [debateCompareIssueId, setDebateCompareIssueId] = useState('');
   const missingProjectHandledRef = useRef<string | null>(null);
   const addToastRef = useRef(addToast);
   const onProjectMissingRef = useRef(onProjectMissing);
@@ -314,6 +235,7 @@ const ProjectRoom = ({
   const loadProjectDetail = useCallback(async () => {
     if (!effectiveProjectId) {
       setDetail(null);
+      setTemplateGatePrecheck(null);
       return;
     }
     setLoadingDetail(true);
@@ -347,9 +269,70 @@ const ProjectRoom = ({
     }
   }, [effectiveProjectId]);
 
+  const loadTemplateGatePrecheck = useCallback(async (options?: { silent?: boolean }) => {
+    if (!effectiveProjectId || !detail?.pendingApproval) {
+      setTemplateGatePrecheck(null);
+      return;
+    }
+    setIsLoadingTemplateGatePrecheck(true);
+    try {
+      const next = await projectsApi.getTemplateGatePrecheck(effectiveProjectId);
+      setTemplateGatePrecheck(next);
+    } catch (error) {
+      setTemplateGatePrecheck(null);
+      if (!options?.silent && !isProjectNotFoundError(error)) {
+        addToast(`加载模板门禁预检失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      setIsLoadingTemplateGatePrecheck(false);
+    }
+  }, [addToast, detail?.pendingApproval, effectiveProjectId]);
+
   useEffect(() => {
     void loadProjectDetail();
   }, [loadProjectDetail]);
+
+  useEffect(() => {
+    void loadTemplateGatePrecheck({ silent: true });
+  }, [detail?.pendingApproval, detail?.currentStage, loadTemplateGatePrecheck]);
+
+  useEffect(() => {
+    if (!project.id) {
+      setRelatedIssues([]);
+      return;
+    }
+
+    let canceled = false;
+    const loadIssues = async () => {
+      try {
+        const allIssues = await issuesApi.list();
+        if (canceled) {
+          return;
+        }
+        const withDebate = allIssues.filter((item) => String(item.debateStatus || '').toLowerCase() === 'completed');
+        const pool = withDebate.length > 0 ? withDebate : allIssues;
+        const linked = pool.filter((item) => item.createdProjectId === project.id);
+        const candidates = (linked.length > 0 ? linked : pool)
+          .slice()
+          .sort((left, right) => {
+            const leftTs = new Date(left.updatedAt || 0).getTime();
+            const rightTs = new Date(right.updatedAt || 0).getTime();
+            return rightTs - leftTs;
+          })
+          .slice(0, 20);
+        setRelatedIssues(candidates);
+      } catch {
+        if (!canceled) {
+          setRelatedIssues([]);
+        }
+      }
+    };
+
+    void loadIssues();
+    return () => {
+      canceled = true;
+    };
+  }, [project.id]);
 
   const fallbackTasks = useMemo(
     () =>
@@ -598,17 +581,6 @@ const ProjectRoom = ({
     return mapping;
   }, [executionRecords]);
 
-  const formatExecutionModelLabel = (record?: ProjectExecutionRecord | null) => {
-    if (!record) {
-      return '未知模型';
-    }
-    const model = String(record.model || '').trim() || 'n/a';
-    const provider = String(record.provider || record.runtimeMode || '').trim() || 'unknown';
-    return `${model} (${provider})`;
-  };
-
-  const isDesignLikeText = (text: string) => /(design|设计|视觉|交互|官网|landing|ui|ux)/i.test(String(text || '').toLowerCase());
-
   const getStageModelLabel = (stageType?: string) => {
     if (!stageType) {
       return '未知模型';
@@ -643,6 +615,17 @@ const ProjectRoom = ({
     交付物: deliverables.length,
     时间线: timelineEvents.length,
   }), [effectiveProjectTasks.length, stageItems.length, deliverables.length, timelineEvents.length]);
+  const debateIssueOptions = useMemo(
+    () =>
+      relatedIssues.map((item) => ({
+        id: item.id,
+        title: item.title || item.id,
+        relativeUpdatedAt: formatIssueUpdatedRelative(item.updatedAt),
+        absoluteUpdatedAt: formatIssueUpdatedAbsolute(item.updatedAt),
+        label: `${item.title || item.id} (${item.id.slice(0, 8)}) · ${formatIssueUpdatedRelative(item.updatedAt)}`,
+      })),
+    [relatedIssues],
+  );
 
   const requiredActions = useMemo<ProjectRequiredAction[]>(
     () => (Array.isArray(detail?.requiredActions) ? detail.requiredActions : []),
@@ -655,40 +638,6 @@ const ProjectRoom = ({
       .toLowerCase();
     return /(design|设计|视觉|交互|页面|官网)/i.test(text);
   }, [project.phase, project.description, effectiveProjectTasks]);
-
-  const getTaskTimestamp = (task: Task) => {
-    const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
-    const rawDate = taskRecord.updatedAt || taskRecord.createdAt || new Date().toISOString();
-    const date = new Date(rawDate);
-    return Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
-  };
-
-  const formatProjectLogTime = (date: string | Date | null | undefined) => {
-    if (!date) {
-      return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    }
-    const normalized = new Date(date);
-    if (Number.isNaN(normalized.getTime())) {
-      return new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    }
-    return normalized.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  };
-
-  const toLogTimestamp = (raw: string | Date | number | null | undefined) => {
-    if (!raw && raw !== 0) {
-      return Date.now();
-    }
-    const date = new Date(raw);
-    return Number.isNaN(date.getTime()) ? Date.now() : date.getTime();
-  };
-
-  const summarizeText = (text: string, max = 66) => {
-    const normalized = String(text || '').trim().replace(/\s+/g, ' ');
-    if (normalized.length <= max) {
-      return normalized;
-    }
-    return `${normalized.slice(0, max)}...`;
-  };
 
   useEffect(() => {
     setSseLogs([]);
@@ -895,6 +844,13 @@ const ProjectRoom = ({
   const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
+  const currentStageExecution = currentStageType ? (latestExecutionByStage.get(currentStageType) || null) : null;
+  const stageApprovalBlockedReason = useMemo(() => {
+    if (!detail?.pendingApproval) {
+      return null;
+    }
+    return getStageApprovalBlockReason(currentStageExecution);
+  }, [detail?.pendingApproval, currentStageExecution]);
   const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
   const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
 
@@ -1143,8 +1099,9 @@ const ProjectRoom = ({
       loadProjectDetail(),
       loadFinalArtifacts(),
       loadExecutions({ silent: true }),
+      loadTemplateGatePrecheck({ silent: true }),
     ]);
-  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail]);
+  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadTemplateGatePrecheck]);
 
   useEffect(() => {
     void loadFinalArtifacts({ silent: true });
@@ -1641,9 +1598,83 @@ const ProjectRoom = ({
     }
   };
 
+  const handleOpenDebateCompareModal = () => {
+    if (!project.id) {
+      addToast('当前项目不可用，无法写入辩论对比审计', 'error');
+      return;
+    }
+    if (relatedIssues.length < 2) {
+      addToast('可用于对比的 Issue 不足 2 条，请先创建并完成至少两个 Issue 辩论', 'info');
+      return;
+    }
+
+    const latest = relatedIssues[0];
+    const previous = relatedIssues[1] || relatedIssues[0];
+    setDebateBaselineIssueId(previous.id);
+    setDebateCompareIssueId(latest.id);
+    setIsDebateCompareModalOpen(true);
+  };
+
+  const handleWriteDebateCompareAudit = async () => {
+    const baselineIssueId = debateBaselineIssueId.trim();
+    const compareIssueId = debateCompareIssueId.trim();
+    if (!baselineIssueId || !compareIssueId) {
+      addToast('issueId 不能为空', 'error');
+      return;
+    }
+    if (baselineIssueId === compareIssueId) {
+      addToast('基线与对比 issue 不能相同', 'error');
+      return;
+    }
+
+    setIsWritingDebateCompareAudit(true);
+    try {
+      const result = await systemApi.compareDebateAndLog({
+        baselineIssueId,
+        compareIssueId,
+        label: `project-${project.id}-manual-compare`,
+      });
+      addToast(
+        `辩论对比已写入审计：${result.changedRoleCount}/${result.roleCount} 角色发生变化`,
+        result.changedRoleCount > 0 ? 'success' : 'info',
+      );
+      appendSseLog({
+        id: `debate-compare-${Date.now()}-${baselineIssueId}-${compareIssueId}`,
+        time: formatProjectLogTime(new Date()),
+        actor: '系统',
+        message: `辩论对比已归档: ${baselineIssueId} -> ${compareIssueId}，变化 ${result.changedRoleCount}/${result.roleCount}`,
+        type: result.changedRoleCount > 0 ? 'accent' : 'primary',
+        timestamp: Date.now(),
+      });
+      setIsDebateCompareModalOpen(false);
+    } catch (error) {
+      addToast(`写入辩论对比审计失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsWritingDebateCompareAudit(false);
+    }
+  };
+
   const handleApproveStage = async () => {
     if (!project.id || !detail?.pendingApproval) {
       addToast('当前阶段无需验收通过', 'info');
+      return;
+    }
+    if (stageApprovalBlockedReason) {
+      addToast(`当前无法验收通过: ${stageApprovalBlockedReason}`, 'error');
+      setProjectActionHint('请先修复模型通道并重新执行当前阶段，再进行验收。');
+      return;
+    }
+
+    try {
+      const precheck = await projectsApi.getTemplateGatePrecheck(project.id);
+      setTemplateGatePrecheck(precheck);
+      if (!precheck.pass) {
+        setActiveTab('交付物');
+        addToast('当前阶段交付物模板门禁未通过，请先按缺失项补齐后再验收', 'error');
+        return;
+      }
+    } catch (error) {
+      addToast(`验收前预检查失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
       return;
     }
 
@@ -1800,9 +1831,31 @@ const ProjectRoom = ({
     if (!(error instanceof ApiRequestError)) {
       return false;
     }
+    if (error.code === 'REAL_MODEL_GATE_FAILED') {
+      const required = Array.isArray(error.details?.requiredActions)
+        ? (error.details.requiredActions as ProjectRequiredAction[])
+        : [];
+      addToast(error.message || '当前阶段未通过真实模型门禁', 'error');
+      if (required.length > 0) {
+        addToast(`待处理事项: ${formatRequiredActionsHint(required)}`, 'info');
+      } else {
+        openRuntimeConfigHint();
+      }
+      void loadProjectDetail();
+      return true;
+    }
     if (error.code === 'NO_PENDING_APPROVAL') {
       addToast(error.message || '当前没有待确认事项', 'info');
       void loadProjectDetail();
+      return true;
+    }
+    if (error.code === 'STAGE_TEMPLATE_VALIDATION_FAILED') {
+      const precheck = error.details?.templateGatePrecheck;
+      if (precheck && typeof precheck === 'object') {
+        setTemplateGatePrecheck(precheck as ProjectTemplateGatePrecheck);
+      }
+      setActiveTab('交付物');
+      addToast(error.message || '交付物未通过模板门禁，请先补齐后再验收', 'error');
       return true;
     }
     const required = Array.isArray(error.details?.requiredActions)
@@ -1862,7 +1915,33 @@ const ProjectRoom = ({
         return;
       }
       if (action.action === 'refresh_runtime') {
-        openRuntimeConfigHint();
+        setProjectActionHint('正在校验模型通道并尝试恢复当前阶段执行，预计 30-90 秒...');
+        addToast('正在校验模型通道...', 'info');
+        try {
+          const validateResult = await systemApi.validateRuntime();
+          addToast(validateResult.message || '模型通道校验通过', 'success');
+        } catch (error) {
+          if (error instanceof ApiRequestError) {
+            addToast(error.message || '模型通道校验失败，请先修复配置', 'error');
+          } else {
+            addToast(`模型通道校验失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+          }
+          openRuntimeConfigHint();
+          return;
+        }
+
+        if (!project.id) {
+          addToast('当前项目不可用，无法重跑当前阶段', 'error');
+          return;
+        }
+
+        addToast('模型通道已恢复，正在重跑当前阶段...', 'info');
+        await projectsApi.sendMessage(
+          project.id,
+          `系统自愈触发：模型通道校验通过，请按当前阶段（${currentStageLabel}）重新执行一轮并回写最新交付结论。`,
+        );
+        await refreshProjectView();
+        addToast('当前阶段已重跑，请重新执行验收', 'success');
         return;
       }
     } catch (error) {
@@ -1877,6 +1956,33 @@ const ProjectRoom = ({
     }
   };
 
+  const templateGateFailedItems = useMemo(
+    () => (templateGatePrecheck?.items || []).filter((item) => !item.pass),
+    [templateGatePrecheck],
+  );
+
+  const handleRegenerateTemplateGate = async () => {
+    if (!project.id) {
+      addToast('当前项目不可用，无法重生成交付物', 'error');
+      return;
+    }
+    setIsRegeneratingTemplateGate(true);
+    setProjectActionHint('正在按模板规则重生成交付物并重新校验，预计 30-90 秒...');
+    try {
+      await projectsApi.reconcileDeliverables(project.id);
+      await Promise.all([
+        refreshProjectView(),
+        loadTemplateGatePrecheck({ silent: true }),
+      ]);
+      addToast('交付物已按模板重生成，门禁结果已刷新', 'success');
+    } catch (error) {
+      addToast(`重生成失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsRegeneratingTemplateGate(false);
+      setProjectActionHint(null);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       <ProjectHeader
@@ -1887,9 +1993,11 @@ const ProjectRoom = ({
         projectActionHint={projectActionHint}
         isIntervening={isIntervening}
         isDesignPhase={isDesignPhase}
+        isWritingDebateCompareAudit={isWritingDebateCompareAudit}
         onOpenAcceptanceReport={() => { void handleOpenAcceptanceReport(); }}
         onIntervene={() => { void handleIntervene(); }}
         onOpenDesignReview={() => setIsDesignReviewOpen(true)}
+        onWriteDebateCompareAudit={handleOpenDebateCompareModal}
       />
 
       <div className="flex-1 overflow-hidden flex">
@@ -1923,6 +2031,51 @@ const ProjectRoom = ({
                     </button>
                   </div>
                 ))}
+              </div>
+            </section>
+          ) : null}
+
+          {detail?.pendingApproval && templateGatePrecheck && !templateGatePrecheck.pass ? (
+            <section className="rounded-2xl border border-danger/50 bg-danger/10 p-4 sm:p-5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-danger">模板门禁未通过</h3>
+                <Badge variant="danger">{templateGateFailedItems.length} 项缺失</Badge>
+              </div>
+              <p className="text-xs text-danger/90">
+                当前阶段验收前必须先补齐模板必需章节和验收清单。以下是实时预检结果。
+              </p>
+              <div className="space-y-2">
+                {templateGateFailedItems.map((item) => (
+                  <div key={item.expectedName} className="rounded-xl border border-danger/40 bg-surface-soft/70 p-3 space-y-2">
+                    <p className="text-sm font-medium text-white">{item.expectedName}</p>
+                    <p className="text-xs text-slate-300">
+                      命中文档: {item.matched ? `${item.matched.name}（v${item.matched.version}）` : '未命中核心交付物'}
+                    </p>
+                    {item.gate?.issues?.length ? (
+                      <p className="text-xs text-danger">
+                        缺失项: {item.gate.issues.join('；')}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { void loadTemplateGatePrecheck(); }}
+                  disabled={isLoadingTemplateGatePrecheck}
+                  className="px-3 py-1.5 rounded-lg bg-white/10 border border-border-subtle text-xs text-white hover:bg-white/20 disabled:opacity-60"
+                >
+                  {isLoadingTemplateGatePrecheck ? '刷新中...' : '刷新门禁预检'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleRegenerateTemplateGate(); }}
+                  disabled={isRegeneratingTemplateGate}
+                  className="px-3 py-1.5 rounded-lg bg-danger text-white text-xs font-semibold hover:bg-danger/90 disabled:opacity-60"
+                >
+                  {isRegeneratingTemplateGate ? '重生成中...' : '一键重生成并对齐模板'}
+                </button>
               </div>
             </section>
           ) : null}
@@ -2007,6 +2160,8 @@ const ProjectRoom = ({
               getStageAcceptance={getStageAcceptance}
               getStageDeliverableStats={getStageDeliverableStats}
               stageLabelMap={STAGE_LABELS}
+              stageApprovalBlockedReason={stageApprovalBlockedReason}
+              onOpenRuntimeConfig={openRuntimeConfigHint}
             />
           ) : null}
 
@@ -2088,6 +2243,90 @@ const ProjectRoom = ({
         isSubmitting={isSubmittingDesignReview}
         onSubmit={() => { void handleSubmitDesignReview(); }}
       />
+
+      <SurfaceModal
+        isOpen={isDebateCompareModalOpen}
+        onClose={() => {
+          if (isWritingDebateCompareAudit) {
+            return;
+          }
+          setIsDebateCompareModalOpen(false);
+        }}
+        title="写入辩论对比审计"
+        panelClassName="max-w-2xl"
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-slate-400">
+            请选择基线与对比 Issue，系统将写入审计日志并记录角色差异。
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="space-y-1">
+              <span className="text-[11px] text-slate-400">基线 Issue（较早）</span>
+              <select
+                value={debateBaselineIssueId}
+                onChange={(event) => setDebateBaselineIssueId(event.target.value)}
+                className="w-full rounded-lg border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-100 outline-none focus:border-primary"
+              >
+                <option value="" disabled>请选择基线 Issue</option>
+                {debateIssueOptions.map((item) => (
+                  <option key={`baseline-${item.id}`} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="space-y-1">
+              <span className="text-[11px] text-slate-400">对比 Issue（较新）</span>
+              <select
+                value={debateCompareIssueId}
+                onChange={(event) => setDebateCompareIssueId(event.target.value)}
+                className="w-full rounded-lg border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-100 outline-none focus:border-primary"
+              >
+                <option value="" disabled>请选择对比 Issue</option>
+                {debateIssueOptions.map((item) => (
+                  <option key={`compare-${item.id}`} value={item.id}>{item.label}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {debateBaselineIssueId && debateCompareIssueId && debateBaselineIssueId === debateCompareIssueId ? (
+            <p className="text-xs text-danger">基线与对比 Issue 不能相同，请重新选择。</p>
+          ) : null}
+          <div className="rounded-xl border border-border-subtle bg-surface-muted/40 p-3 text-[11px] text-slate-400 max-h-36 overflow-y-auto space-y-1">
+            {debateIssueOptions.length > 0 ? (
+              debateIssueOptions.map((item, index) => (
+                <p key={`candidate-${item.id}`}>
+                  {index + 1}. {item.title} ({item.id.slice(0, 8)}) · {item.relativeUpdatedAt}
+                  <span className="text-slate-500"> · {item.absoluteUpdatedAt}</span>
+                </p>
+              ))
+            ) : (
+              <p>暂无可用 Issue 候选</p>
+            )}
+          </div>
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => setIsDebateCompareModalOpen(false)}
+              disabled={isWritingDebateCompareAudit}
+              className="px-3 py-1.5 rounded-lg border border-border-subtle text-xs text-slate-300 hover:bg-white/5 disabled:opacity-60"
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleWriteDebateCompareAudit(); }}
+              disabled={
+                isWritingDebateCompareAudit
+                || !debateBaselineIssueId
+                || !debateCompareIssueId
+                || debateBaselineIssueId === debateCompareIssueId
+              }
+              className="px-3 py-1.5 rounded-lg bg-primary text-slate-900 text-xs font-semibold hover:bg-primary/90 disabled:opacity-60"
+            >
+              {isWritingDebateCompareAudit ? '写入中...' : '确认写入审计'}
+            </button>
+          </div>
+        </div>
+      </SurfaceModal>
 
       <SurfaceModal
         isOpen={Boolean(previewDeliverable)}

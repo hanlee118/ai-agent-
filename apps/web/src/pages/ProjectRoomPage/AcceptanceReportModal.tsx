@@ -18,7 +18,7 @@ type Props = {
   onArchive: () => void;
   onExport: () => void;
   finalArtifacts: ProjectFinalArtifactsReport | null;
-  finalArtifactsGenerationStatus?: ProjectFinalArtifactsReport['generation']['status'];
+  finalArtifactsGenerationStatus?: NonNullable<ProjectFinalArtifactsReport['generation']>['status'];
   finalArtifactsGenerationText: string | null;
   isTriggeringFinalArtifacts: boolean;
   finalArtifactsRunning: boolean;
