@@ -325,3 +325,16 @@ model AgentSop {
   steps     String   // JSON array of step strings
   updatedAt DateTime @updatedAt
 }
+
+model GitLabSync {
+  id          String   @id @default(cuid())
+  projectId   String
+  issueIid    Int
+  projectPath String
+  status      String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([projectId, issueIid])
+  @@index([projectPath, status])
+}
