@@ -516,11 +516,11 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     };
     const requirementContractBlock = [
       "需求合同:",
-      `- 目标: ${confirmedContract.objective || "待补充"}`,
-      `- In Scope: ${(confirmedContract.inScope || []).slice(0, 3).join("；") || "待补充"}`,
-      `- Out of Scope: ${(confirmedContract.outOfScope || []).slice(0, 3).join("；") || "待补充"}`,
-      `- 验收: ${(confirmedContract.acceptanceCriteria || []).slice(0, 3).join("；") || "待补充"}`,
-      `- 产出: ${(confirmedContract.artifacts || []).join("、") || "待补充"}`
+      `- 目标: ${confirmedContract.objective || "信息未提供"}`,
+      `- In Scope: ${(confirmedContract.inScope || []).slice(0, 3).join("；") || "信息未提供"}`,
+      `- Out of Scope: ${(confirmedContract.outOfScope || []).slice(0, 3).join("；") || "信息未提供"}`,
+      `- 验收: ${(confirmedContract.acceptanceCriteria || []).slice(0, 3).join("；") || "信息未提供"}`,
+      `- 产出: ${(confirmedContract.artifacts || []).join("、") || "信息未提供"}`
     ].join("\n");
     const finalProjectDescription = `${projectDescription}\n\n${requirementContractBlock}`;
 

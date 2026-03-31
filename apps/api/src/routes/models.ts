@@ -8,6 +8,7 @@ import {
   sendError,
   sendSuccess
 } from "./utils.js";
+import { getRuntimeSettings, updateRuntimeSettings } from "../system/runtime-config.js";
 
 interface CreateModelBody {
   name?: unknown;
@@ -380,6 +381,33 @@ export function createModelsRouter() {
       reachable,
       latency,
       error
+    });
+  }));
+
+  router.post("/:id/set-default", asyncRoute(async (req, res) => {
+    const id = String(req.params.id ?? "").trim();
+    const model = await prisma.model.findUnique({ where: { id } });
+
+    if (!model) {
+      sendError(res, 404, "NOT_FOUND", "Model not found");
+      return;
+    }
+
+    const currentRuntime = await getRuntimeSettings();
+    const shouldUseOpenAICompatible = Boolean(
+      String(model.apiBaseUrl ?? "").trim()
+      && String(model.apiKey ?? "").trim()
+    );
+    const runtime = await updateRuntimeSettings({
+      provider: shouldUseOpenAICompatible ? "openai-compatible" : currentRuntime.provider,
+      apiBaseUrl: shouldUseOpenAICompatible ? String(model.apiBaseUrl ?? "").trim() : currentRuntime.apiBaseUrl,
+      apiKey: shouldUseOpenAICompatible ? String(model.apiKey ?? "").trim() : undefined,
+      modelName: model.name
+    });
+
+    sendSuccess(res, {
+      model: toModelView(model),
+      runtime
     });
   }));
 

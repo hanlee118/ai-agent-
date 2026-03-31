@@ -6,7 +6,10 @@ import { spawn } from 'node:child_process';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
+const apiRoot = path.join(repoRoot, "apps", "api");
+const sqliteDbPath = path.join(apiRoot, "prisma", "dev.db");
 const apiBase = (process.env.HEALTHCHECK_API_BASE || 'http://127.0.0.1:8787').replace(/\/$/, '');
+const requireRealModelForHealth = String(process.env.REQUIRE_REAL_MODEL_FOR_HEALTH || "").trim().toLowerCase() === "true";
 
 const reportsDir = path.join(repoRoot, 'docs', 'reports');
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -18,9 +21,9 @@ async function run() {
 
   checks.push(await check('DB 连接', async () => {
     const result = await execCapture(
-      'pnpm',
-      ['--filter', '@occ/api', 'exec', 'prisma', 'db', 'execute', '--schema', 'prisma/schema.prisma', '--stdin'],
-      { cwd: repoRoot, input: 'SELECT 1;\n' },
+      'sqlite3',
+      [sqliteDbPath, 'SELECT 1;'],
+      { cwd: repoRoot },
     );
     return {
       ok: true,
@@ -28,12 +31,19 @@ async function run() {
     };
   }));
 
-  checks.push(await check('迁移状态', async () => {
-    const result = await execCapture('pnpm', ['--filter', '@occ/api', 'db:migrate:status'], { cwd: repoRoot });
+  checks.push(await check('核心表结构', async () => {
+    const result = await execCapture(
+      'sqlite3',
+      [sqliteDbPath, "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('Project','AuthSession','SystemConfig');"],
+      { cwd: repoRoot }
+    );
     const output = `${result.stdout}\n${result.stderr}`.trim();
+    const hasProject = output.includes("Project");
+    const hasAuthSession = output.includes("AuthSession");
+    const hasSystemConfig = output.includes("SystemConfig");
     return {
-      ok: true,
-      detail: output.split('\n').slice(0, 3).join(' | ').slice(0, 240),
+      ok: hasProject && hasAuthSession && hasSystemConfig,
+      detail: output.split('\n').filter(Boolean).join(' | ').slice(0, 240) || '未查询到目标表',
     };
   }));
 
@@ -47,6 +57,35 @@ async function run() {
     return {
       ok: Boolean(openapiVersion),
       detail: openapiVersion ? `openapi=${openapiVersion}` : '缺少 openapi 字段',
+    };
+  }));
+
+  checks.push(await check('运行时模型就绪度', async () => {
+    const response = await fetch(`${apiBase}/health`);
+    if (!response.ok) {
+      return { ok: false, detail: `HTTP ${response.status}` };
+    }
+    const payload = await response.json();
+    const runtime = payload?.runtime ?? {};
+    const mode = String(runtime?.mode ?? "unknown");
+    const requestedMode = String(runtime?.requestedMode ?? "unknown");
+    const configured = Boolean(runtime?.configured);
+    const realModelReady = mode === "openai-compatible" && requestedMode === "openai-compatible" && configured;
+
+    if (requireRealModelForHealth) {
+      return {
+        ok: realModelReady,
+        detail: realModelReady
+          ? "real-model ready"
+          : `real-model not ready (mode=${mode}, requestedMode=${requestedMode}, configured=${configured})`,
+      };
+    }
+
+    return {
+      ok: true,
+      detail: realModelReady
+        ? "real-model ready"
+        : `non-blocking: mode=${mode}, requestedMode=${requestedMode}, configured=${configured}`,
     };
   }));
 

@@ -1,0 +1,497 @@
+import fs from "node:fs";
+import path from "node:path";
+
+const API_BASE = (process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
+const MAX_ROUNDS = Math.max(60, Number(process.env.MAX_ROUNDS || 220));
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "Admin@123456").trim();
+const SKIP_RUNTIME_PREFLIGHT = String(process.env.SKIP_RUNTIME_PREFLIGHT || "").trim().toLowerCase() === "true";
+const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let SESSION_COOKIE = "";
+
+const requirement = "帮我搭建一个跨境电商的爆品选品跟品机器人。当某个跨境品在tiktok或者亚马逊等上的流量突然大爆时，帮我做好监控和排名，并且提供链接供我实时跟品。";
+const stageOrder = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
+const stageMustHaveExecutions = ["ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
+const requiredRoles = ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"];
+
+async function req(method, pathname, body, timeoutMs = 240000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const headers = {};
+    if (body) {
+      headers["content-type"] = "application/json";
+    }
+    if (SESSION_COOKIE) {
+      headers.cookie = SESSION_COOKIE;
+    }
+    const res = await fetch(`${API_BASE}${pathname}`, {
+      method,
+      signal: controller.signal,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    });
+    const setCookie = res.headers.get("set-cookie");
+    if (setCookie) {
+      const occSessionPair = setCookie
+        .split(",")
+        .map((item) => item.trim())
+        .find((item) => item.startsWith("occ_session="));
+      if (occSessionPair) {
+        SESSION_COOKIE = occSessionPair.split(";")[0] || SESSION_COOKIE;
+      }
+    }
+    const text = await res.text();
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = text;
+    }
+    return { status: res.status, body: payload };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function unwrap(payload) {
+  if (payload && typeof payload === "object" && "success" in payload && payload.success === true && "data" in payload) {
+    return payload.data;
+  }
+  return payload;
+}
+
+function summarizeProject(project) {
+  return {
+    id: project?.id,
+    status: project?.status,
+    currentStage: project?.currentStage,
+    currentRole: project?.currentRole,
+    progress: project?.progress,
+    pendingApproval: project?.pendingApproval
+  };
+}
+
+function isDegraded(metadata) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return Boolean(metadata.degraded);
+}
+
+function writeReport(report) {
+  const outDir = path.resolve("/private/tmp/ai-agent-check/docs/reports");
+  fs.mkdirSync(outDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const outPath = path.join(outDir, `real-data-round2-${ts}.json`);
+  fs.writeFileSync(outPath, JSON.stringify(report, null, 2), "utf8");
+  return outPath;
+}
+
+async function ensureAuthAndRuntime(logs) {
+  const authStatusResp = await req("GET", "/api/auth/status");
+  if (authStatusResp.status !== 200) {
+    logs.push({
+      at: new Date().toISOString(),
+      type: "auth_status_unavailable",
+      status: authStatusResp.status
+    });
+    return {
+      authenticated: false,
+      runtime: null,
+      runtimeStatus: null
+    };
+  }
+
+  const authStatus = unwrap(authStatusResp.body) || authStatusResp.body || {};
+  logs.push({
+    at: new Date().toISOString(),
+    type: "auth_status",
+    setupComplete: Boolean(authStatus.setupComplete),
+    authenticated: Boolean(authStatus.authenticated)
+  });
+
+  if (!authStatus.setupComplete) {
+    const setupResp = await req("POST", "/api/auth/setup", { password: ADMIN_PASSWORD });
+    if (setupResp.status !== 201 && setupResp.status !== 409) {
+      throw new Error(`auth setup failed: ${setupResp.status} ${JSON.stringify(setupResp.body).slice(0, 500)}`);
+    }
+  }
+
+  const loginResp = await req("POST", "/api/auth/login", { password: ADMIN_PASSWORD });
+  if (loginResp.status !== 200) {
+    logs.push({
+      at: new Date().toISOString(),
+      type: "auth_login_failed",
+      status: loginResp.status
+    });
+  } else {
+    logs.push({
+      at: new Date().toISOString(),
+      type: "auth_login_ok"
+    });
+  }
+
+  const runtimeResp = await req("GET", "/api/system/runtime");
+  if (runtimeResp.status !== 200) {
+    logs.push({
+      at: new Date().toISOString(),
+      type: "runtime_status_unavailable",
+      status: runtimeResp.status
+    });
+    return {
+      authenticated: loginResp.status === 200,
+      runtime: null,
+      runtimeStatus: runtimeResp.status
+    };
+  }
+
+  const runtime = unwrap(runtimeResp.body) || runtimeResp.body;
+  logs.push({
+    at: new Date().toISOString(),
+    type: "runtime_status",
+    mode: runtime?.mode,
+    requestedMode: runtime?.requestedMode,
+    configured: runtime?.configured
+  });
+
+  return {
+    authenticated: loginResp.status === 200,
+    runtime,
+    runtimeStatus: runtimeResp.status
+  };
+}
+
+async function handleRequiredActions(project, actions, logs) {
+  const list = Array.isArray(actions) ? actions : [];
+  const has = (action) => list.some((item) => item?.action === action);
+  logs.push({ at: new Date().toISOString(), type: "required_actions", list });
+
+  if (has("review_pending_stage")) {
+    const approve = await req("POST", `/api/projects/${encodeURIComponent(project.id)}/approve`, {});
+    if (approve.status !== 200) {
+      throw new Error(`approve failed: ${approve.status} ${JSON.stringify(approve.body).slice(0, 500)}`);
+    }
+    return unwrap(approve.body);
+  }
+
+  if (has("open_design_review")) {
+    const reviewContent = [
+      "# 设计审查卡.md",
+      "## 视觉方案",
+      "- 优先呈现爆品监控、排名变化、跟品链接三大核心视图。",
+      "## 版式策略",
+      "- 首屏突出实时告警和重点指标，三秒内可定位爆品变化。",
+      "## 组件清单",
+      "- 榜单卡片、趋势图、跟品链接操作卡、风险提示条。",
+      "## 品牌语气",
+      "- 专业、直接、可执行，避免空泛描述。",
+      "## UX 原则",
+      "- 主链路优先；低延迟反馈；减少认知切换。",
+      "## 可访问性检查",
+      "- 语义化结构；键盘可达；对比度达标。",
+      "## 设计审查卡",
+      "- 审查结论: 通过"
+    ].join("\n");
+    const submit = await req("POST", `/api/projects/${encodeURIComponent(project.id)}/stages/submit`, {
+      title: "设计审查卡.md",
+      content: reviewContent,
+      designReview: {
+        visualDirection: "实时决策控制台",
+        brandTone: "专业、可执行、清晰",
+        uxPrinciples: ["主链路优先", "反馈可解释", "低延迟可感知"],
+        accessibilityChecklist: ["语义结构完整", "键盘可达", "对比度达标"],
+        approvedBy: "系统自动审查",
+        approved: true,
+        notes: "第2轮真实数据门禁验证自动提交"
+      }
+    }, 180000);
+    if (submit.status !== 200) {
+      throw new Error(`submit design review failed: ${submit.status} ${JSON.stringify(submit.body).slice(0, 500)}`);
+    }
+    return unwrap(submit.body);
+  }
+
+  if (has("reconcile_deliverables")) {
+    const reconcile = await req("POST", `/api/projects/${encodeURIComponent(project.id)}/reconcile-deliverables`, {});
+    if (reconcile.status !== 200) {
+      throw new Error(`reconcile failed: ${reconcile.status} ${JSON.stringify(reconcile.body).slice(0, 500)}`);
+    }
+    return unwrap(reconcile.body);
+  }
+
+  if (has("resolve_blocked_tasks")) {
+    const tasksResp = await req("GET", `/api/projects/${encodeURIComponent(project.id)}/tasks`);
+    if (tasksResp.status !== 200) {
+      throw new Error(`list tasks failed: ${tasksResp.status}`);
+    }
+    const tasks = unwrap(tasksResp.body) || [];
+    for (const task of tasks) {
+      if (task?.status === "blocked") {
+        const patch = await req("PATCH", `/api/tasks/${encodeURIComponent(task.id)}`, { status: "done" });
+        if (patch.status !== 200) {
+          throw new Error(`patch task failed: ${patch.status}`);
+        }
+      }
+    }
+    const detail = await req("GET", `/api/projects/${encodeURIComponent(project.id)}`);
+    if (detail.status !== 200) {
+      throw new Error(`detail after resolving blocked tasks failed: ${detail.status}`);
+    }
+    return unwrap(detail.body);
+  }
+
+  throw new Error(`unhandled required actions: ${JSON.stringify(list).slice(0, 300)}`);
+}
+
+async function main() {
+  const logs = [];
+  const startedAt = new Date().toISOString();
+
+  const health = await req("GET", "/health");
+  if (health.status !== 200) {
+    throw new Error(`health check failed: ${health.status}`);
+  }
+
+  const authAndRuntime = await ensureAuthAndRuntime(logs);
+  if (!SKIP_RUNTIME_PREFLIGHT) {
+    const runtime = authAndRuntime.runtime;
+    const runtimeReady = Boolean(
+      runtime
+      && runtime.mode === "openai-compatible"
+      && runtime.requestedMode === "openai-compatible"
+      && runtime.configured
+    );
+    if (!runtimeReady) {
+      const report = {
+        ok: false,
+        startedAt,
+        finishedAt: new Date().toISOString(),
+        apiBase: API_BASE,
+        projectId: null,
+        requirement,
+        blockedBy: "RUNTIME_NOT_READY",
+        runtime,
+        quality: {
+          projectCompleted: false,
+          readyForAcceptance: false,
+          allSuccessExecutionsAreReal: false,
+          allSuccessExecutionsNonDegraded: false,
+          stageCoverageMissing: stageMustHaveExecutions,
+          roleCoverageMissing: requiredRoles,
+          noPlaceholder: false
+        },
+        stageTransitions: [],
+        stageSummary: [],
+        roleSummary: [],
+        scriptedExecutions: [],
+        degradedExecutions: [],
+        executionCount: 0,
+        successExecutionCount: 0,
+        logs
+      };
+      const outPath = writeReport(report);
+      console.log(JSON.stringify({
+        ok: report.ok,
+        blockedBy: report.blockedBy,
+        runtime: report.runtime,
+        outPath
+      }, null, 2));
+      process.stderr.write(`verify-real-data-round2 blocked by runtime preflight, report: ${outPath}\n`);
+      process.exitCode = 1;
+      return;
+    }
+  }
+
+  const createResp = await req("POST", "/api/projects", {
+    name: `real-data-round2-${Date.now()}`,
+    description: requirement,
+    team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"]
+  }, 240000);
+  if (createResp.status !== 201) {
+    throw new Error(`create project failed: ${createResp.status} ${JSON.stringify(createResp.body).slice(0, 500)}`);
+  }
+
+  let project = unwrap(createResp.body);
+  const projectId = String(project?.id || "");
+  if (!projectId) {
+    throw new Error("missing project id");
+  }
+  logs.push({ at: new Date().toISOString(), type: "project_created", project: summarizeProject(project) });
+
+  const stageTransitions = [];
+  let previousStage = project.currentStage;
+
+  for (let i = 1; i <= MAX_ROUNDS; i += 1) {
+    const detail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`);
+    if (detail.status !== 200) {
+      throw new Error(`project detail failed: round=${i} status=${detail.status}`);
+    }
+    project = unwrap(detail.body);
+
+    if (project.currentStage !== previousStage) {
+      stageTransitions.push({
+        at: new Date().toISOString(),
+        from: previousStage,
+        to: project.currentStage,
+        progress: project.progress
+      });
+      previousStage = project.currentStage;
+    }
+
+    if (project.status === "completed") {
+      logs.push({ at: new Date().toISOString(), type: "completed", round: i, project: summarizeProject(project) });
+      break;
+    }
+
+    if (project.pendingApproval) {
+      const approve = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/approve`, {});
+      if (approve.status !== 200) {
+        throw new Error(`approve failed: round=${i} status=${approve.status} body=${JSON.stringify(approve.body).slice(0, 500)}`);
+      }
+      project = unwrap(approve.body);
+      continue;
+    }
+
+    const advance = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/advance`, {}, 240000);
+    const code = advance.body?.error?.code;
+    logs.push({ at: new Date().toISOString(), type: "advance", round: i, status: advance.status, code });
+
+    if (advance.status === 200) {
+      project = unwrap(advance.body);
+      continue;
+    }
+
+    if (advance.status === 409 && code === "PROJECT_ADVANCE_IN_PROGRESS") {
+      const pollAfter = Number(advance.body?.error?.pollAfterMs || 1500);
+      await WAIT(Math.max(1000, Math.min(7000, pollAfter)));
+      continue;
+    }
+
+    if (advance.status === 409 && code === "REQUIRES_USER_INTERVENTION") {
+      project = await handleRequiredActions(project, advance.body?.error?.requiredActions, logs);
+      continue;
+    }
+
+    if (advance.status === 409 && code === "PROJECT_ADVANCE_FAILED") {
+      throw new Error(`advance failed: ${JSON.stringify(advance.body).slice(0, 800)}`);
+    }
+
+    throw new Error(`unexpected advance response: status=${advance.status} code=${code} body=${JSON.stringify(advance.body).slice(0, 800)}`);
+  }
+
+  const finalDetail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`);
+  if (finalDetail.status !== 200) {
+    throw new Error(`final detail failed: ${finalDetail.status}`);
+  }
+  const finalProject = unwrap(finalDetail.body);
+
+  const executionsResp = await req("GET", `/api/projects/${encodeURIComponent(projectId)}/executions?limit=800`);
+  if (executionsResp.status !== 200) {
+    throw new Error(`list executions failed: ${executionsResp.status}`);
+  }
+  const executions = (unwrap(executionsResp.body)?.executions) || [];
+  const successExecutions = executions.filter((row) => row.status === "success");
+  const scriptedExecutions = successExecutions.filter((row) => String(row.provider || "").toLowerCase() === "scripted");
+  const degradedExecutions = successExecutions.filter((row) => isDegraded(row.metadata));
+
+  const stageSummary = stageOrder.map((stage) => {
+    const rows = successExecutions.filter((row) => row.stageType === stage);
+    return {
+      stage,
+      successCount: rows.length,
+      providers: [...new Set(rows.map((row) => row.provider).filter(Boolean))],
+      models: [...new Set(rows.map((row) => row.model).filter(Boolean))],
+      roles: [...new Set(rows.map((row) => row.role).filter(Boolean))]
+    };
+  });
+
+  const roleSummary = requiredRoles.map((role) => {
+    const rows = successExecutions.filter((row) => row.role === role);
+    return {
+      role,
+      successCount: rows.length,
+      scriptedCount: rows.filter((row) => String(row.provider || "").toLowerCase() === "scripted").length,
+      degradedCount: rows.filter((row) => isDegraded(row.metadata)).length,
+      providers: [...new Set(rows.map((row) => row.provider).filter(Boolean))],
+      models: [...new Set(rows.map((row) => row.model).filter(Boolean))]
+    };
+  });
+
+  const stageCoverageMissing = stageMustHaveExecutions.filter((stage) =>
+    stageSummary.find((item) => item.stage === stage)?.successCount === 0
+  );
+  const roleCoverageMissing = roleSummary.filter((item) => item.successCount === 0).map((item) => item.role);
+
+  const finalArtifactsResp = await req("GET", `/api/projects/${encodeURIComponent(projectId)}/final-artifacts`);
+  const finalArtifacts = finalArtifactsResp.status === 200 ? unwrap(finalArtifactsResp.body) : null;
+  const deliverables = Array.isArray(finalProject?.deliverables) ? finalProject.deliverables : [];
+  const placeholderHits = deliverables.filter((d) => /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i.test(String(d?.content || ""))).map((d) => d.name);
+
+  const quality = {
+    projectCompleted: finalProject?.status === "completed",
+    readyForAcceptance: Boolean(finalArtifacts?.readyForAcceptance),
+    allSuccessExecutionsAreReal: scriptedExecutions.length === 0,
+    allSuccessExecutionsNonDegraded: degradedExecutions.length === 0,
+    stageCoverageMissing,
+    roleCoverageMissing,
+    noPlaceholder: placeholderHits.length === 0
+  };
+
+  const pass = quality.projectCompleted
+    && quality.readyForAcceptance
+    && quality.allSuccessExecutionsAreReal
+    && quality.allSuccessExecutionsNonDegraded
+    && quality.stageCoverageMissing.length === 0
+    && quality.roleCoverageMissing.length === 0
+    && quality.noPlaceholder;
+
+  const report = {
+    ok: pass,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    apiBase: API_BASE,
+    projectId,
+    requirement,
+    finalProject: summarizeProject(finalProject),
+    quality,
+    stageTransitions,
+    stageSummary,
+    roleSummary,
+    scriptedExecutions: scriptedExecutions.map((row) => ({
+      stageType: row.stageType,
+      role: row.role,
+      provider: row.provider,
+      model: row.model,
+      createdAt: row.createdAt
+    })),
+    degradedExecutions: degradedExecutions.map((row) => ({
+      stageType: row.stageType,
+      role: row.role,
+      provider: row.provider,
+      model: row.model,
+      createdAt: row.createdAt
+    })),
+    executionCount: executions.length,
+    successExecutionCount: successExecutions.length,
+    logs
+  };
+
+  const outPath = writeReport(report);
+
+  console.log(JSON.stringify({
+    ok: report.ok,
+    outPath,
+    projectId: report.projectId,
+    quality: report.quality
+  }, null, 2));
+
+  if (!report.ok) {
+    process.stderr.write(`verify-real-data-round2 failed, report: ${outPath}\n`);
+    process.exitCode = 1;
+  }
+}
+
+main().catch((error) => {
+  console.error(String(error?.stack || error));
+  process.exit(1);
+});

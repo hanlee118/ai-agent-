@@ -65,6 +65,10 @@ const STAGE_NEXT_INPUT: Record<StageType, string> = {
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
+const STAGE_COMPANION_ROLES: Partial<Record<StageType, RoleType[]>> = {
+  DESIGN: ["ROLE_PRODUCT"],
+  DEV: ["ROLE_ARCH"]
+};
 
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
@@ -73,6 +77,66 @@ const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   DEV: ["技术方案与选型.md", "Demo原型说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
+
+function isRealModelGateEnabled() {
+  const raw = String(process.env.ENFORCE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return process.env.NODE_ENV === "production";
+}
+
+function isExecutionDegraded(metadata: Prisma.JsonValue | null) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return Boolean((metadata as Record<string, unknown>).degraded);
+}
+
+async function assertCurrentStageRealModelGate(project: ProjectDetail) {
+  if (!isRealModelGateEnabled()) {
+    return;
+  }
+
+  const runtime = await getRuntimeStatus();
+  if (runtime.requestedMode !== "openai-compatible") {
+    throw new Error("REAL_MODEL_GATE_FAILED: 当前运行模式不是 openai-compatible，禁止通过阶段验收。");
+  }
+  if (!runtime.configured) {
+    throw new Error("REAL_MODEL_GATE_FAILED: 真实模型配置不完整（API Base URL / API Key / Model）。");
+  }
+
+  const stageExecutions = await prisma.projectExecution.findMany({
+    where: {
+      projectId: project.id,
+      stageType: project.currentStage,
+      status: "success"
+    },
+    orderBy: { createdAt: "desc" },
+    take: 40
+  });
+
+  if (stageExecutions.length === 0) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少可验证执行记录。`);
+  }
+
+  if (!stageExecutions.some((row) => row.role === project.currentRole)) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少当前角色 ${project.currentRole} 的执行证据。`);
+  }
+
+  const scriptedRows = stageExecutions.filter((row) => String(row.provider || "").trim().toLowerCase() === "scripted");
+  if (scriptedRows.length > 0) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 scripted 输出，禁止通过验收。`);
+  }
+
+  const degradedRows = stageExecutions.filter((row) => isExecutionDegraded(row.metadata));
+  if (degradedRows.length > 0) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 degraded 降级输出，禁止通过验收。`);
+  }
+}
 
 function normalizeDesignReview(input: StageSubmissionInput["designReview"]) {
   if (!input) {
@@ -340,6 +404,69 @@ function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: S
   }
 }
 
+export async function getProjectTemplateGatePrecheck(projectId: string) {
+  const project = await findProject(projectId);
+  if (!project) {
+    return undefined;
+  }
+
+  const stageType = project.currentStage as StageType;
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
+  const stageDeliverables = project.deliverables.filter((item) => item.stageType === stageType);
+
+  const checks = expectedNames.map((expectedName) => {
+    const matched = stageDeliverables
+      .filter((item) => isSameCoreDeliverable(item.name, expectedName, stageType))
+      .sort((left, right) => {
+        const versionDelta = (right.version || 0) - (left.version || 0);
+        if (versionDelta !== 0) {
+          return versionDelta;
+        }
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      })[0];
+
+    if (!matched) {
+      return {
+        expectedName,
+        matchedName: null,
+        passed: false,
+        issues: [`缺少核心交付物: ${expectedName}`]
+      };
+    }
+
+    const statusIssues =
+      matched.status === "submitted" || matched.status === "approved"
+        ? []
+        : [`交付物状态为 ${matched.status}，未达到可审批状态`];
+    const gate = validateDeliverableTemplateGate({
+      stageType,
+      deliverableName: matched.name,
+      content: String(matched.content || "")
+    });
+
+    return {
+      expectedName,
+      matchedName: matched.name,
+      passed: statusIssues.length === 0 && gate.passed,
+      issues: [...statusIssues, ...gate.issues]
+    };
+  });
+
+  const missingExpected = expectedNames.filter((expectedName) =>
+    !checks.some((item) => item.expectedName === expectedName && item.passed)
+  );
+
+  return {
+    projectId: project.id,
+    stageType,
+    expectedCount: expectedNames.length,
+    deliverableCount: stageDeliverables.length,
+    passed: checks.every((item) => item.passed),
+    missingExpected,
+    checks
+  };
+}
+
 function containsAny(input: string, patterns: RegExp[]) {
   return patterns.some((pattern) => pattern.test(input));
 }
@@ -534,11 +661,11 @@ async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail)
 
 function formatRequirementContract(contract: RequirementContract) {
   return [
-    `目标: ${contract.objective || "待补充"}`,
-    `In Scope: ${(contract.inScope || []).join("；") || "待补充"}`,
-    `Out of Scope: ${(contract.outOfScope || []).join("；") || "待补充"}`,
-    `验收标准: ${(contract.acceptanceCriteria || []).join("；") || "待补充"}`,
-    `目标产出: ${(contract.artifacts || []).join("、") || "待补充"}`,
+    `目标: ${contract.objective || "信息未提供"}`,
+    `In Scope: ${(contract.inScope || []).join("；") || "信息未提供"}`,
+    `Out of Scope: ${(contract.outOfScope || []).join("；") || "信息未提供"}`,
+    `验收标准: ${(contract.acceptanceCriteria || []).join("；") || "信息未提供"}`,
+    `目标产出: ${(contract.artifacts || []).join("、") || "信息未提供"}`,
     contract.designTheme ? `设计主题: ${contract.designTheme}` : "",
     contract.valueNarrative ? `价值叙事: ${contract.valueNarrative}` : ""
   ]
@@ -581,7 +708,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
     agentId: "ROLE_ANALYST",
     type: "message",
     title: "需求合同已绑定项目",
-    content: `需求合同已注入交付物，目标: ${contract.objective || "待补充"}`,
+    content: `需求合同已注入交付物，目标: ${contract.objective || "信息未提供"}`,
     priority: "normal"
   });
   return project;
@@ -923,6 +1050,18 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       ? ((run as { attempts: Prisma.InputJsonValue[] }).attempts)
       : [];
 
+    if (isRealModelGateEnabled()) {
+      const provider = String(run.provider || "").trim().toLowerCase();
+      const degraded = Boolean((run as { degraded?: boolean }).degraded);
+      if (provider === "scripted" || degraded) {
+        const gateError = new Error("REAL_MODEL_GATE_FAILED: 当前阶段输出触发 scripted/degraded 降级，不允许写入为成功结果。") as Error & {
+          attempts?: Prisma.InputJsonValue[];
+        };
+        gateError.attempts = runAttempts;
+        throw gateError;
+      }
+    }
+
     await persistProjectExecutionSafe({
       projectId: input.projectId,
       stageType: input.stageType,
@@ -1042,7 +1181,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
 
   const taskLines = stageTasks.length > 0
     ? stageTasks.map((task, index) => (
-      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "待补充"}`
+      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "暂无补充说明"}`
     ))
     : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
 
@@ -1071,7 +1210,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     ...taskLines,
     "",
     "## 模板章节骨架（请按模板补全）",
-    ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合任务证据、约束与风险完善本节。"])),
+    ...template.requiredSections.flatMap((section) => ([section, "- 请结合任务证据、约束与风险完善本节。"])),
     "",
     "## 关键约束",
     ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
@@ -1129,7 +1268,7 @@ async function buildDeliverableBackfillContentWithAgent(
   const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
   const taskLines = stageTasks.length > 0
     ? stageTasks.map((task, index) => (
-      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "待补充"}`
+      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "暂无补充说明"}`
     ))
     : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
   const checklist = buildDeliverableChecklist(deliverable.name, stageType);
@@ -1649,6 +1788,46 @@ async function warmupProjectAfterCreate(project: ProjectDetail) {
   }
 }
 
+async function runCompanionStageExecutions(input: {
+  projectId: string;
+  projectName: string;
+  projectDescription: string;
+  parsedIntent: ParsedIntent;
+  stageType: StageType;
+  primaryRole: RoleType;
+  actionPrefix: string;
+}) {
+  const companionRoles = (STAGE_COMPANION_ROLES[input.stageType] || [])
+    .filter((role) => role !== input.primaryRole);
+  if (companionRoles.length === 0) {
+    return;
+  }
+
+  for (const role of companionRoles) {
+    try {
+      await runProjectStageAgent({
+        projectId: input.projectId,
+        action: `${input.actionPrefix}.companion`,
+        metadata: {
+          companion: true,
+          primaryRole: input.primaryRole
+        },
+        projectName: input.projectName,
+        projectDescription: input.projectDescription,
+        parsedIntent: input.parsedIntent,
+        stageType: input.stageType,
+        role,
+        summary: `请作为${ROLE_LABELS[role]}对${STAGE_LABELS[input.stageType]}阶段产物进行独立评审，并输出可执行建议。`
+      });
+    } catch (error) {
+      console.warn(
+        `[project] companion stage execution failed for ${input.projectId}/${input.stageType}/${role}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+}
+
 export async function approveProject(id: string): Promise<ProjectDetail | undefined> {
   const project = await findProject(id);
 
@@ -1667,6 +1846,7 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     }
   }
 
+  await assertCurrentStageRealModelGate(project);
   assertCoreDeliverablesTemplateGate(project, project.currentStage);
 
   const currentIndex = stageOrder.indexOf(project.currentStage);
@@ -1855,6 +2035,16 @@ async function warmupNextStageAfterApprove(
         }
       });
     }
+
+    await runCompanionStageExecutions({
+      projectId: project.id,
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: nextStage,
+      primaryRole: nextRole,
+      actionPrefix: "project.approve.next-stage.warmup"
+    });
   } catch (error) {
     console.warn(
       `[project] next-stage warmup failed for ${project.id}/${nextStage}:`,

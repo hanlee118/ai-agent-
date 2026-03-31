@@ -92,6 +92,17 @@ type ExecutionRoute = {
   apiKey: string;
 };
 
+function isRealModelGateEnabled() {
+  const raw = String(process.env.ENFORCE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function getModelRouteKey(model: string, route: string) {
   return `${String(model || "").trim().toLowerCase()}::${String(route || "").trim().toLowerCase()}`;
 }
@@ -147,6 +158,7 @@ export async function runStageAgent(input: {
 }): Promise<StageAgentRunResult> {
   const runtime = await getResolvedRuntimeExecutionConfig();
   const requestedRealMode = runtime.status.requestedMode === "openai-compatible";
+  const enforceRealModelGate = isRealModelGateEnabled();
   const attempts: StageModelAttemptTrace[] = [];
 
   const trackAttempt = (payload: {
@@ -170,10 +182,16 @@ export async function runStageAgent(input: {
 
   if (requestedRealMode) {
     if (!runtime.status.configured) {
-      throw new Error("REAL_MODEL_NOT_CONFIGURED: 已启用真实模型模式，但配置不完整（缺少 API Base URL / API Key / Model）。");
+      const gateMessage = "已启用真实模型模式，但配置不完整（缺少 API Base URL / API Key / Model）。";
+      throw new Error(enforceRealModelGate ? `REAL_MODEL_GATE_FAILED: ${gateMessage}` : `REAL_MODEL_NOT_CONFIGURED: ${gateMessage}`);
     }
 
     if (shouldFastFailRealRuntime(runtime.status.lastValidationStatus, runtime.status.lastValidatedAt)) {
+      if (enforceRealModelGate) {
+        throw new Error(
+          `REAL_MODEL_GATE_FAILED: 最近一次模型健康校验失败，已命中快速失败窗口（status=${runtime.status.lastValidationStatus || "unknown"}）。`
+        );
+      }
       const degraded = await runScriptedAgent({
         ...input,
         summary: `${input.summary ?? "当前阶段改为降级执行"}；最近一次模型健康校验失败，进入快速降级模式。`
@@ -412,6 +430,14 @@ export async function runStageAgent(input: {
     }
 
     // 保底降级：避免阶段推进长时间阻塞，至少保证流程可继续并可审阅。
+    if (enforceRealModelGate) {
+      const gateError = new Error(
+        `REAL_MODEL_GATE_FAILED: 真实模型调用失败（${lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error")}）。`
+      ) as Error & { attempts?: StageModelAttemptTrace[] };
+      gateError.attempts = attempts;
+      throw gateError;
+    }
+
     const degraded = await runScriptedAgent({
       ...input,
       summary: `${input.summary ?? "当前阶段改为降级执行"}；真实模型调用超时或失败。`
@@ -433,6 +459,10 @@ export async function runStageAgent(input: {
       attempts,
       degraded: true
     };
+  }
+
+  if (enforceRealModelGate) {
+    throw new Error("REAL_MODEL_GATE_FAILED: 当前运行模式为 scripted，未满足真实模型门禁要求。");
   }
 
   const scripted = await runScriptedAgent(input);

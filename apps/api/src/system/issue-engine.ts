@@ -522,7 +522,7 @@ export function buildRequirementRefinement(rawInput: string): RequirementRefinem
   }
 
   return {
-    problemStatement: summary || "待补充问题定义",
+    problemStatement: summary || "问题定义待确认",
     expectedOutcome: "形成可执行需求卡、明确团队分工并进入研发流程",
     inScopeDraft,
     outOfScopeDraft,

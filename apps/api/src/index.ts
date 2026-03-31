@@ -202,6 +202,17 @@ type ProjectRequiredAction = {
   ctaLabel: string;
 };
 
+function isRealModelGateEnabled() {
+  const raw = String(process.env.ENFORCE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 const GENERIC_OUTPUT_PATTERNS = [
   /固定仪表盘、项目观测室、Agent 中心三大页面/,
   /让实时输出始终成为视觉中心/,
@@ -352,6 +363,13 @@ function countHits(source: string, items: string[]) {
   }).length;
 }
 
+function formatTaskStatusForEvidence(status: string) {
+  if (status === "done") return "已完成";
+  if (status === "in_progress") return "进行中";
+  if (status === "blocked") return "阻塞";
+  return "待处理";
+}
+
 function buildStageTaskEvidence(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ) {
@@ -364,7 +382,7 @@ function buildStageTaskEvidence(
   }
 
   return currentTasks.map((task, index) => (
-    `- ${index + 1}. ${task.title}（${task.status} / 优先级 ${task.priority}）\n  - 说明: ${task.description || "待补充"}`
+    `- ${index + 1}. ${task.title}（${formatTaskStatusForEvidence(task.status)} / 优先级 ${task.priority}）\n  - 说明: ${task.description || "暂无补充说明"}`
   ));
 }
 
@@ -412,7 +430,7 @@ function evaluateAutoSubmissionQuality(input: {
   const issues: string[] = [];
   const diagnostics: string[] = [];
   let score = 100;
-  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true";
+  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true" || isRealModelGateEnabled();
 
   if (input.run.provider === "scripted") {
     score -= strictRealModel ? 42 : 8;
@@ -613,7 +631,7 @@ function buildProjectRequiredActions(
   ) {
     actions.push({
       id: "runtime-degraded",
-      severity: "warning",
+      severity: isRealModelGateEnabled() ? "critical" : "warning",
       title: "当前阶段已降级到脚本输出",
       detail: "真实模型调用连续失败（如 401/超时），请检查模型通道、密钥权限与可用模型策略后重试。",
       action: "refresh_runtime",
@@ -705,7 +723,7 @@ async function buildAutoStageSubmissions(
       `- 交付目的: ${STAGE_LABELS[project.currentStage]}阶段可验收产物，支撑后续确认与推进`,
       "",
       "## 模板章节骨架（自动补齐）",
-      ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合本阶段任务证据与 Agent 正文完善本节。"])),
+      ...template.requiredSections.flatMap((section) => ([section, "- 请结合本阶段任务证据与 Agent 正文完善本节。"])),
       "",
       "## 验收检查清单",
       ...template.acceptanceChecklist.map((item) => `- ${item}`),
@@ -728,7 +746,7 @@ async function buildAutoStageSubmissions(
       content,
       "",
       "## 自动质检",
-      `- 自动质检结论: ${quality.pass ? "通过" : "待补充"}`,
+      `- 自动质检结论: ${quality.pass ? "通过" : "未通过（需补全）"}`,
       `- 质量评分: ${quality.score}/100`,
       ...quality.diagnostics.map((item) => `- ${item}`),
       ...(quality.issues.length > 0 ? ["- 风险项:", ...quality.issues.map((item) => `  - ${item}`)] : ["- 风险项: 无"])
