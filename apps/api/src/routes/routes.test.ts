@@ -626,6 +626,13 @@ async function createGitLabRouterTestApp(
 }
 
 describe("Error Matrix: gitlab routes", () => {
+  it("[503][SERVICE_UNAVAILABLE][FULL_APP] exposes /api/gitlab via main app router", async () => {
+    const res = await request(fullApp).get("/api/gitlab/projects/group%2Frepo/issues?state=opened");
+    assert.equal(res.status, 503);
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.error.code, "SERVICE_UNAVAILABLE");
+  });
+
   it("[503][SERVICE_UNAVAILABLE] returns unified error when GITLAB_TOKEN is missing", async () => {
     const { gitlabApp, restore } = await createGitLabRouterTestApp({
       token: ""
