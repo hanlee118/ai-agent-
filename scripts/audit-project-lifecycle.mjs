@@ -3,7 +3,8 @@ import http from "node:http";
 const BASE = String(process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
 const REQUEST_TIMEOUT_MS = Math.max(15000, Number(process.env.REQUEST_TIMEOUT_MS || 240000));
 const STAGE_ORDER = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
-const MAX_ROUNDS = Math.max(8, Number(process.env.MAX_ROUNDS || 24));
+// Real-model mode is slower than scripted mode; keep enough polling rounds to avoid false negatives.
+const MAX_ROUNDS = Math.max(24, Number(process.env.MAX_ROUNDS || 180));
 
 const EXPECTED_STAGE_TASK_HINTS = {
   ANALYSIS: ["提炼目标与边界", "输出项目排期", "形成审批版分析稿"],
@@ -111,6 +112,12 @@ function req(method, path, body, options = {}) {
       request.write(payload);
     }
     request.end();
+  });
+}
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, Math.round(ms)));
   });
 }
 
@@ -320,6 +327,7 @@ async function main() {
     assertStageTaskHints(project, "ANALYSIS", "分析阶段");
 
     let lastStage = project.currentStage;
+    let inProgressRetries = 0;
     for (let round = 1; round <= MAX_ROUNDS; round += 1) {
       project = await getProjectDetail(createdProjectId, `detail_round_${round}_before`);
       assertNoFutureStageDeliverables(project, `round${round}`);
@@ -355,14 +363,22 @@ async function main() {
           durationMs: advance.durationMs,
           project: summarizeProject(advance.unwrapped),
           code: advance.body?.error?.code,
+          pollAfterMs: advance.body?.error?.pollAfterMs
         });
 
         if (advance.status === 200) {
+          inProgressRetries = 0;
           project = advance.unwrapped;
         } else if (advance.status === 409 && advance.body?.error?.code === "REQUIRES_USER_INTERVENTION") {
+          inProgressRetries = 0;
           project = await handleRequiredActions(project, advance.body?.error?.requiredActions);
         } else if (advance.status === 409 && advance.body?.error?.code === "PROJECT_ADVANCE_IN_PROGRESS") {
-          addWarning("遇到推进锁，等待下一轮重试。");
+          inProgressRetries += 1;
+          if (inProgressRetries % 10 === 0) {
+            addWarning(`推进任务仍在执行（已等待 ${inProgressRetries} 轮）。`);
+          }
+          const pollAfter = Number(advance.body?.error?.pollAfterMs ?? 1200);
+          await wait(Math.max(600, Math.min(5000, pollAfter)));
           continue;
         } else {
           throw new Error(`ADVANCE_FAILED: status=${advance.status} body=${JSON.stringify(advance.body).slice(0, 500)}`);
@@ -433,4 +449,3 @@ main()
     console.log(JSON.stringify(report, null, 2));
     process.exit(1);
   });
-
