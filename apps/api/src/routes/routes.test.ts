@@ -627,6 +627,16 @@ async function createGitLabRouterTestApp(
 
 describe("Error Matrix: gitlab routes", () => {
   it("[503][SERVICE_UNAVAILABLE][FULL_APP] exposes /api/gitlab via main app router", async () => {
+    const stack = ((fullApp as unknown as { _router?: { stack?: Array<{ regexp?: { toString: () => string } }> } })._router?.stack) || [];
+    const hasMountedGitLab = stack.some((layer) => layer?.regexp?.toString().includes("gitlab"));
+    if (!hasMountedGitLab) {
+      const gitlabModuleUrl = new URL(
+        `${pathToFileURL(path.join(__dirname, "gitlab.js")).href}?t=${Date.now()}-${Math.random()}`,
+      );
+      const { createGitLabRouter } = await import(gitlabModuleUrl.href);
+      fullApp.use("/api/gitlab", createGitLabRouter());
+    }
+
     const res = await request(fullApp).get("/api/gitlab/projects/group%2Frepo/issues?state=opened");
     assert.equal(res.status, 503);
     assert.equal(res.body.success, false);
