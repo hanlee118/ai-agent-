@@ -1670,18 +1670,18 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     if (message.startsWith("REAL_MODEL_GATE_FAILED:")) {
       const runtime = await getRuntimeStatus();
       const requiredActions = buildProjectRequiredActions(current, runtime);
-      const normalizedRequiredActions = requiredActions.length > 0
+      const runtimeRepairAction = {
+        id: "real-model-gate-repair",
+        severity: "critical" as const,
+        title: "当前阶段未通过真实模型门禁",
+        detail: "请修复模型通道（API Key / Base URL / 可用模型）并重新执行本阶段，再进行验收。",
+        action: "refresh_runtime" as const,
+        ctaLabel: "修复模型通道"
+      };
+      const hasRuntimeRepairAction = requiredActions.some((item) => item.action === "refresh_runtime");
+      const normalizedRequiredActions = hasRuntimeRepairAction
         ? requiredActions
-        : [
-            {
-              id: "real-model-gate-repair",
-              severity: "critical",
-              title: "当前阶段未通过真实模型门禁",
-              detail: "请修复模型通道（API Key / Base URL / 可用模型）并重新执行本阶段，再进行验收。",
-              action: "refresh_runtime",
-              ctaLabel: "修复模型通道"
-            }
-          ];
+        : [runtimeRepairAction, ...requiredActions];
       res.status(422).json({
         success: false,
         error: {

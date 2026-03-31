@@ -438,6 +438,11 @@ describe("Error Matrix: auth + projects", () => {
     assert.equal(approveGateFail.status, 422);
     assert.equal(approveGateFail.body.success, false);
     assert.equal(approveGateFail.body.error.code, "REAL_MODEL_GATE_FAILED");
+    assert.ok(Array.isArray(approveGateFail.body.error.requiredActions));
+    assert.ok(
+      approveGateFail.body.error.requiredActions.some((item: { action?: string }) => item.action === "refresh_runtime"),
+      "REAL_MODEL_GATE_FAILED 必须返回 refresh_runtime 修复动作"
+    );
     if (oldGateValue === undefined) {
       delete process.env.ENFORCE_REAL_MODEL_GATE;
     } else {
