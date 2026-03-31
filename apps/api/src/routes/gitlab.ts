@@ -1,6 +1,8 @@
 import express from "express";
 import { prisma } from "../db.js";
+import type { StageType } from "@occ/shared";
 import { asyncRoute, sendError, sendSuccess, type ApiErrorCode } from "./utils.js";
+import { findProject } from "../data/repository.js";
 
 const GITLAB_BASE_URL = String(process.env.GITLAB_BASE_URL || "https://gitlab.com").trim().replace(/\/$/, "");
 const GITLAB_TOKEN = String(process.env.GITLAB_TOKEN || "").trim();
@@ -10,6 +12,9 @@ const GITLAB_DEFAULT_PROJECT = String(
   || process.env.GITLAB_DEFAULT_PROJECT_ID
   || ""
 ).trim();
+const HARNESS_PROJECT_MARKER = "OCC_PROJECT_ID";
+const HARNESS_TASK_MARKER = "OCC_TASK_ID";
+const HARNESS_LABEL = "occ-harness";
 
 function parseOptionalString(input: unknown) {
   const value = String(input ?? "").trim();
@@ -158,8 +163,321 @@ async function requestGitLab(path: string, init?: RequestInit) {
   };
 }
 
+function sanitizeLabelFragment(input: string) {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 48);
+}
+
+function buildHarnessProjectLabel(projectId: string) {
+  return `occ-project-${sanitizeLabelFragment(projectId)}`;
+}
+
+function buildHarnessStageLabel(stageType: string) {
+  return `occ-stage-${sanitizeLabelFragment(stageType)}`;
+}
+
+function buildHarnessTaskLabel(taskId: string) {
+  return `occ-task-${sanitizeLabelFragment(taskId).slice(0, 24)}`;
+}
+
+function buildHarnessIssueTitle(input: {
+  projectId: string;
+  taskTitle: string;
+  stageType: string;
+}) {
+  return `[OCC][${input.stageType}] ${input.taskTitle} (${input.projectId})`;
+}
+
+function buildHarnessIssueDescription(input: {
+  projectId: string;
+  projectName: string;
+  stageType: string;
+  taskId: string;
+  taskTitle: string;
+  taskDescription: string;
+  taskAssignee: string;
+  taskPriority: string;
+  taskStatus: string;
+}) {
+  return [
+    `## Harness Task Dispatch`,
+    `- OCC 项目: ${input.projectName} (${input.projectId})`,
+    `- 阶段: ${input.stageType}`,
+    `- 任务: ${input.taskTitle}`,
+    `- 负责人: ${input.taskAssignee}`,
+    `- 优先级: ${input.taskPriority}`,
+    `- 当前状态: ${input.taskStatus}`,
+    "",
+    "## 任务描述",
+    input.taskDescription || "暂无补充描述",
+    "",
+    "## 协作规则（Harness Engineering）",
+    "- 先交付最小可验收结果，再持续迭代。",
+    "- 每次变更必须有可追溯证据（提交、评论、产物链接）。",
+    "- 阻塞/风险需在 issue 中显式同步。",
+    "",
+    "## 机器可读标记",
+    `<!-- ${HARNESS_PROJECT_MARKER}:${input.projectId} -->`,
+    `<!-- ${HARNESS_TASK_MARKER}:${input.taskId} -->`,
+    `<!-- OCC_STAGE:${input.stageType} -->`
+  ].join("\n");
+}
+
+function extractHarnessMarker(source: string, marker: string) {
+  const regex = new RegExp(`${marker}\\s*:\\s*([^\\s>]+)`, "i");
+  const matched = source.match(regex);
+  return matched ? String(matched[1] || "").trim() : "";
+}
+
+function desiredIssueStateEvent(taskStatus: string) {
+  return taskStatus === "done" ? "close" : "reopen";
+}
+
+function desiredTaskStatusFromIssueState(issueState: string) {
+  return issueState === "closed" ? "done" : "in_progress";
+}
+
+async function findIssueByTaskMarker(projectPath: string, taskId: string) {
+  const query = new URLSearchParams({
+    state: "all",
+    per_page: "30",
+    search: `${HARNESS_TASK_MARKER}:${taskId}`
+  });
+  const response = await requestGitLab(
+    `/projects/${encodeURIComponent(projectPath)}/issues?${query.toString()}`
+  );
+  if (!response.ok || !Array.isArray(response.payload)) {
+    return null;
+  }
+  for (const item of response.payload as Array<Record<string, unknown>>) {
+    const iid = Number(item.iid);
+    if (!Number.isInteger(iid) || iid <= 0) {
+      continue;
+    }
+    const title = String(item.title || "");
+    const description = String(item.description || "");
+    const markerSource = `${title}\n${description}`;
+    if (extractHarnessMarker(markerSource, HARNESS_TASK_MARKER) === taskId) {
+      return {
+        iid,
+        state: String(item.state || "opened")
+      };
+    }
+  }
+  return null;
+}
+
+export async function syncProjectGitLabHarness(input: {
+  projectId: string;
+  stageType?: StageType | string;
+  projectPath?: string;
+  closeOnComplete?: boolean;
+}) {
+  const project = await findProject(input.projectId);
+  if (!project) {
+    return {
+      ok: false,
+      code: "NOT_FOUND",
+      message: `Project not found: ${input.projectId}`
+    } as const;
+  }
+
+  if (!GITLAB_TOKEN) {
+    return {
+      ok: false,
+      code: "SERVICE_UNAVAILABLE",
+      message: "GITLAB_TOKEN 未配置，无法执行 Harness 同步"
+    } as const;
+  }
+
+  const projectPath = resolveProjectPath(input.projectPath);
+  if (!projectPath) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message: "GitLab projectPath 未配置（GITLAB_DEFAULT_PROJECT 或请求参数 projectPath）"
+    } as const;
+  }
+
+  const targetStage = String(input.stageType || project.currentStage || "DEV").trim().toUpperCase();
+  const tasks = project.tasks.filter((task) => task.stageType === targetStage);
+
+  const created: number[] = [];
+  const updated: number[] = [];
+  const reused: number[] = [];
+  const failed: Array<{ taskId: string; taskTitle: string; reason: string }> = [];
+
+  for (const task of tasks) {
+    try {
+      const existing = await findIssueByTaskMarker(projectPath, task.id);
+      const labels = [
+        HARNESS_LABEL,
+        buildHarnessProjectLabel(project.id),
+        buildHarnessStageLabel(task.stageType),
+        buildHarnessTaskLabel(task.id)
+      ].join(",");
+
+      if (!existing) {
+        const createResponse = await requestGitLab(
+          `/projects/${encodeURIComponent(projectPath)}/issues`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              title: buildHarnessIssueTitle({
+                projectId: project.id,
+                taskTitle: task.title,
+                stageType: task.stageType
+              }),
+              description: buildHarnessIssueDescription({
+                projectId: project.id,
+                projectName: project.name,
+                stageType: task.stageType,
+                taskId: task.id,
+                taskTitle: task.title,
+                taskDescription: task.description,
+                taskAssignee: task.assignee,
+                taskPriority: task.priority,
+                taskStatus: task.status
+              }),
+              labels
+            })
+          }
+        );
+
+        if (!createResponse.ok) {
+          throw new Error(createResponse.errorText);
+        }
+
+        const createdIssue = createResponse.payload as { iid?: unknown; state?: unknown };
+        const iid = Number(createdIssue?.iid);
+        if (!Number.isInteger(iid) || iid <= 0) {
+          throw new Error("GitLab issue iid is invalid");
+        }
+
+        created.push(iid);
+        await safeUpsertGitLabSync({
+          projectId: project.id,
+          issueIid: iid,
+          projectPath,
+          status: String(createdIssue?.state || "opened")
+        });
+      } else {
+        reused.push(existing.iid);
+        const desiredEvent = desiredIssueStateEvent(task.status);
+        const shouldClose = desiredEvent === "close";
+        const issueClosed = existing.state === "closed";
+        if ((shouldClose && !issueClosed) || (!shouldClose && issueClosed)) {
+          const updateResponse = await requestGitLab(
+            `/projects/${encodeURIComponent(projectPath)}/issues/${encodeURIComponent(String(existing.iid))}`,
+            {
+              method: "PUT",
+              body: JSON.stringify({
+                state_event: desiredEvent,
+                labels
+              })
+            }
+          );
+          if (!updateResponse.ok) {
+            throw new Error(updateResponse.errorText);
+          }
+          updated.push(existing.iid);
+          const issue = updateResponse.payload as { state?: unknown };
+          await safeUpsertGitLabSync({
+            projectId: project.id,
+            issueIid: existing.iid,
+            projectPath,
+            status: String(issue?.state || (shouldClose ? "closed" : "opened"))
+          });
+        }
+      }
+    } catch (error) {
+      failed.push({
+        taskId: task.id,
+        taskTitle: task.title,
+        reason: error instanceof Error ? error.message : "unknown error"
+      });
+    }
+  }
+
+  if (input.closeOnComplete || project.status === "completed") {
+    const labels = [HARNESS_LABEL, buildHarnessProjectLabel(project.id)].join(",");
+    const openedIssues = await requestGitLab(
+      `/projects/${encodeURIComponent(projectPath)}/issues?state=opened&per_page=100&labels=${encodeURIComponent(labels)}`
+    );
+    if (openedIssues.ok && Array.isArray(openedIssues.payload)) {
+      for (const issue of openedIssues.payload as Array<Record<string, unknown>>) {
+        const iid = Number(issue.iid);
+        if (!Number.isInteger(iid) || iid <= 0) {
+          continue;
+        }
+        const closeIssue = await requestGitLab(
+          `/projects/${encodeURIComponent(projectPath)}/issues/${encodeURIComponent(String(iid))}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({ state_event: "close" })
+          }
+        );
+        if (closeIssue.ok) {
+          await safeUpsertGitLabSync({
+            projectId: project.id,
+            issueIid: iid,
+            projectPath,
+            status: "closed"
+          });
+        }
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    data: {
+      projectId: project.id,
+      projectName: project.name,
+      projectPath,
+      stageType: targetStage,
+      closeOnComplete: Boolean(input.closeOnComplete || project.status === "completed"),
+      taskTotal: tasks.length,
+      created,
+      updated,
+      reused,
+      failed
+    }
+  } as const;
+}
+
 export function createGitLabRouter() {
   const router = express.Router();
+
+  router.post("/harness/projects/:occProjectId/sync", asyncRoute(async (req, res) => {
+    if (!ensureGitLabConfig(res)) {
+      return;
+    }
+
+    const occProjectId = parseOptionalString(req.params.occProjectId);
+    if (!occProjectId) {
+      sendError(res, 400, "VALIDATION_ERROR", "occProjectId is required");
+      return;
+    }
+
+    const result = await syncProjectGitLabHarness({
+      projectId: occProjectId,
+      projectPath: parseOptionalString((req.body as Record<string, unknown>)?.projectPath),
+      stageType: parseOptionalString((req.body as Record<string, unknown>)?.stageType),
+      closeOnComplete: Boolean((req.body as Record<string, unknown>)?.closeOnComplete)
+    });
+
+    if (!result.ok) {
+      sendError(res, result.code === "NOT_FOUND" ? 404 : 422, result.code, result.message);
+      return;
+    }
+
+    sendSuccess(res, result.data);
+  }));
 
   router.get("/projects/:projectId/issues", asyncRoute(async (req, res) => {
     if (!ensureGitLabConfig(res)) {
@@ -398,12 +716,28 @@ export function createGitLabRouter() {
       const projectPath = String((payload.project as Record<string, unknown> | undefined)?.path_with_namespace || "").trim();
       const iid = Number(issue.iid);
       const state = String(issue.state || "").trim();
+      const markerSource = `${String(issue.title || "")}\n${String(issue.description || "")}`;
+      const projectIdMarker = extractHarnessMarker(markerSource, HARNESS_PROJECT_MARKER);
+      const taskIdMarker = extractHarnessMarker(markerSource, HARNESS_TASK_MARKER);
 
       if (projectPath && Number.isInteger(iid) && iid > 0) {
         await safeUpdateGitLabSyncByProjectPath({
           projectPath,
           issueIid: iid,
           status: state || "synced"
+        });
+      }
+
+      if (projectIdMarker && taskIdMarker) {
+        const nextTaskStatus = desiredTaskStatusFromIssueState(state);
+        await prisma.task.updateMany({
+          where: {
+            id: taskIdMarker,
+            projectId: projectIdMarker
+          },
+          data: {
+            status: nextTaskStatus
+          }
         });
       }
 

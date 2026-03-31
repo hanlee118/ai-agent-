@@ -30,6 +30,7 @@ import {
 import { getRuntimeStatus } from "../agents/runtime.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
+import { syncProjectGitLabHarness } from "./gitlab.js";
 
 /**
  * @openapi
@@ -880,6 +881,36 @@ function inferProjectTeam(input: string, suggestedTeam: RoleType[]): RoleType[] 
   return suggestedTeam.length > 0 ? suggestedTeam.slice(0, 6) : ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"];
 }
 
+const GITLAB_HARNESS_SYNC_STAGES = new Set(["DEV", "ACCEPT"]);
+
+async function trySyncGitLabHarness(input: {
+  projectId: string;
+  stageType?: string;
+  closeOnComplete?: boolean;
+  reason: string;
+}) {
+  const normalizedStage = String(input.stageType || "").trim().toUpperCase();
+  const closeOnComplete = Boolean(input.closeOnComplete);
+  const shouldSync = GITLAB_HARNESS_SYNC_STAGES.has(normalizedStage) || closeOnComplete;
+  if (!shouldSync) {
+    return;
+  }
+
+  try {
+    const result = await syncProjectGitLabHarness({
+      projectId: input.projectId,
+      stageType: normalizedStage || undefined,
+      closeOnComplete
+    });
+    if (!result.ok) {
+      console.warn(`[GitLab Harness] sync skipped (${input.reason}): ${result.code} ${result.message}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    console.warn(`[GitLab Harness] sync failed (${input.reason}): ${message}`);
+  }
+}
+
 export function createProjectsRouter(options: CreateProjectsRouterOptions) {
   const {
     asyncRoute,
@@ -1728,6 +1759,12 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     resourceId: project.id,
     summary: `批准项目阶段 ${project.currentStage}`
   });
+  void trySyncGitLabHarness({
+    projectId: project.id,
+    stageType: project.currentStage,
+    closeOnComplete: project.status === "completed",
+    reason: "project.approve"
+  });
   res.json(project);
 }));
 
@@ -1779,6 +1816,11 @@ router.post("/api/projects/:id/reject", asyncRoute(async (req, res) => {
     summary: `退回项目阶段 ${project.currentStage}`,
     detail: reason
   });
+  void trySyncGitLabHarness({
+    projectId: project.id,
+    stageType: project.currentStage,
+    reason: "project.reject"
+  });
   res.json(project);
 }));
 
@@ -1808,6 +1850,11 @@ router.post("/api/projects/:id/intervene", asyncRoute(async (req, res) => {
     summary: `项目 ${project.id} 已被人工介入`,
     detail: command
   });
+  void trySyncGitLabHarness({
+    projectId: project.id,
+    stageType: project.currentStage,
+    reason: "project.intervene"
+  });
   res.json(project);
 }));
 
@@ -1829,6 +1876,11 @@ router.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
     summary: `项目 ${project.id} 已恢复执行`
   });
   kickProjectAutomationTick();
+  void trySyncGitLabHarness({
+    projectId: project.id,
+    stageType: project.currentStage,
+    reason: "project.resume"
+  });
   res.json(project);
 }));
 
@@ -1848,6 +1900,12 @@ router.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
     resourceType: "project",
     resourceId: project.id,
     summary: `项目 ${project.id} 已关闭`
+  });
+  void trySyncGitLabHarness({
+    projectId: project.id,
+    stageType: project.currentStage,
+    closeOnComplete: true,
+    reason: "project.close"
   });
   res.json(project);
 }));
@@ -1930,6 +1988,11 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
     resourceId: project.id,
     summary: `提交项目 ${project.id} 当前阶段交付物`
   });
+  void trySyncGitLabHarness({
+    projectId: project.id,
+    stageType: project.currentStage,
+    reason: "project.stage_submit"
+  });
   res.json(project);
 }));
 
@@ -1986,6 +2049,11 @@ router.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
     resourceType: "task",
     resourceId: task.id,
     summary: `任务 ${task.id} 状态更新为 ${task.status}`
+  });
+  void trySyncGitLabHarness({
+    projectId: task.projectId,
+    stageType: task.stageType,
+    reason: "task.update"
   });
   res.json(task);
 }));

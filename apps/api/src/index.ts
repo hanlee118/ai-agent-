@@ -118,7 +118,7 @@ import { createSystemRouter } from "./routes/system.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createOpenClawRouter } from "./routes/openclaw.js";
 import { createProjectsRouter } from "./routes/projects.js";
-import { createGitLabRouter } from "./routes/gitlab.js";
+import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js";
 import { buildOpenApiSpec } from "./system/openapi.js";
 
 const app = express();
@@ -128,6 +128,7 @@ const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
 const webGeneratedPath = fileURLToPath(new URL("../../web/public/generated", import.meta.url));
 const siteGeneratedPath = fileURLToPath(new URL("../../../site/generated", import.meta.url));
 const projectAutoAdvanceIntervalMs = Math.max(5000, Number(process.env.PROJECT_AUTO_ADVANCE_INTERVAL_MS ?? 12000));
+const GITLAB_HARNESS_SYNC_STAGES = new Set<StageType>(["DEV", "ACCEPT"]);
 
 const projectAutomationState: {
   enabled: boolean;
@@ -784,6 +785,37 @@ async function submitStageSubmissionBundle(
   }
 }
 
+async function trySyncGitLabHarnessForProject(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    stageType?: string;
+    closeOnComplete?: boolean;
+    reason?: string;
+  }
+) {
+  const normalizedStage = String(options?.stageType || project.currentStage || "").trim().toUpperCase();
+  const closeOnComplete = Boolean(options?.closeOnComplete || project.status === "completed");
+  const shouldSync = GITLAB_HARNESS_SYNC_STAGES.has(normalizedStage as StageType) || closeOnComplete;
+
+  if (!shouldSync) {
+    return;
+  }
+
+  try {
+    const result = await syncProjectGitLabHarness({
+      projectId: project.id,
+      stageType: normalizedStage || undefined,
+      closeOnComplete
+    });
+    if (!result.ok) {
+      console.warn(`[GitLab Harness] sync skipped (${options?.reason || "automation"}): ${result.code} ${result.message}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "unknown error";
+    console.warn(`[GitLab Harness] sync failed (${options?.reason || "automation"}): ${message}`);
+  }
+}
+
 async function runProjectAutomationTick(options?: { force?: boolean }) {
   const force = options?.force === true;
 
@@ -832,6 +864,11 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
           await submitStageSubmissionBundle(project.id, submissions);
 
           const refreshed = await findProject(project.id);
+          if (refreshed) {
+            await trySyncGitLabHarnessForProject(refreshed, {
+              reason: "project.automation_tick"
+            });
+          }
           if (refreshed?.pendingApproval) {
             awaitingConfirmation += 1;
             const qualityPass = submissions.every((item) => item.quality.pass);

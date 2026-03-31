@@ -226,6 +226,21 @@ pnpm start:prod
 - `POST /api/openclaw/agents/:agentId/memory`
 - `GET /api/openclaw/sla`
 
+### GitLab Harness（实施与验收闭环）
+
+- `POST /api/gitlab/harness/projects/:occProjectId/sync`
+  - 将 OCC 项目 `DEV/ACCEPT` 阶段任务同步为 GitLab Issue（含 `OCC_PROJECT_ID`、`OCC_TASK_ID` 机器标记）。
+- `POST /api/gitlab/webhook`
+  - 接收 Issue 状态回写：`closed -> done`，`opened/reopened -> in_progress`。
+- 项目执行关键动作（`submit/approve/reject/intervene/resume/close/task update`）和自动推进 tick 均会触发 Harness 同步。
+- 项目完成或关闭时，会自动执行 `closeOnComplete`，关闭同项目下仍打开的 Harness Issue。
+
+### 仓库治理约定
+
+- `main` 仅保留可发布代码，所有功能开发在 `codex/*` 分支完成并回合到 `main`。
+- 临时日志、运行缓存、本地数据库、`node_modules`、构建产物不得入库。
+- 每轮改造需同步更新 `docs/` 与桌面主文档，确保“仓库版”和“本地版”一致。
+
 ## 文档索引
 
 - [最新版本对比说明](docs/LATEST_VERSION_COMPARISON.md)
