@@ -46,6 +46,9 @@ jobs:
       - name: Normalize route-test seed DB path
         run: |
           mkdir -p apps/api/prisma
+          if [ ! -f apps/api/prisma/dev.db ] && [ -f apps/api/prisma/prisma/dev.db ]; then
+            cp apps/api/prisma/prisma/dev.db apps/api/prisma/dev.db
+          fi
           if [ ! -f apps/api/prisma/dev.db ] && [ -f prisma/dev.db ]; then
             cp prisma/dev.db apps/api/prisma/dev.db
           fi
