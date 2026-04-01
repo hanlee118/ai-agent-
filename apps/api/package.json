@@ -10,6 +10,7 @@
     "test:routes": "tsx --test src/routes/routes.test.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
+    "db:migrate:status": "prisma migrate status",
     "db:bootstrap": "sqlite3 prisma/dev.db < prisma/bootstrap.sql",
     "db:seed": "tsx prisma/seed.ts"
   },
