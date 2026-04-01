@@ -583,16 +583,9 @@ function buildDeliverableSpecificSections(
   title: string,
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ) {
-  const template = resolveDeliverableTemplate(title, stageType);
   return [
     "## 专业模板约束",
     ...buildDeliverableTemplatePromptBlock(title, stageType, project.parsedIntent.keywords).map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
-    "",
-    "## 模板章节骨架（请结合 Agent 输出正文补全）",
-    ...template.requiredSections.flatMap((section) => ([
-      section,
-      "- 结合项目上下文补充该章节关键内容。"
-    ])),
     "",
     "## 交付细化说明",
     "- 说明本交付物如何作为下一阶段输入。",

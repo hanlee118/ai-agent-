@@ -1832,6 +1832,17 @@ async function buildDeliverableBackfillContentWithAgent(
   ].join("\n");
 }
 
+function shouldUseDeterministicCurrentStageRecovery(
+  project: ProjectRecord,
+  stageType: StageType | null,
+  stageStatus: string | undefined
+) {
+  return project.status === "active"
+    && !project.pendingApproval
+    && stageType === resolveStageType(project.currentStage)
+    && stageStatus === "active";
+}
+
 async function reconcileProjectDeliverables(project: ProjectRecord) {
   const stageStatusByType = new Map(project.stages.map((stage) => [stage.type, stage.status]));
   const stageRunCache = new Map<string, Awaited<ReturnType<typeof runStageAgent>>>();
@@ -1853,6 +1864,12 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
 
   for (const deliverable of project.deliverables) {
     const stageStatus = stageStatusByType.get(deliverable.stageType);
+    const deliverableStageType = resolveStageType(deliverable.stageType);
+    const useDeterministicRecovery = shouldUseDeterministicCurrentStageRecovery(
+      project,
+      deliverableStageType,
+      stageStatus
+    );
     const shouldPromoteStatus =
       project.status === "completed"
       && stageStatus === "completed"
@@ -1872,7 +1889,13 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
     }
 
     const backfilledContent = needBackfill
-      ? await buildDeliverableBackfillContentWithAgent(project, deliverable, stageRunCache)
+      ? (
+          // When the current active stage is already stuck in recovery, prioritize
+          // deterministic, template-complete content over another round of slow model retries.
+          useDeterministicRecovery
+            ? buildDeliverableBackfillContent(project, deliverable)
+            : await buildDeliverableBackfillContentWithAgent(project, deliverable, stageRunCache)
+        )
       : deliverable.content;
 
     updates.push({
@@ -1932,7 +1955,13 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         updatedAt: now
       };
       const shouldFastFillCurrentPendingStage = project.pendingApproval && stage.type === project.currentStage;
+      const shouldFastFillCurrentActiveStage = shouldUseDeterministicCurrentStageRecovery(
+        project,
+        stageType,
+        stage.status
+      );
       const content = shouldFastFillCurrentPendingStage
+        || shouldFastFillCurrentActiveStage
         ? buildDeliverableBackfillContent(project, templateDeliverable)
         : await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
       creates.push({

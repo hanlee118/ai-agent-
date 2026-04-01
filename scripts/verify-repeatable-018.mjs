@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { prisma } from "../apps/api/dist/db.js";
+import { generateSessionToken, hashSessionToken } from "../apps/api/dist/security/secret-store.js";
 
 const API_BASE = (process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
-const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "Admin@123456").trim();
 const PROJECT_ID = String(process.env.PROJECT_ID || "OCC-20260401-018").trim();
 const MAX_ROUNDS = Math.max(20, Number(process.env.MAX_ROUNDS || 120));
 const REQUEST_TIMEOUT_MS = Math.max(90000, Number(process.env.REQUEST_TIMEOUT_MS || 240000));
@@ -11,6 +13,7 @@ const PLACEHOLDER_RE = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/
 const STAGES = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 
 let SESSION_COOKIE = "";
+let API_STARTED_BY_SCRIPT = false;
 
 function unwrap(payload) {
   if (payload && typeof payload === "object" && payload.success === true && "data" in payload) {
@@ -83,6 +86,49 @@ function writeReport(report) {
   return outPath;
 }
 
+async function ensureApiReady(logs) {
+  const health = await req("GET", "/health", null, 15000);
+  if (health.status === 200) {
+    return;
+  }
+
+  logs.push({ at: new Date().toISOString(), type: "api_autostart", status: health.status });
+  execFileSync("pnpm", ["daemon:start"], {
+    cwd: process.cwd(),
+    stdio: "inherit"
+  });
+  API_STARTED_BY_SCRIPT = true;
+
+  for (let i = 0; i < 20; i += 1) {
+    const retry = await req("GET", "/health", null, 15000);
+    if (retry.status === 200) {
+      return;
+    }
+    await WAIT(1000);
+  }
+
+  throw new Error("health check failed after daemon:start");
+}
+
+function stopStartedApi(logs) {
+  if (!API_STARTED_BY_SCRIPT) {
+    return;
+  }
+  try {
+    execFileSync("pnpm", ["daemon:stop"], {
+      cwd: process.cwd(),
+      stdio: "inherit"
+    });
+    logs.push({ at: new Date().toISOString(), type: "api_stopped_after_verification" });
+  } catch (error) {
+    logs.push({
+      at: new Date().toISOString(),
+      type: "api_stop_failed",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
 async function ensureAuth(logs) {
   const statusResp = await req("GET", "/api/auth/status");
   if (statusResp.status !== 200) {
@@ -90,16 +136,31 @@ async function ensureAuth(logs) {
   }
   const status = unwrap(statusResp.body) || {};
   if (!status.setupComplete) {
-    const setupResp = await req("POST", "/api/auth/setup", { password: ADMIN_PASSWORD });
-    if (setupResp.status !== 201 && setupResp.status !== 409) {
-      throw new Error(`auth setup failed: ${setupResp.status}`);
+    throw new Error("auth setup incomplete; cannot create temporary session safely");
+  }
+
+  const sessionToken = generateSessionToken();
+  await prisma.authSession.create({
+    data: {
+      tokenHash: await hashSessionToken(sessionToken),
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
     }
-  }
-  const loginResp = await req("POST", "/api/auth/login", { password: ADMIN_PASSWORD });
-  if (loginResp.status !== 200) {
-    throw new Error(`auth login failed: ${loginResp.status}`);
-  }
+  });
+  SESSION_COOKIE = `occ_session=${sessionToken}`;
   logs.push({ at: new Date().toISOString(), type: "auth_ok" });
+}
+
+async function cleanupAuth(logs) {
+  const rawToken = SESSION_COOKIE.replace(/^occ_session=/, "").trim();
+  if (!rawToken) {
+    return;
+  }
+  await prisma.authSession.deleteMany({
+    where: {
+      tokenHash: await hashSessionToken(rawToken)
+    }
+  });
+  logs.push({ at: new Date().toISOString(), type: "auth_session_cleaned" });
 }
 
 async function submitDesignReviewCard(projectId) {
@@ -188,7 +249,9 @@ async function handleRequiredActions(project, actions, logs) {
 
 async function main() {
   const logs = [];
-  await ensureAuth(logs);
+  try {
+    await ensureApiReady(logs);
+    await ensureAuth(logs);
 
   let projectResp = await req("GET", `/api/projects/${encodeURIComponent(PROJECT_ID)}`);
   if (projectResp.status !== 200) {
@@ -375,9 +438,14 @@ async function main() {
     pmStageEvidence
   }, null, 2));
 
-  if (!ok) {
-    process.stderr.write(`verify-repeatable-018 failed: ${outPath}\n`);
-    process.exitCode = 1;
+    if (!ok) {
+      process.stderr.write(`verify-repeatable-018 failed: ${outPath}\n`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await cleanupAuth(logs);
+    await prisma.$disconnect();
+    stopStartedApi(logs);
   }
 }
 
