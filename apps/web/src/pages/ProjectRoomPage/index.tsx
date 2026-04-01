@@ -1461,10 +1461,18 @@ const ProjectRoom = ({
     }
   };
 
+  const sanitizeChecklistEntry = (input: string) =>
+    String(input || '')
+      .trim()
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/^[-*]\s*/, '')
+      .replace(/^【[^】]+】/, '')
+      .trim();
+
   const splitChecklist = (input: string) =>
     input
       .split(/\n|；|;|,|，/)
-      .map((item) => item.trim())
+      .map((item) => sanitizeChecklistEntry(item))
       .filter(Boolean);
 
   const handleSubmitDesignReview = async () => {
@@ -1494,6 +1502,11 @@ const ProjectRoom = ({
 
     setIsSubmittingDesignReview(true);
     try {
+      const reviewChecklist = [
+        '设计说明可支撑开发实施，不依赖口头解释。',
+        '无障碍检查项至少 3 条并可验证。',
+        '审查结论明确（通过/驳回）且有理由。',
+      ];
       await projectsApi.submitStage(project.id, {
         title: `设计审查卡 ${new Date().toLocaleDateString('zh-CN')}`,
         content: [
@@ -1510,6 +1523,15 @@ const ProjectRoom = ({
           '',
           '## 品牌语气',
           `- ${designReviewForm.brandTone.trim()}`,
+          '',
+          '## UX 原则',
+          ...uxPrinciples.map((item) => `- ${item}`),
+          '',
+          '## 可访问性检查',
+          ...accessibilityChecklist.map((item) => `- ${item}`),
+          '',
+          '## 验收检查清单',
+          ...reviewChecklist.map((item) => `- ${item}`),
         ].join('\n'),
         designReview: {
           visualDirection: designReviewForm.visualDirection.trim(),

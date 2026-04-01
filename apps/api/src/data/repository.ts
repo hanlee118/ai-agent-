@@ -354,17 +354,48 @@ function normalizeDesignReview(input: StageSubmissionInput["designReview"]) {
     return null;
   }
 
-  const visualDirection = String(input.visualDirection ?? "").trim();
-  const brandTone = String(input.brandTone ?? "").trim();
-  const approvedBy = String(input.approvedBy ?? "").trim();
+  const sanitizeField = (value: unknown) =>
+    String(value ?? "")
+      .replace(/\r\n/g, "\n")
+      .split("\n")
+      .map((line) =>
+        line
+          .trim()
+          .replace(/^#{1,6}\s*/, "")
+          .replace(/^[-*]\s*/, "")
+          .replace(/^【[^】]+】/, "")
+          .trim()
+      )
+      .filter((line) => {
+        if (!line) {
+          return false;
+        }
+        const normalized = line.toLowerCase().replace(/[：:]/g, "").replace(/\s+/g, "");
+        return ![
+          "视觉方案",
+          "版式策略",
+          "组件清单",
+          "品牌语气",
+          "ux原则",
+          "可访问性检查",
+          "设计审查卡",
+          "验收检查清单",
+          "agent介入说明",
+          "agent输出摘录"
+        ].includes(normalized);
+      })
+      .join("；")
+      .trim();
+  const sanitizeList = (values: unknown[]) =>
+    Array.from(new Set(values.map((item) => sanitizeField(item)).filter(Boolean)));
+
+  const visualDirection = sanitizeField(input.visualDirection);
+  const brandTone = sanitizeField(input.brandTone);
+  const approvedBy = sanitizeField(input.approvedBy);
   const approved = Boolean(input.approved);
-  const uxPrinciples = (Array.isArray(input.uxPrinciples) ? input.uxPrinciples : [])
-    .map((item) => String(item).trim())
-    .filter(Boolean);
-  const accessibilityChecklist = (Array.isArray(input.accessibilityChecklist) ? input.accessibilityChecklist : [])
-    .map((item) => String(item).trim())
-    .filter(Boolean);
-  const notes = String(input.notes ?? "").trim();
+  const uxPrinciples = sanitizeList(Array.isArray(input.uxPrinciples) ? input.uxPrinciples : []);
+  const accessibilityChecklist = sanitizeList(Array.isArray(input.accessibilityChecklist) ? input.accessibilityChecklist : []);
+  const notes = sanitizeField(input.notes);
 
   if (!visualDirection || !brandTone || !approvedBy) {
     return null;
@@ -483,6 +514,11 @@ function ensureDesignSubmissionContent(
 
   if (!hasSection("## 可访问性检查")) {
     appendSection("## 可访问性检查", designReview.accessibilityChecklist.map((item) => `- ${item}`));
+  }
+
+  if (!hasSection("## 验收检查清单")) {
+    const checklist = resolveDeliverableTemplate("设计审查卡.md", "DESIGN").acceptanceChecklist;
+    appendSection("## 验收检查清单", checklist.map((item) => `- ${item}`));
   }
 
   if (!hasSection("## 单页预览代码（HTML）")) {

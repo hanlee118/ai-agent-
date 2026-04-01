@@ -147,6 +147,41 @@ const isDesignReviewFormBlank = (form: ProjectRoomDesignReviewForm) => {
   ].some((item) => String(item || '').trim().length > 0);
 };
 
+const DESIGN_REVIEW_NOISE_TITLES = new Set([
+  '视觉方案',
+  '版式策略',
+  '组件清单',
+  '品牌语气',
+  'ux 原则',
+  '可访问性检查',
+  '设计审查卡',
+  '验收检查清单',
+  'agent 介入说明',
+  'agent 输出摘录',
+]);
+
+const normalizePrefillLine = (value: string) =>
+  value
+    .trim()
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^[-*]\s*/, '')
+    .replace(/^【[^】]+】/, '')
+    .trim();
+
+const isNoiseLine = (value: string) => {
+  const normalized = value.trim().toLowerCase().replace(/[：:]/g, '');
+  return !normalized || DESIGN_REVIEW_NOISE_TITLES.has(normalized);
+};
+
+const sanitizePrefillText = (value: string) =>
+  String(value || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(normalizePrefillLine)
+    .filter((line) => !isNoiseLine(line))
+    .join(' ')
+    .trim();
+
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const extractSectionBullets = (source: string, title: string) => {
@@ -154,15 +189,15 @@ const extractSectionBullets = (source: string, title: string) => {
   const section = source.match(sectionPattern)?.[1] || '';
   return section
     .split('\n')
-    .map((line) => line.trim().replace(/^[-*]\s*/, '').trim())
-    .filter(Boolean);
+    .map((line) => normalizePrefillLine(line))
+    .filter((line) => !isNoiseLine(line));
 };
 
 const pickLine = (source: string, patterns: RegExp[]) => {
   for (const pattern of patterns) {
     const matched = source.match(pattern);
     if (matched?.[1]) {
-      const value = matched[1].trim();
+      const value = sanitizePrefillText(matched[1]);
       if (value) {
         return value;
       }
@@ -172,7 +207,7 @@ const pickLine = (source: string, patterns: RegExp[]) => {
 };
 
 const ensureAtLeastThree = (items: string[], fallback: string[]) => {
-  const deduped = Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+  const deduped = Array.from(new Set(items.map((item) => sanitizePrefillText(item)).filter(Boolean)));
   const merged = [...deduped];
   for (const candidate of fallback) {
     if (merged.length >= 3) {
@@ -226,7 +261,7 @@ const buildDesignReviewPrefill = (input: {
     ...a11yLine.split(/[；;，,\n]/),
   ], DEFAULT_A11Y_ITEMS);
 
-  const compact = source.replace(/\s+/g, ' ').trim();
+  const compact = sanitizePrefillText(source).replace(/\s+/g, ' ').trim();
   const summary = compact.length > 220 ? `${compact.slice(0, 220)}...` : compact;
   const noteHead = input.actionDetail ? `触发原因: ${input.actionDetail}` : '触发原因: 设计 Agent 需要人工补充或确认';
   const notes = `${noteHead}\n\nAgent 思考摘录:\n${summary}`;
@@ -2045,7 +2080,7 @@ const ProjectRoom = ({
   const splitChecklist = (input: string) =>
     input
       .split(/\n|；|;|,|，/)
-      .map((item) => item.trim())
+      .map((item) => sanitizePrefillText(item))
       .filter(Boolean);
 
   const openDesignReviewModal = useCallback((action?: ProjectRequiredAction) => {
@@ -2098,6 +2133,11 @@ const ProjectRoom = ({
 
     setIsSubmittingDesignReview(true);
     try {
+      const reviewChecklist = [
+        '设计说明可支撑开发实施，不依赖口头解释。',
+        '无障碍检查项至少 3 条并可验证。',
+        '审查结论明确（通过/驳回）且有理由。',
+      ];
       await projectsApi.submitStage(project.id, {
         title: `设计审查卡 ${new Date().toLocaleDateString('zh-CN')}`,
         content: [
@@ -2114,6 +2154,15 @@ const ProjectRoom = ({
           '',
           '## 品牌语气',
           `- ${designReviewForm.brandTone.trim()}`,
+          '',
+          '## UX 原则',
+          ...uxPrinciples.map((item) => `- ${item}`),
+          '',
+          '## 可访问性检查',
+          ...accessibilityChecklist.map((item) => `- ${item}`),
+          '',
+          '## 验收检查清单',
+          ...reviewChecklist.map((item) => `- ${item}`),
         ].join('\n'),
         designReview: {
           visualDirection: designReviewForm.visualDirection.trim(),
