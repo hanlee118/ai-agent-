@@ -229,6 +229,38 @@ function inferIssueMissionAnchor(rawInput: string) {
   return `围绕“${headline}”构建可追踪需求闭环，并确保交付可验收。`;
 }
 
+function buildFallbackAlignmentSuggestions(rawInput: string) {
+  const profile = detectScenarioProfile(rawInput);
+  const missionAnchor = inferIssueMissionAnchor(rawInput);
+
+  if (profile.isCrossBorderEcomSelection) {
+    return {
+      goals: [
+        "更早发现跨境平台中的爆量商品，并缩短跟品决策时间。",
+        "用可追溯证据链完成候选商品排序，提升爆品判断命中率。",
+        "持续跟踪已选商品变化，降低漏判与误判风险。"
+      ],
+      principles: [
+        "证据优先，不只给结论，要给来源、增速与变化依据。",
+        "人工可控，关键跟品决策默认保留人工确认。",
+        "先打通最小闭环，再逐步扩展平台、类目与自动化能力。"
+      ]
+    };
+  }
+
+  return {
+    goals: [
+      `围绕“${missionAnchor}”提升核心业务响应速度与交付确定性。`,
+      "减少需求到方案再到执行过程中的返工与信息损耗。"
+    ],
+    principles: [
+      "目标清晰、范围收敛，先完成最小可交付闭环。",
+      "结论可追溯、产出可验收，不依赖口头补充。",
+      "优先保障主链路，再逐步扩展外围能力。"
+    ]
+  };
+}
+
 export function inferIssueSummary(rawInput: string) {
   const trimmed = rawInput.trim();
   if (!trimmed) {
@@ -831,6 +863,15 @@ export function buildContextAlignment(
       return normalized.includes(key) || key.split(/\s+/).some((part) => part.length > 1 && normalized.includes(part));
     })
     .slice(0, 3);
+  const missingContextGoals = (productContext.goals ?? []).filter((item) => item.trim()).length === 0;
+  const missingContextPrinciples = (productContext.principles ?? []).filter((item) => item.trim()).length === 0;
+  const fallbackAlignment = buildFallbackAlignmentSuggestions(rawInput);
+  const effectiveMatchedGoals = matchedGoals.length > 0 || !missingContextGoals
+    ? matchedGoals
+    : fallbackAlignment.goals;
+  const effectiveMatchedPrinciples = matchedPrinciples.length > 0 || !missingContextPrinciples
+    ? matchedPrinciples
+    : fallbackAlignment.principles;
 
   const selectedIndustryCode = String(options?.industryCode ?? "").trim().toLowerCase();
   const inputIndustry = detectIndustry(rawInput) || detectIndustry(selectedIndustryCode);
@@ -882,6 +923,9 @@ export function buildContextAlignment(
   if (shouldPreferIssueMission) {
     contextNotes.push("本次草案已优先按当前需求语义生成，未直接复用历史使命表述。");
   }
+  if (missingContextGoals || missingContextPrinciples) {
+    contextNotes.push("当前产品说明文档尚未维护完整目标/原则，已基于本次需求自动生成初始对齐建议。");
+  }
   if (requiresCrossBorderScene) {
     contextNotes.push(
       sceneHitPassed
@@ -895,8 +939,8 @@ export function buildContextAlignment(
     missionAnchor: shouldPreferIssueMission
       ? inferIssueMissionAnchor(rawInput)
       : (productContext.mission || inferIssueMissionAnchor(rawInput)),
-    matchedGoals: sceneHitPassed ? matchedGoals : [],
-    matchedPrinciples: sceneHitPassed ? matchedPrinciples : [],
+    matchedGoals: sceneHitPassed ? effectiveMatchedGoals : [],
+    matchedPrinciples: sceneHitPassed ? effectiveMatchedPrinciples : [],
     contextNotes
   };
 }

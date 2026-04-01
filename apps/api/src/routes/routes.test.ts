@@ -509,6 +509,8 @@ describe("Error Matrix: issues + role-sets", () => {
     assert.equal(previewRes.body.success, true);
     assert.ok(previewRes.body.data.issueId);
     assert.ok(Array.isArray(previewRes.body.data.questions));
+    assert.ok((previewRes.body.data.contextAlignment?.matchedGoals || []).length > 0);
+    assert.ok((previewRes.body.data.contextAlignment?.matchedPrinciples || []).length > 0);
 
     const issueId = String(previewRes.body.data.issueId);
     const missingRequiredConfirm = await request(app)
