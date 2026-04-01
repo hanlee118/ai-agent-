@@ -315,7 +315,7 @@ export default function ProductContextPanel({ addToast }: Props) {
                   )}
                   {item.requirementContract && (
                     <details className="mt-2">
-                      <summary className="cursor-pointer text-slate-400">查看需求合同</summary>
+                      <summary className="cursor-pointer text-slate-400">查看需求确认单</summary>
                       <div className="mt-2 space-y-1 text-[11px] text-slate-500">
                         <p>目标: {item.requirementContract.objective}</p>
                         <p>In Scope: {(item.requirementContract.inScope || []).join('；') || '暂无'}</p>

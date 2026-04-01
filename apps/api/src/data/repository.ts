@@ -52,7 +52,7 @@ const DESIGN_REVIEW_MARKER = "## 设计审查卡";
 const MIN_DELIVERABLE_CONTENT_LENGTH = 180;
 const STAGE_OBJECTIVES: Record<StageType, string> = {
   INIT: "确认项目目标、边界与团队分工，建立执行基线。",
-  ANALYSIS: "把输入需求转成结构化需求合同、约束与风险清单。",
+  ANALYSIS: "把输入需求转成结构化需求确认单、约束与风险清单。",
   DESIGN: "输出可执行设计方案，明确信息架构、视觉方向与交互规则。",
   DEV: "先产出研发技术方案与关键选型，再把设计与任务拆解落地为可运行实现，并完成联调验证。",
   ACCEPT: "完成验收验证、结果总结与文档回填，形成可持续迭代闭环。"
@@ -60,7 +60,7 @@ const STAGE_OBJECTIVES: Record<StageType, string> = {
 
 const STAGE_NEXT_INPUT: Record<StageType, string> = {
   INIT: "将项目章程与角色分工交给分析阶段继续细化。",
-  ANALYSIS: "把需求合同、排期和风险清单交给设计阶段产出方案。",
+  ANALYSIS: "把需求确认单、排期和风险清单交给设计阶段产出方案。",
   DESIGN: "把设计审查卡、视觉定稿单页与实施方案交给开发阶段，先完成技术方案与选型再进入实现。",
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
@@ -948,13 +948,13 @@ function evaluateRequirementAlignment(
   const unmetChecks: string[] = [];
 
   if (!input.objective.trim()) {
-    unmetChecks.push("需求合同缺少目标定义");
+    unmetChecks.push("需求确认单缺少目标定义");
   }
   if (input.inScope.length === 0) {
-    unmetChecks.push("需求合同缺少 In Scope");
+    unmetChecks.push("需求确认单缺少 In Scope");
   }
   if (input.acceptanceCriteria.length === 0) {
-    unmetChecks.push("需求合同缺少验收标准");
+    unmetChecks.push("需求确认单缺少验收标准");
   }
 
   if (project.status !== "completed" || project.progress < 100) {
@@ -1100,7 +1100,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
     return project;
   }
 
-  const contractBlock = `\n\n## 需求合同\n${formatRequirementContract(contract)}`;
+  const contractBlock = `\n\n## 需求确认单\n${formatRequirementContract(contract)}`;
   project.deliverables = project.deliverables.map((deliverable) => {
     if (deliverable.name.includes("需求分析文档")) {
       return {
@@ -1111,7 +1111,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
     if (deliverable.name.includes("项目排期方案")) {
       return {
         ...deliverable,
-        content: `${deliverable.content}\n\n## 需求合同约束\n- ${contract.objective}`
+        content: `${deliverable.content}\n\n## 需求确认单约束\n- ${contract.objective}`
       };
     }
     if (deliverable.name.includes("产品方案草案") || deliverable.name.toLowerCase().includes("word")) {
@@ -1123,14 +1123,14 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
     return deliverable;
   });
 
-  project.summary = `${project.summary} 已绑定需求合同并同步到交付物。`;
+  project.summary = `${project.summary} 已绑定需求确认单并同步到交付物。`;
   project.timeline.unshift({
     id: randomUUID(),
     timestamp: new Date().toISOString(),
     agentId: "ROLE_ANALYST",
     type: "message",
-    title: "需求合同已绑定项目",
-    content: `需求合同已注入交付物，目标: ${contract.objective || "信息未提供"}`,
+    title: "需求确认单已绑定项目",
+    content: `需求确认单已注入交付物，目标: ${contract.objective || "信息未提供"}`,
     priority: "normal"
   });
   return project;
@@ -1672,7 +1672,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
-    "- 如需变更目标或范围，请先在需求合同中更新后再推进。",
+    "- 如需变更目标或范围，请先在需求确认单中更新后再推进。",
     "",
     "## 审阅与验收建议",
     "- 审阅是否覆盖目标、范围、风险、任务与交付证据。",
@@ -1815,7 +1815,7 @@ async function buildDeliverableBackfillContentWithAgent(
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
-    "- 如需变更目标或范围，请先在需求合同中更新后再推进。",
+    "- 如需变更目标或范围，请先在需求确认单中更新后再推进。",
     ...(isVisualMockup
       ? [
           "",

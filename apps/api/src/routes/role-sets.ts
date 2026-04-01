@@ -100,20 +100,20 @@ const INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
             roleId: "ROLE_PRODUCT",
             title: "产品方案与验收标准",
             input: "分析结论",
-            output: "需求合同草案、验收标准"
+            output: "需求确认单草案、验收标准"
           },
           {
             order: 3,
             roleId: "ROLE_DESIGN",
             title: "视觉与交互方案审查",
-            input: "需求合同草案",
+            input: "需求确认单草案",
             output: "视觉方向、组件规范、可访问性检查项"
           },
           {
             order: 4,
             roleId: "ROLE_DEV",
             title: "任务拆解与开发执行",
-            input: "已确认需求合同 + 设计审查卡",
+            input: "已确认需求确认单 + 设计审查卡",
             output: "代码变更与 Demo"
           },
           {

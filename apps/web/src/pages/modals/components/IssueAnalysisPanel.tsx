@@ -257,7 +257,7 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           )}
 
           <div className="space-y-3">
-            <p className="text-xs text-slate-400">需求合同草案（可追溯）</p>
+            <p className="text-xs text-slate-400">需求确认单草案（可追溯）</p>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-2">
               <div className="space-y-1">
                 <p className="text-slate-400 text-xs">目标</p>
