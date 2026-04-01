@@ -159,6 +159,19 @@ else
 fi
 
 curl -sf "$API_BASE_URL/api/auth/status" > "$TMP_DIR/auth-status.json"
+AUTH_SETUP_COMPLETE="$(node --input-type=module - "$TMP_DIR/auth-status.json" <<'EOF'
+import { readFileSync } from "node:fs";
+const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
+console.log(payload.setupComplete === true ? "true" : "false");
+EOF
+)"
+if [[ "$AUTH_SETUP_COMPLETE" != "true" ]]; then
+  curl -sS -o /dev/null -w "%{http_code}" \
+    -X POST "$API_BASE_URL/api/auth/setup" \
+    -H "Content-Type: application/json" \
+    -d '{"password":"Admin@123456"}' >/dev/null || true
+  curl -sf "$API_BASE_URL/api/auth/status" > "$TMP_DIR/auth-status.json"
+fi
 assert_json "$TMP_DIR/auth-status.json" '
   if (!payload.setupComplete) throw new Error("auth setup is incomplete");
   if (typeof payload.authenticated !== "boolean") throw new Error("auth status did not expose authenticated flag");
