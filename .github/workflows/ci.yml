@@ -70,7 +70,7 @@ jobs:
 
       - name: Start production API
         run: |
-          nohup node apps/api/dist/index.js > /tmp/occ-api.log 2>&1 &
+          nohup pnpm --filter @occ/api exec tsx src/index.ts > /tmp/occ-api.log 2>&1 &
           for attempt in $(seq 1 30); do
             if curl -sf http://127.0.0.1:8787/health > /dev/null; then
               exit 0
