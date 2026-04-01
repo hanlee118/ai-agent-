@@ -59,6 +59,9 @@ jobs:
             exit 1
           fi
 
+      - name: Build shared runtime package
+        run: pnpm --filter @occ/shared build
+
       - name: API route tests
         run: pnpm --filter @occ/api test:routes
 
