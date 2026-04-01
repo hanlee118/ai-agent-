@@ -12,3 +12,7 @@ pnpm-lock.yaml
 *.tsbuildinfo
 *.db
 *.db-journal
+
+# Runtime generated static artifacts
+apps/web/public/generated/
+site/generated/
