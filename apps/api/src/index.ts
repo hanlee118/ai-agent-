@@ -452,11 +452,27 @@ function isVisualMockupDeliverableTitle(title: string) {
   return /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(title || ""));
 }
 
+function extractRenderableHtmlPreview(content: string) {
+  const source = String(content || "");
+  const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+  let matched: RegExpExecArray | null;
+  while ((matched = fencedPattern.exec(source)) !== null) {
+    const candidate = String(matched[1] || "").trim();
+    if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (/(<!doctype html|<html[\s>])/i.test(source)) {
+    return source.trim();
+  }
+
+  return null;
+}
+
 function hasVisualDesignPreview(content: string) {
   const source = String(content || "");
-  return /```html[\s\S]*?```/i.test(source)
-    || /<!doctype html/i.test(source)
-    || /<html[\s>]/i.test(source)
+  return Boolean(extractRenderableHtmlPreview(source))
     || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
 }
 

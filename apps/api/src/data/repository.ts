@@ -521,7 +521,7 @@ function ensureDesignSubmissionContent(
     appendSection("## 验收检查清单", checklist.map((item) => `- ${item}`));
   }
 
-  if (!hasSection("## 单页预览代码（HTML）")) {
+  if (!hasVisualDesignPreview(normalized)) {
     const keywordLine = [designReview.visualDirection, designReview.brandTone].filter(Boolean).join(" / ");
     const html = buildVisualDesignPreviewHtml({
       projectName: "设计阶段视觉确认稿",
@@ -559,11 +559,27 @@ function hasApprovedDesignReview(content: string) {
   return content.includes(DESIGN_REVIEW_MARKER) && /审查结论:\s*通过/.test(content);
 }
 
+function extractRenderableHtmlPreview(content: string) {
+  const source = String(content || "");
+  const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+  let matched: RegExpExecArray | null;
+  while ((matched = fencedPattern.exec(source)) !== null) {
+    const candidate = String(matched[1] || "").trim();
+    if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (/(<!doctype html|<html[\s>])/i.test(source)) {
+    return source.trim();
+  }
+
+  return null;
+}
+
 function hasVisualDesignPreview(content: string) {
   const source = String(content || "");
-  return /```html[\s\S]*?```/i.test(source)
-    || /<!doctype html/i.test(source)
-    || /<html[\s>]/i.test(source)
+  return Boolean(extractRenderableHtmlPreview(source))
     || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
 }
 
@@ -1562,8 +1578,16 @@ function needsDeliverableAgentUpgrade(content: string, deliverableName: string, 
     return true;
   }
 
+  if (trimmed.includes("## 模板章节骨架（自动补齐）")) {
+    return true;
+  }
+
   const missingTemplateSections = template.requiredSections.filter((section) => !trimmed.includes(section));
   if (missingTemplateSections.length > 0) {
+    return true;
+  }
+
+  if (template.kind === "visual_mockup" && !hasVisualDesignPreview(trimmed)) {
     return true;
   }
 
@@ -1713,6 +1737,12 @@ async function buildDeliverableBackfillContentWithAgent(
   const template = resolveDeliverableTemplate(deliverable.name, stageType);
   const isVisualMockup = template.kind === "visual_mockup";
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
+
+  // Visual mockup backfill should be deterministic and instantly renderable.
+  // This avoids long model round-trips when historical content only has placeholders.
+  if (isVisualMockup && !hasVisualDesignPreview(String(deliverable.content || ""))) {
+    return buildDeliverableBackfillContent(project, deliverable);
+  }
 
   const runCacheKey = `${project.id}:${stageType}:shared`;
   let run = stageRunCache.get(runCacheKey);
@@ -3427,6 +3457,8 @@ function toProjectDetail(project: {
   }>;
 }): ProjectDetail {
   const latestDeliverables = selectLatestDeliverablesByCoreName(project.deliverables);
+  const keywordLine = readStringArray(project.parsedKeywords).join(" / ");
+  const fallbackVisualDirection = "强调业务主链路、证据可追溯和行动可执行";
 
   const stages: Stage[] = project.stages.map((stage) => ({
     type: stage.type as StageType,
@@ -3470,17 +3502,34 @@ function toProjectDetail(project: {
     openTaskCount: project.tasks.filter((task) => task.status !== "done").length,
     stages,
     tasks: project.tasks.map(toTask),
-    deliverables: latestDeliverables.map((deliverable) => ({
-      id: deliverable.id,
-      name: deliverable.name,
-      type: deliverable.type as "markdown" | "pdf" | "code",
-      content: deliverable.content,
-      version: deliverable.version,
-      status: deliverable.status as ProjectDetail["deliverables"][number]["status"],
-      stageType: deliverable.stageType as StageType,
-      createdBy: deliverable.createdBy as RoleType,
-      updatedAt: deliverable.updatedAt.toISOString()
-    })),
+    deliverables: latestDeliverables.map((deliverable) => {
+      const stageType = resolveStageType(deliverable.stageType);
+      const template = stageType ? resolveDeliverableTemplate(deliverable.name, stageType) : null;
+      const rawContent = String(deliverable.content || "");
+      let content = rawContent;
+
+      if (template?.kind === "visual_mockup" && !hasVisualDesignPreview(rawContent)) {
+        const html = buildVisualDesignPreviewHtml({
+          projectName: project.name || "视觉确认稿",
+          keywordLine,
+          visualDirection: fallbackVisualDirection
+        });
+        const section = ["## 单页预览代码（HTML）", "```html", html, "```"].join("\n");
+        content = rawContent.trim() ? `${rawContent.trim()}\n\n${section}` : section;
+      }
+
+      return {
+        id: deliverable.id,
+        name: deliverable.name,
+        type: deliverable.type as "markdown" | "pdf" | "code",
+        content,
+        version: deliverable.version,
+        status: deliverable.status as ProjectDetail["deliverables"][number]["status"],
+        stageType: deliverable.stageType as StageType,
+        createdBy: deliverable.createdBy as RoleType,
+        updatedAt: deliverable.updatedAt.toISOString()
+      };
+    }),
     timeline,
     liveSession: {
       activeRole: project.currentRole as RoleType,

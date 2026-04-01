@@ -805,9 +805,13 @@ const ProjectRoom = ({
     && /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(item.name || ''));
   const extractDeliverableHtmlPreview = (content?: string) => {
     const source = String(content || '');
-    const fenced = source.match(/```html\s*([\s\S]*?)```/i);
-    if (fenced && fenced[1] && fenced[1].trim()) {
-      return fenced[1].trim();
+    const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+    let matched: RegExpExecArray | null;
+    while ((matched = fencedPattern.exec(source)) !== null) {
+      const candidate = String(matched[1] || '').trim();
+      if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+        return candidate;
+      }
     }
     if (/(<!doctype html|<html[\s>])/i.test(source)) {
       return source.trim();
