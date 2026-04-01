@@ -65,4 +65,4 @@ export type NewProjectFormData = {
   agentIds: string[];
 };
 
-export type ModalStep = 'input' | 'analysis' | 'confirm';
+export type ModalStep = 'input' | 'analysis' | 'team' | 'confirm';

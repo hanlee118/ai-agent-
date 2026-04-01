@@ -4,6 +4,7 @@ import IndustryConfigPanel from './components/IndustryConfigPanel';
 import IssueAnalysisPanel from './components/IssueAnalysisPanel';
 import IssueInputPanel from './components/IssueInputPanel';
 import ProjectConfirmCard from './components/ProjectConfirmCard';
+import TeamAssignmentPanel from './components/TeamAssignmentPanel';
 import { useNewProjectModalController } from './hooks/useNewProjectModalController';
 import SurfaceModal from '../impl/SurfaceModal';
 
@@ -18,6 +19,13 @@ export default function NewProjectModal(props: NewProjectModalProps) {
     handleImportProjectFile,
     parsedProject,
   } = controller;
+  const steps: Array<{ id: typeof step; label: string }> = [
+    { id: 'input', label: '需求输入' },
+    { id: 'analysis', label: '分析讨论' },
+    { id: 'team', label: '团队分配' },
+    { id: 'confirm', label: '确认创建' },
+  ];
+  const currentIndex = steps.findIndex((item) => item.id === step);
 
   return (
     <SurfaceModal isOpen={isOpen} onClose={handleClose} title="创建新项目">
@@ -35,6 +43,32 @@ export default function NewProjectModal(props: NewProjectModalProps) {
 
         {!isImporting ? (
           <>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2">
+                {steps.map((item, index) => {
+                  const done = currentIndex > index;
+                  const active = currentIndex === index;
+                  return (
+                    <div key={item.id} className="flex items-center gap-2 min-w-0">
+                      <div
+                        className={`w-6 h-6 rounded-full border text-[10px] font-bold flex items-center justify-center ${
+                          done
+                            ? 'bg-primary/20 border-primary/50 text-primary'
+                            : active
+                              ? 'bg-accent/20 border-accent/50 text-accent'
+                              : 'bg-white/5 border-border-subtle text-slate-500'
+                        }`}
+                      >
+                        {index + 1}
+                      </div>
+                      <span className={`text-[11px] ${active ? 'text-white' : 'text-slate-500'}`}>{item.label}</span>
+                      {index < steps.length - 1 && <div className="w-4 h-px bg-border-subtle" />}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             {step === 'input' && (
               <div className="space-y-4">
                 <IndustryConfigPanel controller={controller} />
@@ -44,6 +78,10 @@ export default function NewProjectModal(props: NewProjectModalProps) {
 
             {step === 'analysis' && parsedProject && (
               <IssueAnalysisPanel controller={controller} />
+            )}
+
+            {step === 'team' && parsedProject && (
+              <TeamAssignmentPanel controller={controller} />
             )}
 
             {step === 'confirm' && parsedProject && (

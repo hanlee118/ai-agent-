@@ -1,9 +1,8 @@
 import { Zap } from 'lucide-react';
 import { cn } from '../../../lib/utils';
 import type { NewProjectModalController } from '../hooks/useNewProjectModalController';
-import { ISSUE_ANSWER_LABELS, applySuggestedAnswers, normalizeRoleId, roleLabel, toMultilineText } from '../utils/newProjectHelpers';
+import { ISSUE_ANSWER_LABELS, applySuggestedAnswers, roleLabel, toMultilineText } from '../utils/newProjectHelpers';
 import Badge from './Badge';
-import ClarificationForm from './ClarificationForm';
 
 type Props = {
   controller: NewProjectModalController;
@@ -25,16 +24,18 @@ export default function IssueAnalysisPanel({ controller }: Props) {
     debatePollingError,
     discussionAcknowledged,
     setDiscussionAcknowledged,
+    discussionOverride,
+    setDiscussionOverride,
     conflictAcknowledged,
     setConflictAcknowledged,
     conflictResolution,
     setConflictResolution,
+    isRefreshingDebate,
+    handleRefreshDebate,
     issueAnswers,
     setIssueAnswers,
     handleContinueFromAnalysis,
     setStep,
-    analysisRecommendations,
-    soulRoleId,
   } = controller;
 
   if (!parsedProject) {
@@ -360,19 +361,25 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                 </div>
               )}
               <div className="space-y-2">
-                {issuePreview.discussion.map((item) => (
-                  <div key={item.id} className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-1">
-                    <p className="text-xs font-semibold text-white">{item.roleLabel} · {item.focus}</p>
-                    <p className="text-[11px] text-slate-400 leading-relaxed">讨论要点: {item.concern}</p>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">结论建议: {item.proposal}</p>
-                    {issuePreview.debate?.opinions?.find((opinion) => opinion.roleId === item.roleId) && (
-                      <p className="text-[10px] text-slate-500">
-                        模型来源: {issuePreview.debate.opinions.find((opinion) => opinion.roleId === item.roleId)?.provider}/
-                        {issuePreview.debate.opinions.find((opinion) => opinion.roleId === item.roleId)?.model}
-                      </p>
-                    )}
-                  </div>
-                ))}
+                {issuePreview.discussion.map((item) => {
+                  const opinion = issuePreview.debate?.opinions?.find((candidate) => candidate.roleId === item.roleId);
+                  return (
+                    <details key={item.id} className="p-3 rounded-xl bg-white/5 border border-border-subtle">
+                      <summary className="text-xs font-semibold text-white cursor-pointer list-none">
+                        {item.roleLabel} · {item.focus}
+                      </summary>
+                      <div className="space-y-1 pt-2">
+                        <p className="text-[11px] text-slate-400 leading-relaxed">讨论要点: {item.concern}</p>
+                        <p className="text-[11px] text-slate-300 leading-relaxed">结论建议: {item.proposal}</p>
+                        {opinion && (
+                          <p className="text-[10px] text-slate-500">
+                            模型来源: {opinion.provider}/{opinion.model}
+                          </p>
+                        )}
+                      </div>
+                    </details>
+                  );
+                })}
               </div>
               <label className="flex items-center gap-2 text-xs text-slate-300">
                 <input
@@ -383,6 +390,31 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                 />
                 我确认以上讨论结论，可据此形成任务并进入执行
               </label>
+              <div className="space-y-2">
+                <p className="text-[11px] text-slate-500">如果你不同意当前结论，可补充修正意见后继续，或重新生成讨论。</p>
+                <textarea
+                  rows={2}
+                  value={discussionOverride}
+                  onChange={(event) => setDiscussionOverride(event.target.value)}
+                  placeholder="例如：请按B端场景优先，不做C端运营活动；将验收改为“下单转化率提升10%”。"
+                  className="w-full bg-surface-muted border border-border-subtle rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                />
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <button
+                    onClick={() => void handleRefreshDebate()}
+                    disabled={isRefreshingDebate}
+                    className="py-2 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all disabled:opacity-50"
+                  >
+                    {isRefreshingDebate ? '重生成中...' : '重新生成多角色讨论'}
+                  </button>
+                  <button
+                    onClick={() => setStep('input')}
+                    className="py-2 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
+                  >
+                    返回补充需求后再分析
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -519,29 +551,6 @@ export default function IssueAnalysisPanel({ controller }: Props) {
         </>
       )}
 
-      <div className="space-y-3">
-        <p className="text-xs text-slate-400">自动分配的需求分析 Agent</p>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          {analysisRecommendations.map((agent) => (
-            <div key={agent.agentId} className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-1">
-              <p className="text-sm font-bold text-white">
-                {agent.name}
-                {normalizeRoleId(agent.roleId) === normalizeRoleId(soulRoleId) && (
-                  <span className="ml-2 text-[10px] text-primary font-semibold">灵魂角色</span>
-                )}
-              </p>
-              <p className="text-[11px] text-slate-500">{roleLabel(agent.roleId)}</p>
-              <p className="text-[11px] text-slate-400 leading-relaxed">{agent.reason}</p>
-            </div>
-          ))}
-          {analysisRecommendations.length === 0 && (
-            <p className="text-xs text-slate-500">暂无匹配 Agent，请切换行业或手动指定。</p>
-          )}
-        </div>
-      </div>
-
-      <ClarificationForm controller={controller} />
-
       <div className="flex gap-3 pt-1">
         <button
           onClick={() => setStep('input')}
@@ -553,7 +562,7 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           onClick={handleContinueFromAnalysis}
           className="flex-1 py-2.5 bg-primary text-surface rounded-xl text-xs font-bold hover:bg-primary/90 transition-all"
         >
-          完成需求细化并生成确认卡
+          下一步：团队分配与扩展信息
         </button>
       </div>
     </div>

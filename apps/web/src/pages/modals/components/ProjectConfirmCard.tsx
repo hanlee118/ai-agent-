@@ -143,10 +143,10 @@ export default function ProjectConfirmCard({ controller }: Props) {
 
       <div className="flex gap-3 pt-2">
         <button
-          onClick={() => setStep('analysis')}
+          onClick={() => setStep('team')}
           className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
         >
-          返回澄清
+          返回团队分配
         </button>
         <button
           onClick={handleUseManualFromParsed}

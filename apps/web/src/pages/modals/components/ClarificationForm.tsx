@@ -19,7 +19,12 @@ export default function ClarificationForm({ controller }: Props) {
               {(['MVP闭环', '核心流程+管理后台', '完整一期'] as const).map((item) => (
                 <button
                   key={item}
-                  onClick={() => setClarification((prev) => ({ ...prev, deliveryDepth: item }))}
+                  onClick={() =>
+                    setClarification((prev) => ({
+                      ...prev,
+                      deliveryDepth: prev.deliveryDepth === item ? '' : item,
+                    }))
+                  }
                   className={cn(
                     'px-3 py-2 rounded-lg text-xs border transition-colors',
                     clarification.deliveryDepth === item
@@ -42,8 +47,8 @@ export default function ClarificationForm({ controller }: Props) {
                   onClick={() =>
                     setClarification((prev) => ({
                       ...prev,
-                      timeline: item,
-                      customTimeline: item === '自定义' ? prev.customTimeline : '',
+                      timeline: prev.timeline === item ? '' : item,
+                      customTimeline: prev.timeline === item ? '' : item === '自定义' ? prev.customTimeline : '',
                     }))
                   }
                   className={cn(
@@ -76,7 +81,12 @@ export default function ClarificationForm({ controller }: Props) {
               {(['并行推进', '串行推进', '先分析后研发'] as const).map((item) => (
                 <button
                   key={item}
-                  onClick={() => setClarification((prev) => ({ ...prev, collaboration: item }))}
+                  onClick={() =>
+                    setClarification((prev) => ({
+                      ...prev,
+                      collaboration: prev.collaboration === item ? '' : item,
+                    }))
+                  }
                   className={cn(
                     'px-3 py-2 rounded-lg text-xs border transition-colors',
                     clarification.collaboration === item
