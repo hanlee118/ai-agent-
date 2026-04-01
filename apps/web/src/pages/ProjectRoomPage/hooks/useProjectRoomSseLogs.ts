@@ -11,10 +11,83 @@ export type ProjectRoomSseLogItem = {
   timestamp: number;
 };
 
-export function useProjectRoomSseLogs(effectiveProjectId: string | null | undefined) {
+type SnapshotFallbackMetrics = {
+  activeAgents?: number;
+  totalProjects?: number;
+  inProgressTasks?: number;
+  blockedTasks?: number;
+};
+
+type SnapshotMetrics = {
+  activeAgents?: number;
+  totalProjects?: number;
+  inProgressTasks?: number;
+  blockedTasks?: number;
+  activeSessions?: number;
+  totalSessions?: number;
+  staleSessions?: number;
+};
+
+const toNumber = (value: unknown): number | undefined => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return undefined;
+};
+
+const pickMetric = (...values: Array<unknown>): number | undefined => {
+  for (const value of values) {
+    const parsed = toNumber(value);
+    if (parsed !== undefined) {
+      return parsed;
+    }
+  }
+  return undefined;
+};
+
+const formatMetric = (value: number | undefined) => (value === undefined ? '-' : String(value));
+
+const resolveSnapshotMetrics = (payload: Record<string, unknown>, fallback?: SnapshotFallbackMetrics): SnapshotMetrics => {
+  const sessions = Array.isArray(payload.sessions)
+    ? payload.sessions as Array<{ status?: unknown }>
+    : [];
+  const tools = Array.isArray(payload.tools)
+    ? payload.tools as Array<{ activeCount?: unknown; sessionCount?: unknown }>
+    : [];
+
+  const activeSessions = sessions.filter((item) => item.status === 'active').length;
+  const staleSessions = sessions.filter((item) => item.status === 'stale').length;
+  const activeCountFromTools = tools.reduce((sum, item) => sum + (toNumber(item.activeCount) ?? 0), 0);
+
+  return {
+    activeAgents: pickMetric(payload.activeAgents, activeCountFromTools > 0 ? activeCountFromTools : undefined, fallback?.activeAgents),
+    totalProjects: pickMetric(payload.totalProjects, fallback?.totalProjects),
+    inProgressTasks: pickMetric(payload.inProgressTasks, fallback?.inProgressTasks),
+    blockedTasks: pickMetric(payload.blockedTasks, fallback?.blockedTasks),
+    activeSessions: sessions.length > 0 ? activeSessions : undefined,
+    totalSessions: sessions.length > 0 ? sessions.length : undefined,
+    staleSessions: sessions.length > 0 ? staleSessions : undefined,
+  };
+};
+
+export function useProjectRoomSseLogs(
+  effectiveProjectId: string | null | undefined,
+  snapshotFallback?: SnapshotFallbackMetrics,
+) {
   const [sseLogs, setSseLogs] = useState<ProjectRoomSseLogItem[]>([]);
   const lastSnapshotDigestRef = useRef<string>('');
   const lastConnectedLogAtRef = useRef<number>(0);
+  const snapshotFallbackRef = useRef<SnapshotFallbackMetrics | undefined>(snapshotFallback);
+
+  useEffect(() => {
+    snapshotFallbackRef.current = snapshotFallback;
+  }, [snapshotFallback]);
 
   useEffect(() => {
     setSseLogs([]);
@@ -58,19 +131,29 @@ export function useProjectRoomSseLogs(effectiveProjectId: string | null | undefi
       timestamp = now;
       message = '实时通道已连接（SSE）';
     } else if (eventType === 'snapshot') {
+      const metrics = resolveSnapshotMetrics(payload, snapshotFallbackRef.current);
       const digest = [
-        String(payload.activeAgents ?? ''),
-        String(payload.totalProjects ?? ''),
-        String(payload.blockedTasks ?? ''),
-        String(payload.inProgressTasks ?? ''),
+        formatMetric(metrics.activeAgents),
+        formatMetric(metrics.totalProjects),
+        formatMetric(metrics.inProgressTasks),
+        formatMetric(metrics.blockedTasks),
+        formatMetric(metrics.activeSessions),
+        formatMetric(metrics.totalSessions),
+        formatMetric(metrics.staleSessions),
       ].join(':');
       if (digest && digest === lastSnapshotDigestRef.current) {
         return;
       }
       lastSnapshotDigestRef.current = digest;
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      message = `系统快照: 活跃Agent ${payload.activeAgents ?? 0} / 项目 ${payload.totalProjects ?? 0} / 进行中任务 ${payload.inProgressTasks ?? 0} / 阻塞任务 ${payload.blockedTasks ?? 0}`;
-      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'primary';
+      timestamp = toLogTimestamp(
+        (payload.timestamp as string | undefined)
+        || (payload.scannedAt as string | undefined),
+      );
+      const sessionSummary = metrics.totalSessions !== undefined
+        ? ` / 活跃会话 ${formatMetric(metrics.activeSessions)}/${formatMetric(metrics.totalSessions)}`
+        : '';
+      message = `系统快照: 活跃Agent ${formatMetric(metrics.activeAgents)} / 项目 ${formatMetric(metrics.totalProjects)} / 进行中任务 ${formatMetric(metrics.inProgressTasks)} / 阻塞任务 ${formatMetric(metrics.blockedTasks)}${sessionSummary}`;
+      type = (metrics.blockedTasks ?? 0) > 0 || (metrics.staleSessions ?? 0) > 0 ? 'danger' : 'primary';
     } else if (eventType === 'task_update') {
       timestamp = toLogTimestamp(payload.timestamp as string | undefined);
       const blocked = Number(payload.blockedTasks ?? 0);

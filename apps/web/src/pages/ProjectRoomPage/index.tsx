@@ -222,7 +222,26 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectId = projectId || project.id;
-  const { sseLogs, appendSseLog } = useProjectRoomSseLogs(effectiveProjectId);
+  const snapshotFallbackMetrics = useMemo(() => {
+    const taskItems = Array.isArray(detail?.tasks) ? detail.tasks : [];
+    const activeAssignees = new Set(
+      taskItems
+        .filter((item) => item.status !== 'done')
+        .map((item) => String(item.assignee || '').trim())
+        .filter(Boolean),
+    );
+    const inferredActiveAgents = activeAssignees.size > 0
+      ? activeAssignees.size
+      : (Array.isArray(detail?.team) ? detail.team.length : undefined);
+
+    return {
+      activeAgents: inferredActiveAgents,
+      totalProjects: projects.length > 0 ? projects.length : undefined,
+      inProgressTasks: taskItems.filter((item) => item.status === 'in_progress').length,
+      blockedTasks: taskItems.filter((item) => item.status === 'blocked').length,
+    };
+  }, [detail?.tasks, detail?.team]);
+  const { sseLogs, appendSseLog } = useProjectRoomSseLogs(effectiveProjectId, snapshotFallbackMetrics);
   const {
     readSignoffFiltersFromUrl,
     consumeAutoOpenAcceptanceReportSignal,

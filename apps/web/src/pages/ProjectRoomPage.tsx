@@ -930,6 +930,31 @@ const ProjectRoom = ({
     return `${normalized.slice(0, max)}...`;
   };
 
+  const toNumber = (value: unknown) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const pickMetric = (...values: Array<unknown>) => {
+    for (const value of values) {
+      const parsed = toNumber(value);
+      if (parsed !== undefined) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const formatMetric = (value: number | undefined) => (value === undefined ? '-' : String(value));
+
   useEffect(() => {
     setSseLogs([]);
     lastSnapshotDigestRef.current = '';
@@ -972,19 +997,59 @@ const ProjectRoom = ({
       timestamp = now;
       message = '实时通道已连接（SSE）';
     } else if (eventType === 'snapshot') {
+      const taskItems = Array.isArray(detail?.tasks) ? detail.tasks : [];
+      const activeAssignees = new Set(
+        taskItems
+          .filter((item) => item.status !== 'done')
+          .map((item) => String(item.assignee || '').trim())
+          .filter(Boolean),
+      );
+      const sessions = Array.isArray(payload.sessions)
+        ? payload.sessions as Array<{ status?: unknown }>
+        : [];
+      const tools = Array.isArray(payload.tools)
+        ? payload.tools as Array<{ activeCount?: unknown }>
+        : [];
+      const activeCountFromTools = tools.reduce((sum, item) => sum + (toNumber(item.activeCount) ?? 0), 0);
+      const activeSessions = sessions.filter((item) => item.status === 'active').length;
+      const staleSessions = sessions.filter((item) => item.status === 'stale').length;
+      const activeAgents = pickMetric(
+        payload.activeAgents,
+        activeCountFromTools > 0 ? activeCountFromTools : undefined,
+        activeAssignees.size > 0 ? activeAssignees.size : undefined,
+        Array.isArray(detail?.team) ? detail.team.length : undefined,
+      );
+      const totalProjects = pickMetric(payload.totalProjects, projects.length > 0 ? projects.length : undefined);
+      const inProgressTasks = pickMetric(
+        payload.inProgressTasks,
+        taskItems.filter((item) => item.status === 'in_progress').length,
+      );
+      const blockedTasks = pickMetric(
+        payload.blockedTasks,
+        taskItems.filter((item) => item.status === 'blocked').length,
+      );
       const digest = [
-        String(payload.activeAgents ?? ''),
-        String(payload.totalProjects ?? ''),
-        String(payload.blockedTasks ?? ''),
-        String(payload.inProgressTasks ?? ''),
+        formatMetric(activeAgents),
+        formatMetric(totalProjects),
+        formatMetric(inProgressTasks),
+        formatMetric(blockedTasks),
+        formatMetric(sessions.length > 0 ? activeSessions : undefined),
+        formatMetric(sessions.length > 0 ? sessions.length : undefined),
+        formatMetric(sessions.length > 0 ? staleSessions : undefined),
       ].join(':');
       if (digest && digest === lastSnapshotDigestRef.current) {
         return;
       }
       lastSnapshotDigestRef.current = digest;
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      message = `系统快照: 活跃Agent ${payload.activeAgents ?? 0} / 项目 ${payload.totalProjects ?? 0} / 进行中任务 ${payload.inProgressTasks ?? 0} / 阻塞任务 ${payload.blockedTasks ?? 0}`;
-      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'primary';
+      timestamp = toLogTimestamp(
+        (payload.timestamp as string | undefined)
+        || (payload.scannedAt as string | undefined),
+      );
+      const sessionSummary = sessions.length > 0
+        ? ` / 活跃会话 ${activeSessions}/${sessions.length}`
+        : '';
+      message = `系统快照: 活跃Agent ${formatMetric(activeAgents)} / 项目 ${formatMetric(totalProjects)} / 进行中任务 ${formatMetric(inProgressTasks)} / 阻塞任务 ${formatMetric(blockedTasks)}${sessionSummary}`;
+      type = (blockedTasks ?? 0) > 0 || staleSessions > 0 ? 'danger' : 'primary';
     } else if (eventType === 'task_update') {
       timestamp = toLogTimestamp(payload.timestamp as string | undefined);
       const blocked = Number(payload.blockedTasks ?? 0);
@@ -1037,7 +1102,7 @@ const ProjectRoom = ({
       type,
       timestamp,
     });
-  }, [appendSseLog, effectiveProjectId]);
+  }, [appendSseLog, detail?.tasks, detail?.team, effectiveProjectId, projects.length]);
 
   const sseEvents = useMemo(
     () => ['connected', 'snapshot', 'task_update', 'project_progress', 'agent_status', 'system', 'heartbeat'],
