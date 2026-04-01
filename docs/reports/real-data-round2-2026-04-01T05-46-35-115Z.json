@@ -1,0 +1,666 @@
+{
+  "ok": true,
+  "startedAt": "2026-04-01T05:33:53.764Z",
+  "finishedAt": "2026-04-01T05:46:35.114Z",
+  "apiBase": "http://127.0.0.1:8787",
+  "projectId": "OCC-20260401-020",
+  "requirement": "帮我搭建一个跨境电商的爆品选品跟品机器人。当某个跨境品在tiktok或者亚马逊等上的流量突然大爆时，帮我做好监控和排名，并且提供链接供我实时跟品。",
+  "finalProject": {
+    "id": "OCC-20260401-020",
+    "status": "completed",
+    "currentStage": "ACCEPT",
+    "currentRole": "ROLE_HR",
+    "progress": 100,
+    "pendingApproval": false
+  },
+  "quality": {
+    "projectCompleted": true,
+    "readyForAcceptance": true,
+    "allSuccessExecutionsAreReal": true,
+    "allSuccessExecutionsNonDegraded": true,
+    "stageCoverageMissing": [],
+    "roleCoverageMissing": [],
+    "noPlaceholder": true
+  },
+  "stageTransitions": [
+    {
+      "at": "2026-04-01T05:37:00.417Z",
+      "from": "ANALYSIS",
+      "to": "DESIGN",
+      "progress": 32
+    },
+    {
+      "at": "2026-04-01T05:40:57.433Z",
+      "from": "DESIGN",
+      "to": "DEV",
+      "progress": 52
+    },
+    {
+      "at": "2026-04-01T05:44:25.769Z",
+      "from": "DEV",
+      "to": "ACCEPT",
+      "progress": 72
+    }
+  ],
+  "stageSummary": [
+    {
+      "stage": "INIT",
+      "successCount": 2,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "qwen3-coder-plus"
+      ],
+      "roles": [
+        "ROLE_PM"
+      ]
+    },
+    {
+      "stage": "ANALYSIS",
+      "successCount": 3,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.4",
+        "openai/gpt-5.3-codex"
+      ],
+      "roles": [
+        "ROLE_PM",
+        "ROLE_ANALYST"
+      ]
+    },
+    {
+      "stage": "DESIGN",
+      "successCount": 8,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "kimi-k2.5",
+        "openai/gpt-5.4"
+      ],
+      "roles": [
+        "ROLE_DESIGN",
+        "ROLE_PM",
+        "ROLE_PRODUCT"
+      ]
+    },
+    {
+      "stage": "DEV",
+      "successCount": 8,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.3-codex",
+        "qwen3-coder-plus"
+      ],
+      "roles": [
+        "ROLE_PM",
+        "ROLE_ARCH",
+        "ROLE_DEV"
+      ]
+    },
+    {
+      "stage": "ACCEPT",
+      "successCount": 3,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.4",
+        "openai/gpt-5.2"
+      ],
+      "roles": [
+        "ROLE_PM",
+        "ROLE_QA"
+      ]
+    }
+  ],
+  "roleSummary": [
+    {
+      "role": "ROLE_PM",
+      "successCount": 11,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.4",
+        "openai/gpt-5.3-codex",
+        "qwen3-coder-plus"
+      ]
+    },
+    {
+      "role": "ROLE_ANALYST",
+      "successCount": 2,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5.4"
+      ]
+    },
+    {
+      "role": "ROLE_PRODUCT",
+      "successCount": 1,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.4"
+      ]
+    },
+    {
+      "role": "ROLE_DESIGN",
+      "successCount": 4,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "kimi-k2.5",
+        "openai/gpt-5.4"
+      ]
+    },
+    {
+      "role": "ROLE_ARCH",
+      "successCount": 2,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "qwen3-coder-plus"
+      ]
+    },
+    {
+      "role": "ROLE_DEV",
+      "successCount": 3,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.3-codex",
+        "qwen3-coder-plus"
+      ]
+    },
+    {
+      "role": "ROLE_QA",
+      "successCount": 1,
+      "scriptedCount": 0,
+      "degradedCount": 0,
+      "providers": [
+        "openai-compatible"
+      ],
+      "models": [
+        "openai/gpt-5.2"
+      ]
+    }
+  ],
+  "scriptedExecutions": [],
+  "degradedExecutions": [],
+  "executionCount": 28,
+  "successExecutionCount": 24,
+  "logs": [
+    {
+      "at": "2026-04-01T05:33:53.836Z",
+      "type": "auth_status",
+      "setupComplete": true,
+      "authenticated": false
+    },
+    {
+      "at": "2026-04-01T05:33:53.956Z",
+      "type": "auth_login_ok"
+    },
+    {
+      "at": "2026-04-01T05:33:54.058Z",
+      "type": "runtime_status",
+      "mode": "openai-compatible",
+      "requestedMode": "openai-compatible",
+      "configured": true
+    },
+    {
+      "at": "2026-04-01T05:33:54.176Z",
+      "type": "project_created",
+      "project": {
+        "id": "OCC-20260401-020",
+        "status": "active",
+        "currentStage": "ANALYSIS",
+        "currentRole": "ROLE_ANALYST",
+        "progress": 12,
+        "pendingApproval": false
+      }
+    },
+    {
+      "at": "2026-04-01T05:33:54.593Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:33:57.479Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:01.323Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:06.374Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:13.015Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:20.224Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:27.400Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:34.613Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:41.815Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:49.022Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:34:56.205Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:03.416Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:10.625Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:17.830Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:25.030Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:32.214Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:39.373Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:46.585Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:35:53.790Z",
+      "type": "advance",
+      "round": 1,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:36:00.936Z",
+      "type": "required_actions",
+      "list": [
+        {
+          "id": "ready-for-review",
+          "severity": "info",
+          "title": "当前阶段已具备验收条件",
+          "detail": "请执行人工验收决策（通过或驳回），以推进下一阶段。",
+          "action": "review_pending_stage",
+          "ctaLabel": "执行阶段验收"
+        }
+      ]
+    },
+    {
+      "at": "2026-04-01T05:37:00.417Z",
+      "type": "required_actions",
+      "list": [
+        {
+          "id": "design-phase-no-deliverable",
+          "severity": "info",
+          "title": "设计阶段尚未提交交付物",
+          "detail": "建议先完成设计审查卡，再提交设计交付物，避免后续阶段返工。",
+          "action": "open_design_review",
+          "ctaLabel": "填写设计审查卡"
+        }
+      ]
+    },
+    {
+      "at": "2026-04-01T05:38:31.786Z",
+      "type": "approve_template_gate_retry",
+      "round": 3,
+      "project": {
+        "id": "OCC-20260401-020",
+        "status": "active",
+        "currentStage": "DESIGN",
+        "currentRole": "ROLE_DESIGN",
+        "progress": 32,
+        "pendingApproval": true
+      },
+      "message": "缺少核心交付物: 客户汇报方案.ppt.md | 缺少核心交付物: 实施方案说明.word.md（已自动触发交付物补齐，请稍后重试验收）"
+    },
+    {
+      "at": "2026-04-01T05:40:57.536Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:00.435Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:04.280Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:09.354Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:15.995Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:23.263Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:30.454Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:37.649Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:44.826Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:51.995Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:41:59.167Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:42:06.322Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:42:13.499Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:42:20.686Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:42:27.858Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:42:35.041Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:42:42.207Z",
+      "type": "advance",
+      "round": 5,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:25.856Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:28.755Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:32.570Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:37.601Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:44.240Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:51.423Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:44:58.600Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:45:05.770Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:45:12.946Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:45:20.107Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:45:27.289Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:45:34.477Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:45:41.635Z",
+      "type": "advance",
+      "round": 6,
+      "status": 409,
+      "code": "PROJECT_ADVANCE_IN_PROGRESS"
+    },
+    {
+      "at": "2026-04-01T05:46:32.520Z",
+      "type": "required_actions",
+      "list": [
+        {
+          "id": "real-model-gate-repair",
+          "severity": "critical",
+          "title": "当前阶段未通过真实模型门禁",
+          "detail": "请修复模型通道（API Key / Base URL / 可用模型）并重新执行本阶段，再进行验收。",
+          "action": "refresh_runtime",
+          "ctaLabel": "修复模型通道"
+        }
+      ]
+    },
+    {
+      "at": "2026-04-01T05:46:32.685Z",
+      "type": "runtime_validate",
+      "status": 200,
+      "code": null
+    },
+    {
+      "at": "2026-04-01T05:46:34.877Z",
+      "type": "completed",
+      "round": 7,
+      "project": {
+        "id": "OCC-20260401-020",
+        "status": "completed",
+        "currentStage": "ACCEPT",
+        "currentRole": "ROLE_HR",
+        "progress": 100,
+        "pendingApproval": false
+      }
+    }
+  ]
+}
