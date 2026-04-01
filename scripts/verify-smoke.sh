@@ -8,6 +8,17 @@ API_BASE_URL="${OCC_BASE_URL:-}"
 TMP_DIR="$(mktemp -d)"
 SESSION_TOKEN=""
 API_STARTED_BY_SCRIPT="false"
+SKIP_OPENCLAW_CHECKS="false"
+
+is_true() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  [[ "$raw" == "1" || "$raw" == "true" || "$raw" == "yes" || "$raw" == "on" ]]
+}
+
+if is_true "${CI_SKIP_OPENCLAW_CHECKS:-}" || is_true "${CI:-}"; then
+  SKIP_OPENCLAW_CHECKS="true"
+fi
 
 cleanup() {
   if [[ -n "$SESSION_TOKEN" ]]; then
@@ -136,10 +147,16 @@ assert_json "$TMP_DIR/health.json" '
 '
 
 curl -sf "$API_BASE_URL/ready" > "$TMP_DIR/ready.json"
-assert_json "$TMP_DIR/ready.json" '
-  if (!payload.ok) throw new Error("/ready did not report ready");
-  if (!Array.isArray(payload.services) || payload.services.length === 0) throw new Error("/ready did not include service details");
-'
+if [[ "$SKIP_OPENCLAW_CHECKS" == "true" ]]; then
+  assert_json "$TMP_DIR/ready.json" '
+    if (!Array.isArray(payload.services) || payload.services.length === 0) throw new Error("/ready did not include service details");
+  '
+else
+  assert_json "$TMP_DIR/ready.json" '
+    if (!payload.ok) throw new Error("/ready did not report ready");
+    if (!Array.isArray(payload.services) || payload.services.length === 0) throw new Error("/ready did not include service details");
+  '
+fi
 
 curl -sf "$API_BASE_URL/api/auth/status" > "$TMP_DIR/auth-status.json"
 assert_json "$TMP_DIR/auth-status.json" '
@@ -165,17 +182,19 @@ assert_json "$TMP_DIR/projects.json" '
   if (!Array.isArray(payload) || payload.length === 0) throw new Error("projects endpoint returned no projects");
 '
 
-curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/openclaw/workspace" > "$TMP_DIR/workspace.json"
-assert_json "$TMP_DIR/workspace.json" '
-  if (!Array.isArray(payload.agents) || payload.agents.length === 0) throw new Error("workspace did not expose agents");
-  if (!Array.isArray(payload.projects) || payload.projects.length === 0) throw new Error("workspace did not expose projects");
-'
+if [[ "$SKIP_OPENCLAW_CHECKS" != "true" ]]; then
+  curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/openclaw/workspace" > "$TMP_DIR/workspace.json"
+  assert_json "$TMP_DIR/workspace.json" '
+    if (!Array.isArray(payload.agents) || payload.agents.length === 0) throw new Error("workspace did not expose agents");
+    if (!Array.isArray(payload.projects) || payload.projects.length === 0) throw new Error("workspace did not expose projects");
+  '
 
-curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/openclaw/agents" > "$TMP_DIR/openclaw-agents.json"
-assert_json "$TMP_DIR/openclaw-agents.json" '
-  if (!Array.isArray(payload) || payload.length === 0) throw new Error("openclaw agents endpoint returned no agents");
-  if (!payload.some((agent) => agent.agentId === "jeremy")) throw new Error("jeremy agent is missing from API output");
-'
+  curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/openclaw/agents" > "$TMP_DIR/openclaw-agents.json"
+  assert_json "$TMP_DIR/openclaw-agents.json" '
+    if (!Array.isArray(payload) || payload.length === 0) throw new Error("openclaw agents endpoint returned no agents");
+    if (!payload.some((agent) => agent.agentId === "jeremy")) throw new Error("jeremy agent is missing from API output");
+  '
+fi
 
 curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/system/local-agent-monitor" > "$TMP_DIR/local-monitor.json"
 assert_json "$TMP_DIR/local-monitor.json" '

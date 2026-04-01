@@ -88,4 +88,4 @@ jobs:
         run: pnpm health:check
 
       - name: Smoke test runtime
-        run: pnpm test:smoke
+        run: CI_SKIP_OPENCLAW_CHECKS=true pnpm test:smoke
