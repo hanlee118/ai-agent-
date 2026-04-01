@@ -66,4 +66,21 @@ export const modelsApi = {
       method: 'POST',
     });
   },
+
+  async discover(data?: {
+    provider?: string;
+    apiBaseUrl?: string;
+    apiKey?: string;
+  }) {
+    return request<{
+      provider: string;
+      apiBaseUrl: string;
+      discovered: number;
+      synced: number;
+      models: Model[];
+    }>('/models/discover', {
+      method: 'POST',
+      body: JSON.stringify(data ?? {}),
+    });
+  },
 };

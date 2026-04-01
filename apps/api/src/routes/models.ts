@@ -8,7 +8,8 @@ import {
   sendError,
   sendSuccess
 } from "./utils.js";
-import { getRuntimeSettings, updateRuntimeSettings } from "../system/runtime-config.js";
+import { ensureSystemConfig, getRuntimeSettings, updateRuntimeSettings } from "../system/runtime-config.js";
+import { decryptSecret } from "../security/secret-store.js";
 
 interface CreateModelBody {
   name?: unknown;
@@ -28,6 +29,57 @@ interface UpdateModelBody {
   status?: unknown;
   totalTokens?: unknown;
   dailyTokens?: unknown;
+}
+
+interface DiscoverModelsBody {
+  provider?: unknown;
+  apiBaseUrl?: unknown;
+  apiKey?: unknown;
+}
+
+function normalizeApiBaseUrl(value: string) {
+  return String(value || "").trim().replace(/\/$/, "");
+}
+
+function buildModelsUrl(apiBaseUrl: string) {
+  return `${normalizeApiBaseUrl(apiBaseUrl)}/models`;
+}
+
+function parseDiscoveredModelNames(payload: unknown): string[] {
+  const candidates: unknown[] = [];
+  if (Array.isArray(payload)) {
+    candidates.push(...payload);
+  } else if (payload && typeof payload === "object") {
+    const record = payload as Record<string, unknown>;
+    if (Array.isArray(record.data)) {
+      candidates.push(...record.data);
+    }
+    if (Array.isArray(record.models)) {
+      candidates.push(...record.models);
+    }
+    if (record.result && typeof record.result === "object") {
+      const nested = record.result as Record<string, unknown>;
+      if (Array.isArray(nested.data)) {
+        candidates.push(...nested.data);
+      }
+      if (Array.isArray(nested.models)) {
+        candidates.push(...nested.models);
+      }
+    }
+  }
+
+  const names = candidates.map((item) => {
+    if (typeof item === "string") {
+      return item.trim();
+    }
+    if (item && typeof item === "object") {
+      const entry = item as Record<string, unknown>;
+      return String(entry.id ?? entry.name ?? "").trim();
+    }
+    return "";
+  }).filter(Boolean);
+
+  return [...new Set(names)];
 }
 
 function toModelView(model: {
@@ -102,6 +154,100 @@ export function createModelsRouter() {
     });
 
     sendSuccess(res, toModelView(created), 201);
+  }));
+
+  router.post("/discover", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as DiscoverModelsBody;
+    const systemConfig = await ensureSystemConfig();
+    const runtimeApiKey = await decryptSecret(systemConfig.apiKey);
+
+    const provider = String(payload.provider ?? systemConfig.provider ?? "").trim() || "openai-compatible";
+    const apiBaseUrl = normalizeApiBaseUrl(String(payload.apiBaseUrl ?? systemConfig.apiBaseUrl ?? ""));
+    const apiKey = String(payload.apiKey ?? runtimeApiKey ?? "").trim();
+
+    if (provider !== "openai-compatible") {
+      sendError(res, 400, "VALIDATION_ERROR", "discover currently supports openai-compatible provider only");
+      return;
+    }
+    if (!/^https?:\/\//i.test(apiBaseUrl)) {
+      sendError(res, 400, "VALIDATION_ERROR", "apiBaseUrl is required and must start with http(s)://");
+      return;
+    }
+    if (!apiKey) {
+      sendError(res, 400, "VALIDATION_ERROR", "apiKey is required (or configure runtime api key first)");
+      return;
+    }
+
+    const response = await fetch(buildModelsUrl(apiBaseUrl), {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`
+      }
+    });
+
+    if (!response.ok) {
+      sendError(res, 502, "SERVICE_UNAVAILABLE", `discover failed: upstream status ${response.status}`);
+      return;
+    }
+
+    const discoveredPayload = await response.json().catch(() => null);
+    const discoveredNames = parseDiscoveredModelNames(discoveredPayload);
+    if (discoveredNames.length === 0) {
+      sendSuccess(res, {
+        provider,
+        apiBaseUrl,
+        discovered: 0,
+        synced: 0,
+        models: []
+      });
+      return;
+    }
+
+    let synced = 0;
+    const syncedModels = [];
+    for (const name of discoveredNames) {
+      const existing = await prisma.model.findFirst({
+        where: {
+          name,
+          provider,
+          apiBaseUrl
+        }
+      });
+
+      if (existing) {
+        const updated = await prisma.model.update({
+          where: { id: existing.id },
+          data: {
+            apiKey,
+            status: existing.status === "Offline" ? "Degraded" : existing.status
+          }
+        });
+        synced += 1;
+        syncedModels.push(toModelView(updated));
+        continue;
+      }
+
+      const created = await prisma.model.create({
+        data: {
+          name,
+          provider,
+          apiBaseUrl,
+          apiKey,
+          status: "Healthy",
+          tokenLimit: 1_000_000
+        }
+      });
+      synced += 1;
+      syncedModels.push(toModelView(created));
+    }
+
+    sendSuccess(res, {
+      provider,
+      apiBaseUrl,
+      discovered: discoveredNames.length,
+      synced,
+      models: syncedModels
+    });
   }));
 
   router.get("/:id", asyncRoute(async (req, res) => {

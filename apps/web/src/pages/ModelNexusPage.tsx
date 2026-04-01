@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Info, Plus, RotateCcw, Terminal, Zap } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { models } from '../lib/runtimeCollections';
+import { modelsApi, systemApi } from '../lib/api';
 import { Badge, Cpu, Dialog, ModelTerminal } from './impl/GovernanceShared';
 
 type Props = {
@@ -13,6 +14,8 @@ type Props = {
 export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData }: Props) {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isSyncingCatalog, setIsSyncingCatalog] = useState(false);
+  const [isRepairingRuntime, setIsRepairingRuntime] = useState(false);
 
   const stats = useMemo(() => ({
     totalTokens: models.reduce((acc, model) => acc + (model.totalTokens || 0), 0),
@@ -24,6 +27,40 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
     () => models.find((model) => model.id === selectedModelId),
     [selectedModelId, models],
   );
+  const canPromoteSelectedModel = Boolean(selectedModel && !String(selectedModel.id || '').startsWith('runtime-'));
+
+  const handleSyncCatalog = async () => {
+    setIsSyncingCatalog(true);
+    addToast('正在从模型服务同步可用模型列表...', 'info');
+    try {
+      const result = await modelsApi.discover();
+      addToast(`模型目录同步完成：发现 ${result.discovered} 个，写入/更新 ${result.synced} 个`, 'success');
+      if (onRefreshData) {
+        await onRefreshData();
+      }
+    } catch (error) {
+      addToast(`同步失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsSyncingCatalog(false);
+    }
+  };
+
+  const handleSetDefaultAndValidate = async (modelId: string) => {
+    setIsRepairingRuntime(true);
+    addToast('正在设置运行默认模型并执行通道校验...', 'info');
+    try {
+      await modelsApi.setDefault(modelId);
+      const validation = await systemApi.validateRuntime();
+      addToast(validation.message || '运行时校验完成', validation.ok ? 'success' : 'error');
+      if (onRefreshData) {
+        await onRefreshData();
+      }
+    } catch (error) {
+      addToast(`修复失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsRepairingRuntime(false);
+    }
+  };
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -63,6 +100,13 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
             className="p-2 bg-white/5 border border-border-subtle rounded-xl text-slate-400 hover:text-white transition-colors"
           >
             <RotateCcw size={20} className={cn(isRefreshing && 'animate-spin')} />
+          </button>
+          <button
+            onClick={() => void handleSyncCatalog()}
+            disabled={isSyncingCatalog}
+            className="px-4 py-2 bg-white/5 border border-border-subtle rounded-xl text-sm font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60"
+          >
+            {isSyncingCatalog ? '同步中...' : '同步模型目录'}
           </button>
           <button onClick={onOpenNewModel} className="px-4 py-2 bg-primary text-surface font-bold rounded-xl shadow-lg shadow-primary/20 flex items-center gap-2">
             <Plus size={18} />
@@ -134,7 +178,25 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
       </div>
 
       <Dialog isOpen={Boolean(selectedModelId)} onClose={() => setSelectedModelId(null)} title={selectedModel ? `${selectedModel.name} 实时终端` : '模型终端'}>
-        {selectedModel ? <ModelTerminal model={selectedModel} /> : null}
+        {selectedModel ? (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-3 p-3 rounded-xl bg-white/5 border border-border-subtle">
+              <div className="text-xs text-slate-400">
+                {canPromoteSelectedModel
+                  ? '可将当前模型设置为运行时默认，并立即执行通道校验。'
+                  : '该模型来自运行态推断，请先在模型中心注册后再设为默认。'}
+              </div>
+              <button
+                onClick={() => void handleSetDefaultAndValidate(selectedModel.id)}
+                disabled={!canPromoteSelectedModel || isRepairingRuntime}
+                className="px-3 py-1.5 rounded-lg bg-primary text-surface text-xs font-bold disabled:opacity-50"
+              >
+                {isRepairingRuntime ? '修复中...' : '设为运行默认并校验'}
+              </button>
+            </div>
+            <ModelTerminal model={selectedModel} />
+          </div>
+        ) : null}
       </Dialog>
     </div>
   );

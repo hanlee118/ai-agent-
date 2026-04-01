@@ -1588,10 +1588,10 @@ const ProjectRoom = ({
   const openRuntimeConfigHint = () => {
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
-      url.searchParams.set('app_tab', 'settings');
+      url.searchParams.set('app_tab', 'model-nexus');
       window.history.replaceState(window.history.state, '', `${url.pathname}${url.search ? url.search : ''}${url.hash}`);
     }
-    addToast('请前往设置页补全模型运行时配置（API Base URL / API Key / Model）', 'info');
+    addToast('请前往模型中心执行“设为运行默认并校验”，必要时再到设置页补充高级参数。', 'info');
   };
 
   const handleRequiredAction = async (action: ProjectRequiredAction) => {
