@@ -1,0 +1,68 @@
+{
+  "generatedAt": "2026-04-01T07:16:08.918Z",
+  "gitlabProjectPath": "root/occ-harness-e2e-20260401151341",
+  "occProject": {
+    "id": "OCC-20260401-022",
+    "currentStage": "ANALYSIS",
+    "taskCount": 17
+  },
+  "syncResponse": {
+    "success": true,
+    "data": {
+      "projectId": "OCC-20260401-022",
+      "projectName": "harness-e2e-real-chain",
+      "projectPath": "root/occ-harness-e2e-20260401151341",
+      "stageType": "ANALYSIS",
+      "closeOnComplete": false,
+      "taskTotal": 3,
+      "created": [
+        1,
+        2,
+        3
+      ],
+      "updated": [],
+      "reused": [],
+      "failed": []
+    }
+  },
+  "issuesSummary": {
+    "total": 3,
+    "harnessLike": 3,
+    "sample": [
+      {
+        "iid": 3,
+        "title": "[OCC][ANALYSIS] 形成审批版分析稿 (OCC-20260401-022)",
+        "state": "opened",
+        "labels": [
+          "occ-harness",
+          "occ-project-occ-20260401-022",
+          "occ-stage-analysis",
+          "occ-task-cmnfppaar0009y9noscs3lwn"
+        ]
+      },
+      {
+        "iid": 2,
+        "title": "[OCC][ANALYSIS] 输出项目排期 (OCC-20260401-022)",
+        "state": "opened",
+        "labels": [
+          "occ-harness",
+          "occ-project-occ-20260401-022",
+          "occ-stage-analysis",
+          "occ-task-cmnfppaar0008y9no80pq5fs"
+        ]
+      },
+      {
+        "iid": 1,
+        "title": "[OCC][ANALYSIS] 提炼目标与边界 (OCC-20260401-022)",
+        "state": "opened",
+        "labels": [
+          "occ-harness",
+          "occ-project-occ-20260401-022",
+          "occ-stage-analysis",
+          "occ-task-cmnfppaar0007y9now8v7i72"
+        ]
+      }
+    ]
+  },
+  "ok": true
+}

@@ -322,3 +322,11 @@ v1.0.1 是在 v1.0.0 基础上的闭环验收补丁版本。它已经通过自�
 - 私有化部署的本地工作台
 - 多 Agent 团队治理底座
 - 后续 1.x 版本持续演进的基线
+
+### 2026-04-01 最新更新（收敛与验收）
+
+- 完成后端收敛增强：`advance` 退避恢复、门禁与健康检查链路强化。
+- 增加可重复验收脚本：`pnpm verify:repeatable:018`。
+- 完成 GitLab Harness 真实链路验收（本地 GitLab + 真实 Issue 创建/回查）：
+  - 报告：[docs/reports/harness-e2e-latest.json](docs/reports/harness-e2e-latest.json)
+- 仓库清理：移除历史 `apps/web/public/generated` 自动生成 HTML，避免无效产物污染主干。
