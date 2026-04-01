@@ -31,11 +31,32 @@ const STAGE_TIMEOUT_BASELINE_MS: Record<StageType, number> = {
 const ROUTE_TIMEOUT_COOLDOWN_MS = Math.max(30000, Number(process.env.MODEL_ROUTE_TIMEOUT_COOLDOWN_MS ?? 180000));
 const ROUTE_AUTH_COOLDOWN_MS = Math.max(60000, Number(process.env.MODEL_ROUTE_AUTH_COOLDOWN_MS ?? 900000));
 const ROUTE_NETWORK_COOLDOWN_MS = Math.max(30000, Number(process.env.MODEL_ROUTE_NETWORK_COOLDOWN_MS ?? 300000));
+const MODEL_ROUTE_PREWARM_ENABLED = String(process.env.MODEL_ROUTE_PREWARM_ENABLED ?? "true").trim().toLowerCase() !== "false";
+const MODEL_ROUTE_PREWARM_TIMEOUT_MS = Math.max(1200, Number(process.env.MODEL_ROUTE_PREWARM_TIMEOUT_MS ?? 4500));
+const MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS = Math.max(10000, Number(process.env.MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS ?? 90000));
+const MODEL_ROUTE_PREWARM_FAIL_TTL_MS = Math.max(15000, Number(process.env.MODEL_ROUTE_PREWARM_FAIL_TTL_MS ?? 180000));
 const REAL_RUNTIME_FAIL_FAST_WINDOW_MS = Math.max(
   60000,
   Number(process.env.REAL_RUNTIME_FAIL_FAST_WINDOW_MS ?? 600000)
 );
 const modelRouteCooldown = new Map<string, number>();
+const routePrewarmCache = new Map<string, { reason: string | null; expiresAt: number }>();
+
+const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
+  ROLE_PM: 120000,
+  ROLE_DESIGN: 180000,
+  ROLE_ARCH: 160000,
+  ROLE_DEV: 180000,
+  ROLE_QA: 120000
+};
+
+const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
+  ROLE_PM: 90000,
+  ROLE_DESIGN: 120000,
+  ROLE_ARCH: 100000,
+  ROLE_DEV: 120000,
+  ROLE_QA: 90000
+};
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   INIT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "minima/MiniMax-M2.7-highspeed"],
@@ -92,28 +113,32 @@ type ExecutionRoute = {
   apiKey: string;
 };
 
+function isRealModelGateEnabled() {
+  const raw = String(process.env.ENFORCE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 function getModelRouteKey(model: string, route: string) {
   return `${String(model || "").trim().toLowerCase()}::${String(route || "").trim().toLowerCase()}`;
 }
 
-function getRouteOnlyKey(route: string) {
-  return getModelRouteKey("*", route);
-}
-
 function getModelRouteCooldownError(model: string, route: string) {
-  const keys = [getModelRouteKey(model, route), getRouteOnlyKey(route)];
-  for (const key of keys) {
-    const blockedUntil = modelRouteCooldown.get(key);
-    if (!blockedUntil) {
-      continue;
-    }
-    if (blockedUntil <= Date.now()) {
-      modelRouteCooldown.delete(key);
-      continue;
-    }
-    return `ROUTE_COOLDOWN_ACTIVE: retryAfterMs=${blockedUntil - Date.now()}`;
+  const key = getModelRouteKey(model, route);
+  const blockedUntil = modelRouteCooldown.get(key);
+  if (!blockedUntil) {
+    return null;
   }
-  return null;
+  if (blockedUntil <= Date.now()) {
+    modelRouteCooldown.delete(key);
+    return null;
+  }
+  return `ROUTE_COOLDOWN_ACTIVE: retryAfterMs=${blockedUntil - Date.now()}`;
 }
 
 function markModelRouteCooldown(model: string, route: string, error: unknown) {
@@ -134,7 +159,134 @@ function markModelRouteCooldown(model: string, route: string, error: unknown) {
 
   const blockedUntil = Date.now() + ttlMs;
   modelRouteCooldown.set(getModelRouteKey(model, route), blockedUntil);
-  modelRouteCooldown.set(getRouteOnlyKey(route), blockedUntil);
+}
+
+async function getRoutePrewarmError(route: ExecutionRoute, model: string, routeRemainingMs: number) {
+  if (!MODEL_ROUTE_PREWARM_ENABLED) {
+    return null;
+  }
+
+  const routeLabel = toRouteLabel(route);
+  const cacheKey = getModelRouteKey(model, routeLabel);
+  const cached = routePrewarmCache.get(cacheKey);
+  if (cached) {
+    if (cached.expiresAt > Date.now()) {
+      return cached.reason;
+    }
+    routePrewarmCache.delete(cacheKey);
+  }
+
+  const timeoutMs = Math.max(1200, Math.min(MODEL_ROUTE_PREWARM_TIMEOUT_MS, routeRemainingMs - 300));
+  if (timeoutMs < 1200) {
+    return null;
+  }
+
+  const result = await probeRouteModel(route, model, timeoutMs);
+  if (!result.reason) {
+    routePrewarmCache.set(cacheKey, {
+      reason: null,
+      expiresAt: Date.now() + MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS
+    });
+    return null;
+  }
+
+  routePrewarmCache.set(cacheKey, {
+    reason: result.reason,
+    expiresAt: Date.now() + result.ttlMs
+  });
+  return result.reason;
+}
+
+async function probeRouteModel(route: ExecutionRoute, model: string, timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const baseUrl = String(route.apiBaseUrl ?? "").replace(/\/$/, "");
+  const normalizedModel = normalizeRuntimeModelName(model);
+
+  const request = async (stream: boolean) => fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    signal: controller.signal,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${route.apiKey}`
+    },
+    body: JSON.stringify({
+      model: normalizedModel,
+      stream,
+      max_tokens: 12,
+      temperature: 0,
+      messages: [
+        {
+          role: "user",
+          content: "OK"
+        }
+      ]
+    })
+  });
+
+  try {
+    let stream = requiresStreamMode(model);
+    let response = await request(stream);
+    if (!response.ok) {
+      const message = await readResponseMessage(response);
+      if (!stream && /stream must be set to true/i.test(message)) {
+        stream = true;
+        response = await request(stream);
+      } else if (stream && /stream/i.test(message)) {
+        stream = false;
+        response = await request(stream);
+      }
+    }
+
+    if (!response.ok) {
+      const message = await readResponseMessage(response);
+      if (response.status === 401 || response.status === 403) {
+        return { reason: `PREWARM_AUTH_${response.status}: ${message || "unauthorized"}`, ttlMs: ROUTE_AUTH_COOLDOWN_MS };
+      }
+      if (response.status === 503) {
+        return { reason: `PREWARM_HTTP_503: ${message || "service unavailable"}`, ttlMs: MODEL_ROUTE_PREWARM_FAIL_TTL_MS };
+      }
+      return { reason: null, ttlMs: 0 };
+    }
+
+    await response.text();
+    return { reason: null, ttlMs: 0 };
+  } catch (error) {
+    const message = normalizeErrorMessage(error).toUpperCase();
+    if (message.includes("ABORT") || message.includes("TIMEOUT") || message.includes("TIMED OUT")) {
+      return { reason: `PREWARM_TIMEOUT: ${normalizeErrorMessage(error)}`, ttlMs: ROUTE_TIMEOUT_COOLDOWN_MS };
+    }
+    if (message.includes("ECONNRESET") || message.includes("ECONNREFUSED") || message.includes("ENOTFOUND")) {
+      return { reason: `PREWARM_NETWORK: ${normalizeErrorMessage(error)}`, ttlMs: ROUTE_NETWORK_COOLDOWN_MS };
+    }
+    return { reason: null, ttlMs: 0 };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normalizeRuntimeModelName(model: string) {
+  const normalized = String(model ?? "").trim();
+  if (normalized.startsWith("openai/")) {
+    return normalized.slice("openai/".length);
+  }
+  if (normalized.startsWith("anthropic/")) {
+    return normalized.slice("anthropic/".length);
+  }
+  return normalized;
+}
+
+async function readResponseMessage(response: Response) {
+  const raw = await response.text();
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: string };
+      message?: string;
+    };
+    return String(parsed.error?.message ?? parsed.message ?? raw).trim();
+  } catch {
+    return String(raw).trim();
+  }
 }
 
 export async function runStageAgent(input: {
@@ -147,6 +299,7 @@ export async function runStageAgent(input: {
 }): Promise<StageAgentRunResult> {
   const runtime = await getResolvedRuntimeExecutionConfig();
   const requestedRealMode = runtime.status.requestedMode === "openai-compatible";
+  const enforceRealModelGate = isRealModelGateEnabled();
   const attempts: StageModelAttemptTrace[] = [];
 
   const trackAttempt = (payload: {
@@ -170,10 +323,16 @@ export async function runStageAgent(input: {
 
   if (requestedRealMode) {
     if (!runtime.status.configured) {
-      throw new Error("REAL_MODEL_NOT_CONFIGURED: 已启用真实模型模式，但配置不完整（缺少 API Base URL / API Key / Model）。");
+      const gateMessage = "已启用真实模型模式，但配置不完整（缺少 API Base URL / API Key / Model）。";
+      throw new Error(enforceRealModelGate ? `REAL_MODEL_GATE_FAILED: ${gateMessage}` : `REAL_MODEL_NOT_CONFIGURED: ${gateMessage}`);
     }
 
     if (shouldFastFailRealRuntime(runtime.status.lastValidationStatus, runtime.status.lastValidatedAt)) {
+      if (enforceRealModelGate) {
+        throw new Error(
+          `REAL_MODEL_GATE_FAILED: 最近一次模型健康校验失败，已命中快速失败窗口（status=${runtime.status.lastValidationStatus || "unknown"}）。`
+        );
+      }
       const degraded = await runScriptedAgent({
         ...input,
         summary: `${input.summary ?? "当前阶段改为降级执行"}；最近一次模型健康校验失败，进入快速降级模式。`
@@ -197,7 +356,7 @@ export async function runStageAgent(input: {
 
     const modelPlan = (await resolveRoleModelPlan(input.role, input.stageType, runtime.modelName))
       .slice(0, STAGE_AGENT_MAX_MODELS);
-    const stageTimeoutMs = resolveStageTimeoutMs(input.stageType);
+    const stageTimeoutMs = resolveStageTimeoutMs(input.stageType, input.role);
     const deadline = Date.now() + stageTimeoutMs;
     let lastError: unknown;
 
@@ -243,6 +402,17 @@ export async function runStageAgent(input: {
             });
             continue;
           }
+          const prewarmError = await getRoutePrewarmError(route, model, routeRemainingMs);
+          if (prewarmError) {
+            trackAttempt({
+              model,
+              route: routeLabel,
+              status: "skipped",
+              startedAtMs: Date.now(),
+              error: prewarmError
+            });
+            continue;
+          }
           const startedAtMs = Date.now();
           try {
             const run = await withTimeout(
@@ -255,7 +425,8 @@ export async function runStageAgent(input: {
                 input
               ),
               routeRemainingMs,
-              `anthropic:${model}@${route.source}`
+              `anthropic:${model}@${route.source}`,
+              resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs)
             );
             trackAttempt({ model, route: routeLabel, status: "success", startedAtMs });
             return { ...run, attempts };
@@ -297,6 +468,17 @@ export async function runStageAgent(input: {
             });
             continue;
           }
+          const prewarmError = await getRoutePrewarmError(route, model, routeRemainingMs);
+          if (prewarmError) {
+            trackAttempt({
+              model,
+              route: routeLabel,
+              status: "skipped",
+              startedAtMs: Date.now(),
+              error: prewarmError
+            });
+            continue;
+          }
           const startedAtMs = Date.now();
           try {
             const run = await withTimeout(
@@ -309,7 +491,8 @@ export async function runStageAgent(input: {
                 input
               ),
               routeRemainingMs,
-              `openai-compatible:${model}@${route.source}`
+              `openai-compatible:${model}@${route.source}`,
+              resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs)
             );
             trackAttempt({ model, route: routeLabel, status: "success", startedAtMs });
             return { ...run, attempts };
@@ -351,6 +534,17 @@ export async function runStageAgent(input: {
             });
             continue;
           }
+          const prewarmError = await getRoutePrewarmError(route, model, routeRemainingMs);
+          if (prewarmError) {
+            trackAttempt({
+              model,
+              route: routeLabel,
+              status: "skipped",
+              startedAtMs: Date.now(),
+              error: prewarmError
+            });
+            continue;
+          }
           const startedAtMs = Date.now();
           try {
             const run = await withTimeout(
@@ -363,7 +557,8 @@ export async function runStageAgent(input: {
                 input
               ),
               routeRemainingMs,
-              `openai-compatible:${model}@${route.source}`
+              `openai-compatible:${model}@${route.source}`,
+              resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs)
             );
             trackAttempt({ model, route: routeLabel, status: "success", startedAtMs });
             return { ...run, attempts };
@@ -388,6 +583,22 @@ export async function runStageAgent(input: {
         });
         continue;
       }
+      const runtimeRoute: ExecutionRoute = {
+        source: "runtime-selected",
+        apiBaseUrl: runtime.apiBaseUrl,
+        apiKey: runtime.apiKey
+      };
+      const prewarmError = await getRoutePrewarmError(runtimeRoute, model, remainingMs);
+      if (prewarmError) {
+        trackAttempt({
+          model,
+          route: runtimeRouteLabel,
+          status: "skipped",
+          startedAtMs: Date.now(),
+          error: prewarmError
+        });
+        continue;
+      }
       const startedAtMs = Date.now();
       try {
         const run = await withTimeout(
@@ -400,7 +611,8 @@ export async function runStageAgent(input: {
             input
           ),
           remainingMs,
-          `openai-compatible:${model}@runtime-selected`
+          `openai-compatible:${model}@runtime-selected`,
+          resolveSingleAttemptTimeoutMs(input.role, input.stageType, remainingMs)
         );
         trackAttempt({ model, route: runtimeRouteLabel, status: "success", startedAtMs });
         return { ...run, attempts };
@@ -412,6 +624,14 @@ export async function runStageAgent(input: {
     }
 
     // 保底降级：避免阶段推进长时间阻塞，至少保证流程可继续并可审阅。
+    if (enforceRealModelGate) {
+      const gateError = new Error(
+        `REAL_MODEL_GATE_FAILED: 真实模型调用失败（${lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error")}）。`
+      ) as Error & { attempts?: StageModelAttemptTrace[] };
+      gateError.attempts = attempts;
+      throw gateError;
+    }
+
     const degraded = await runScriptedAgent({
       ...input,
       summary: `${input.summary ?? "当前阶段改为降级执行"}；真实模型调用超时或失败。`
@@ -433,6 +653,10 @@ export async function runStageAgent(input: {
       attempts,
       degraded: true
     };
+  }
+
+  if (enforceRealModelGate) {
+    throw new Error("REAL_MODEL_GATE_FAILED: 当前运行模式为 scripted，未满足真实模型门禁要求。");
   }
 
   const scripted = await runScriptedAgent(input);
@@ -654,10 +878,15 @@ async function resolveRoleModelPlan(role: RoleType, stageType: StageType, runtim
   return models;
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label: string,
+  maxBudgetMs = MAX_SINGLE_ATTEMPT_TIMEOUT_MS
+): Promise<T> {
   const budget = Math.max(
     MIN_ATTEMPT_BUDGET_MS,
-    Math.min(timeoutMs, MAX_SINGLE_ATTEMPT_TIMEOUT_MS)
+    Math.min(timeoutMs, maxBudgetMs)
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<T>((_, reject) => {
@@ -693,6 +922,11 @@ function isOpenAIModel(model: string) {
     || normalized.startsWith("gpt-");
 }
 
+function requiresStreamMode(model: string) {
+  const normalized = normalizeRuntimeModelName(model).toLowerCase();
+  return normalized.startsWith("gpt-5.4") || normalized.startsWith("gpt-5.3-codex");
+}
+
 type OpenClawRuntimeConfig = {
   env?: Record<string, string>;
   models?: {
@@ -716,11 +950,9 @@ async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput):
 
   const routes: ExecutionRoute[] = [
     {
-      source: "openclaw-openai",
-      apiBaseUrl: String(provider?.baseUrl ?? "").trim(),
-      apiKey: String(provider?.apiKey ?? "").trim()
-        || String(config.env?.OPENAI_API_KEY ?? "").trim()
-        || String(process.env.OPENAI_API_KEY ?? "").trim()
+      source: "runtime-selected",
+      apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
+      apiKey: String(input.runtimeApiKey ?? "").trim()
     },
     {
       source: "env-openai",
@@ -728,9 +960,11 @@ async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput):
       apiKey: String(process.env.OPENAI_API_KEY ?? "").trim()
     },
     {
-      source: "runtime-selected",
-      apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
-      apiKey: String(input.runtimeApiKey ?? "").trim()
+      source: "openclaw-openai",
+      apiBaseUrl: String(provider?.baseUrl ?? "").trim(),
+      apiKey: String(provider?.apiKey ?? "").trim()
+        || String(config.env?.OPENAI_API_KEY ?? "").trim()
+        || String(process.env.OPENAI_API_KEY ?? "").trim()
     }
   ];
 
@@ -822,12 +1056,41 @@ function normalizeErrorMessage(error: unknown) {
   return normalized.length > 260 ? `${normalized.slice(0, 260)}...` : normalized;
 }
 
-function resolveStageTimeoutMs(stageType: StageType) {
+function resolveStageTimeoutMs(stageType: StageType, role?: RoleType) {
+  if (role) {
+    const roleStageSpecific = Number(process.env[`STAGE_AGENT_TOTAL_TIMEOUT_${stageType}_${role}_MS`]);
+    if (Number.isFinite(roleStageSpecific) && roleStageSpecific > 0) {
+      return Math.max(MIN_ATTEMPT_BUDGET_MS, Math.round(roleStageSpecific));
+    }
+    const roleSpecific = Number(process.env[`STAGE_AGENT_TOTAL_TIMEOUT_${role}_MS`]);
+    if (Number.isFinite(roleSpecific) && roleSpecific > 0) {
+      return Math.max(MIN_ATTEMPT_BUDGET_MS, Math.round(roleSpecific));
+    }
+  }
   const stageSpecificEnv = Number(process.env[`STAGE_AGENT_TOTAL_TIMEOUT_${stageType}_MS`]);
   if (Number.isFinite(stageSpecificEnv) && stageSpecificEnv > 0) {
     return Math.max(MIN_ATTEMPT_BUDGET_MS, Math.round(stageSpecificEnv));
   }
-  return Math.max(STAGE_AGENT_TOTAL_TIMEOUT_MS, STAGE_TIMEOUT_BASELINE_MS[stageType]);
+  const roleBaseline = role ? (ROLE_STAGE_TIMEOUT_BASELINE_MS[role] ?? 0) : 0;
+  return Math.max(STAGE_AGENT_TOTAL_TIMEOUT_MS, STAGE_TIMEOUT_BASELINE_MS[stageType], roleBaseline);
+}
+
+function resolveSingleAttemptTimeoutMs(role: RoleType, stageType: StageType, remainingMs: number) {
+  const roleStageSpecific = Number(process.env[`STAGE_AGENT_SINGLE_ATTEMPT_TIMEOUT_${stageType}_${role}_MS`]);
+  if (Number.isFinite(roleStageSpecific) && roleStageSpecific > 0) {
+    return Math.max(MIN_ATTEMPT_BUDGET_MS, Math.min(remainingMs, Math.round(roleStageSpecific)));
+  }
+
+  const roleSpecific = Number(process.env[`STAGE_AGENT_SINGLE_ATTEMPT_TIMEOUT_${role}_MS`]);
+  if (Number.isFinite(roleSpecific) && roleSpecific > 0) {
+    return Math.max(MIN_ATTEMPT_BUDGET_MS, Math.min(remainingMs, Math.round(roleSpecific)));
+  }
+
+  const roleBaseline = ROLE_ATTEMPT_TIMEOUT_BASELINE_MS[role] ?? 0;
+  return Math.max(
+    MIN_ATTEMPT_BUDGET_MS,
+    Math.min(remainingMs, Math.max(MAX_SINGLE_ATTEMPT_TIMEOUT_MS, roleBaseline))
+  );
 }
 
 function normalizeStageType(value: string): StageType | null {

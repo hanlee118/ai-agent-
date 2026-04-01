@@ -87,6 +87,13 @@ before(async () => {
       "SET \"adminPasswordHash\" = '',",
       "    \"adminPasswordSalt\" = '',",
       "    \"adminPasswordUpdatedAt\" = NULL,",
+      "    \"provider\" = 'scripted',",
+      "    \"apiBaseUrl\" = '',",
+      "    \"modelName\" = '',",
+      "    \"configSource\" = 'default',",
+      "    \"lastValidatedAt\" = NULL,",
+      "    \"lastValidationStatus\" = 'unknown',",
+      "    \"lastValidationError\" = NULL,",
       "    \"updatedAt\" = CURRENT_TIMESTAMP;",
       "PRAGMA foreign_keys = ON;",
       "SQL"

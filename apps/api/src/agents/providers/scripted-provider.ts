@@ -19,9 +19,9 @@ export interface AgentRunResult {
 }
 
 export async function runScriptedAgent(context: AgentRunContext): Promise<AgentRunResult> {
-  const keywords = context.parsedIntent.keywords.join(" / ") || "待补充";
-  const constraints = context.parsedIntent.constraints.join("；") || "待补充";
-  const risks = context.parsedIntent.risks.join("；") || "待补充";
+  const keywords = context.parsedIntent.keywords.join(" / ") || "信息未提供";
+  const constraints = context.parsedIntent.constraints.join("；") || "信息未提供";
+  const risks = context.parsedIntent.risks.join("；") || "信息未提供";
 
   const stageBodyByType: Record<StageType, string[]> = {
     INIT: [

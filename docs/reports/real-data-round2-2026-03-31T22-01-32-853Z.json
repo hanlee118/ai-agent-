@@ -1,0 +1,68 @@
+{
+  "ok": false,
+  "startedAt": "2026-03-31T22:01:32.678Z",
+  "finishedAt": "2026-03-31T22:01:32.853Z",
+  "apiBase": "http://127.0.0.1:8799",
+  "projectId": null,
+  "requirement": "帮我搭建一个跨境电商的爆品选品跟品机器人。当某个跨境品在tiktok或者亚马逊等上的流量突然大爆时，帮我做好监控和排名，并且提供链接供我实时跟品。",
+  "blockedBy": "RUNTIME_NOT_READY",
+  "runtime": {
+    "mode": "scripted",
+    "requestedMode": "scripted",
+    "modelName": "scripted-agent",
+    "configured": true,
+    "apiBaseUrl": "",
+    "apiKeyConfigured": false,
+    "configSource": "default",
+    "lastValidationStatus": "unknown",
+    "lastValidationError": null
+  },
+  "quality": {
+    "projectCompleted": false,
+    "readyForAcceptance": false,
+    "allSuccessExecutionsAreReal": false,
+    "allSuccessExecutionsNonDegraded": false,
+    "stageCoverageMissing": [
+      "ANALYSIS",
+      "DESIGN",
+      "DEV",
+      "ACCEPT"
+    ],
+    "roleCoverageMissing": [
+      "ROLE_PM",
+      "ROLE_ANALYST",
+      "ROLE_PRODUCT",
+      "ROLE_DESIGN",
+      "ROLE_ARCH",
+      "ROLE_DEV",
+      "ROLE_QA"
+    ],
+    "noPlaceholder": false
+  },
+  "stageTransitions": [],
+  "stageSummary": [],
+  "roleSummary": [],
+  "scriptedExecutions": [],
+  "degradedExecutions": [],
+  "executionCount": 0,
+  "successExecutionCount": 0,
+  "logs": [
+    {
+      "at": "2026-03-31T22:01:32.702Z",
+      "type": "auth_status",
+      "setupComplete": true,
+      "authenticated": false
+    },
+    {
+      "at": "2026-03-31T22:01:32.797Z",
+      "type": "auth_login_ok"
+    },
+    {
+      "at": "2026-03-31T22:01:32.853Z",
+      "type": "runtime_status",
+      "mode": "scripted",
+      "requestedMode": "scripted",
+      "configured": true
+    }
+  ]
+}

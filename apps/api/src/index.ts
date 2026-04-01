@@ -202,6 +202,17 @@ type ProjectRequiredAction = {
   ctaLabel: string;
 };
 
+function isRealModelGateEnabled() {
+  const raw = String(process.env.ENFORCE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return process.env.NODE_ENV === "production";
+}
+
 const GENERIC_OUTPUT_PATTERNS = [
   /固定仪表盘、项目观测室、Agent 中心三大页面/,
   /让实时输出始终成为视觉中心/,
@@ -209,6 +220,59 @@ const GENERIC_OUTPUT_PATTERNS = [
   /避免常规 SaaS 模板感/,
   /优先打通数据库、仓储和实时执行流/
 ];
+
+const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(2, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
+const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
+  45_000,
+  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 120_000)
+);
+const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
+  900,
+  Number(process.env.MANUAL_ADVANCE_BACKOFF_BASE_MS ?? 1_200)
+);
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function computeAdvanceBackoffMs(attempt: number, recovering = false) {
+  const normalizedAttempt = Math.max(1, attempt);
+  const base = Math.min(22_000, MANUAL_ADVANCE_BACKOFF_BASE_MS * (2 ** (normalizedAttempt - 1)));
+  const jitter = Math.round(base * (recovering ? 0.3 : 0.2) * Math.random());
+  return Math.min(28_000, base + jitter + (recovering ? 450 : 180));
+}
+
+function isTransientAdvanceErrorMessage(message: string) {
+  const normalized = String(message || "").toUpperCase();
+  return normalized.includes("MODEL_ATTEMPT_TIMEOUT")
+    || normalized.includes("MANUAL_ADVANCE_ATTEMPT_TIMEOUT")
+    || normalized.includes("REQUEST_TIMEOUT")
+    || normalized.includes("ETIMEDOUT")
+    || normalized.includes("ECONNRESET")
+    || normalized.includes("EAI_AGAIN")
+    || normalized.includes("429")
+    || normalized.includes("503")
+    || normalized.includes("REAL_MODEL_GATE_FAILED")
+    || normalized.includes("PROJECT_ADVANCE_IN_PROGRESS");
+}
+
+function isTemplateValidationErrorMessage(message: string) {
+  return String(message || "").includes("STAGE_TEMPLATE_VALIDATION_FAILED");
+}
 
 function buildAutoStageTitle(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
   return STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage]?.[0] || `自动提交-${project.currentStage}阶段.md`;
@@ -234,15 +298,67 @@ function summarizeAdvanceError(error: unknown) {
 
 async function executeManualAdvanceCycle(projectId: string) {
   await withProjectLock(projectId, async () => {
-    const current = await findProject(projectId);
-    if (!current || current.status !== "active" || current.pendingApproval) {
-      return;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= MANUAL_ADVANCE_MAX_ATTEMPTS; attempt += 1) {
+      const current = await findProject(projectId);
+      if (!current || current.status !== "active" || current.pendingApproval) {
+        return;
+      }
+
+      try {
+        const submissions = await withTimeout(
+          buildAutoStageSubmissions(current, {
+            action: "stage.auto_submission.manual_advance",
+            metadata: {
+              manualAdvanceAttempt: attempt,
+              manualAdvanceMaxAttempts: MANUAL_ADVANCE_MAX_ATTEMPTS
+            }
+          }),
+          MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
+        );
+        await withTimeout(
+          submitStageSubmissionBundle(projectId, submissions),
+          MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} submitStageSubmissionBundle exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        const message = summarizeAdvanceError(error);
+        const isTemplateError = isTemplateValidationErrorMessage(message);
+        const isTransientError = isTransientAdvanceErrorMessage(message);
+
+        if (!isTemplateError && !isTransientError) {
+          throw error;
+        }
+
+        const isRealModelGateError = message.includes("REAL_MODEL_GATE_FAILED");
+        if (isTemplateError || isRealModelGateError) {
+          await reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
+            console.warn(
+              `[project.advance] auto reconcile failed for ${projectId}:`,
+              reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
+            );
+          });
+        }
+
+        if (!isTemplateError) {
+          await validateRuntimeSettings().catch(() => {
+            // ignore runtime validation errors, continue retry loop
+          });
+        }
+
+        if (attempt < MANUAL_ADVANCE_MAX_ATTEMPTS) {
+          const backoffMs = computeAdvanceBackoffMs(attempt, isRealModelGateError);
+          await sleep(backoffMs);
+          continue;
+        }
+      }
     }
 
-    const submissions = await buildAutoStageSubmissions(current, {
-      action: "stage.auto_submission.manual_advance"
-    });
-    await submitStageSubmissionBundle(projectId, submissions);
+    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "manual advance failed"));
   });
 }
 
@@ -352,6 +468,13 @@ function countHits(source: string, items: string[]) {
   }).length;
 }
 
+function formatTaskStatusForEvidence(status: string) {
+  if (status === "done") return "已完成";
+  if (status === "in_progress") return "进行中";
+  if (status === "blocked") return "阻塞";
+  return "待处理";
+}
+
 function buildStageTaskEvidence(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ) {
@@ -364,7 +487,7 @@ function buildStageTaskEvidence(
   }
 
   return currentTasks.map((task, index) => (
-    `- ${index + 1}. ${task.title}（${task.status} / 优先级 ${task.priority}）\n  - 说明: ${task.description || "待补充"}`
+    `- ${index + 1}. ${task.title}（${formatTaskStatusForEvidence(task.status)} / 优先级 ${task.priority}）\n  - 说明: ${task.description || "暂无补充说明"}`
   ));
 }
 
@@ -412,7 +535,7 @@ function evaluateAutoSubmissionQuality(input: {
   const issues: string[] = [];
   const diagnostics: string[] = [];
   let score = 100;
-  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true";
+  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true" || isRealModelGateEnabled();
 
   if (input.run.provider === "scripted") {
     score -= strictRealModel ? 42 : 8;
@@ -613,7 +736,7 @@ function buildProjectRequiredActions(
   ) {
     actions.push({
       id: "runtime-degraded",
-      severity: "warning",
+      severity: isRealModelGateEnabled() ? "critical" : "warning",
       title: "当前阶段已降级到脚本输出",
       detail: "真实模型调用连续失败（如 401/超时），请检查模型通道、密钥权限与可用模型策略后重试。",
       action: "refresh_runtime",
@@ -705,7 +828,7 @@ async function buildAutoStageSubmissions(
       `- 交付目的: ${STAGE_LABELS[project.currentStage]}阶段可验收产物，支撑后续确认与推进`,
       "",
       "## 模板章节骨架（自动补齐）",
-      ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合本阶段任务证据与 Agent 正文完善本节。"])),
+      ...template.requiredSections.flatMap((section) => ([section, "- 请结合本阶段任务证据与 Agent 正文完善本节。"])),
       "",
       "## 验收检查清单",
       ...template.acceptanceChecklist.map((item) => `- ${item}`),
@@ -728,7 +851,7 @@ async function buildAutoStageSubmissions(
       content,
       "",
       "## 自动质检",
-      `- 自动质检结论: ${quality.pass ? "通过" : "待补充"}`,
+      `- 自动质检结论: ${quality.pass ? "通过" : "未通过（需补全）"}`,
       `- 质量评分: ${quality.score}/100`,
       ...quality.diagnostics.map((item) => `- ${item}`),
       ...(quality.issues.length > 0 ? ["- 风险项:", ...quality.issues.map((item) => `  - ${item}`)] : ["- 风险项: 无"])

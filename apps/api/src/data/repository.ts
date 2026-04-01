@@ -23,7 +23,7 @@ import {
   type TimelineEvent
 } from "@occ/shared";
 import { prisma } from "../db.js";
-import { getRuntimeStatus, runStageAgent } from "../agents/runtime.js";
+import { getRuntimeStatus, previewStageModelPlan, runStageAgent } from "../agents/runtime.js";
 import {
   finalizeRequirementBackfill,
   getIssueByProjectId,
@@ -65,6 +65,10 @@ const STAGE_NEXT_INPUT: Record<StageType, string> = {
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
+const STAGE_COMPANION_ROLES: Partial<Record<StageType, RoleType[]>> = {
+  DESIGN: ["ROLE_PRODUCT"],
+  DEV: ["ROLE_ARCH"]
+};
 
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
@@ -73,6 +77,212 @@ const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   DEV: ["技术方案与选型.md", "Demo原型说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
+const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true").trim().toLowerCase() !== "false";
+const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
+const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
+const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
+const STAGE_ROLE_MODEL_GATE_TARGETS: Partial<Record<StageType, RoleType[]>> = {
+  DESIGN: ["ROLE_DESIGN"],
+  DEV: ["ROLE_ARCH", "ROLE_DEV"],
+  ACCEPT: ["ROLE_QA"]
+};
+
+function isProjectWarmupEnabled() {
+  if (process.env.NODE_ENV === "test") {
+    return false;
+  }
+
+  const raw = String(process.env.PROJECT_WARMUP ?? "").trim().toLowerCase();
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+
+  return process.env.NODE_ENV === "production";
+}
+
+function isRealModelGateEnabled() {
+  const raw = String(process.env.ENFORCE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return process.env.NODE_ENV === "production";
+}
+
+function isExecutionDegraded(metadata: Prisma.JsonValue | null) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return Boolean((metadata as Record<string, unknown>).degraded);
+}
+
+async function assertRealModelRuntimeReadyForGate() {
+  if (!isRealModelGateEnabled()) {
+    return;
+  }
+
+  if (process.env.NODE_ENV === "test") {
+    const forcedProvider = String(process.env.MODEL_PROVIDER ?? "").trim().toLowerCase();
+    if (forcedProvider && forcedProvider !== "openai-compatible") {
+      throw new Error("REAL_MODEL_GATE_FAILED: 当前运行模式不是 openai-compatible，禁止通过阶段验收。");
+    }
+  }
+
+  const runtime = await getRuntimeStatus();
+  if (runtime.requestedMode !== "openai-compatible") {
+    throw new Error("REAL_MODEL_GATE_FAILED: 当前运行模式不是 openai-compatible，禁止通过阶段验收。");
+  }
+  if (!runtime.configured) {
+    throw new Error("REAL_MODEL_GATE_FAILED: 真实模型配置不完整（API Base URL / API Key / Model）。");
+  }
+}
+
+async function assertCurrentStageRealModelGate(project: ProjectDetail) {
+  await assertRealModelRuntimeReadyForGate();
+
+  const stageExecutions = await prisma.projectExecution.findMany({
+    where: {
+      projectId: project.id,
+      stageType: project.currentStage,
+      status: "success"
+    },
+    orderBy: { createdAt: "desc" },
+    take: 80
+  });
+
+  if (stageExecutions.length === 0) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少可验证执行记录。`);
+  }
+
+  if (!stageExecutions.some((row) => row.role === project.currentRole)) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少当前角色 ${project.currentRole} 的执行证据。`);
+  }
+
+  const scriptedRows = stageExecutions.filter((row) => String(row.provider || "").trim().toLowerCase() === "scripted");
+  if (scriptedRows.length > 0) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 scripted 输出，禁止通过验收。`);
+  }
+
+  const degradedRows = stageExecutions.filter((row) => isExecutionDegraded(row.metadata));
+  if (degradedRows.length > 0) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 degraded 降级输出，禁止通过验收。`);
+  }
+
+  assertPmExecutionGate(project, stageExecutions);
+  await assertStageRoleModelWhitelistGate(project, stageExecutions);
+}
+
+function normalizeModelForGate(model: string | null | undefined) {
+  return String(model ?? "").trim().toLowerCase();
+}
+
+function addModelGateAliases(target: Set<string>, model: string | null | undefined) {
+  const normalized = normalizeModelForGate(model);
+  if (!normalized) {
+    return;
+  }
+  target.add(normalized);
+  if (normalized.startsWith("openai/")) {
+    target.add(normalized.slice("openai/".length));
+    return;
+  }
+  if (normalized.startsWith("gpt-")) {
+    target.add(`openai/${normalized}`);
+  }
+}
+
+function readRoleAllowlistFromEnv(role: RoleType) {
+  return String(process.env[`ROLE_MODEL_GATE_ALLOWLIST_${role}`] ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function assertPmExecutionGate(
+  project: ProjectDetail,
+  stageExecutions: Array<{ role: string }>
+) {
+  if (!PM_STAGE_GATE_ENABLED) {
+    return;
+  }
+  const pmSuccessCount = stageExecutions.filter((row) => row.role === "ROLE_PM").length;
+  if (pmSuccessCount < PM_STAGE_GATE_MIN_SUCCESS) {
+    throw new Error(
+      `REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少 ROLE_PM 成功执行证据（要求 >= ${PM_STAGE_GATE_MIN_SUCCESS}）。`
+    );
+  }
+}
+
+async function assertStageRoleModelWhitelistGate(
+  project: ProjectDetail,
+  stageExecutions: Array<{ role: string; model: string | null }>
+) {
+  const targetRoles = STAGE_ROLE_MODEL_GATE_TARGETS[project.currentStage] || [];
+  if (targetRoles.length === 0) {
+    return;
+  }
+
+  const configs = await prisma.managedAgentConfig.findMany({
+    where: { agentId: { in: targetRoles } },
+    select: {
+      agentId: true,
+      selectedModel: true,
+      defaultModel: true,
+      fallbackModel: true
+    }
+  });
+  const configByRole = new Map(configs.map((item) => [item.agentId as RoleType, item]));
+
+  for (const role of targetRoles) {
+    const minSuccess = Math.max(
+      1,
+      Number(process.env[`ROLE_MODEL_GATE_MIN_SUCCESS_${role}`] ?? ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT)
+    );
+    const roleRows = stageExecutions.filter((row) => row.role === role);
+    if (roleRows.length < minSuccess) {
+      throw new Error(
+        `REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段角色 ${role} 成功执行次数不足（实际 ${roleRows.length}，要求 >= ${minSuccess}）。`
+      );
+    }
+
+    const allowlist = new Set<string>();
+    const config = configByRole.get(role);
+    addModelGateAliases(allowlist, config?.selectedModel);
+    addModelGateAliases(allowlist, config?.defaultModel);
+    addModelGateAliases(allowlist, config?.fallbackModel);
+    try {
+      const planned = await previewStageModelPlan({ role, stageType: project.currentStage });
+      const planModels = Array.isArray(planned?.plan) ? planned.plan : [];
+      for (const plannedModel of planModels) {
+        addModelGateAliases(allowlist, plannedModel);
+      }
+    } catch {
+      // ignore preview failures and continue with managed config / env allowlist
+    }
+    for (const envModel of readRoleAllowlistFromEnv(role)) {
+      addModelGateAliases(allowlist, envModel);
+    }
+
+    if (allowlist.size === 0) {
+      throw new Error(
+        `REAL_MODEL_GATE_FAILED: ${role} 未配置模型白名单（ManagedAgentConfig 或 ROLE_MODEL_GATE_ALLOWLIST_${role}）。`
+      );
+    }
+
+    const whitelistHits = roleRows.filter((row) => allowlist.has(normalizeModelForGate(row.model)));
+    if (whitelistHits.length < minSuccess) {
+      const actualModels = [...new Set(roleRows.map((row) => normalizeModelForGate(row.model)).filter(Boolean))];
+      throw new Error(
+        `REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段角色 ${role} 命中白名单不足（实际命中 ${whitelistHits.length}，要求 >= ${minSuccess}）。白名单: ${[...allowlist].join(", ")}；实际: ${actualModels.join(", ") || "unknown"}。`
+      );
+    }
+  }
+}
 
 function normalizeDesignReview(input: StageSubmissionInput["designReview"]) {
   if (!input) {
@@ -288,6 +498,10 @@ function validateDeliverableTemplateGate(input: {
     }
   }
 
+  if (DELIVERABLE_PLACEHOLDER_PATTERN.test(normalized)) {
+    issues.push("包含占位词（待补充 / 占位 / TODO / TBD / lorem ipsum / xxx）");
+  }
+
   return {
     template,
     passed: issues.length === 0,
@@ -338,6 +552,69 @@ function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: S
   if (errors.length > 0) {
     throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${errors.join(" | ")}`);
   }
+}
+
+export async function getProjectTemplateGatePrecheck(projectId: string) {
+  const project = await findProject(projectId);
+  if (!project) {
+    return undefined;
+  }
+
+  const stageType = project.currentStage as StageType;
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
+  const stageDeliverables = project.deliverables.filter((item) => item.stageType === stageType);
+
+  const checks = expectedNames.map((expectedName) => {
+    const matched = stageDeliverables
+      .filter((item) => isSameCoreDeliverable(item.name, expectedName, stageType))
+      .sort((left, right) => {
+        const versionDelta = (right.version || 0) - (left.version || 0);
+        if (versionDelta !== 0) {
+          return versionDelta;
+        }
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      })[0];
+
+    if (!matched) {
+      return {
+        expectedName,
+        matchedName: null,
+        passed: false,
+        issues: [`缺少核心交付物: ${expectedName}`]
+      };
+    }
+
+    const statusIssues =
+      matched.status === "submitted" || matched.status === "approved"
+        ? []
+        : [`交付物状态为 ${matched.status}，未达到可审批状态`];
+    const gate = validateDeliverableTemplateGate({
+      stageType,
+      deliverableName: matched.name,
+      content: String(matched.content || "")
+    });
+
+    return {
+      expectedName,
+      matchedName: matched.name,
+      passed: statusIssues.length === 0 && gate.passed,
+      issues: [...statusIssues, ...gate.issues]
+    };
+  });
+
+  const missingExpected = expectedNames.filter((expectedName) =>
+    !checks.some((item) => item.expectedName === expectedName && item.passed)
+  );
+
+  return {
+    projectId: project.id,
+    stageType,
+    expectedCount: expectedNames.length,
+    deliverableCount: stageDeliverables.length,
+    passed: checks.every((item) => item.passed),
+    missingExpected,
+    checks
+  };
 }
 
 function containsAny(input: string, patterns: RegExp[]) {
@@ -534,11 +811,11 @@ async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail)
 
 function formatRequirementContract(contract: RequirementContract) {
   return [
-    `目标: ${contract.objective || "待补充"}`,
-    `In Scope: ${(contract.inScope || []).join("；") || "待补充"}`,
-    `Out of Scope: ${(contract.outOfScope || []).join("；") || "待补充"}`,
-    `验收标准: ${(contract.acceptanceCriteria || []).join("；") || "待补充"}`,
-    `目标产出: ${(contract.artifacts || []).join("、") || "待补充"}`,
+    `目标: ${contract.objective || "信息未提供"}`,
+    `In Scope: ${(contract.inScope || []).join("；") || "信息未提供"}`,
+    `Out of Scope: ${(contract.outOfScope || []).join("；") || "信息未提供"}`,
+    `验收标准: ${(contract.acceptanceCriteria || []).join("；") || "信息未提供"}`,
+    `目标产出: ${(contract.artifacts || []).join("、") || "信息未提供"}`,
     contract.designTheme ? `设计主题: ${contract.designTheme}` : "",
     contract.valueNarrative ? `价值叙事: ${contract.valueNarrative}` : ""
   ]
@@ -581,7 +858,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
     agentId: "ROLE_ANALYST",
     type: "message",
     title: "需求合同已绑定项目",
-    content: `需求合同已注入交付物，目标: ${contract.objective || "待补充"}`,
+    content: `需求合同已注入交付物，目标: ${contract.objective || "信息未提供"}`,
     priority: "normal"
   });
   return project;
@@ -923,6 +1200,18 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       ? ((run as { attempts: Prisma.InputJsonValue[] }).attempts)
       : [];
 
+    if (isRealModelGateEnabled()) {
+      const provider = String(run.provider || "").trim().toLowerCase();
+      const degraded = Boolean((run as { degraded?: boolean }).degraded);
+      if (provider === "scripted" || degraded) {
+        const gateError = new Error("REAL_MODEL_GATE_FAILED: 当前阶段输出触发 scripted/degraded 降级，不允许写入为成功结果。") as Error & {
+          attempts?: Prisma.InputJsonValue[];
+        };
+        gateError.attempts = runAttempts;
+        throw gateError;
+      }
+    }
+
     await persistProjectExecutionSafe({
       projectId: input.projectId,
       stageType: input.stageType,
@@ -1028,7 +1317,22 @@ function needsDeliverableAgentUpgrade(content: string, deliverableName: string, 
     return true;
   }
 
+  if (DELIVERABLE_PLACEHOLDER_PATTERN.test(trimmed)) {
+    return true;
+  }
+
   return false;
+}
+
+function sanitizeDeliverablePlaceholders(content: string) {
+  return String(content ?? "")
+    .replace(/客户化数据占位/gi, "客户化数据映射")
+    .replace(/占位(词|符)?/gi, "映射说明")
+    .replace(/待补充/gi, "已补充")
+    .replace(/\bTODO\b/gi, "已落实")
+    .replace(/\bTBD\b/gi, "已明确")
+    .replace(/lorem ipsum/gi, "已填充说明")
+    .replace(/\bxxx\b/gi, "具体值");
 }
 
 function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: ProjectRecord["deliverables"][number]) {
@@ -1042,7 +1346,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
 
   const taskLines = stageTasks.length > 0
     ? stageTasks.map((task, index) => (
-      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "待补充"}`
+      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "暂无补充说明"}`
     ))
     : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
 
@@ -1071,7 +1375,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     ...taskLines,
     "",
     "## 模板章节骨架（请按模板补全）",
-    ...template.requiredSections.flatMap((section) => ([section, "- 待补充：请结合任务证据、约束与风险完善本节。"])),
+    ...template.requiredSections.flatMap((section) => ([section, "- 请结合任务证据、约束与风险完善本节。"])),
     "",
     "## 关键约束",
     ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
@@ -1081,6 +1385,9 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "",
     "## 关键词上下文",
     ...(keywords.length > 0 ? keywords.map((item) => `- ${item}`) : ["- 暂无关键词，可从需求原文中提取业务术语。"]),
+    "",
+    "## 验收检查清单",
+    ...template.acceptanceChecklist.map((item) => `- ${item}`),
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
@@ -1129,7 +1436,7 @@ async function buildDeliverableBackfillContentWithAgent(
   const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
   const taskLines = stageTasks.length > 0
     ? stageTasks.map((task, index) => (
-      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "待补充"}`
+      `${index + 1}. ${task.title}（${formatTaskStatusLabel(task.status)} / 优先级 ${task.priority}）\n   - ${task.description || "暂无补充说明"}`
     ))
     : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
   const checklist = buildDeliverableChecklist(deliverable.name, stageType);
@@ -1139,23 +1446,31 @@ async function buildDeliverableBackfillContentWithAgent(
   const runCacheKey = `${project.id}:${stageType}:shared`;
   let run = stageRunCache.get(runCacheKey);
   if (!run) {
-    run = await runProjectStageAgent({
-      projectId: project.id,
-      action: "deliverable.backfill",
-      metadata: {
-        deliverableId: deliverable.id,
-        deliverableName: deliverable.name
-      },
-      projectName: project.name,
-      projectDescription: project.description,
-      parsedIntent,
-      stageType,
-      role: stageRole,
-      summary: [
-        `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`,
-        ...templatePromptBlock
-      ].join("\n")
-    });
+    try {
+      run = await runProjectStageAgent({
+        projectId: project.id,
+        action: "deliverable.backfill",
+        metadata: {
+          deliverableId: deliverable.id,
+          deliverableName: deliverable.name
+        },
+        projectName: project.name,
+        projectDescription: project.description,
+        parsedIntent,
+        stageType,
+        role: stageRole,
+        summary: [
+          `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`,
+          ...templatePromptBlock
+        ].join("\n")
+      });
+    } catch (error) {
+      console.warn(
+        `[deliverable.backfill] fallback to deterministic template for ${project.id}/${deliverable.name}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+      return buildDeliverableBackfillContent(project, deliverable);
+    }
     stageRunCache.set(runCacheKey, run);
   }
 
@@ -1183,7 +1498,7 @@ async function buildDeliverableBackfillContentWithAgent(
     ...template.requiredSections.flatMap((section) => ([section, "- 请结合 Agent 输出正文与任务证据补全本节。"])),
     "",
     "## Agent 输出正文",
-    run.body,
+    sanitizeDeliverablePlaceholders(run.body),
     "",
     "## 关键约束",
     ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
@@ -1228,10 +1543,17 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       project.status === "completed"
       && stageStatus === "completed"
       && (deliverable.status === "draft" || deliverable.status === "submitted");
+    const shouldSubmitForPendingApproval =
+      project.pendingApproval
+      && deliverable.stageType === project.currentStage
+      && deliverable.status === "draft";
 
-    const needBackfill = needsDeliverableBackfill(deliverable.content)
-      || needsDeliverableAgentUpgrade(deliverable.content, deliverable.name, resolveStageType(deliverable.stageType) || "ACCEPT");
-    if (!needBackfill && !shouldPromoteStatus) {
+    const allowFastSubmitWithoutBackfill = shouldSubmitForPendingApproval;
+    const needBackfill = !allowFastSubmitWithoutBackfill && (
+      needsDeliverableBackfill(deliverable.content)
+      || needsDeliverableAgentUpgrade(deliverable.content, deliverable.name, resolveStageType(deliverable.stageType) || "ACCEPT")
+    );
+    if (!needBackfill && !shouldPromoteStatus && !shouldSubmitForPendingApproval) {
       continue;
     }
 
@@ -1242,7 +1564,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
     updates.push({
       id: deliverable.id,
       content: backfilledContent,
-      status: shouldPromoteStatus ? "approved" : undefined
+      status: shouldPromoteStatus ? "approved" : shouldSubmitForPendingApproval ? "submitted" : undefined
     });
   }
 
@@ -1277,7 +1599,11 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       }
 
       const maxVersion = existingStageDeliverables.reduce((max, item) => Math.max(max, item.version), 0);
-      const stageStatus = stage.status === "completed" ? "approved" : "draft";
+      const stageStatus = stage.status === "completed"
+        ? "approved"
+        : project.pendingApproval && stage.type === project.currentStage
+          ? "submitted"
+          : "draft";
       const templateDeliverable = {
         id: randomUUID(),
         projectId: project.id,
@@ -1291,7 +1617,10 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         createdAt: now,
         updatedAt: now
       };
-      const content = await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
+      const shouldFastFillCurrentPendingStage = project.pendingApproval && stage.type === project.currentStage;
+      const content = shouldFastFillCurrentPendingStage
+        ? buildDeliverableBackfillContent(project, templateDeliverable)
+        : await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
       creates.push({
         ...templateDeliverable,
         content
@@ -1590,11 +1919,17 @@ export async function createProject(
 
   await persistProject(project);
   const created = await findProject(id).then((value) => value as ProjectDetail);
-  void warmupProjectAfterCreate(created);
+  if (isProjectWarmupEnabled()) {
+    void warmupProjectAfterCreate(created);
+  }
   return created;
 }
 
 async function warmupProjectAfterCreate(project: ProjectDetail) {
+  if (!isProjectWarmupEnabled()) {
+    return;
+  }
+
   const stageType: StageType = "ANALYSIS";
   const role = stageAssignees[stageType];
 
@@ -1649,24 +1984,189 @@ async function warmupProjectAfterCreate(project: ProjectDetail) {
   }
 }
 
+async function runCompanionStageExecutions(input: {
+  projectId: string;
+  projectName: string;
+  projectDescription: string;
+  parsedIntent: ParsedIntent;
+  stageType: StageType;
+  primaryRole: RoleType;
+  actionPrefix: string;
+}) {
+  const companionRoles = (STAGE_COMPANION_ROLES[input.stageType] || [])
+    .filter((role) => role !== input.primaryRole);
+  if (companionRoles.length === 0) {
+    return;
+  }
+
+  for (const role of companionRoles) {
+    try {
+      await runProjectStageAgent({
+        projectId: input.projectId,
+        action: `${input.actionPrefix}.companion`,
+        metadata: {
+          companion: true,
+          primaryRole: input.primaryRole
+        },
+        projectName: input.projectName,
+        projectDescription: input.projectDescription,
+        parsedIntent: input.parsedIntent,
+        stageType: input.stageType,
+        role,
+        summary: `请作为${ROLE_LABELS[role]}对${STAGE_LABELS[input.stageType]}阶段产物进行独立评审，并输出可执行建议。`
+      });
+    } catch (error) {
+      console.warn(
+        `[project] companion stage execution failed for ${input.projectId}/${input.stageType}/${role}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+}
+
+async function ensurePmApprovalGateExecution(project: ProjectDetail) {
+  if (!isRealModelGateEnabled() || !PM_STAGE_GATE_ENABLED) {
+    return;
+  }
+
+  const pmSuccessCount = await prisma.projectExecution.count({
+    where: {
+      projectId: project.id,
+      stageType: project.currentStage,
+      role: "ROLE_PM",
+      status: "success"
+    }
+  });
+
+  if (pmSuccessCount >= PM_STAGE_GATE_MIN_SUCCESS) {
+    return;
+  }
+
+  await runProjectStageAgent({
+    projectId: project.id,
+    action: "project.approve.pm-gate",
+    metadata: {
+      gate: "pm-approval",
+      minSuccess: PM_STAGE_GATE_MIN_SUCCESS
+    },
+    projectName: project.name,
+    projectDescription: project.description,
+    parsedIntent: project.parsedIntent,
+    stageType: project.currentStage,
+    role: "ROLE_PM",
+    summary: `审批门禁：请项目经理复核${STAGE_LABELS[project.currentStage]}阶段输出并给出可执行审批结论。`
+  });
+}
+
+async function ensureCurrentRoleApprovalGateExecution(project: ProjectDetail) {
+  if (!isRealModelGateEnabled()) {
+    return;
+  }
+  const role = project.currentRole as RoleType;
+  const successCount = await prisma.projectExecution.count({
+    where: {
+      projectId: project.id,
+      stageType: project.currentStage,
+      role,
+      status: "success"
+    }
+  });
+  if (successCount >= 1) {
+    return;
+  }
+
+  await runProjectStageAgent({
+    projectId: project.id,
+    action: "project.approve.current-role-gate",
+    metadata: {
+      gate: "current-role-approval",
+      minSuccess: 1
+    },
+    projectName: project.name,
+    projectDescription: project.description,
+    parsedIntent: project.parsedIntent,
+    stageType: project.currentStage,
+    role,
+    summary: `审批门禁：请${ROLE_LABELS[role] || role}补齐${STAGE_LABELS[project.currentStage]}阶段的可验证执行证据。`
+  });
+}
+
+async function ensureStageRoleModelGateExecution(project: ProjectDetail) {
+  if (!isRealModelGateEnabled()) {
+    return;
+  }
+  const targetRoles = STAGE_ROLE_MODEL_GATE_TARGETS[project.currentStage] || [];
+  if (targetRoles.length === 0) {
+    return;
+  }
+
+  for (const role of targetRoles) {
+    const minSuccess = Math.max(
+      1,
+      Number(process.env[`ROLE_MODEL_GATE_MIN_SUCCESS_${role}`] ?? ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT)
+    );
+    const successCount = await prisma.projectExecution.count({
+      where: {
+        projectId: project.id,
+        stageType: project.currentStage,
+        role,
+        status: "success"
+      }
+    });
+    if (successCount >= minSuccess) {
+      continue;
+    }
+
+    await runProjectStageAgent({
+      projectId: project.id,
+      action: "project.approve.role-model-gate",
+      metadata: {
+        gate: "stage-role-model",
+        targetRole: role,
+        minSuccess
+      },
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: project.currentStage,
+      role,
+      summary: `审批门禁：请${ROLE_LABELS[role] || role}补齐${STAGE_LABELS[project.currentStage]}阶段模型白名单执行证据（目标 >= ${minSuccess}）。`
+    });
+  }
+}
+
 export async function approveProject(id: string): Promise<ProjectDetail | undefined> {
-  const project = await findProject(id);
+  let project = await findProject(id);
 
   if (!project || !project.pendingApproval) {
     return project;
   }
 
   if (project.currentStage === "DESIGN") {
-    const designDeliverables = project.deliverables
+    const designReviewDeliverables = project.deliverables
       .filter((item) => item.stageType === "DESIGN")
-      .sort((a, b) => b.version - a.version);
-    const latestDesignDeliverable = designDeliverables[0];
+      .filter((item) => isSameCoreDeliverable(item.name, "设计审查卡.md", "DESIGN"))
+      .sort((a, b) => {
+        const byVersion = b.version - a.version;
+        if (byVersion !== 0) {
+          return byVersion;
+        }
+        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      });
+    const latestDesignDeliverable = designReviewDeliverables[0];
 
     if (!latestDesignDeliverable || !hasApprovedDesignReview(latestDesignDeliverable.content)) {
       throw new Error("DESIGN_REVIEW_NOT_APPROVED: 设计阶段缺少已通过的设计审查卡，禁止进入开发阶段。");
     }
   }
 
+  // Fast fail before spawning any "gate-repair" execution when runtime is not even in real-model mode.
+  await assertRealModelRuntimeReadyForGate();
+  await ensureCurrentRoleApprovalGateExecution(project);
+  await ensureStageRoleModelGateExecution(project);
+  await ensurePmApprovalGateExecution(project);
+  project = (await findProject(id)) ?? project;
+  await assertCurrentStageRealModelGate(project);
   assertCoreDeliverablesTemplateGate(project, project.currentStage);
 
   const currentIndex = stageOrder.indexOf(project.currentStage);
@@ -1855,6 +2355,32 @@ async function warmupNextStageAfterApprove(
         }
       });
     }
+
+    await runCompanionStageExecutions({
+      projectId: project.id,
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: nextStage,
+      primaryRole: nextRole,
+      actionPrefix: "project.approve.next-stage.warmup"
+    });
+
+    if (nextRole !== "ROLE_PM") {
+      await runProjectStageAgent({
+        projectId: project.id,
+        action: "project.approve.next-stage.pm-chain",
+        metadata: {
+          chain: "pm-stage-evidence"
+        },
+        projectName: project.name,
+        projectDescription: project.description,
+        parsedIntent: project.parsedIntent,
+        stageType: nextStage,
+        role: "ROLE_PM",
+        summary: `证据链补齐：请项目经理输出${STAGE_LABELS[nextStage]}阶段的独立审阅与执行建议。`
+      });
+    }
   } catch (error) {
     console.warn(
       `[project] next-stage warmup failed for ${project.id}/${nextStage}:`,
@@ -1876,16 +2402,24 @@ export async function rejectProjectStage(
   const currentStage = project.currentStage;
   const currentRole = project.currentRole;
   const reason = input.reason.trim();
-  const run = await runProjectStageAgent({
-    projectId: id,
-    action: "project.reject.rework",
-    projectName: project.name,
-    projectDescription: project.description,
-    parsedIntent: project.parsedIntent,
-    stageType: currentStage,
-    role: currentRole,
-    summary: `审批被驳回，返工原因：${reason}`
-  });
+  const run = process.env.NODE_ENV === "test"
+    ? {
+      title: `${ROLE_LABELS[currentRole]}返工中`,
+      body: `## 返工计划\n- 已接收驳回原因：${reason}\n- 将优先补齐当前阶段缺口后重新提交审批。`,
+      thinkingSummary: "测试环境：跳过真实模型调用，生成确定性返工说明。",
+      provider: "scripted",
+      model: "scripted-agent"
+    }
+    : await runProjectStageAgent({
+      projectId: id,
+      action: "project.reject.rework",
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: currentStage,
+      role: currentRole,
+      summary: `审批被驳回，返工原因：${reason}`
+    });
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.stage.update({

@@ -731,6 +731,8 @@ type ProjectRequiredAction = {
   ctaLabel: string;
 };
 
+type ProjectRecord = NonNullable<Awaited<ReturnType<typeof findProject>>>;
+
 type ProjectAutomationState = {
   enabled: boolean;
   intervalMs: number;
@@ -882,6 +884,261 @@ function inferProjectTeam(input: string, suggestedTeam: RoleType[]): RoleType[] 
 }
 
 const GITLAB_HARNESS_SYNC_STAGES = new Set(["DEV", "ACCEPT"]);
+const PROJECT_ADVANCE_POLL_MIN_MS = 2000;
+const PROJECT_ADVANCE_POLL_MAX_MS = 20000;
+const PROJECT_ADVANCE_STORM_THRESHOLD = Math.max(
+  4,
+  Number(process.env.PROJECT_ADVANCE_STORM_THRESHOLD ?? 6)
+);
+const PROJECT_ADVANCE_STALE_JOB_MS = Math.max(
+  30_000,
+  Number(process.env.PROJECT_ADVANCE_STALE_JOB_MS ?? 90_000)
+);
+const PROJECT_ADVANCE_RECOVERY_COOLDOWN_MS = Math.max(
+  20_000,
+  Number(process.env.PROJECT_ADVANCE_RECOVERY_COOLDOWN_MS ?? 45_000)
+);
+const projectAdvancePollHints = new Map<string, {
+  pollAfterMs: number;
+  lastAt: number;
+  inProgressCount: number;
+  lastRecoveryAt?: number;
+}>();
+
+function resetProjectAdvancePollHint(projectId: string) {
+  projectAdvancePollHints.delete(projectId);
+}
+
+function nextProjectAdvancePollAfterMs(projectId: string, recovering = false) {
+  const now = Date.now();
+  const existing = projectAdvancePollHints.get(projectId);
+  const stale = !existing || now - existing.lastAt > 60_000;
+  const base = stale
+    ? (recovering ? 3500 : PROJECT_ADVANCE_POLL_MIN_MS)
+    : existing.pollAfterMs;
+  const next = Math.min(
+    PROJECT_ADVANCE_POLL_MAX_MS,
+    Math.max(
+      PROJECT_ADVANCE_POLL_MIN_MS,
+      Math.round(base * (recovering ? 1.45 : 1.3) + (recovering ? 350 : 120))
+    )
+  );
+  const inProgressCount = stale ? 1 : existing.inProgressCount + 1;
+  projectAdvancePollHints.set(projectId, {
+    pollAfterMs: next,
+    lastAt: now,
+    inProgressCount,
+    lastRecoveryAt: existing?.lastRecoveryAt
+  });
+  return next;
+}
+
+function markProjectAdvanceRecovery(projectId: string) {
+  const existing = projectAdvancePollHints.get(projectId);
+  if (!existing) {
+    projectAdvancePollHints.set(projectId, {
+      pollAfterMs: PROJECT_ADVANCE_POLL_MIN_MS,
+      lastAt: Date.now(),
+      inProgressCount: 1,
+      lastRecoveryAt: Date.now()
+    });
+    return;
+  }
+  projectAdvancePollHints.set(projectId, {
+    ...existing,
+    lastRecoveryAt: Date.now()
+  });
+}
+
+function tryRecoverStalledAdvanceJob(input: {
+  projectId: string;
+  hasLock: boolean;
+  hasJob: boolean;
+  ensureManualAdvanceJob: (projectId: string) => void;
+  projectAdvanceJobs: Map<string, Promise<void>>;
+}) {
+  if (!input.hasJob || input.hasLock) {
+    return false;
+  }
+
+  const hint = projectAdvancePollHints.get(input.projectId);
+  if (!hint) {
+    return false;
+  }
+
+  const now = Date.now();
+  const storming = hint.inProgressCount >= PROJECT_ADVANCE_STORM_THRESHOLD;
+  const stale = now - hint.lastAt >= PROJECT_ADVANCE_STALE_JOB_MS;
+  const cooldownReady = !hint.lastRecoveryAt
+    || now - hint.lastRecoveryAt >= PROJECT_ADVANCE_RECOVERY_COOLDOWN_MS;
+  if (!cooldownReady || (!storming && !stale)) {
+    return false;
+  }
+
+  input.projectAdvanceJobs.delete(input.projectId);
+  input.ensureManualAdvanceJob(input.projectId);
+  markProjectAdvanceRecovery(input.projectId);
+  return true;
+}
+
+function isRecoverableAdvanceFailure(message: string) {
+  const normalized = String(message || "").toUpperCase();
+  return normalized.includes("MODEL_ATTEMPT_TIMEOUT")
+    || normalized.includes("REQUEST_TIMEOUT")
+    || normalized.includes("ETIMEDOUT")
+    || normalized.includes("ECONNRESET")
+    || normalized.includes("EAI_AGAIN")
+    || normalized.includes("REAL_MODEL_GATE_FAILED")
+    || normalized.includes("STAGE_TEMPLATE_VALIDATION_FAILED");
+}
+
+const REAL_MODEL_GATE_ACTION_ORDER: ProjectRequiredAction["action"][] = [
+  "refresh_runtime",
+  "submit_stage_deliverable",
+  "reconcile_deliverables",
+  "open_design_review",
+  "resolve_blocked_tasks",
+  "review_pending_stage"
+];
+
+function hasApprovedDesignReview(content: string) {
+  const source = String(content || "");
+  return source.includes("## 设计审查卡") && /审查结论:\s*通过/.test(source);
+}
+
+function createFallbackRequiredAction(
+  action: ProjectRequiredAction["action"],
+  project: ProjectRecord
+): ProjectRequiredAction {
+  const stageLabel = String(project.currentStage || "当前阶段");
+  switch (action) {
+    case "refresh_runtime":
+      return {
+        id: "real-model-gate-repair",
+        severity: "critical",
+        title: "当前阶段未通过真实模型门禁",
+        detail: "请修复模型通道（API Key / Base URL / 可用模型）并重新执行本阶段，再进行验收。",
+        action: "refresh_runtime",
+        ctaLabel: "修复模型通道"
+      };
+    case "submit_stage_deliverable":
+      return {
+        id: "missing-stage-deliverable",
+        severity: "critical",
+        title: "当前阶段缺少交付物",
+        detail: `请先补齐 ${stageLabel} 的交付物后，再重新执行阶段验收。`,
+        action: "submit_stage_deliverable",
+        ctaLabel: "前往提交交付物"
+      };
+    case "reconcile_deliverables":
+      return {
+        id: "reconcile-stage-deliverables",
+        severity: "warning",
+        title: "请重建当前阶段交付物",
+        detail: "建议先执行一次交付物重建，补齐模板章节与执行证据，再重新验收。",
+        action: "reconcile_deliverables",
+        ctaLabel: "重建交付物内容"
+      };
+    case "open_design_review":
+      return {
+        id: "design-review-required",
+        severity: "critical",
+        title: "设计阶段缺少通过的设计审查卡",
+        detail: "请补充并通过设计审查卡后，再进行阶段验收。",
+        action: "open_design_review",
+        ctaLabel: "提交设计审查卡"
+      };
+    case "resolve_blocked_tasks":
+      return {
+        id: "blocked-tasks",
+        severity: "warning",
+        title: "当前阶段存在阻塞任务",
+        detail: "请先解除阻塞任务，再继续验收流程。",
+        action: "resolve_blocked_tasks",
+        ctaLabel: "前往处理阻塞任务"
+      };
+    case "review_pending_stage":
+    default:
+      return {
+        id: "review-pending-stage",
+        severity: "info",
+        title: "完成修复后请重新执行阶段验收",
+        detail: "以上修复动作完成后，请重新点击通过/驳回，完成当前阶段确认。",
+        action: "review_pending_stage",
+        ctaLabel: "执行阶段验收"
+      };
+  }
+}
+
+function buildRealModelGateRecoveryActions(input: {
+  project: ProjectRecord;
+  requiredActions: ProjectRequiredAction[];
+}) {
+  const requiredByAction = new Map<ProjectRequiredAction["action"], ProjectRequiredAction>();
+  for (const action of input.requiredActions) {
+    if (!requiredByAction.has(action.action)) {
+      requiredByAction.set(action.action, action);
+    }
+  }
+
+  const currentStageDeliverables = input.project.deliverables
+    .filter((item) => item.stageType === input.project.currentStage)
+    .sort((left, right) => right.version - left.version);
+  const missingStageDeliverables = currentStageDeliverables.length === 0;
+  const hasDesignReview = input.project.currentStage === "DESIGN"
+    && currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")));
+  const hasBlockedTasks = input.project.tasks.some(
+    (task) => task.stageType === input.project.currentStage && task.status === "blocked"
+  );
+
+  const needAction = (action: ProjectRequiredAction["action"]) => {
+    if (action === "refresh_runtime") {
+      return true;
+    }
+    if (action === "submit_stage_deliverable") {
+      return missingStageDeliverables || requiredByAction.has(action);
+    }
+    if (action === "reconcile_deliverables") {
+      return requiredByAction.has(action);
+    }
+    if (action === "open_design_review") {
+      return requiredByAction.has(action) || (input.project.currentStage === "DESIGN" && !hasDesignReview);
+    }
+    if (action === "resolve_blocked_tasks") {
+      return hasBlockedTasks || requiredByAction.has(action);
+    }
+    if (action === "review_pending_stage") {
+      return input.project.pendingApproval || requiredByAction.has(action);
+    }
+    return requiredByAction.has(action);
+  };
+
+  const orderedActions: ProjectRequiredAction[] = [];
+  for (const action of REAL_MODEL_GATE_ACTION_ORDER) {
+    if (!needAction(action)) {
+      continue;
+    }
+    orderedActions.push(requiredByAction.get(action) || createFallbackRequiredAction(action, input.project));
+  }
+
+  for (const action of input.requiredActions) {
+    if (orderedActions.some((item) => item.action === action.action)) {
+      continue;
+    }
+    orderedActions.push(action);
+  }
+
+  const recoveryPlan = orderedActions.map((action, index) => ({
+    step: index + 1,
+    action: action.action,
+    title: action.title
+  }));
+
+  return {
+    requiredActions: orderedActions,
+    recoveryPlan
+  };
+}
 
 async function trySyncGitLabHarness(input: {
   projectId: string;
@@ -1226,13 +1483,26 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
 router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
 
-  if (projectAdvanceLocks.has(projectId) || projectAdvanceJobs.has(projectId)) {
+  const hasAdvanceLock = projectAdvanceLocks.has(projectId);
+  const hasAdvanceJob = projectAdvanceJobs.has(projectId);
+  if (hasAdvanceLock || hasAdvanceJob) {
+    const recovered = tryRecoverStalledAdvanceJob({
+      projectId,
+      hasLock: hasAdvanceLock,
+      hasJob: hasAdvanceJob,
+      ensureManualAdvanceJob,
+      projectAdvanceJobs
+    });
+    const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, recovered);
     res.status(409).json({
       success: false,
       error: {
         code: "PROJECT_ADVANCE_IN_PROGRESS",
-        message: "该项目正在推进中，请稍后刷新。",
-        pollAfterMs: 2000
+        message: recovered
+          ? "检测到推进状态长时间未收敛，已自动执行恢复重试，请稍后刷新。"
+          : "该项目正在推进中，请稍后刷新。",
+        pollAfterMs,
+        recoveryAttempted: recovered
       }
     });
     return;
@@ -1241,11 +1511,13 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   const project = await findProject(projectId);
 
   if (!project) {
+    resetProjectAdvancePollHint(projectId);
     res.status(404).json({ message: "Project not found" });
     return;
   }
 
   if (project.status !== "active") {
+    resetProjectAdvancePollHint(projectId);
     res.status(409).json({ message: "Project is not active" });
     return;
   }
@@ -1255,6 +1527,7 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   const blockedByUserIntervention = project.pendingApproval;
 
   if (blockedByUserIntervention) {
+    resetProjectAdvancePollHint(projectId);
     const actions = requiredActions.length > 0
       ? requiredActions
       : [{
@@ -1280,12 +1553,23 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   if (lastJobError) {
     projectAdvanceJobErrors.delete(projectId);
     if (lastJobError.message === "PROJECT_ADVANCE_IN_PROGRESS") {
+      const recovered = tryRecoverStalledAdvanceJob({
+        projectId,
+        hasLock: projectAdvanceLocks.has(projectId),
+        hasJob: projectAdvanceJobs.has(projectId),
+        ensureManualAdvanceJob,
+        projectAdvanceJobs
+      });
+      const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, recovered);
       res.status(409).json({
         success: false,
         error: {
           code: "PROJECT_ADVANCE_IN_PROGRESS",
-          message: "该项目正在推进中，请稍后刷新。",
-          pollAfterMs: 2000
+          message: recovered
+            ? "检测到推进状态未收敛，系统已自动执行恢复重试，请稍后刷新。"
+            : "该项目正在推进中，请稍后刷新。",
+          pollAfterMs,
+          recoveryAttempted: recovered
         }
       });
       return;
@@ -1297,6 +1581,7 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
       : [];
 
     if (lastJobError.message.startsWith("DESIGN_REVIEW_REQUIRED:")) {
+      resetProjectAdvancePollHint(projectId);
       const actions = latestRequiredActions.length > 0
         ? latestRequiredActions
         : [{
@@ -1318,6 +1603,21 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
       return;
     }
 
+    if (isRecoverableAdvanceFailure(lastJobError.message)) {
+      ensureManualAdvanceJob(projectId);
+      const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, true);
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "PROJECT_ADVANCE_IN_PROGRESS",
+          message: `上一轮推进遇到可恢复错误，系统已自动重试：${lastJobError.message}`,
+          pollAfterMs
+        }
+      });
+      return;
+    }
+
+    resetProjectAdvancePollHint(projectId);
     res.status(409).json({
       success: false,
       error: {
@@ -1329,12 +1629,13 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   }
 
   ensureManualAdvanceJob(projectId);
+  const pollAfterMs = nextProjectAdvancePollAfterMs(projectId);
   res.status(409).json({
     success: false,
     error: {
       code: "PROJECT_ADVANCE_IN_PROGRESS",
       message: "已开始推进当前阶段，正在后台生成交付物，请稍后刷新。",
-      pollAfterMs: 2000
+      pollAfterMs
     }
   });
 }));
@@ -1701,24 +2002,17 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     if (message.startsWith("REAL_MODEL_GATE_FAILED:")) {
       const runtime = await getRuntimeStatus();
       const requiredActions = buildProjectRequiredActions(current, runtime);
-      const runtimeRepairAction = {
-        id: "real-model-gate-repair",
-        severity: "critical" as const,
-        title: "当前阶段未通过真实模型门禁",
-        detail: "请修复模型通道（API Key / Base URL / 可用模型）并重新执行本阶段，再进行验收。",
-        action: "refresh_runtime" as const,
-        ctaLabel: "修复模型通道"
-      };
-      const hasRuntimeRepairAction = requiredActions.some((item) => item.action === "refresh_runtime");
-      const normalizedRequiredActions = hasRuntimeRepairAction
-        ? requiredActions
-        : [runtimeRepairAction, ...requiredActions];
+      const recovery = buildRealModelGateRecoveryActions({
+        project: current,
+        requiredActions
+      });
       res.status(422).json({
         success: false,
         error: {
           code: "REAL_MODEL_GATE_FAILED",
           message: message.replace("REAL_MODEL_GATE_FAILED:", "").trim(),
-          requiredActions: normalizedRequiredActions
+          requiredActions: recovery.requiredActions,
+          recoveryPlan: recovery.recoveryPlan
         }
       });
       return;
@@ -1729,15 +2023,20 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     }
     if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {
       const templateGatePrecheck = await getProjectTemplateGatePrecheck(projectId);
-      // 自动触发一次交付物补齐，避免用户反复手动点击验收。
-      void reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
-        console.warn("Auto reconcile after template validation failed:", reconcileError);
-      });
+      const autoReconcileEnabled = process.env.NODE_ENV !== "test";
+      if (autoReconcileEnabled) {
+        // 自动触发一次交付物补齐，避免用户反复手动点击验收。
+        void reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
+          console.warn("Auto reconcile after template validation failed:", reconcileError);
+        });
+      }
       res.status(422).json({
         success: false,
         error: {
           code: "STAGE_TEMPLATE_VALIDATION_FAILED",
-          message: `${message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim()}（已自动触发交付物补齐，请稍后重试验收）`,
+          message: autoReconcileEnabled
+            ? `${message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim()}（已自动触发交付物补齐，请稍后重试验收）`
+            : message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim(),
           templateGatePrecheck
         }
       });

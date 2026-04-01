@@ -72,7 +72,7 @@ function collectConstraints(input: string): string[] {
   }
 
   if (constraints.length === 0) {
-    constraints.push("约束待补充: 默认按单用户 MVP 规划");
+    constraints.push("约束基线: 默认按单用户 MVP 规划");
   }
 
   return constraints;

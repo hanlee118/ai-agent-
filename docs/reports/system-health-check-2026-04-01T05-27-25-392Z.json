@@ -1,0 +1,120 @@
+{
+  "generatedAt": "2026-04-01T05:27:25.432Z",
+  "apiBase": "http://127.0.0.1:8787",
+  "summary": {
+    "total": 9,
+    "passed": 2,
+    "failed": 7,
+    "ok": false
+  },
+  "checks": [
+    {
+      "name": "DB 连接",
+      "ok": true,
+      "detail": "1",
+      "durationMs": 15
+    },
+    {
+      "name": "核心表结构",
+      "ok": true,
+      "detail": "Project | AuthSession | SystemConfig",
+      "durationMs": 4
+    },
+    {
+      "name": "OpenAPI docs",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 16
+    },
+    {
+      "name": "运行时模型就绪度",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 1
+    },
+    {
+      "name": "关键路由 /health",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 0
+    },
+    {
+      "name": "关键路由 /ready",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 1
+    },
+    {
+      "name": "关键路由 /api/openclaw/agents",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 0
+    },
+    {
+      "name": "关键路由 /api/projects",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 0
+    },
+    {
+      "name": "关键路由 /api/product-context",
+      "ok": false,
+      "detail": "fetch failed",
+      "durationMs": 1
+    }
+  ],
+  "runtimeRepair": {
+    "realModelSelfCheck": {
+      "checkedAt": "2026-04-01T05:27:25.431Z",
+      "ready": false,
+      "mode": "unknown",
+      "requestedMode": "unknown",
+      "configured": false,
+      "apiBaseUrl": "",
+      "apiKeyConfigured": false,
+      "modelName": "",
+      "lastValidatedAt": null,
+      "lastValidationStatus": "unknown",
+      "lastValidationError": null,
+      "lastValidateOk": false,
+      "lastValidateStatusCode": 0,
+      "issues": [
+        "无法读取 /health（HTTP 0）",
+        "无法读取 /api/system/runtime（HTTP 0）",
+        "requestedMode=unknown，未切换到真实模型模式",
+        "缺少 API Base URL",
+        "API Key 未配置",
+        "模型名未配置或仍为 scripted 默认值",
+        "真实模型配置不完整（configured=false）",
+        "实时校验未通过（HTTP 0）"
+      ],
+      "sources": {
+        "health": {
+          "ok": false,
+          "status": 0
+        },
+        "runtime": {
+          "ok": false,
+          "status": 0
+        },
+        "validate": {
+          "ok": false,
+          "status": 0
+        }
+      }
+    },
+    "repairGuide": {
+      "quickFixAvailable": false,
+      "summary": "API 当前不可达，需先恢复服务再执行模型修复。",
+      "steps": [
+        {
+          "id": "ensure-api-ready",
+          "title": "先恢复 API 服务",
+          "reason": "runtime 接口不可用，无法执行在线修复。",
+          "command": "curl -sS http://127.0.0.1:8787/health",
+          "expected": "返回 HTTP 200 且包含 runtime 字段"
+        }
+      ]
+    }
+  }
+}

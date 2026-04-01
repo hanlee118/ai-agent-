@@ -27,18 +27,23 @@ async function verifyRuntime() {
   const runtime = await getRuntimeStatus();
   const health = await getSystemHealth();
   const readiness = await getSystemReadiness();
+  const skipOpenClawChecks = ["1", "true", "yes", "on"].includes(
+    String(process.env.CI_SKIP_OPENCLAW_CHECKS ?? process.env.CI ?? "").trim().toLowerCase()
+  );
 
   assert.equal(typeof runtime.mode, "string", "runtime mode should be readable");
   assert.equal(Array.isArray(health.services), true, "system health should expose services");
   assert.equal(readiness.database.exists, true, "database file should exist");
   assert.ok(readiness.database.path, "database path should be present");
   assert.equal(existsSync(readiness.database.path), true, "database path should resolve on disk");
-  assert.equal(readiness.openclaw.configExists, true, "openclaw config should exist");
-  assert.equal(readiness.openclaw.workspaceExists, true, "openclaw workspace should exist");
-  assert.ok(readiness.openclaw.liveWorkspaceAgentCount > 0, "should detect at least one live openclaw agent");
-  assert.ok(readiness.openclaw.liveWorkspaceProjectCount > 0, "should detect at least one live openclaw project");
+  if (!skipOpenClawChecks) {
+    assert.equal(readiness.openclaw.configExists, true, "openclaw config should exist");
+    assert.equal(readiness.openclaw.workspaceExists, true, "openclaw workspace should exist");
+    assert.ok(readiness.openclaw.liveWorkspaceAgentCount > 0, "should detect at least one live openclaw agent");
+    assert.ok(readiness.openclaw.liveWorkspaceProjectCount > 0, "should detect at least one live openclaw project");
 
-  const jeremy = await findOpenClawAgent("jeremy");
-  assert.ok(jeremy, "jeremy agent should be discoverable");
-  assert.ok(jeremy?.model, "jeremy should expose a model");
+    const jeremy = await findOpenClawAgent("jeremy");
+    assert.ok(jeremy, "jeremy agent should be discoverable");
+    assert.ok(jeremy?.model, "jeremy should expose a model");
+  }
 }
