@@ -31,9 +31,6 @@ jobs:
       - name: Generate Prisma client
         run: pnpm --filter @occ/api db:generate
 
-      - name: Sync database schema
-        run: pnpm --filter @occ/api db:push
-
       - name: DB baseline preflight
         run: pnpm db:baseline
 
