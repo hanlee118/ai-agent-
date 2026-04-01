@@ -28,6 +28,7 @@ import { listAuditLogs } from "../system/audit-log.js";
 import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/design-model-policy-health.js";
 import { getIssue } from "../system/v1-method-store.js";
 import { getCachedLocalAgentMonitorOverview, subscribeLocalAgentMonitor } from "../system/local-agent-monitor.js";
+import { inspectOpenClawModelRouting } from "../openclaw/workspace.js";
 
 interface CreateSystemRouterOptions {
   asyncRoute: (
@@ -125,6 +126,33 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
   router.post("/runtime/validate", asyncRoute(async (_req, res) => {
     const result = await validateRuntimeSettings();
     res.status(result.ok ? 200 : 422).json(result);
+  }));
+
+  router.get("/model-routing/self-check", asyncRoute(async (_req, res) => {
+    res.json(await inspectOpenClawModelRouting({ repair: false }));
+  }));
+
+  router.post("/model-routing/self-heal", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as { apply?: unknown };
+    const apply = payload.apply === undefined ? true : Boolean(payload.apply);
+    const result = await inspectOpenClawModelRouting({ repair: apply });
+
+    if (apply) {
+      await safeAudit(req, res, {
+        actorType: "admin",
+        actorLabel: "管理员",
+        action: "system.model_routing_self_heal",
+        resourceType: "system",
+        summary: `模型路由占位值修复完成（fixed=${result.fixed}, pending=${result.pending}）`,
+        detail: JSON.stringify({
+          fixed: result.fixed,
+          pending: result.pending,
+          issues: result.issues
+        })
+      });
+    }
+
+    res.json(result);
   }));
 
   router.get("/readiness", asyncRoute(async (_req, res) => {

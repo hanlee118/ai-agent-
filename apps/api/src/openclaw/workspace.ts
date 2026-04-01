@@ -238,6 +238,166 @@ export async function findOpenClawAgent(agentId: string): Promise<OpenClawAgentD
   return agents.find((agent) => agent.agentId === agentId);
 }
 
+export async function inspectOpenClawModelRouting(input?: {
+  repair?: boolean;
+}) {
+  const repair = Boolean(input?.repair);
+  const checkedAt = new Date().toISOString();
+  const fallbackModel = listGlobalFallbackModels()[0] || "minima/MiniMax-M2.7-highspeed";
+  const items: Array<{
+    source: "openclaw_config" | "managed_agent_config";
+    agentId: string;
+    field: "model" | "selectedModel" | "defaultModel" | "fallbackModel";
+    from: string | null;
+    to: string;
+    reason: string;
+    repaired: boolean;
+  }> = [];
+
+  let scannedOpenClawAgents = 0;
+  let scannedManagedConfigs = 0;
+  let fixed = 0;
+  let pending = 0;
+
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
+  const agentConfigs = config?.agents?.list ?? [];
+  let configChanged = false;
+
+  for (const item of agentConfigs) {
+    scannedOpenClawAgents += 1;
+    const before = normalizeModelId(item.model) ?? null;
+    const next = pickPreferredModel([before ?? undefined], fallbackModel);
+    if (before === next) {
+      continue;
+    }
+
+    const reason = !before
+      ? "empty model id"
+      : isRoutingPlaceholderModel(before)
+        ? "placeholder/alias model id"
+        : "normalized fallback";
+    const repaired = repair;
+    items.push({
+      source: "openclaw_config",
+      agentId: item.id,
+      field: "model",
+      from: before,
+      to: next,
+      reason,
+      repaired
+    });
+
+    if (repair) {
+      item.model = next;
+      configChanged = true;
+      fixed += 1;
+    } else {
+      pending += 1;
+    }
+  }
+
+  if (repair && configChanged && config?.agents?.list) {
+    await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+  }
+
+  const managedConfigs = await prisma.managedAgentConfig.findMany({
+    select: {
+      agentId: true,
+      selectedModel: true,
+      defaultModel: true,
+      fallbackModel: true
+    }
+  });
+  scannedManagedConfigs = managedConfigs.length;
+
+  for (const row of managedConfigs) {
+    const nextSelectedModel = pickPreferredModel(
+      [row.selectedModel, row.defaultModel, row.fallbackModel ?? undefined],
+      fallbackModel
+    );
+    const nextDefaultModel = pickPreferredModel(
+      [row.defaultModel, nextSelectedModel, row.fallbackModel ?? undefined],
+      nextSelectedModel
+    );
+    const nextFallbackModel = pickPreferredModel(
+      [row.fallbackModel ?? undefined, nextDefaultModel],
+      nextDefaultModel
+    );
+
+    const updateData: {
+      selectedModel?: string;
+      defaultModel?: string;
+      fallbackModel?: string;
+    } = {};
+
+    const track = (
+      field: "selectedModel" | "defaultModel" | "fallbackModel",
+      from: string | null,
+      to: string
+    ) => {
+      if (from === to) {
+        return;
+      }
+
+      const reason = !from
+        ? "empty model id"
+        : isRoutingPlaceholderModel(from)
+          ? "placeholder/alias model id"
+          : "normalized fallback";
+      const repaired = repair;
+      items.push({
+        source: "managed_agent_config",
+        agentId: row.agentId,
+        field,
+        from,
+        to,
+        reason,
+        repaired
+      });
+      if (repair) {
+        fixed += 1;
+      } else {
+        pending += 1;
+      }
+    };
+
+    if ((row.selectedModel ?? null) !== nextSelectedModel) {
+      track("selectedModel", row.selectedModel ?? null, nextSelectedModel);
+      updateData.selectedModel = nextSelectedModel;
+    }
+    if ((row.defaultModel ?? null) !== nextDefaultModel) {
+      track("defaultModel", row.defaultModel ?? null, nextDefaultModel);
+      updateData.defaultModel = nextDefaultModel;
+    }
+    const hasInvalidFallbackModel = Boolean(row.fallbackModel) && isRoutingPlaceholderModel(row.fallbackModel ?? undefined);
+    if ((row.fallbackModel ?? null) !== nextFallbackModel && hasInvalidFallbackModel) {
+      track("fallbackModel", row.fallbackModel ?? null, nextFallbackModel);
+      updateData.fallbackModel = nextFallbackModel;
+    }
+
+    if (repair && Object.keys(updateData).length > 0) {
+      await prisma.managedAgentConfig.update({
+        where: { agentId: row.agentId },
+        data: updateData
+      });
+    }
+  }
+
+  return {
+    checkedAt,
+    repair,
+    fallbackModel,
+    scanned: {
+      openclawAgents: scannedOpenClawAgents,
+      managedAgentConfigs: scannedManagedConfigs
+    },
+    issues: items.length,
+    fixed,
+    pending,
+    items
+  };
+}
+
 export async function updateOpenClawAgentSettings(
   agentId: string,
   input: OpenClawAgentSettingsInput
