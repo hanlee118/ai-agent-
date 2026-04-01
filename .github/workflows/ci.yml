@@ -43,6 +43,19 @@ jobs:
       - name: Prepare route-test seed DB
         run: pnpm --filter @occ/api db:push
 
+      - name: Normalize route-test seed DB path
+        run: |
+          mkdir -p apps/api/prisma
+          if [ ! -f apps/api/prisma/dev.db ] && [ -f prisma/dev.db ]; then
+            cp prisma/dev.db apps/api/prisma/dev.db
+          fi
+          if [ ! -f apps/api/prisma/dev.db ]; then
+            echo "missing apps/api/prisma/dev.db" >&2
+            ls -la apps/api/prisma >&2 || true
+            ls -la prisma >&2 || true
+            exit 1
+          fi
+
       - name: API route tests
         run: pnpm --filter @occ/api test:routes
 
