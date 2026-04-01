@@ -198,6 +198,12 @@ const RESERVED_WORKSPACE_DIRS = new Set([
 ]);
 const SOP_FILE_CANDIDATES = ["sop-document.md", "SOP.md"];
 const NON_DELETABLE_AGENT_IDS = new Set(["main"]);
+const MODEL_ROUTING_PLACEHOLDERS = new Set(["runtime", "unknown", "default", "auto"]);
+const HARD_FALLBACK_MODELS = [
+  "anthropic/claude-sonnet-4-20250514",
+  "openai/gpt-5.4",
+  "minima/MiniMax-M2.7-highspeed"
+];
 let statusCache: { expiresAt: number; value: OpenClawStatusSummary } | null = null;
 
 export async function getOpenClawWorkspace(): Promise<OpenClawWorkspaceOverview> {
@@ -247,7 +253,14 @@ export async function updateOpenClawAgentSettings(
   const currentModel = String(agentConfig.model ?? "").trim() || "unknown";
   const existingRecord = await prisma.managedAgentConfig.findUnique({ where: { agentId } });
   const existingSettings = normalizeCommanderSettings(currentModel, existingRecord ?? undefined);
-  const nextSelectedModel = normalizeModelId(input.selectedModel) || existingSettings.selectedModel;
+  const globalFallbacks = listGlobalFallbackModels();
+  const nextSelectedModel = pickPreferredModel([
+    input.selectedModel,
+    existingSettings.selectedModel,
+    existingSettings.defaultModel,
+    existingSettings.fallbackModel ?? undefined,
+    ...globalFallbacks
+  ]);
   const nextDisplayName = String(input.displayName ?? existingRecord?.displayName ?? agentConfig.name ?? "").trim() || undefined;
   const nextTitle = String(input.title ?? existingRecord?.title ?? "").trim() || undefined;
   const nextIntro = String(input.intro ?? existingRecord?.intro ?? "").trim() || undefined;
@@ -275,10 +288,23 @@ export async function updateOpenClawAgentSettings(
   };
   await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
 
+  const nextDefaultModel = pickPreferredModel([
+    input.defaultModel,
+    existingSettings.defaultModel,
+    nextSelectedModel,
+    existingSettings.fallbackModel ?? undefined,
+    ...globalFallbacks
+  ], nextSelectedModel);
+  const nextFallbackModel = pickPreferredModel([
+    input.fallbackModel,
+    existingSettings.fallbackModel ?? undefined,
+    ...globalFallbacks
+  ], nextDefaultModel);
+
   const nextSettings: OpenClawAgentCommanderSettings = {
     selectedModel: nextSelectedModel,
-    defaultModel: normalizeModelId(input.defaultModel) || existingSettings.defaultModel || nextSelectedModel,
-    fallbackModel: normalizeModelId(input.fallbackModel) || existingSettings.fallbackModel,
+    defaultModel: nextDefaultModel,
+    fallbackModel: nextFallbackModel === nextSelectedModel ? undefined : nextFallbackModel,
     executionMode: input.executionMode ?? existingSettings.executionMode,
     requireConfirmation: input.requireConfirmation ?? existingSettings.requireConfirmation,
     autoApproveMinorSteps: input.autoApproveMinorSteps ?? existingSettings.autoApproveMinorSteps,
@@ -840,27 +866,44 @@ export async function sendOpenClawAgentMessage(
 
   let stdout = "";
   let stderr = "";
-  let activeModel = agent.commander.selectedModel;
   const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(
     `${agent.agentId} ${agent.name} ${agent.title} ${agent.responsibility}`
   );
-  const designPrimaryModel = normalizeModelId(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
+  const designPrimaryModel = normalizeModelForRouting(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
+  const globalFallbackCandidates = listGlobalFallbackModels();
   const defaultFallbackCandidates = dedupeStrings([
-    normalizeModelId(agent.commander.fallbackModel),
-    normalizeModelId(process.env.OPENCLAW_AGENT_FALLBACK_MODEL),
-    "minima/MiniMax-M2.7-highspeed"
+    normalizeModelForRouting(agent.commander.defaultModel),
+    normalizeModelForRouting(agent.commander.fallbackModel),
+    ...globalFallbackCandidates
   ].filter((item): item is string => Boolean(item)));
   const designFallbackCandidates = dedupeStrings([
-    normalizeModelId(process.env.DESIGN_FALLBACK_MODEL),
-    ...DESIGN_MODEL_FALLBACKS,
+    normalizeModelForRouting(process.env.DESIGN_FALLBACK_MODEL),
+    ...DESIGN_MODEL_FALLBACKS.map((item) => normalizeModelForRouting(item)),
     ...defaultFallbackCandidates
   ].filter((item): item is string => Boolean(item)));
-  const fallbackCandidates = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates)
-    .filter((modelId) => modelId !== normalizeModelId(activeModel));
+  const fallbackCandidates = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates);
+  let activeModel = pickPreferredModel([
+    agent.commander.selectedModel,
+    agent.commander.defaultModel,
+    agent.commander.fallbackModel ?? undefined,
+    ...(isDesignAgent ? [designPrimaryModel] : []),
+    ...fallbackCandidates
+  ]);
+  const fallbackQueue = fallbackCandidates.filter((modelId) => modelId !== activeModel);
   let fallbackCursor = 0;
   const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
   const commandTimeoutMs = Math.max(30_000, Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 8 * 60 * 1000));
   let finalError: string | null = null;
+
+  const selectedModelRaw = normalizeModelId(agent.commander.selectedModel) || "";
+  if (selectedModelRaw !== activeModel) {
+    try {
+      await switchAgentModelForRetry(agentId, activeModel);
+    } catch (switchError) {
+      const reason = switchError instanceof Error ? switchError.message : "initial model sanitize failed";
+      finalError = `[model-sanitize] ${reason}`;
+    }
+  }
 
   if (isDesignAgent && designPrimaryModel && !isDesignModelPreferred(activeModel)) {
     try {
@@ -885,8 +928,14 @@ export async function sendOpenClawAgentMessage(
         timeout: commandTimeoutMs,
         maxBuffer: 1024 * 1024 * 8
       });
-      stdout = result.stdout;
-      stderr = result.stderr;
+      const nextStdout = result.stdout;
+      const nextStderr = result.stderr;
+      const payloadError = extractOpenClawGatewayError(`${nextStdout || ""}\n${nextStderr || ""}`);
+      if (payloadError) {
+        throw new Error(payloadError);
+      }
+      stdout = nextStdout;
+      stderr = nextStderr;
       finalError = null;
       break;
     } catch (error) {
@@ -913,8 +962,15 @@ export async function sendOpenClawAgentMessage(
       const isLockError = /session file locked|locked \(timeout|gateway closed/i.test(finalError);
       const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(finalError);
       const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(finalError);
-      const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted/i.test(finalError);
-      const nextFallbackModel = fallbackCandidates[fallbackCursor];
+      const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted|relay service error|bad_response_status_code|5\d{2}/i.test(finalError);
+      if (isModelUnavailableError) {
+        for (const modelId of listGroupFallbackModels(finalError)) {
+          if (modelId !== activeModel && !fallbackQueue.includes(modelId)) {
+            fallbackQueue.push(modelId);
+          }
+        }
+      }
+      const nextFallbackModel = fallbackQueue[fallbackCursor];
       const shouldRetryWithFallback =
         (isTokenError || isModelUnavailableError)
         && Boolean(nextFallbackModel)
@@ -2223,13 +2279,30 @@ function normalizeCommanderSettings(
     updatedAt?: Date | string | null;
   }
 ): OpenClawAgentCommanderSettings {
-  const selectedModel = normalizeModelId(stored?.selectedModel ?? undefined) || normalizeModelId(currentModel) || "unknown";
+  const globalFallbacks = listGlobalFallbackModels();
+  const selectedModel = pickPreferredModel([
+    stored?.selectedModel ?? undefined,
+    currentModel,
+    stored?.defaultModel ?? undefined,
+    stored?.fallbackModel ?? undefined,
+    ...globalFallbacks
+  ]);
+  const defaultModel = pickPreferredModel([
+    stored?.defaultModel ?? undefined,
+    selectedModel,
+    stored?.fallbackModel ?? undefined,
+    ...globalFallbacks
+  ], selectedModel);
+  const fallbackModel = pickPreferredModel([
+    stored?.fallbackModel ?? undefined,
+    ...globalFallbacks
+  ], selectedModel);
   const executionMode = stored?.executionMode === "autonomous" ? "autonomous" : "confirm_first";
 
   return {
     selectedModel,
-    defaultModel: normalizeModelId(stored?.defaultModel ?? undefined) || selectedModel,
-    fallbackModel: normalizeModelId(stored?.fallbackModel ?? undefined),
+    defaultModel,
+    fallbackModel: fallbackModel === selectedModel ? undefined : fallbackModel,
     executionMode,
     requireConfirmation: stored?.requireConfirmation ?? executionMode !== "autonomous",
     autoApproveMinorSteps: stored?.autoApproveMinorSteps ?? executionMode === "autonomous",
@@ -2313,6 +2386,104 @@ function deriveModelTags(modelId: string) {
 function normalizeModelId(value?: string) {
   const model = String(value ?? "").trim();
   return model || undefined;
+}
+
+function isRoutingPlaceholderModel(value?: string) {
+  const model = normalizeModelId(value);
+  if (!model) {
+    return true;
+  }
+  const normalized = model.toLowerCase();
+  return MODEL_ROUTING_PLACEHOLDERS.has(normalized) || normalized.startsWith("runtime-");
+}
+
+function normalizeModelForRouting(value?: string) {
+  const model = normalizeModelId(value);
+  if (!model) {
+    return undefined;
+  }
+  if (isRoutingPlaceholderModel(model)) {
+    return undefined;
+  }
+  return model;
+}
+
+function parseCsvModels(value?: string) {
+  return String(value ?? "")
+    .split(",")
+    .map((item) => normalizeModelForRouting(item))
+    .filter((item): item is string => Boolean(item));
+}
+
+function listGlobalFallbackModels() {
+  return dedupeStrings([
+    ...parseCsvModels(process.env.OPENCLAW_CLAUDE_CODE_DEV_MODELS),
+    normalizeModelForRouting(process.env.OPENCLAW_AGENT_FALLBACK_MODEL),
+    ...HARD_FALLBACK_MODELS.map((item) => normalizeModelForRouting(item)),
+  ].filter((item): item is string => Boolean(item)));
+}
+
+function listGroupFallbackModels(errorText: string) {
+  if (/group\s+claude_code/i.test(errorText)) {
+    return dedupeStrings([
+      ...parseCsvModels(process.env.OPENCLAW_CLAUDE_CODE_DEV_MODELS),
+      "anthropic/claude-sonnet-4-20250514",
+      "claude-sonnet-4-20250514",
+      "claude-3-5-haiku-20241022",
+    ].map((item) => normalizeModelForRouting(item)).filter((item): item is string => Boolean(item)));
+  }
+  return [] as string[];
+}
+
+function pickPreferredModel(candidates: Array<string | undefined>, fallback?: string) {
+  for (const candidate of candidates) {
+    const resolved = normalizeModelForRouting(candidate);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  const fallbackResolved = normalizeModelForRouting(fallback);
+  if (fallbackResolved) {
+    return fallbackResolved;
+  }
+
+  return listGlobalFallbackModels()[0] || "minima/MiniMax-M2.7-highspeed";
+}
+
+function extractOpenClawGatewayError(raw: string) {
+  const normalizedRaw = String(raw || "").trim();
+  if (!normalizedRaw) {
+    return null;
+  }
+
+  const payloadMatch = normalizedRaw.match(/HTTP\s+\d{3}\s+(?:new_api_error|bad_response_status_code):[^\n]+/i);
+  if (payloadMatch?.[0]) {
+    return payloadMatch[0].trim();
+  }
+
+  try {
+    const parsed = parseOpenClawJson(normalizedRaw);
+    const textPayload = Array.isArray(parsed?.result?.payloads)
+      ? parsed.result.payloads
+          .map((item) => String(item?.text ?? "").trim())
+          .find((text) =>
+            /HTTP\s+\d{3}\s+(?:new_api_error|bad_response_status_code)|no available channel|unsupported model|model not found|auth status failed|request timeout|relay service error/i.test(text)
+          )
+      : "";
+    if (textPayload) {
+      return textPayload;
+    }
+
+    const stopReason = String(parsed?.result?.meta?.stopReason ?? "").trim().toLowerCase();
+    if (stopReason === "error") {
+      return "OpenClaw returned stopReason=error";
+    }
+  } catch {
+    // ignore parse failures here; caller can still rely on stderr/exit code
+  }
+
+  return null;
 }
 
 function estimateTokenCount(text: string) {
@@ -2488,11 +2659,21 @@ async function ensureManagedAgentConfigExists(
   model: string
 ) {
   const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(`${agentId} ${displayName} ${title}`);
-  const designPrimaryModel = normalizeModelId(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
+  const designPrimaryModel = normalizeModelForRouting(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
   const designFallbackModel =
-    normalizeModelId(process.env.DESIGN_FALLBACK_MODEL)
+    normalizeModelForRouting(process.env.DESIGN_FALLBACK_MODEL)
     || DESIGN_MODEL_FALLBACKS[0];
-  const selectedModel = isDesignAgent ? (designPrimaryModel || model) : model;
+  const selectedModel = isDesignAgent
+    ? pickPreferredModel([
+        designPrimaryModel,
+        model,
+        designFallbackModel,
+        ...listGlobalFallbackModels()
+      ])
+    : pickPreferredModel([
+        model,
+        ...listGlobalFallbackModels()
+      ]);
 
   await prisma.managedAgentConfig.upsert({
     where: { agentId },
@@ -2652,15 +2833,15 @@ function sleep(ms: number) {
 async function switchAgentModelForRetry(agentId: string, model: string) {
   const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
   if (!config?.agents?.list?.length) {
-    return;
+    throw new Error("OpenClaw config missing agents.list");
   }
 
   const target = config.agents.list.find((item) => item.id === agentId);
   if (!target) {
-    return;
+    throw new Error(`Agent ${agentId} not found in OpenClaw config`);
   }
 
-  const normalizedModel = normalizeModelId(model);
+  const normalizedModel = normalizeModelForRouting(model);
   if (!normalizedModel || target.model === normalizedModel) {
     return;
   }
@@ -2767,6 +2948,7 @@ function parseOpenClawJson(raw: string) {
         payloads?: Array<{ text?: string }>;
         meta?: {
           durationMs?: number;
+          stopReason?: string;
           agentMeta?: {
             sessionId?: string;
             provider?: string;
