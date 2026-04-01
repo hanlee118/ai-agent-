@@ -683,11 +683,9 @@ const ProjectRoom = ({
   );
 
   const isDesignPhase = useMemo(() => {
-    const text = [project.phase, project.description, ...effectiveProjectTasks.map((task) => `${task.title} ${task.agent}`)]
-      .join(' ')
-      .toLowerCase();
-    return /(design|设计|视觉|交互|页面|官网)/i.test(text);
-  }, [project.phase, project.description, effectiveProjectTasks]);
+    const stageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+    return stageType === 'DESIGN' && project.status === 'active';
+  }, [detail?.currentStage, stageItems, project.status]);
 
   const recentLogs = useMemo(() => {
     const logs: ProjectRoomLogItem[] = [];

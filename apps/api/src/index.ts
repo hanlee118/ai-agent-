@@ -715,6 +715,9 @@ function buildProjectRequiredActions(
   runtime?: Awaited<ReturnType<typeof getRuntimeStatus>>
 ) {
   const actions: ProjectRequiredAction[] = [];
+  if (project.status === "completed") {
+    return actions;
+  }
   const currentStageDeliverables = project.deliverables
     .filter((item) => item.stageType === project.currentStage)
     .sort((left, right) => right.version - left.version);
