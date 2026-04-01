@@ -81,6 +81,7 @@ type ProjectDetailResponse = {
   pendingApproval: boolean;
   progress: number;
   summary?: string;
+  team?: string[];
   stages?: Array<{
     type: string;
     label: string;
@@ -599,12 +600,62 @@ const ProjectRoom = ({
   };
 
   const projectAgents = useMemo(() => {
-    if (project.agents.length > 0) {
-      return agents.filter((agent) => project.agents.includes(agent.id));
+    const selected = new Map<string, { id: string; name: string; role: string }>();
+
+    const registerById = (rawId?: string) => {
+      const memberId = String(rawId || '').trim();
+      if (!memberId || selected.has(memberId)) {
+        return;
+      }
+
+      const byExactId = agents.find((agent) => String(agent.id || '').trim() === memberId);
+      if (byExactId) {
+        selected.set(memberId, {
+          id: memberId,
+          name: byExactId.name || roleLabel(memberId),
+          role: byExactId.role || roleLabel(memberId),
+        });
+        return;
+      }
+
+      const byRoleId = agents.find((agent) => String(agent.role || '').trim() === memberId);
+      if (byRoleId) {
+        selected.set(memberId, {
+          id: memberId,
+          name: byRoleId.name || roleLabel(memberId),
+          role: roleLabel(memberId),
+        });
+        return;
+      }
+
+      selected.set(memberId, {
+        id: memberId,
+        name: roleLabel(memberId),
+        role: roleLabel(memberId),
+      });
+    };
+
+    detail?.team?.forEach((memberId) => registerById(memberId));
+    detail?.stages?.forEach((stage) => registerById(stage.assignee));
+    detail?.tasks?.forEach((task) => registerById(task.assignee));
+
+    if (selected.size === 0) {
+      project.agents.forEach((memberId) => registerById(memberId));
     }
-    const linkedAgentNames = new Set(effectiveProjectTasks.map((task) => task.agent));
-    return agents.filter((agent) => linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name));
-  }, [project.agents, effectiveProjectTasks]);
+
+    if (selected.size === 0) {
+      const linkedAgentNames = new Set(
+        effectiveProjectTasks.map((task) => String(task.agent || '').trim()).filter(Boolean),
+      );
+      agents.forEach((agent) => {
+        if (linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name) || linkedAgentNames.has(agent.role)) {
+          registerById(agent.id);
+        }
+      });
+    }
+
+    return [...selected.values()];
+  }, [detail?.stages, detail?.tasks, detail?.team, effectiveProjectTasks, project.agents]);
 
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
 
