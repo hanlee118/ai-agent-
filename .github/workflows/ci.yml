@@ -37,6 +37,9 @@ jobs:
       - name: DB baseline preflight
         run: pnpm db:baseline
 
+      - name: Apply migrations preflight
+        run: pnpm --filter @occ/api exec prisma migrate deploy
+
       - name: DB migration status preflight
         run: pnpm --filter @occ/api db:migrate:status
 
