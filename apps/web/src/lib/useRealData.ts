@@ -62,14 +62,14 @@ export function useRealData(): RealDataState {
   }, []);
 
   const mergeAgents = useCallback((managedAgents: Agent[], runtimeAgents: Agent[]) => {
-    if (managedAgents.length === 0) {
-      return runtimeAgents;
+    if (runtimeAgents.length === 0) {
+      return managedAgents;
     }
 
-    const runtimeById = new Map(runtimeAgents.map((agent) => [agent.id, agent]));
-    const merged = managedAgents.map((managed) => {
-      const runtimeAgent = runtimeById.get(managed.id);
-      return runtimeAgent
+    const managedById = new Map(managedAgents.map((agent) => [agent.id, agent]));
+    return runtimeAgents.map((runtimeAgent) => {
+      const managed = managedById.get(runtimeAgent.id);
+      return managed
         ? {
             ...runtimeAgent,
             ...managed,
@@ -77,12 +77,8 @@ export function useRealData(): RealDataState {
             model: runtimeAgent.model || managed.model || managed.currentModelId,
             lastActiveAt: runtimeAgent.lastActiveAt || managed.lastActiveAt,
           }
-        : managed;
+        : runtimeAgent;
     });
-
-    const managedIds = new Set(merged.map((agent) => agent.id));
-    const runtimeOnly = runtimeAgents.filter((agent) => !managedIds.has(agent.id));
-    return [...merged, ...runtimeOnly];
   }, []);
 
   const refresh = useCallback(async () => {

@@ -4,6 +4,7 @@ import {
   open,
   copyFile,
   mkdir,
+  rm,
   readdir,
   readFile,
   stat,
@@ -196,6 +197,7 @@ const RESERVED_WORKSPACE_DIRS = new Set([
   "occ-frontend"
 ]);
 const SOP_FILE_CANDIDATES = ["sop-document.md", "SOP.md"];
+const NON_DELETABLE_AGENT_IDS = new Set(["main"]);
 let statusCache: { expiresAt: number; value: OpenClawStatusSummary } | null = null;
 
 export async function getOpenClawWorkspace(): Promise<OpenClawWorkspaceOverview> {
@@ -430,6 +432,55 @@ export async function createOpenClawAgent(
   });
 
   return findOpenClawAgent(agentId);
+}
+
+export async function deleteOpenClawAgent(
+  agentIdRaw: string
+): Promise<{ status: "deleted" | "not_found" | "protected"; removedWorkspace: boolean }> {
+  const agentId = String(agentIdRaw ?? "").trim();
+  if (!agentId) {
+    return { status: "not_found", removedWorkspace: false };
+  }
+
+  if (NON_DELETABLE_AGENT_IDS.has(agentId)) {
+    return { status: "protected", removedWorkspace: false };
+  }
+
+  const config = (await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH)) ?? { agents: { list: [] } };
+  config.agents ||= { list: [] };
+  config.agents.list ||= [];
+
+  const existing = config.agents.list.find((item) => item.id === agentId);
+  if (!existing) {
+    return { status: "not_found", removedWorkspace: false };
+  }
+
+  const workspacePath = existing.workspace || resolveWorkspaceForAgent(agentId);
+  config.agents.list = config.agents.list.filter((item) => item.id !== agentId);
+  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+
+  await prisma.$transaction([
+    prisma.agentSoul.deleteMany({ where: { agentId } }),
+    prisma.agentSop.deleteMany({ where: { agentId } }),
+    prisma.agentMemoryEntry.deleteMany({ where: { agentId } }),
+    prisma.agentUsageLog.deleteMany({ where: { agentId } }),
+    prisma.managedAgentConfig.deleteMany({ where: { agentId } }),
+    prisma.agentProfile.deleteMany({ where: { roleId: agentId } }),
+    prisma.task.deleteMany({ where: { assignee: agentId } })
+  ]);
+
+  let removedWorkspace = false;
+  if (isRemovableAgentWorkspacePath(workspacePath, agentId)) {
+    try {
+      await rm(workspacePath, { recursive: true, force: true });
+      removedWorkspace = true;
+    } catch {
+      removedWorkspace = false;
+    }
+  }
+
+  statusCache = null;
+  return { status: "deleted", removedWorkspace };
 }
 
 export async function addOpenClawAgentMemory(
@@ -2064,6 +2115,17 @@ function resolveWorkspaceForAgent(agentId: string) {
 
   const candidate = path.join(OPENCLAW_WORKSPACE_ROOT, "agents", agentId);
   return existsSync(candidate) ? candidate : "";
+}
+
+function isRemovableAgentWorkspacePath(workspacePath: string | undefined, agentId: string) {
+  const raw = String(workspacePath ?? "").trim();
+  if (!raw) {
+    return false;
+  }
+
+  const resolvedWorkspace = path.resolve(raw);
+  const safeBase = path.resolve(path.join(OPENCLAW_WORKSPACE_ROOT, "agents", agentId));
+  return resolvedWorkspace === safeBase;
 }
 
 function humanizeAgentId(agentId: string) {

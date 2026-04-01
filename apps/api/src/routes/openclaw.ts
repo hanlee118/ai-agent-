@@ -3,6 +3,7 @@ import {
   addOpenClawAgentMemory,
   buildOpenClawProjectReport,
   createOpenClawAgent,
+  deleteOpenClawAgent,
   findOpenClawAgent,
   findOpenClawProject,
   getOpenClawStatusSummary,
@@ -126,6 +127,35 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
       summary: `已创建 Agent ${created.agentId}`
     });
     res.status(201).json(created);
+  }));
+
+  router.delete("/agents/:agentId", asyncRoute(async (req, res) => {
+    const agentId = String(req.params.agentId ?? "").trim();
+    const result = await deleteOpenClawAgent(agentId);
+    if (result.status === "not_found") {
+      res.status(404).json({ message: "Agent not found" });
+      return;
+    }
+    if (result.status === "protected") {
+      res.status(400).json({ message: "Core agent cannot be deleted" });
+      return;
+    }
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "openclaw.agent_deleted",
+      resourceType: "agent",
+      resourceId: agentId,
+      summary: `已删除 Agent ${agentId}`,
+      detail: result.removedWorkspace ? "Agent workspace removed." : "Agent workspace retained."
+    });
+
+    res.json({
+      success: true,
+      agentId,
+      removedWorkspace: result.removedWorkspace
+    });
   }));
 
   router.patch("/agents/:agentId/settings", asyncRoute(async (req, res) => {
