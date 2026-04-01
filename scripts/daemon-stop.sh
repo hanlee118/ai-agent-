@@ -5,9 +5,16 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
 PID_FILE="$ROOT_DIR/.runtime/openclaw.pid"
+PORT="${PORT:-8787}"
+HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
+HEALTH_URL="http://${HEALTH_HOST}:${PORT}/health"
 
 if [ ! -f "$PID_FILE" ]; then
-  echo "OpenClaw is not running"
+  if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+    echo "OpenClaw responds on :$PORT but no PID file exists; nothing to stop safely"
+  else
+    echo "OpenClaw is not running"
+  fi
   exit 0
 fi
 

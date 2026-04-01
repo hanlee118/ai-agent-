@@ -8,28 +8,46 @@ RUNTIME_DIR="$ROOT_DIR/.runtime"
 PID_FILE="$RUNTIME_DIR/openclaw.pid"
 LOG_FILE="$RUNTIME_DIR/openclaw.log"
 PORT="${PORT:-8787}"
+HOST="${HOST:-0.0.0.0}"
+HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
+HEALTH_URL="http://${HEALTH_HOST}:${PORT}/health"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-20}"
 
 mkdir -p "$RUNTIME_DIR"
 
-if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
-  echo "OpenClaw is already running with PID $(cat "$PID_FILE") on :$PORT"
+if [ -f "$PID_FILE" ]; then
+  EXISTING_PID="$(cat "$PID_FILE")"
+  if kill -0 "$EXISTING_PID" 2>/dev/null; then
+    echo "OpenClaw is already running with PID $EXISTING_PID on :$PORT"
+    exit 0
+  fi
+
+  echo "Removing stale PID file ($EXISTING_PID)"
+  rm -f "$PID_FILE"
+fi
+
+if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+  echo "OpenClaw is already healthy on :$PORT ($HEALTH_URL)"
   exit 0
 fi
 
-if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
-  echo "A service is already listening on :$PORT, refusing to start a duplicate instance"
-  exit 1
-fi
-
 : > "$LOG_FILE"
-nohup env PORT="$PORT" NODE_ENV=production ./scripts/start-local-prod.sh >> "$LOG_FILE" 2>&1 &
+nohup env PORT="$PORT" HOST="$HOST" NODE_ENV=production ./scripts/start-local-prod.sh >> "$LOG_FILE" 2>&1 < /dev/null &
 PID=$!
 echo "$PID" > "$PID_FILE"
 
 for _ in $(seq 1 "$STARTUP_TIMEOUT"); do
-  if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+  if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+    sleep 1
+    if ! kill -0 "$PID" 2>/dev/null; then
+      echo "OpenClaw became healthy but exited immediately afterwards" >&2
+      tail -n 80 "$LOG_FILE" >&2 || true
+      rm -f "$PID_FILE"
+      exit 1
+    fi
+
     echo "OpenClaw started with PID $PID on :$PORT"
+    echo "Health: $HEALTH_URL"
     echo "Logs: $LOG_FILE"
     exit 0
   fi
