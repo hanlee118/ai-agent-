@@ -375,6 +375,7 @@ const ProjectRoom = ({
             agent: roleLabel(item.assignee),
             status: toTaskStatus(item.status),
             progress: toTaskProgress(item.status),
+            stageType: item.stageType,
             projectId: item.projectId,
             createdAt: item.updatedAt,
             updatedAt: item.updatedAt,
