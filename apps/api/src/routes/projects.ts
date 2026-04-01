@@ -1006,6 +1006,14 @@ function hasApprovedDesignReview(content: string) {
   return source.includes("## 设计审查卡") && /审查结论:\s*通过/.test(source);
 }
 
+function hasVisualDesignPreview(content: string) {
+  const source = String(content || "");
+  return /```html[\s\S]*?```/i.test(source)
+    || /<!doctype html/i.test(source)
+    || /<html[\s>]/i.test(source)
+    || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
+}
+
 function createFallbackRequiredAction(
   action: ProjectRequiredAction["action"],
   project: ProjectRecord
@@ -1043,8 +1051,8 @@ function createFallbackRequiredAction(
       return {
         id: "design-review-required",
         severity: "critical",
-        title: "设计阶段缺少通过的设计审查卡",
-        detail: "请补充并通过设计审查卡后，再进行阶段验收。",
+        title: "设计阶段缺少可确认设计审查产物",
+        detail: "请补充并通过设计审查卡，同时提供静态图或单页 HTML 视觉稿后再验收。",
         action: "open_design_review",
         ctaLabel: "提交设计审查卡"
       };
@@ -1087,6 +1095,11 @@ function buildRealModelGateRecoveryActions(input: {
   const missingStageDeliverables = currentStageDeliverables.length === 0;
   const hasDesignReview = input.project.currentStage === "DESIGN"
     && currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")));
+  const hasVisualPreview = input.project.currentStage === "DESIGN"
+    && currentStageDeliverables.some((item) =>
+      /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|preview\.html/i.test(String(item.name || ""))
+      && hasVisualDesignPreview(String(item.content || ""))
+    );
   const hasBlockedTasks = input.project.tasks.some(
     (task) => task.stageType === input.project.currentStage && task.status === "blocked"
   );
@@ -1102,7 +1115,7 @@ function buildRealModelGateRecoveryActions(input: {
       return requiredByAction.has(action);
     }
     if (action === "open_design_review") {
-      return requiredByAction.has(action) || (input.project.currentStage === "DESIGN" && !hasDesignReview);
+      return requiredByAction.has(action) || (input.project.currentStage === "DESIGN" && (!hasDesignReview || !hasVisualPreview));
     }
     if (action === "resolve_blocked_tasks") {
       return hasBlockedTasks || requiredByAction.has(action);
@@ -1580,15 +1593,15 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
       ? buildProjectRequiredActions(latestProject, latestRuntime)
       : [];
 
-    if (lastJobError.message.startsWith("DESIGN_REVIEW_REQUIRED:")) {
+    if (lastJobError.message.startsWith("DESIGN_REVIEW_REQUIRED:") || lastJobError.message.startsWith("DESIGN_VISUAL_PREVIEW_REQUIRED:")) {
       resetProjectAdvancePollHint(projectId);
       const actions = latestRequiredActions.length > 0
         ? latestRequiredActions
         : [{
           id: "design-review-required",
           severity: "critical" as const,
-          title: "设计阶段缺少设计审查卡",
-          detail: "请补充设计审查卡后再推进。",
+          title: "设计阶段缺少可确认设计产物",
+          detail: "请补充设计审查卡并提供静态图或单页 HTML 视觉稿后再推进。",
           action: "open_design_review" as const,
           ctaLabel: "提交设计审查卡"
         }];
@@ -2021,6 +2034,10 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
       res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
       return;
     }
+    if (message.startsWith("DESIGN_VISUAL_PREVIEW_REQUIRED:")) {
+      res.status(422).json({ message: message.replace("DESIGN_VISUAL_PREVIEW_REQUIRED:", "").trim() });
+      return;
+    }
     if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {
       const templateGatePrecheck = await getProjectTemplateGatePrecheck(projectId);
       const autoReconcileEnabled = process.env.NODE_ENV !== "test";
@@ -2259,6 +2276,10 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
     }
     if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:")) {
       res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
+      return;
+    }
+    if (message.startsWith("DESIGN_VISUAL_PREVIEW_REQUIRED:")) {
+      res.status(422).json({ message: message.replace("DESIGN_VISUAL_PREVIEW_REQUIRED:", "").trim() });
       return;
     }
     if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {

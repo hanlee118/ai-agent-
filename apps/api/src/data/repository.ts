@@ -61,7 +61,7 @@ const STAGE_OBJECTIVES: Record<StageType, string> = {
 const STAGE_NEXT_INPUT: Record<StageType, string> = {
   INIT: "将项目章程与角色分工交给分析阶段继续细化。",
   ANALYSIS: "把需求合同、排期和风险清单交给设计阶段产出方案。",
-  DESIGN: "把设计审查卡、实施方案与组件规范交给开发阶段，先完成技术方案与选型再进入实现。",
+  DESIGN: "把设计审查卡、视觉定稿单页与实施方案交给开发阶段，先完成技术方案与选型再进入实现。",
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
@@ -73,7 +73,7 @@ const STAGE_COMPANION_ROLES: Partial<Record<StageType, RoleType[]>> = {
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md"],
+  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "Demo原型说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
@@ -420,6 +420,16 @@ function ensureDesignSubmissionContent(
     appendSection("## 可访问性检查", designReview.accessibilityChecklist.map((item) => `- ${item}`));
   }
 
+  if (!hasSection("## 单页预览代码（HTML）")) {
+    const keywordLine = [designReview.visualDirection, designReview.brandTone].filter(Boolean).join(" / ");
+    const html = buildVisualDesignPreviewHtml({
+      projectName: "设计阶段视觉确认稿",
+      keywordLine,
+      visualDirection: designReview.visualDirection
+    });
+    appendSection("## 单页预览代码（HTML）", ["```html", html, "```"]);
+  }
+
   const bulletCount = normalized
     .split("\n")
     .map((line) => line.trim())
@@ -446,6 +456,81 @@ function ensureDesignSubmissionContent(
 
 function hasApprovedDesignReview(content: string) {
   return content.includes(DESIGN_REVIEW_MARKER) && /审查结论:\s*通过/.test(content);
+}
+
+function hasVisualDesignPreview(content: string) {
+  const source = String(content || "");
+  return /```html[\s\S]*?```/i.test(source)
+    || /<!doctype html/i.test(source)
+    || /<html[\s>]/i.test(source)
+    || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
+}
+
+function buildVisualDesignPreviewHtml(input: {
+  projectName: string;
+  keywordLine: string;
+  visualDirection?: string;
+}) {
+  const title = String(input.projectName || "设计预览").trim();
+  const keywords = String(input.keywordLine || "需求闭环 / 可执行 / 可验收").trim();
+  const direction = String(input.visualDirection || "强调业务主链路与执行证据的高可读视觉风格").trim();
+  return [
+    "<!doctype html>",
+    "<html lang=\"zh-CN\">",
+    "<head>",
+    "  <meta charset=\"UTF-8\" />",
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+    `  <title>${title} · 视觉定稿预览</title>`,
+    "  <style>",
+    "    :root { --bg:#0b1220; --card:#111b2e; --text:#e2e8f0; --muted:#94a3b8; --accent:#22d3ee; --line:#20304a; }",
+    "    * { box-sizing:border-box; }",
+    "    body { margin:0; font-family:'SF Pro Display','Segoe UI','PingFang SC',sans-serif; background:linear-gradient(160deg,#07101d,#0b1626 55%,#132238); color:var(--text); }",
+    "    .wrap { max-width:1120px; margin:0 auto; padding:40px 24px 56px; }",
+    "    .hero { display:grid; grid-template-columns:1.25fr 1fr; gap:18px; }",
+    "    .card { background:rgba(17,27,46,.88); border:1px solid var(--line); border-radius:18px; padding:22px; backdrop-filter: blur(4px); }",
+    "    h1 { margin:0 0 12px; font-size:30px; line-height:1.2; }",
+    "    p { margin:0; color:var(--muted); line-height:1.7; }",
+    "    .tag { display:inline-flex; margin-bottom:12px; padding:4px 10px; border-radius:999px; background:rgba(34,211,238,.16); color:var(--accent); font-size:12px; font-weight:600; }",
+    "    .kpis { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }",
+    "    .kpi { border:1px solid var(--line); border-radius:12px; padding:10px 12px; }",
+    "    .kpi strong { display:block; font-size:18px; margin-bottom:4px; }",
+    "    .sec { margin-top:16px; }",
+    "    .flow { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }",
+    "    .node { border:1px solid var(--line); border-radius:10px; padding:10px; color:var(--muted); font-size:13px; }",
+    "    .cta { margin-top:14px; display:inline-flex; padding:10px 14px; border-radius:10px; background:var(--accent); color:#032029; text-decoration:none; font-weight:700; }",
+    "    @media (max-width:900px) { .hero { grid-template-columns:1fr; } .flow { grid-template-columns:repeat(2,minmax(0,1fr)); } }",
+    "  </style>",
+    "</head>",
+    "<body>",
+    "  <main class=\"wrap\">",
+    "    <section class=\"hero\">",
+    "      <article class=\"card\">",
+    "        <span class=\"tag\">视觉定稿单页</span>",
+    `        <h1>${title}</h1>`,
+    `        <p>视觉方向: ${direction}</p>`,
+    `        <p class=\"sec\">关键词: ${keywords}</p>`,
+    "        <div class=\"kpis\">",
+    "          <div class=\"kpi\"><strong>01</strong><span>需求确认</span></div>",
+    "          <div class=\"kpi\"><strong>02</strong><span>方案评审</span></div>",
+    "          <div class=\"kpi\"><strong>03</strong><span>开发落地</span></div>",
+    "        </div>",
+    "        <a class=\"cta\" href=\"#\" aria-label=\"确认视觉方案\">确认该视觉方案</a>",
+    "      </article>",
+    "      <article class=\"card\">",
+    "        <h2 style=\"margin:0 0 8px;font-size:20px;\">主链路结构</h2>",
+    "        <div class=\"flow\">",
+    "          <div class=\"node\">需求输入</div>",
+    "          <div class=\"node\">多 Agent 协作</div>",
+    "          <div class=\"node\">执行证据回写</div>",
+    "          <div class=\"node\">阶段验收与回填</div>",
+    "        </div>",
+    "        <p class=\"sec\">该预览用于设计确认，不替代开发实现代码。</p>",
+    "      </article>",
+    "    </section>",
+    "  </main>",
+    "</body>",
+    "</html>"
+  ].join("\n");
 }
 
 function normalizeDeliverableToken(value: string) {
@@ -500,6 +585,10 @@ function validateDeliverableTemplateGate(input: {
 
   if (DELIVERABLE_PLACEHOLDER_PATTERN.test(normalized)) {
     issues.push("包含占位词（待补充 / 占位 / TODO / TBD / lorem ipsum / xxx）");
+  }
+
+  if (template.kind === "visual_mockup" && !hasVisualDesignPreview(normalized)) {
+    issues.push("缺少可视化设计稿预览（需提供静态图链接或 ```html 单页代码）");
   }
 
   return {
@@ -1353,6 +1442,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
   const objective = STAGE_OBJECTIVES[stageType] || "围绕当前阶段目标沉淀可审阅产物。";
   const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
   const template = resolveDeliverableTemplate(deliverable.name, stageType);
+  const isVisualMockup = template.kind === "visual_mockup";
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
 
   return [
@@ -1395,7 +1485,20 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "",
     "## 审阅与验收建议",
     "- 审阅是否覆盖目标、范围、风险、任务与交付证据。",
-    "- 若信息不足，请在当前文档补全后再次提交阶段审批。"
+    "- 若信息不足，请在当前文档补全后再次提交阶段审批。",
+    ...(isVisualMockup
+      ? [
+          "",
+          "## 单页预览代码（HTML）",
+          "```html",
+          buildVisualDesignPreviewHtml({
+            projectName: project.name,
+            keywordLine: keywords.join(" / "),
+            visualDirection: "强调业务主链路、证据可追溯和行动可执行"
+          }),
+          "```"
+        ]
+      : [])
   ].join("\n");
 }
 
@@ -1441,6 +1544,7 @@ async function buildDeliverableBackfillContentWithAgent(
     : ["1. 当前阶段任务暂未编排，建议补充任务后重新提交审批版交付物。"];
   const checklist = buildDeliverableChecklist(deliverable.name, stageType);
   const template = resolveDeliverableTemplate(deliverable.name, stageType);
+  const isVisualMockup = template.kind === "visual_mockup";
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
 
   const runCacheKey = `${project.id}:${stageType}:shared`;
@@ -1514,7 +1618,20 @@ async function buildDeliverableBackfillContentWithAgent(
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
-    "- 如需变更目标或范围，请先在需求合同中更新后再推进。"
+    "- 如需变更目标或范围，请先在需求合同中更新后再推进。",
+    ...(isVisualMockup
+      ? [
+          "",
+          "## 单页预览代码（HTML）",
+          "```html",
+          buildVisualDesignPreviewHtml({
+            projectName: project.name,
+            keywordLine: keywords.join(" / "),
+            visualDirection: "强调业务主链路、证据可追溯和行动可执行"
+          }),
+          "```"
+        ]
+      : [])
   ].join("\n");
 }
 
@@ -2157,6 +2274,21 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
 
     if (!latestDesignDeliverable || !hasApprovedDesignReview(latestDesignDeliverable.content)) {
       throw new Error("DESIGN_REVIEW_NOT_APPROVED: 设计阶段缺少已通过的设计审查卡，禁止进入开发阶段。");
+    }
+
+    const visualPreviewDeliverables = project.deliverables
+      .filter((item) => item.stageType === "DESIGN")
+      .filter((item) => isSameCoreDeliverable(item.name, "视觉定稿单页.preview.html.md", "DESIGN"))
+      .sort((a, b) => {
+        const byVersion = b.version - a.version;
+        if (byVersion !== 0) {
+          return byVersion;
+        }
+        return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+      });
+    const latestVisualPreview = visualPreviewDeliverables[0];
+    if (!latestVisualPreview || !hasVisualDesignPreview(String(latestVisualPreview.content || ""))) {
+      throw new Error("DESIGN_VISUAL_PREVIEW_REQUIRED: 设计阶段缺少可视化设计稿（静态图或单页 HTML），禁止进入开发阶段。");
     }
   }
 

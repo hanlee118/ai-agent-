@@ -155,7 +155,7 @@ const projectAdvanceJobErrors = new Map<string, { message: string; at: string }>
 const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md"],
+  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "Demo原型说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
@@ -445,6 +445,74 @@ function buildDesignRequiredSections(
   ].join("\n");
 }
 
+function isVisualMockupDeliverableTitle(title: string) {
+  return /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(title || ""));
+}
+
+function hasVisualDesignPreview(content: string) {
+  const source = String(content || "");
+  return /```html[\s\S]*?```/i.test(source)
+    || /<!doctype html/i.test(source)
+    || /<html[\s>]/i.test(source)
+    || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
+}
+
+function buildVisualDesignPreviewHtml(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  title: string,
+  visualDirection: string
+) {
+  const keywordLine = project.parsedIntent.keywords.slice(0, 5).join(" / ") || "需求闭环 / 可执行 / 可验收";
+  return [
+    "<!doctype html>",
+    "<html lang=\"zh-CN\">",
+    "<head>",
+    "  <meta charset=\"UTF-8\" />",
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+    `  <title>${project.name} · 视觉定稿预览</title>`,
+    "  <style>",
+    "    :root { --bg:#0b1220; --card:#111b2e; --text:#e2e8f0; --muted:#94a3b8; --accent:#22d3ee; --line:#20304a; }",
+    "    * { box-sizing:border-box; }",
+    "    body { margin:0; font-family:'SF Pro Display','Segoe UI','PingFang SC',sans-serif; background:linear-gradient(160deg,#07101d,#0b1626 55%,#132238); color:var(--text); }",
+    "    .wrap { max-width:1120px; margin:0 auto; padding:40px 24px 56px; }",
+    "    .hero { display:grid; grid-template-columns:1.25fr 1fr; gap:18px; }",
+    "    .card { background:rgba(17,27,46,.88); border:1px solid var(--line); border-radius:18px; padding:22px; backdrop-filter: blur(4px); }",
+    "    h1 { margin:0 0 12px; font-size:30px; line-height:1.2; }",
+    "    p { margin:0; color:var(--muted); line-height:1.7; }",
+    "    .tag { display:inline-flex; margin-bottom:12px; padding:4px 10px; border-radius:999px; background:rgba(34,211,238,.16); color:var(--accent); font-size:12px; font-weight:600; }",
+    "    .flow { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }",
+    "    .node { border:1px solid var(--line); border-radius:10px; padding:10px; color:var(--muted); font-size:13px; }",
+    "    .cta { margin-top:14px; display:inline-flex; padding:10px 14px; border-radius:10px; background:var(--accent); color:#032029; text-decoration:none; font-weight:700; }",
+    "    @media (max-width:900px) { .hero { grid-template-columns:1fr; } .flow { grid-template-columns:repeat(2,minmax(0,1fr)); } }",
+    "  </style>",
+    "</head>",
+    "<body>",
+    "  <main class=\"wrap\">",
+    "    <section class=\"hero\">",
+    "      <article class=\"card\">",
+    "        <span class=\"tag\">视觉定稿单页</span>",
+    `        <h1>${project.name}</h1>`,
+    `        <p>目标交付物: ${title}</p>`,
+    `        <p>视觉方向: ${visualDirection}</p>`,
+    `        <p>关键词: ${keywordLine}</p>`,
+    "        <a class=\"cta\" href=\"#\" aria-label=\"确认视觉方案\">确认该视觉方案</a>",
+    "      </article>",
+    "      <article class=\"card\">",
+    "        <h2 style=\"margin:0 0 8px;font-size:20px;\">主链路结构</h2>",
+    "        <div class=\"flow\">",
+    "          <div class=\"node\">需求输入</div>",
+    "          <div class=\"node\">多 Agent 协作</div>",
+    "          <div class=\"node\">执行证据回写</div>",
+    "          <div class=\"node\">阶段验收与回填</div>",
+    "        </div>",
+    "      </article>",
+    "    </section>",
+    "  </main>",
+    "</body>",
+    "</html>"
+  ].join("\n");
+}
+
 function buildAutoSubmissionChecklist(
   stageType: StageType,
   title: string
@@ -608,6 +676,11 @@ function evaluateAutoSubmissionQuality(input: {
     issues.push(`未完整覆盖专业模板章节: ${missingTemplateSections.slice(0, 4).join("、")}${missingTemplateSections.length > 4 ? "..." : ""}`);
   }
 
+  if (template.kind === "visual_mockup" && !hasVisualDesignPreview(input.content)) {
+    score -= 20;
+    issues.push("缺少可渲染视觉设计稿（需包含静态图或 ```html 单页代码）。");
+  }
+
   const pass = score >= 72 && issues.length === 0;
   return {
     pass,
@@ -673,15 +746,31 @@ function buildProjectRequiredActions(
       });
     }
 
-    if (project.currentStage === "DESIGN" && !currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
-      actions.push({
-        id: "design-review-required",
-        severity: "critical",
-        title: "设计阶段缺少通过的设计审查卡",
-        detail: "请补充完整设计审查卡（视觉方案、版式策略、组件清单、品牌语气）并通过审查。",
-        action: "open_design_review",
-        ctaLabel: "提交设计审查卡"
-      });
+    if (project.currentStage === "DESIGN") {
+      if (!currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
+        actions.push({
+          id: "design-review-required",
+          severity: "critical",
+          title: "设计阶段缺少通过的设计审查卡",
+          detail: "请补充完整设计审查卡（视觉方案、版式策略、组件清单、品牌语气）并通过审查。",
+          action: "open_design_review",
+          ctaLabel: "提交设计审查卡"
+        });
+      }
+
+      const hasVisualPreview = currentStageDeliverables.some((item) =>
+        isVisualMockupDeliverableTitle(item.name) && hasVisualDesignPreview(String(item.content || ""))
+      );
+      if (!hasVisualPreview) {
+        actions.push({
+          id: "design-visual-preview-required",
+          severity: "critical",
+          title: "设计阶段缺少可视化设计稿",
+          detail: "请输出可确认的视觉稿（静态图或单页 HTML 预览），用于业务确认后再进入开发。",
+          action: "open_design_review",
+          ctaLabel: "补齐视觉设计稿"
+        });
+      }
     }
 
     if (isAutoApprovalReady(project)) {
@@ -703,6 +792,20 @@ function buildProjectRequiredActions(
       action: "open_design_review",
       ctaLabel: "填写设计审查卡"
     });
+  } else if (project.currentStage === "DESIGN") {
+    const hasVisualPreview = currentStageDeliverables.some((item) =>
+      isVisualMockupDeliverableTitle(item.name) && hasVisualDesignPreview(String(item.content || ""))
+    );
+    if (!hasVisualPreview) {
+      actions.push({
+        id: "design-visual-preview-recommended",
+        severity: "info",
+        title: "建议补齐可视化设计稿后再推进",
+        detail: "当前还没有可视确认的设计单页，建议先补齐静态图或 HTML 预览以降低开发返工。",
+        action: "open_design_review",
+        ctaLabel: "补齐视觉设计稿"
+      });
+    }
   }
 
   const blockedTasks = project.tasks.filter((task) => task.stageType === project.currentStage && task.status === "blocked");
@@ -838,6 +941,22 @@ async function buildAutoStageSubmissions(
       "## 审阅要点",
       ...checklist
     ].join("\n");
+
+    if (project.currentStage === "DESIGN" && isVisualMockupDeliverableTitle(title) && !hasVisualDesignPreview(content)) {
+      const designReview = buildDesignReviewPayload(project, run.model);
+      content = [
+        content,
+        "",
+        "## 单页预览代码（HTML）",
+        "```html",
+        buildVisualDesignPreviewHtml(project, title, designReview.visualDirection),
+        "```",
+        "",
+        "## 预览说明",
+        "- 该 HTML 用于设计确认，开发阶段可按此结构实现真实页面。",
+        "- 若需静态图，可对该单页截图并附在交付物中。"
+      ].join("\n");
+    }
 
     const quality = evaluateAutoSubmissionQuality({
       project,

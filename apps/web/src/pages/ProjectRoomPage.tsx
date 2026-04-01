@@ -990,6 +990,45 @@ const ProjectRoom = ({
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
   const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
+  const isVisualPreviewDeliverable = (item: Pick<ProjectDeliverable, 'name' | 'stageType'>) =>
+    item.stageType === 'DESIGN'
+    && /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(item.name || ''));
+  const extractDeliverableHtmlPreview = (content?: string) => {
+    const source = String(content || '');
+    const fenced = source.match(/```html\s*([\s\S]*?)```/i);
+    if (fenced && fenced[1] && fenced[1].trim()) {
+      return fenced[1].trim();
+    }
+    if (/(<!doctype html|<html[\s>])/i.test(source)) {
+      return source.trim();
+    }
+    return null;
+  };
+  const extractDeliverableImagePreview = (content?: string) => {
+    const source = String(content || '');
+    const markdownImage = source.match(/!\[[^\]]*\]\((https?:\/\/[^\s)]+|data:image\/[^\s)]+)\)/i);
+    if (markdownImage && markdownImage[1]) {
+      return markdownImage[1];
+    }
+    const rawImage = source.match(/(https?:\/\/[^\s"'()]+\.(?:png|jpg|jpeg|webp|gif|svg))/i);
+    if (rawImage && rawImage[1]) {
+      return rawImage[1];
+    }
+    return null;
+  };
+  const previewDeliverableHtml = useMemo(
+    () => (previewDeliverable ? extractDeliverableHtmlPreview(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const previewDeliverableImage = useMemo(
+    () => (previewDeliverable ? extractDeliverableImagePreview(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const canRenderVisualPreview = Boolean(
+    previewDeliverable
+    && isVisualPreviewDeliverable(previewDeliverable)
+    && (previewDeliverableHtml || previewDeliverableImage),
+  );
 
   const getStageAcceptance = (stageType: string) => {
     const items = deliverablesByStage.get(stageType) || [];
@@ -3203,6 +3242,31 @@ const ProjectRoom = ({
                   复制正文
                 </button>
               </div>
+              {canRenderVisualPreview ? (
+                <div className="rounded-xl border border-border-subtle bg-surface-soft/40 p-3 space-y-2">
+                  <p className="text-xs text-slate-300">视觉设计预览（确认后再进入开发）</p>
+                  {previewDeliverableHtml ? (
+                    <iframe
+                      title="视觉设计预览"
+                      sandbox=""
+                      srcDoc={previewDeliverableHtml}
+                      className="w-full h-[58vh] rounded-lg border border-border-subtle bg-white"
+                    />
+                  ) : null}
+                  {!previewDeliverableHtml && previewDeliverableImage ? (
+                    <img
+                      src={previewDeliverableImage}
+                      alt="视觉设计稿预览"
+                      className="w-full max-h-[58vh] object-contain rounded-lg border border-border-subtle bg-slate-950"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              {previewDeliverable && isVisualPreviewDeliverable(previewDeliverable) && !canRenderVisualPreview ? (
+                <p className="text-xs text-warning">
+                  当前未检测到可渲染的视觉预览，请在交付物中补充静态图链接或 ```html 单页代码。
+                </p>
+              ) : null}
               <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border-subtle bg-surface-muted p-4">
                 <pre className="text-xs leading-6 text-slate-200 whitespace-pre-wrap break-words">{previewDeliverable.content || '该交付物暂无正文内容。'}</pre>
               </div>

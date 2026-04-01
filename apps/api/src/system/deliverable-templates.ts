@@ -7,6 +7,7 @@ export type DeliverableTemplateKind =
   | "presentation_ppt"
   | "implementation_word"
   | "design_review"
+  | "visual_mockup"
   | "demo_prototype"
   | "test_report"
   | "product_backfill"
@@ -176,6 +177,31 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
       "所有重点页面需给交互反馈策略。"
     ]
   },
+  visual_mockup: {
+    kind: "visual_mockup",
+    label: "视觉定稿单页模板",
+    requiredSections: [
+      "## 视觉目标与范围",
+      "## 布局与信息架构",
+      "## 视觉规范（色彩 / 字体 / 间距）",
+      "## 单页预览代码（HTML）",
+      "## 交互与状态说明"
+    ],
+    sectionBlueprint: [
+      "- 用页面结构解释业务主链路，不允许只写概念描述。",
+      "- HTML 预览需可直接在浏览器打开并看到完整页面。",
+      "- 交互说明至少覆盖主 CTA、悬停态与反馈态。"
+    ],
+    acceptanceChecklist: [
+      "包含可渲染的单页 HTML 预览代码块（```html）。",
+      "页面具备首屏价值主张、核心能力区块与主 CTA。",
+      "视觉规范与交互说明可支撑开发阶段实现。"
+    ],
+    authoringRules: [
+      "优先输出可确认视觉结果，再补充文档解释。",
+      "禁止只给文字描述而没有可视化预览。"
+    ]
+  },
   demo_prototype: {
     kind: "demo_prototype",
     label: "Demo / 原型说明模板",
@@ -297,6 +323,9 @@ export function resolveDeliverableTemplate(title: string, stageType: StageType):
   }
   if (/审查卡|design review|设计审查/.test(normalized)) {
     return TEMPLATE_LIBRARY.design_review;
+  }
+  if (/视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/.test(normalized)) {
+    return TEMPLATE_LIBRARY.visual_mockup;
   }
   if (/demo|原型|演示页|官网/.test(normalized)) {
     return TEMPLATE_LIBRARY.demo_prototype;
