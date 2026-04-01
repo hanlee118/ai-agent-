@@ -14,6 +14,7 @@ import {
   createProject,
   deleteProject,
   findProject,
+  getDesignInterventionSignal,
   interveneProject,
   listProjectExecutions,
   listProjectTasks,
@@ -729,6 +730,8 @@ type ProjectRequiredAction = {
     | "reconcile_deliverables"
     | "refresh_runtime";
   ctaLabel: string;
+  reasonCode?: "design_ambiguity";
+  prefillContent?: string;
 };
 
 type ProjectRecord = NonNullable<Awaited<ReturnType<typeof findProject>>>;
@@ -1100,6 +1103,7 @@ function buildRealModelGateRecoveryActions(input: {
       /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|preview\.html/i.test(String(item.name || ""))
       && hasVisualDesignPreview(String(item.content || ""))
     );
+  const designInterventionRequired = getDesignInterventionSignal(input.project).required;
   const hasBlockedTasks = input.project.tasks.some(
     (task) => task.stageType === input.project.currentStage && task.status === "blocked"
   );
@@ -1115,7 +1119,8 @@ function buildRealModelGateRecoveryActions(input: {
       return requiredByAction.has(action);
     }
     if (action === "open_design_review") {
-      return requiredByAction.has(action) || (input.project.currentStage === "DESIGN" && (!hasDesignReview || !hasVisualPreview));
+      return requiredByAction.has(action)
+        || (input.project.currentStage === "DESIGN" && designInterventionRequired && (!hasDesignReview || !hasVisualPreview));
     }
     if (action === "resolve_blocked_tasks") {
       return hasBlockedTasks || requiredByAction.has(action);

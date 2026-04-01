@@ -107,6 +107,143 @@ type ProjectRoomLogItem = {
   timestamp: number;
 };
 
+type ProjectRoomDesignReviewForm = {
+  visualDirection: string;
+  brandTone: string;
+  layoutStrategy: string;
+  componentSpecs: string;
+  uxPrinciples: string;
+  accessibilityChecklist: string;
+  approvedBy: string;
+  notes: string;
+  approved: boolean;
+};
+
+const DEFAULT_REVIEWER = '视觉设计总监';
+const DEFAULT_UX_ITEMS = ['主路径优先', '关键反馈及时', '降低认知负担'];
+const DEFAULT_A11Y_ITEMS = ['文本对比度达标', '键盘可达', '语义结构完整'];
+
+const createDefaultDesignReviewForm = (): ProjectRoomDesignReviewForm => ({
+  visualDirection: '',
+  brandTone: '',
+  layoutStrategy: '',
+  componentSpecs: '',
+  uxPrinciples: '',
+  accessibilityChecklist: '',
+  approvedBy: DEFAULT_REVIEWER,
+  notes: '',
+  approved: true,
+});
+
+const isDesignReviewFormBlank = (form: ProjectRoomDesignReviewForm) => {
+  return ![
+    form.visualDirection,
+    form.brandTone,
+    form.layoutStrategy,
+    form.componentSpecs,
+    form.uxPrinciples,
+    form.accessibilityChecklist,
+    form.notes,
+  ].some((item) => String(item || '').trim().length > 0);
+};
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const extractSectionBullets = (source: string, title: string) => {
+  const sectionPattern = new RegExp(`##\\s*${escapeRegExp(title)}\\s*([\\s\\S]*?)(?=\\n##\\s|$)`, 'i');
+  const section = source.match(sectionPattern)?.[1] || '';
+  return section
+    .split('\n')
+    .map((line) => line.trim().replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean);
+};
+
+const pickLine = (source: string, patterns: RegExp[]) => {
+  for (const pattern of patterns) {
+    const matched = source.match(pattern);
+    if (matched?.[1]) {
+      const value = matched[1].trim();
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return '';
+};
+
+const ensureAtLeastThree = (items: string[], fallback: string[]) => {
+  const deduped = Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+  const merged = [...deduped];
+  for (const candidate of fallback) {
+    if (merged.length >= 3) {
+      break;
+    }
+    if (!merged.includes(candidate)) {
+      merged.push(candidate);
+    }
+  }
+  return merged.slice(0, 6);
+};
+
+const buildDesignReviewPrefill = (input: {
+  source: string;
+  actionDetail?: string;
+}): ProjectRoomDesignReviewForm | null => {
+  const source = String(input.source || '').replace(/\r\n/g, '\n').trim();
+  if (!source) {
+    return null;
+  }
+
+  const visualDirection = pickLine(source, [
+    /(?:视觉方向|视觉风格|视觉主题)[:：]\s*([^\n]+)/i,
+    /##\s*视觉方案[\s\S]*?-\s*([^\n]+)/i,
+  ]) || '请围绕业务主链路确认视觉方向';
+
+  const brandTone = pickLine(source, [
+    /(?:品牌语气|语气|品牌调性)[:：]\s*([^\n]+)/i,
+    /##\s*品牌语气[\s\S]*?-\s*([^\n]+)/i,
+  ]) || '专业、直接、可执行';
+
+  const layoutStrategy = pickLine(source, [
+    /(?:版式策略|布局策略|信息架构)[:：]\s*([^\n]+)/i,
+  ]) || extractSectionBullets(source, '版式策略').slice(0, 4).join('；') || '首屏价值主张 -> 核心流程 -> 执行证据 -> CTA';
+
+  const componentSpecs = pickLine(source, [
+    /(?:组件规范|组件清单|模块清单)[:：]\s*([^\n]+)/i,
+  ]) || extractSectionBullets(source, '组件清单').slice(0, 6).join('；') || 'Hero、能力卡、流程步骤、证据卡、CTA';
+
+  const uxLine = pickLine(source, [/(?:UX\s*原则|交互原则|体验原则)[:：]\s*([^\n]+)/i]);
+  const uxSection = extractSectionBullets(source, 'UX 原则');
+  const uxPrinciples = ensureAtLeastThree([
+    ...uxSection,
+    ...uxLine.split(/[；;，,\n]/),
+  ], DEFAULT_UX_ITEMS);
+
+  const a11yLine = pickLine(source, [/(?:可访问性检查|无障碍清单|可访问性清单)[:：]\s*([^\n]+)/i]);
+  const a11ySection = extractSectionBullets(source, '可访问性检查');
+  const accessibilityChecklist = ensureAtLeastThree([
+    ...a11ySection,
+    ...a11yLine.split(/[；;，,\n]/),
+  ], DEFAULT_A11Y_ITEMS);
+
+  const compact = source.replace(/\s+/g, ' ').trim();
+  const summary = compact.length > 220 ? `${compact.slice(0, 220)}...` : compact;
+  const noteHead = input.actionDetail ? `触发原因: ${input.actionDetail}` : '触发原因: 设计 Agent 需要人工补充或确认';
+  const notes = `${noteHead}\n\nAgent 思考摘录:\n${summary}`;
+
+  return {
+    visualDirection,
+    brandTone,
+    layoutStrategy,
+    componentSpecs,
+    uxPrinciples: uxPrinciples.join('\n'),
+    accessibilityChecklist: accessibilityChecklist.join('\n'),
+    approvedBy: DEFAULT_REVIEWER,
+    notes,
+    approved: true,
+  };
+};
+
 const ROLE_LABELS: Record<string, string> = {
   ROLE_ASSISTANT: '总助理',
   ROLE_PM: '项目经理',
@@ -291,17 +428,7 @@ const ProjectRoom = ({
     approved: boolean;
     visualDirection: string;
   }>>([]);
-  const [designReviewForm, setDesignReviewForm] = useState({
-    visualDirection: '',
-    brandTone: '',
-    layoutStrategy: '',
-    componentSpecs: '',
-    uxPrinciples: '',
-    accessibilityChecklist: '',
-    approvedBy: '视觉设计总监',
-    notes: '',
-    approved: true,
-  });
+  const [designReviewForm, setDesignReviewForm] = useState<ProjectRoomDesignReviewForm>(createDefaultDesignReviewForm());
   const missingProjectHandledRef = useRef<string | null>(null);
   const addToastRef = useRef(addToast);
   const onProjectMissingRef = useRef(onProjectMissing);
@@ -332,6 +459,11 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectId = projectId || project.id;
+
+  useEffect(() => {
+    setDesignReviewForm(createDefaultDesignReviewForm());
+    setIsDesignReviewOpen(false);
+  }, [effectiveProjectId]);
 
   const loadProjectDetail = useCallback(async () => {
     if (!effectiveProjectId) {
@@ -742,12 +874,27 @@ const ProjectRoom = ({
     [detail?.requiredActions],
   );
 
+  const designReviewRequiredAction = useMemo(
+    () => requiredActions.find((action) => action.action === 'open_design_review') || null,
+    [requiredActions],
+  );
+
+  const latestDesignExecution = useMemo(() => {
+    const designRuns = executionRecords
+      .filter((record) => String(record.stageType || '').toUpperCase() === 'DESIGN')
+      .slice()
+      .sort((left, right) => {
+        const leftTime = new Date(left.updatedAt || left.createdAt).getTime();
+        const rightTime = new Date(right.updatedAt || right.createdAt).getTime();
+        return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+      });
+    return designRuns[0] || null;
+  }, [executionRecords]);
+
   const isDesignPhase = useMemo(() => {
-    const text = [project.phase, project.description, ...effectiveProjectTasks.map((task) => `${task.title} ${task.agent}`)]
-      .join(' ')
-      .toLowerCase();
-    return /(design|设计|视觉|交互|页面|官网)/i.test(text);
-  }, [project.phase, project.description, effectiveProjectTasks]);
+    const stageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+    return stageType === 'DESIGN' && String(detail?.status || '').toLowerCase() === 'active';
+  }, [detail?.currentStage, detail?.status, stageItems]);
 
   const getTaskTimestamp = (task: Task) => {
     const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
@@ -1836,6 +1983,29 @@ const ProjectRoom = ({
       .map((item) => item.trim())
       .filter(Boolean);
 
+  const openDesignReviewModal = useCallback((action?: ProjectRequiredAction) => {
+    setDesignReviewForm((prev) => {
+      if (!isDesignReviewFormBlank(prev)) {
+        return prev;
+      }
+      const source = [
+        action?.prefillContent,
+        latestDesignExecution?.outputPreview,
+        latestDesignExecution?.promptSummary,
+        latestDesignExecution?.errorMessage,
+      ]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const prefilled = buildDesignReviewPrefill({
+        source,
+        actionDetail: action?.detail,
+      });
+      return prefilled || prev;
+    });
+    setIsDesignReviewOpen(true);
+  }, [latestDesignExecution]);
+
   const handleSubmitDesignReview = async () => {
     if (!project.id) {
       addToast('当前没有可提交审查卡的项目', 'error');
@@ -1914,6 +2084,7 @@ const ProjectRoom = ({
   };
 
   const designReviewTips = [
+    '当设计 Agent 识别到需求不清晰/无法继续时，系统会自动预填该表单',
     '视觉方向必须明确（品牌气质 + 主色氛围）',
     '版式策略必须说明首屏到 CTA 的叙事顺序',
     '组件规范至少列出 Hero/能力卡/流程/案例/CTA',
@@ -1967,8 +2138,12 @@ const ProjectRoom = ({
         return;
       }
       if (action.action === 'open_design_review') {
-        setIsDesignReviewOpen(true);
-        addToast('请先完成设计审查卡，再继续推进', 'info');
+        openDesignReviewModal(action);
+        if (action.reasonCode === 'design_ambiguity') {
+          addToast('已根据设计 Agent 的输出自动预填，你可以直接提交或补充编辑。', 'info');
+        } else {
+          addToast('请先完成设计审查卡，再继续推进', 'info');
+        }
         return;
       }
       if (action.action === 'review_pending_stage') {
@@ -2048,7 +2223,7 @@ const ProjectRoom = ({
           </button>
           {isDesignPhase ? (
             <button
-              onClick={() => setIsDesignReviewOpen(true)}
+              onClick={() => openDesignReviewModal(designReviewRequiredAction || undefined)}
               className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 bg-primary text-slate-950 hover:bg-primary/90 rounded-lg text-xs sm:text-sm font-semibold transition-colors"
             >
               <FileText size={16} />
@@ -3085,7 +3260,7 @@ const ProjectRoom = ({
       <SurfaceModal
         isOpen={isDesignReviewOpen}
         onClose={() => setIsDesignReviewOpen(false)}
-        title="设计审查卡（开发前必填）"
+        title="设计审查卡（需求不清晰时介入）"
         panelClassName="max-w-3xl"
       >
         <div className="space-y-5">

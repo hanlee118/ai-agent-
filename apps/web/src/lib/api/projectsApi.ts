@@ -191,6 +191,8 @@ export type ProjectRequiredAction = {
     | 'reconcile_deliverables'
     | 'refresh_runtime';
   ctaLabel: string;
+  reasonCode?: 'design_ambiguity';
+  prefillContent?: string;
 };
 
 export type ProjectTemplateGatePrecheck = {

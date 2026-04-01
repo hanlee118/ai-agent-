@@ -40,6 +40,7 @@ import {
   createProject,
   deleteProject,
   findProject,
+  getDesignInterventionSignal,
   getSystemHealth,
   interveneProject,
   listProjectTasks,
@@ -200,6 +201,8 @@ type ProjectRequiredAction = {
   detail: string;
   action: "submit_stage_deliverable" | "open_design_review" | "review_pending_stage" | "resolve_blocked_tasks" | "reconcile_deliverables" | "refresh_runtime";
   ctaLabel: string;
+  reasonCode?: "design_ambiguity";
+  prefillContent?: string;
 };
 
 function isRealModelGateEnabled() {
@@ -721,6 +724,7 @@ function buildProjectRequiredActions(
   const currentStageDeliverables = project.deliverables
     .filter((item) => item.stageType === project.currentStage)
     .sort((left, right) => right.version - left.version);
+  const designIntervention = getDesignInterventionSignal(project);
 
   if (project.pendingApproval) {
     if (currentStageDeliverables.length === 0) {
@@ -749,15 +753,17 @@ function buildProjectRequiredActions(
       });
     }
 
-    if (project.currentStage === "DESIGN") {
+    if (project.currentStage === "DESIGN" && designIntervention.required) {
       if (!currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
         actions.push({
           id: "design-review-required",
           severity: "critical",
-          title: "设计阶段缺少通过的设计审查卡",
-          detail: "请补充完整设计审查卡（视觉方案、版式策略、组件清单、品牌语气）并通过审查。",
+          title: "设计阶段需要人工介入确认",
+          detail: `检测到设计阶段存在“${designIntervention.reasonDetail || "需求澄清"}”信号，请确认或补充设计审查卡后继续推进。`,
           action: "open_design_review",
-          ctaLabel: "提交设计审查卡"
+          ctaLabel: "提交设计审查卡",
+          reasonCode: designIntervention.reasonCode,
+          prefillContent: designIntervention.prefillContent
         });
       }
 
@@ -769,9 +775,11 @@ function buildProjectRequiredActions(
           id: "design-visual-preview-required",
           severity: "critical",
           title: "设计阶段缺少可视化设计稿",
-          detail: "请输出可确认的视觉稿（静态图或单页 HTML 预览），用于业务确认后再进入开发。",
+          detail: "请补充可确认的视觉稿（静态图或单页 HTML 预览），用于业务确认后再进入开发。",
           action: "open_design_review",
-          ctaLabel: "补齐视觉设计稿"
+          ctaLabel: "补齐视觉设计稿",
+          reasonCode: designIntervention.reasonCode,
+          prefillContent: designIntervention.prefillContent
         });
       }
     }
@@ -786,27 +794,31 @@ function buildProjectRequiredActions(
         ctaLabel: "执行阶段验收"
       });
     }
-  } else if (project.currentStage === "DESIGN" && currentStageDeliverables.length === 0) {
+  } else if (project.currentStage === "DESIGN" && designIntervention.required && currentStageDeliverables.length === 0) {
     actions.push({
       id: "design-phase-no-deliverable",
-      severity: "info",
-      title: "设计阶段尚未提交交付物",
-      detail: "建议先完成设计审查卡，再提交设计交付物，避免后续阶段返工。",
+      severity: "warning",
+      title: "设计阶段需要先确认澄清项",
+      detail: `检测到设计 Agent 存在“${designIntervention.reasonDetail || "需求澄清"}”阻塞，请先确认审查卡再继续。`,
       action: "open_design_review",
-      ctaLabel: "填写设计审查卡"
+      ctaLabel: "填写设计审查卡",
+      reasonCode: designIntervention.reasonCode,
+      prefillContent: designIntervention.prefillContent
     });
-  } else if (project.currentStage === "DESIGN") {
+  } else if (project.currentStage === "DESIGN" && designIntervention.required) {
     const hasVisualPreview = currentStageDeliverables.some((item) =>
       isVisualMockupDeliverableTitle(item.name) && hasVisualDesignPreview(String(item.content || ""))
     );
     if (!hasVisualPreview) {
       actions.push({
         id: "design-visual-preview-recommended",
-        severity: "info",
-        title: "建议补齐可视化设计稿后再推进",
-        detail: "当前还没有可视确认的设计单页，建议先补齐静态图或 HTML 预览以降低开发返工。",
+        severity: "warning",
+        title: "设计阶段需补齐可视化确认稿",
+        detail: "当前检测到设计澄清需求，建议先补齐静态图或 HTML 预览再推进，避免返工。",
         action: "open_design_review",
-        ctaLabel: "补齐视觉设计稿"
+        ctaLabel: "补齐视觉设计稿",
+        reasonCode: designIntervention.reasonCode,
+        prefillContent: designIntervention.prefillContent
       });
     }
   }

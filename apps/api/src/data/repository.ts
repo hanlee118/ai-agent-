@@ -87,6 +87,71 @@ const STAGE_ROLE_MODEL_GATE_TARGETS: Partial<Record<StageType, RoleType[]>> = {
   ACCEPT: ["ROLE_QA"]
 };
 
+export type DesignInterventionSignal = {
+  required: boolean;
+  reasonCode?: "design_ambiguity";
+  reasonDetail?: string;
+  prefillContent?: string;
+  source?: "live_session" | "deliverable" | "timeline";
+};
+
+const DESIGN_INTERVENTION_RULES: Array<{
+  reasonDetail: string;
+  pattern: RegExp;
+}> = [
+  {
+    reasonDetail: "需求描述存在模糊或未确认项",
+    pattern: /(需求|目标|范围|场景|流程).{0,16}(不清晰|模糊|不明确|无法确定|待确认|需确认)/i
+  },
+  {
+    reasonDetail: "关键输入信息不足",
+    pattern: /(信息|上下文|输入|素材|业务规则).{0,12}(不足|缺失|不完整)/i
+  },
+  {
+    reasonDetail: "设计 Agent 请求补充关键信息",
+    pattern: /(请|需|需要).{0,18}(补充|澄清|明确).{0,18}(需求|信息|目标|范围|约束)/i
+  },
+  {
+    reasonDetail: "设计 Agent 表示当前无法继续推进",
+    pattern: /(无法|不能|难以).{0,12}(继续|推进|完成|产出|定稿|设计)/i
+  },
+  {
+    reasonDetail: "设计阶段等待用户确认后才能继续",
+    pattern: /(等待|待).{0,10}(你|用户|业务方).{0,10}(确认|补充|拍板|反馈)/i
+  }
+];
+
+function sanitizeDesignInterventionText(input: string, maxLength = 1400) {
+  const normalized = String(input || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+function extractDesignInterventionSnippet(source: string, matchedIndex: number, radius = 260) {
+  const normalized = sanitizeDesignInterventionText(source, 5000);
+  if (!normalized) {
+    return "";
+  }
+  const safeIndex = Number.isFinite(matchedIndex) ? Math.max(0, Math.floor(matchedIndex)) : 0;
+  const start = Math.max(0, safeIndex - radius);
+  const end = Math.min(normalized.length, safeIndex + radius);
+  const slice = normalized.slice(start, end).trim();
+  if (!slice) {
+    return "";
+  }
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < normalized.length ? "..." : "";
+  return `${prefix}${slice}${suffix}`;
+}
+
 function isProjectWarmupEnabled() {
   if (process.env.NODE_ENV === "test") {
     return false;
@@ -464,6 +529,72 @@ function hasVisualDesignPreview(content: string) {
     || /<!doctype html/i.test(source)
     || /<html[\s>]/i.test(source)
     || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
+}
+
+export function getDesignInterventionSignal(
+  project: Pick<ProjectDetail, "status" | "currentStage" | "liveSession" | "deliverables" | "timeline">
+): DesignInterventionSignal {
+  if (project.status === "completed" || project.currentStage !== "DESIGN") {
+    return { required: false };
+  }
+
+  const designDeliverables = project.deliverables
+    .filter((item) => item.stageType === "DESIGN")
+    .sort((left, right) => {
+      const byVersion = right.version - left.version;
+      if (byVersion !== 0) {
+        return byVersion;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })
+    .slice(0, 3);
+
+  const timelineItems = project.timeline
+    .slice()
+    .sort((left, right) => new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime())
+    .slice(0, 8);
+
+  const candidates: Array<{ source: DesignInterventionSignal["source"]; text: string }> = [];
+  const liveBody = String(project.liveSession?.body || "").trim();
+  if (liveBody) {
+    candidates.push({ source: "live_session", text: liveBody });
+  }
+  for (const deliverable of designDeliverables) {
+    const content = String(deliverable.content || "").trim();
+    if (content) {
+      candidates.push({ source: "deliverable", text: content });
+    }
+  }
+  for (const timeline of timelineItems) {
+    const content = String(timeline.content || "").trim();
+    if (content) {
+      candidates.push({ source: "timeline", text: content });
+    }
+  }
+
+  for (const candidate of candidates) {
+    for (const rule of DESIGN_INTERVENTION_RULES) {
+      const match = rule.pattern.exec(candidate.text);
+      if (!match) {
+        continue;
+      }
+      const snippet = extractDesignInterventionSnippet(candidate.text, match.index ?? 0);
+      const prefillLines = [
+        `【Agent 介入说明】${rule.reasonDetail}`,
+        "【Agent 输出摘录】",
+        snippet || sanitizeDesignInterventionText(candidate.text, 520)
+      ];
+      return {
+        required: true,
+        reasonCode: "design_ambiguity",
+        reasonDetail: rule.reasonDetail,
+        prefillContent: prefillLines.join("\n"),
+        source: candidate.source
+      };
+    }
+  }
+
+  return { required: false };
 }
 
 function buildVisualDesignPreviewHtml(input: {
@@ -2259,7 +2390,8 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     return project;
   }
 
-  if (project.currentStage === "DESIGN") {
+  const designIntervention = getDesignInterventionSignal(project);
+  if (project.currentStage === "DESIGN" && designIntervention.required) {
     const designReviewDeliverables = project.deliverables
       .filter((item) => item.stageType === "DESIGN")
       .filter((item) => isSameCoreDeliverable(item.name, "设计审查卡.md", "DESIGN"))
@@ -2779,16 +2911,19 @@ export async function submitCurrentStage(
   const normalizedDesignContent = currentStageType === "DESIGN" && normalizedDesignReview
     ? ensureDesignSubmissionContent(input.content, normalizedDesignReview)
     : input.content;
+  const designInterventionRequired = currentStageType === "DESIGN" && getDesignInterventionSignal(project).required;
   if (currentStageType === "DESIGN") {
-    if (!normalizedDesignReview) {
+    if (designInterventionRequired && !normalizedDesignReview) {
       throw new Error("DESIGN_REVIEW_REQUIRED: 设计阶段提交必须包含完整设计审查卡。");
     }
-    if (!normalizedDesignReview.approved) {
+    if (normalizedDesignReview && !normalizedDesignReview.approved) {
       throw new Error("DESIGN_REVIEW_NOT_APPROVED: 设计审查卡未通过，禁止提交阶段交付。");
     }
-    const designErrors = validateDesignSubmission(normalizedDesignContent);
-    if (designErrors.length > 0) {
-      throw new Error(`DESIGN_REVIEW_REQUIRED: ${designErrors.join("；")}`);
+    if (designInterventionRequired) {
+      const designErrors = validateDesignSubmission(normalizedDesignContent);
+      if (designErrors.length > 0) {
+        throw new Error(`DESIGN_REVIEW_REQUIRED: ${designErrors.join("；")}`);
+      }
     }
   }
   const submittedContent = normalizedDesignReview
