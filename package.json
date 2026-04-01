@@ -12,6 +12,7 @@
     "verify:local": "node scripts/verify-local.mjs",
     "verify:smoke": "bash scripts/verify-smoke.sh",
     "verify:real-data:round2": "node scripts/verify-real-data-round2.mjs",
+    "verify:repeatable:018": "node scripts/verify-repeatable-018.mjs",
     "verify:closure": "node --input-type=module -e \"import('./scripts/verify-closure.mjs')\"",
     "test:smoke": "pnpm verify:local && pnpm verify:smoke",
     "test:acceptance": "pnpm verify:local && pnpm verify:smoke && pnpm verify:closure",

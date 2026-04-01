@@ -221,6 +221,59 @@ const GENERIC_OUTPUT_PATTERNS = [
   /优先打通数据库、仓储和实时执行流/
 ];
 
+const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(2, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
+const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
+  45_000,
+  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 120_000)
+);
+const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
+  900,
+  Number(process.env.MANUAL_ADVANCE_BACKOFF_BASE_MS ?? 1_200)
+);
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  try {
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function computeAdvanceBackoffMs(attempt: number, recovering = false) {
+  const normalizedAttempt = Math.max(1, attempt);
+  const base = Math.min(22_000, MANUAL_ADVANCE_BACKOFF_BASE_MS * (2 ** (normalizedAttempt - 1)));
+  const jitter = Math.round(base * (recovering ? 0.3 : 0.2) * Math.random());
+  return Math.min(28_000, base + jitter + (recovering ? 450 : 180));
+}
+
+function isTransientAdvanceErrorMessage(message: string) {
+  const normalized = String(message || "").toUpperCase();
+  return normalized.includes("MODEL_ATTEMPT_TIMEOUT")
+    || normalized.includes("MANUAL_ADVANCE_ATTEMPT_TIMEOUT")
+    || normalized.includes("REQUEST_TIMEOUT")
+    || normalized.includes("ETIMEDOUT")
+    || normalized.includes("ECONNRESET")
+    || normalized.includes("EAI_AGAIN")
+    || normalized.includes("429")
+    || normalized.includes("503")
+    || normalized.includes("REAL_MODEL_GATE_FAILED")
+    || normalized.includes("PROJECT_ADVANCE_IN_PROGRESS");
+}
+
+function isTemplateValidationErrorMessage(message: string) {
+  return String(message || "").includes("STAGE_TEMPLATE_VALIDATION_FAILED");
+}
+
 function buildAutoStageTitle(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
   return STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage]?.[0] || `自动提交-${project.currentStage}阶段.md`;
 }
@@ -245,15 +298,67 @@ function summarizeAdvanceError(error: unknown) {
 
 async function executeManualAdvanceCycle(projectId: string) {
   await withProjectLock(projectId, async () => {
-    const current = await findProject(projectId);
-    if (!current || current.status !== "active" || current.pendingApproval) {
-      return;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= MANUAL_ADVANCE_MAX_ATTEMPTS; attempt += 1) {
+      const current = await findProject(projectId);
+      if (!current || current.status !== "active" || current.pendingApproval) {
+        return;
+      }
+
+      try {
+        const submissions = await withTimeout(
+          buildAutoStageSubmissions(current, {
+            action: "stage.auto_submission.manual_advance",
+            metadata: {
+              manualAdvanceAttempt: attempt,
+              manualAdvanceMaxAttempts: MANUAL_ADVANCE_MAX_ATTEMPTS
+            }
+          }),
+          MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
+        );
+        await withTimeout(
+          submitStageSubmissionBundle(projectId, submissions),
+          MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} submitStageSubmissionBundle exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
+        );
+        return;
+      } catch (error) {
+        lastError = error;
+        const message = summarizeAdvanceError(error);
+        const isTemplateError = isTemplateValidationErrorMessage(message);
+        const isTransientError = isTransientAdvanceErrorMessage(message);
+
+        if (!isTemplateError && !isTransientError) {
+          throw error;
+        }
+
+        const isRealModelGateError = message.includes("REAL_MODEL_GATE_FAILED");
+        if (isTemplateError || isRealModelGateError) {
+          await reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
+            console.warn(
+              `[project.advance] auto reconcile failed for ${projectId}:`,
+              reconcileError instanceof Error ? reconcileError.message : String(reconcileError)
+            );
+          });
+        }
+
+        if (!isTemplateError) {
+          await validateRuntimeSettings().catch(() => {
+            // ignore runtime validation errors, continue retry loop
+          });
+        }
+
+        if (attempt < MANUAL_ADVANCE_MAX_ATTEMPTS) {
+          const backoffMs = computeAdvanceBackoffMs(attempt, isRealModelGateError);
+          await sleep(backoffMs);
+          continue;
+        }
+      }
     }
 
-    const submissions = await buildAutoStageSubmissions(current, {
-      action: "stage.auto_submission.manual_advance"
-    });
-    await submitStageSubmissionBundle(projectId, submissions);
+    throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "manual advance failed"));
   });
 }
 

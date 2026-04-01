@@ -7,6 +7,7 @@ cd "$ROOT_DIR"
 API_BASE_URL="${OCC_BASE_URL:-}"
 TMP_DIR="$(mktemp -d)"
 SESSION_TOKEN=""
+API_STARTED_BY_SCRIPT="false"
 
 cleanup() {
   if [[ -n "$SESSION_TOKEN" ]]; then
@@ -23,6 +24,10 @@ if (sessionToken) {
 
 await prisma.$disconnect();
 EOF
+  fi
+
+  if [[ "$API_STARTED_BY_SCRIPT" == "true" ]]; then
+    pnpm daemon:stop >/dev/null 2>&1 || true
   fi
 
   rm -rf "$TMP_DIR"
@@ -52,6 +57,35 @@ resolve_api_base_url() {
     fi
   done
 
+  return 1
+}
+
+ensure_api_ready() {
+  if [[ -n "$API_BASE_URL" ]] && curl -sf "$API_BASE_URL/health" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ -z "$API_BASE_URL" ]]; then
+    API_BASE_URL="$(resolve_api_base_url "$COOKIE_HEADER" || resolve_api_base_url || true)"
+  fi
+
+  if [[ -n "$API_BASE_URL" ]] && curl -sf "$API_BASE_URL/health" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "verify-smoke: API not reachable, starting local daemon on :8787"
+  pnpm daemon:start >/dev/null
+  API_STARTED_BY_SCRIPT="true"
+  API_BASE_URL="${API_BASE_URL:-http://127.0.0.1:8787}"
+
+  for _ in $(seq 1 20); do
+    if curl -sf "$API_BASE_URL/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "verify-smoke: API did not become healthy in time" >&2
   return 1
 }
 
@@ -90,10 +124,8 @@ EOF
 
 COOKIE_HEADER="occ_session=${SESSION_TOKEN}"
 
-if [[ -z "$API_BASE_URL" ]]; then
-  API_BASE_URL="$(resolve_api_base_url "$COOKIE_HEADER" || resolve_api_base_url || true)"
-  API_BASE_URL="${API_BASE_URL:-http://localhost:8787}"
-fi
+ensure_api_ready
+API_BASE_URL="${API_BASE_URL:-http://127.0.0.1:8787}"
 
 echo "verify-smoke: checking public endpoints"
 

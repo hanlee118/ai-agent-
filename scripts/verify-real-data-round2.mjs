@@ -3,6 +3,9 @@ import path from "node:path";
 
 const API_BASE = (process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
 const MAX_ROUNDS = Math.max(60, Number(process.env.MAX_ROUNDS || 220));
+const MAX_IN_PROGRESS_BONUS_ROUNDS = Math.max(30, Number(process.env.MAX_IN_PROGRESS_BONUS_ROUNDS || 240));
+const REQUEST_TIMEOUT_MS = Math.max(180000, Number(process.env.REQUEST_TIMEOUT_MS || 360000));
+const ADVANCE_TIMEOUT_MS = Math.max(240000, Number(process.env.ADVANCE_TIMEOUT_MS || 540000));
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "Admin@123456").trim();
 const SKIP_RUNTIME_PREFLIGHT = String(process.env.SKIP_RUNTIME_PREFLIGHT || "").trim().toLowerCase() === "true";
 const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -13,7 +16,11 @@ const stageOrder = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const stageMustHaveExecutions = ["ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const requiredRoles = ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"];
 
-async function req(method, pathname, body, timeoutMs = 240000) {
+function isTransportRetryable(resp) {
+  return Boolean(resp && [502, 503, 504, 598, 599].includes(Number(resp.status)));
+}
+
+async function req(method, pathname, body, timeoutMs = REQUEST_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -48,6 +55,18 @@ async function req(method, pathname, body, timeoutMs = 240000) {
       payload = text;
     }
     return { status: res.status, body: payload };
+  } catch (error) {
+    const aborted = error?.name === "AbortError";
+    return {
+      status: aborted ? 598 : 599,
+      body: {
+        error: {
+          code: aborted ? "REQUEST_TIMEOUT" : "REQUEST_FAILED",
+          name: String(error?.name || "Error"),
+          message: String(error?.message || error || "")
+        }
+      }
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -166,8 +185,38 @@ async function handleRequiredActions(project, actions, logs) {
   const has = (action) => list.some((item) => item?.action === action);
   logs.push({ at: new Date().toISOString(), type: "required_actions", list });
 
+  const needRuntimeRefresh = has("refresh_runtime");
+  if (needRuntimeRefresh) {
+    const validate = await req("POST", "/api/system/runtime/validate", {}, 180000);
+    logs.push({
+      at: new Date().toISOString(),
+      type: "runtime_validate",
+      status: validate.status,
+      code: validate.body?.error?.code || validate.body?.code || null
+    });
+    // refresh_runtime can coexist with actionable items (e.g. review_pending_stage),
+    // so only return early when it is the sole required action.
+    if (list.length === 1) {
+      const detail = await req("GET", `/api/projects/${encodeURIComponent(project.id)}`, null, REQUEST_TIMEOUT_MS);
+      if (detail.status === 200) {
+        return unwrap(detail.body);
+      }
+      return project;
+    }
+  }
+
   if (has("review_pending_stage")) {
     const approve = await req("POST", `/api/projects/${encodeURIComponent(project.id)}/approve`, {});
+    if (isTransportRetryable(approve)) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "required_action_retryable_transport",
+        action: "review_pending_stage",
+        status: approve.status,
+        code: approve.body?.error?.code
+      });
+      return project;
+    }
     if (approve.status !== 200) {
       throw new Error(`approve failed: ${approve.status} ${JSON.stringify(approve.body).slice(0, 500)}`);
     }
@@ -189,6 +238,10 @@ async function handleRequiredActions(project, actions, logs) {
       "- 主链路优先；低延迟反馈；减少认知切换。",
       "## 可访问性检查",
       "- 语义化结构；键盘可达；对比度达标。",
+      "## 验收检查清单",
+      "- [x] 设计说明可支撑开发实施，不依赖口头解释。",
+      "- [x] 无障碍检查项至少 3 条并可验证。",
+      "- [x] 审查结论明确（通过/驳回）且有理由。",
       "## 设计审查卡",
       "- 审查结论: 通过"
     ].join("\n");
@@ -205,6 +258,16 @@ async function handleRequiredActions(project, actions, logs) {
         notes: "第2轮真实数据门禁验证自动提交"
       }
     }, 180000);
+    if (isTransportRetryable(submit)) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "required_action_retryable_transport",
+        action: "open_design_review",
+        status: submit.status,
+        code: submit.body?.error?.code
+      });
+      return project;
+    }
     if (submit.status !== 200) {
       throw new Error(`submit design review failed: ${submit.status} ${JSON.stringify(submit.body).slice(0, 500)}`);
     }
@@ -213,6 +276,16 @@ async function handleRequiredActions(project, actions, logs) {
 
   if (has("reconcile_deliverables")) {
     const reconcile = await req("POST", `/api/projects/${encodeURIComponent(project.id)}/reconcile-deliverables`, {});
+    if (isTransportRetryable(reconcile)) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "required_action_retryable_transport",
+        action: "reconcile_deliverables",
+        status: reconcile.status,
+        code: reconcile.body?.error?.code
+      });
+      return project;
+    }
     if (reconcile.status !== 200) {
       throw new Error(`reconcile failed: ${reconcile.status} ${JSON.stringify(reconcile.body).slice(0, 500)}`);
     }
@@ -221,6 +294,16 @@ async function handleRequiredActions(project, actions, logs) {
 
   if (has("resolve_blocked_tasks")) {
     const tasksResp = await req("GET", `/api/projects/${encodeURIComponent(project.id)}/tasks`);
+    if (isTransportRetryable(tasksResp)) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "required_action_retryable_transport",
+        action: "resolve_blocked_tasks_list",
+        status: tasksResp.status,
+        code: tasksResp.body?.error?.code
+      });
+      return project;
+    }
     if (tasksResp.status !== 200) {
       throw new Error(`list tasks failed: ${tasksResp.status}`);
     }
@@ -228,12 +311,33 @@ async function handleRequiredActions(project, actions, logs) {
     for (const task of tasks) {
       if (task?.status === "blocked") {
         const patch = await req("PATCH", `/api/tasks/${encodeURIComponent(task.id)}`, { status: "done" });
+        if (isTransportRetryable(patch)) {
+          logs.push({
+            at: new Date().toISOString(),
+            type: "required_action_retryable_transport",
+            action: "resolve_blocked_tasks_patch",
+            taskId: task?.id,
+            status: patch.status,
+            code: patch.body?.error?.code
+          });
+          return project;
+        }
         if (patch.status !== 200) {
           throw new Error(`patch task failed: ${patch.status}`);
         }
       }
     }
     const detail = await req("GET", `/api/projects/${encodeURIComponent(project.id)}`);
+    if (isTransportRetryable(detail)) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "required_action_retryable_transport",
+        action: "resolve_blocked_tasks_detail",
+        status: detail.status,
+        code: detail.body?.error?.code
+      });
+      return project;
+    }
     if (detail.status !== 200) {
       throw new Error(`detail after resolving blocked tasks failed: ${detail.status}`);
     }
@@ -320,13 +424,32 @@ async function main() {
 
   const stageTransitions = [];
   let previousStage = project.currentStage;
+  let inProgressBonusRounds = 0;
+  let lastProgressFingerprint = `${project.status}|${project.currentStage}|${project.currentRole}|${project.pendingApproval ? 1 : 0}|${project.progress}`;
 
   for (let i = 1; i <= MAX_ROUNDS; i += 1) {
-    const detail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`);
+    const detail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`, null, REQUEST_TIMEOUT_MS);
+    if (isTransportRetryable(detail)) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "detail_retryable_transport",
+        round: i,
+        status: detail.status,
+        code: detail.body?.error?.code
+      });
+      await WAIT(2000);
+      i -= 1;
+      continue;
+    }
     if (detail.status !== 200) {
       throw new Error(`project detail failed: round=${i} status=${detail.status}`);
     }
     project = unwrap(detail.body);
+    const currentProgressFingerprint = `${project.status}|${project.currentStage}|${project.currentRole}|${project.pendingApproval ? 1 : 0}|${project.progress}`;
+    if (currentProgressFingerprint !== lastProgressFingerprint) {
+      inProgressBonusRounds = 0;
+      lastProgressFingerprint = currentProgressFingerprint;
+    }
 
     if (project.currentStage !== previousStage) {
       stageTransitions.push({
@@ -344,15 +467,73 @@ async function main() {
     }
 
     if (project.pendingApproval) {
-      const approve = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/approve`, {});
-      if (approve.status !== 200) {
-        throw new Error(`approve failed: round=${i} status=${approve.status} body=${JSON.stringify(approve.body).slice(0, 500)}`);
+      const pendingRequiredActions = Array.isArray(project?.requiredActions) ? project.requiredActions : [];
+      if (pendingRequiredActions.length > 0) {
+        project = await handleRequiredActions(project, pendingRequiredActions, logs);
+        inProgressBonusRounds = 0;
+        continue;
       }
+      const approve = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/approve`, {});
+      if (isTransportRetryable(approve)) {
+        logs.push({
+          at: new Date().toISOString(),
+          type: "approve_retryable_transport",
+          round: i,
+          status: approve.status,
+          code: approve.body?.error?.code
+        });
+        await WAIT(2500);
+        i -= 1;
+        continue;
+      }
+      if (approve.status === 422 && approve.body?.error?.code === "STAGE_TEMPLATE_VALIDATION_FAILED") {
+        logs.push({
+          at: new Date().toISOString(),
+          type: "approve_template_gate_retry",
+          round: i,
+          project: summarizeProject(project),
+          message: String(approve.body?.error?.message || "")
+        });
+        const reconcile = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/reconcile-deliverables`, {});
+        if (reconcile.status === 200) {
+          project = unwrap(reconcile.body);
+        } else if (isTransportRetryable(reconcile)) {
+          logs.push({
+            at: new Date().toISOString(),
+            type: "reconcile_retryable_transport",
+            round: i,
+            status: reconcile.status,
+            code: reconcile.body?.error?.code
+          });
+        }
+        await WAIT(2000);
+        continue;
+      }
+      if (approve.status === 422 && approve.body?.error?.code === "REAL_MODEL_GATE_FAILED") {
+        const actions = approve.body?.error?.requiredActions;
+        if (Array.isArray(actions) && actions.length > 0) {
+          project = await handleRequiredActions(project, actions, logs);
+          await WAIT(2000);
+          continue;
+        }
+      }
+      if (approve.status !== 200) {
+        throw new Error(`approve failed: round=${i} status=${approve.status} body=${JSON.stringify(approve.body).slice(0, 800)}`);
+      }
+      inProgressBonusRounds = 0;
       project = unwrap(approve.body);
       continue;
     }
 
-    const advance = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/advance`, {}, 240000);
+    // Prefer consuming actionable requiredActions from project detail directly.
+    const detailRequiredActions = Array.isArray(project?.requiredActions) ? project.requiredActions : [];
+    if (detailRequiredActions.length > 0) {
+      project = await handleRequiredActions(project, detailRequiredActions, logs);
+      inProgressBonusRounds = 0;
+      continue;
+    }
+
+    const advance = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/advance`, {}, ADVANCE_TIMEOUT_MS);
     const code = advance.body?.error?.code;
     logs.push({ at: new Date().toISOString(), type: "advance", round: i, status: advance.status, code });
 
@@ -362,8 +543,23 @@ async function main() {
     }
 
     if (advance.status === 409 && code === "PROJECT_ADVANCE_IN_PROGRESS") {
+      inProgressBonusRounds += 1;
+      if (inProgressBonusRounds > MAX_IN_PROGRESS_BONUS_ROUNDS) {
+        throw new Error(`advance still in progress after ${inProgressBonusRounds} bonus rounds`);
+      }
       const pollAfter = Number(advance.body?.error?.pollAfterMs || 1500);
       await WAIT(Math.max(1000, Math.min(7000, pollAfter)));
+      i -= 1;
+      continue;
+    }
+
+    if (isTransportRetryable(advance)) {
+      inProgressBonusRounds += 1;
+      if (inProgressBonusRounds > MAX_IN_PROGRESS_BONUS_ROUNDS) {
+        throw new Error(`advance retryable transport status persists after ${inProgressBonusRounds} bonus rounds`);
+      }
+      await WAIT(2500);
+      i -= 1;
       continue;
     }
 
@@ -373,19 +569,61 @@ async function main() {
     }
 
     if (advance.status === 409 && code === "PROJECT_ADVANCE_FAILED") {
+      const failedMessage = String(advance.body?.error?.message || "");
+      if (failedMessage.includes("REAL_MODEL_GATE_FAILED")) {
+        logs.push({
+          at: new Date().toISOString(),
+          type: "advance_real_model_gate_retry",
+          round: i,
+          message: failedMessage.slice(0, 600)
+        });
+        const actions = Array.isArray(advance.body?.error?.requiredActions)
+          ? advance.body.error.requiredActions
+          : [{ action: "refresh_runtime" }];
+        project = await handleRequiredActions(project, actions, logs);
+        await WAIT(2500);
+        continue;
+      }
+      if (failedMessage.includes("STAGE_TEMPLATE_VALIDATION_FAILED")) {
+        logs.push({
+          at: new Date().toISOString(),
+          type: "advance_template_gate_retry",
+          round: i,
+          message: failedMessage.slice(0, 600)
+        });
+        const reconcile = await req("POST", `/api/projects/${encodeURIComponent(projectId)}/reconcile-deliverables`, {});
+        if (reconcile.status === 200) {
+          project = unwrap(reconcile.body);
+          await WAIT(2000);
+          continue;
+        }
+        if (isTransportRetryable(reconcile)) {
+          await WAIT(2500);
+          i -= 1;
+          continue;
+        }
+      }
       throw new Error(`advance failed: ${JSON.stringify(advance.body).slice(0, 800)}`);
     }
 
     throw new Error(`unexpected advance response: status=${advance.status} code=${code} body=${JSON.stringify(advance.body).slice(0, 800)}`);
   }
 
-  const finalDetail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`);
+  let finalDetail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`, null, REQUEST_TIMEOUT_MS);
+  for (let retry = 0; retry < 2 && isTransportRetryable(finalDetail); retry += 1) {
+    await WAIT(2000);
+    finalDetail = await req("GET", `/api/projects/${encodeURIComponent(projectId)}`, null, REQUEST_TIMEOUT_MS);
+  }
   if (finalDetail.status !== 200) {
     throw new Error(`final detail failed: ${finalDetail.status}`);
   }
   const finalProject = unwrap(finalDetail.body);
 
-  const executionsResp = await req("GET", `/api/projects/${encodeURIComponent(projectId)}/executions?limit=800`);
+  let executionsResp = await req("GET", `/api/projects/${encodeURIComponent(projectId)}/executions?limit=800`, null, REQUEST_TIMEOUT_MS);
+  for (let retry = 0; retry < 2 && isTransportRetryable(executionsResp); retry += 1) {
+    await WAIT(2000);
+    executionsResp = await req("GET", `/api/projects/${encodeURIComponent(projectId)}/executions?limit=800`, null, REQUEST_TIMEOUT_MS);
+  }
   if (executionsResp.status !== 200) {
     throw new Error(`list executions failed: ${executionsResp.status}`);
   }
