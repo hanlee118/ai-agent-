@@ -40,6 +40,9 @@ jobs:
       - name: DB migration status preflight
         run: pnpm --filter @occ/api db:migrate:status
 
+      - name: Prepare route-test seed DB
+        run: pnpm --filter @occ/api db:push
+
       - name: API route tests
         run: pnpm --filter @occ/api test:routes
 
