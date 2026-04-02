@@ -1176,15 +1176,19 @@ export async function sendOpenClawAgentMessage(
   const ok = payload?.status === "ok" || raw.includes('"status": "ok"');
   const summary = String(payload?.summary ?? extractJsonStringField(raw, "summary") ?? "completed");
   const estimatedCompletionTokens = estimateTokenCount(reply);
+  const providerUsage = extractTokenUsageFromPayload(payload);
+  const promptTokens = providerUsage?.promptTokens ?? estimatedPromptTokens;
+  const completionTokens = providerUsage?.completionTokens ?? estimatedCompletionTokens;
+  const totalTokens = providerUsage?.totalTokens ?? (promptTokens + completionTokens);
   const model = result?.meta?.agentMeta?.model || activeModel;
 
   await prisma.agentUsageLog.create({
     data: {
       agentId,
       model,
-      promptTokens: estimatedPromptTokens,
-      completionTokens: estimatedCompletionTokens,
-      totalTokens: estimatedPromptTokens + estimatedCompletionTokens,
+      promptTokens,
+      completionTokens,
+      totalTokens,
       status: ok ? "success" : "failed",
       commandType: classifyInstruction(message)
     }
@@ -3105,21 +3109,113 @@ function parseOpenClawJson(raw: string) {
       status?: string;
       summary?: string;
       result?: {
-        payloads?: Array<{ text?: string }>;
+        payloads?: Array<{ text?: string; usage?: unknown; [key: string]: unknown }>;
         meta?: {
           durationMs?: number;
           stopReason?: string;
+          usage?: unknown;
+          tokenUsage?: unknown;
           agentMeta?: {
             sessionId?: string;
             provider?: string;
             model?: string;
+            usage?: unknown;
+            [key: string]: unknown;
           };
+          [key: string]: unknown;
         };
+        usage?: unknown;
+        [key: string]: unknown;
       };
+      usage?: unknown;
+      [key: string]: unknown;
     };
   } catch (error) {
     throw new Error(`Failed to parse OpenClaw JSON: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
+}
+
+function extractTokenUsageFromPayload(payload: ReturnType<typeof parseOpenClawJson>) {
+  const asRecord = (value: unknown): Record<string, unknown> | null =>
+    value && typeof value === "object" && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  const toInt = (value: unknown) => {
+    const numeric = Number(value ?? 0);
+    return Number.isFinite(numeric) ? Math.max(0, Math.round(numeric)) : 0;
+  };
+
+  const result = asRecord(payload?.result);
+  const meta = asRecord(result?.meta);
+  const agentMeta = asRecord(meta?.agentMeta);
+  const firstPayloadUsage = (() => {
+    const payloads = Array.isArray(result?.payloads) ? result.payloads : [];
+    for (const item of payloads) {
+      const usage = asRecord(asRecord(item)?.usage);
+      if (usage) {
+        return usage;
+      }
+    }
+    return null;
+  })();
+
+  const candidates = [
+    asRecord(result?.usage),
+    asRecord(meta?.usage),
+    asRecord(meta?.tokenUsage),
+    asRecord(agentMeta?.usage),
+    asRecord(payload?.usage),
+    firstPayloadUsage
+  ].filter((item): item is Record<string, unknown> => item !== null);
+
+  for (const usage of candidates) {
+    const promptTokens = toInt(
+      usage.promptTokens
+      ?? usage.prompt_tokens
+      ?? usage.inputTokens
+      ?? usage.input_tokens
+      ?? usage.input
+    );
+    const cachedPromptTokens = toInt(
+      usage.cachedInputTokens
+      ?? usage.cached_input_tokens
+      ?? usage.cacheRead
+      ?? usage.cache_read_input_tokens
+      ?? usage.cache_creation_input_tokens
+      ?? usage.cacheWrite
+      ?? usage.cache_write_input_tokens
+    );
+    const completionTokens = toInt(
+      usage.completionTokens
+      ?? usage.completion_tokens
+      ?? usage.outputTokens
+      ?? usage.output_tokens
+      ?? usage.output
+    );
+    const totalFromPayload = toInt(
+      usage.totalTokens
+      ?? usage.total_tokens
+      ?? usage.total
+    );
+
+    const normalizedPromptTokens = promptTokens + cachedPromptTokens;
+    const normalizedTotalTokens = Math.max(
+      totalFromPayload,
+      normalizedPromptTokens + completionTokens
+    );
+
+    if (normalizedTotalTokens <= 0 && normalizedPromptTokens <= 0 && completionTokens <= 0) {
+      continue;
+    }
+
+    return {
+      promptTokens: normalizedPromptTokens,
+      completionTokens,
+      totalTokens: normalizedTotalTokens
+    };
+  }
+
+  return null;
 }
 
 function extractAgentReplyFromRaw(raw: string) {

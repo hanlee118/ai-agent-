@@ -71,9 +71,6 @@ function inferMetricsQuality(input: {
   if (input.tokenSource === "unknown" && input.executionCount === 0) {
     return "unknown";
   }
-  if (input.usageLogCount >= 20 || input.executionCount >= 20) {
-    return "measured";
-  }
   return "estimated";
 }
 
