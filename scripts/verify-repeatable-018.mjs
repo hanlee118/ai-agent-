@@ -8,6 +8,8 @@ const API_BASE = (process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/
 const PROJECT_ID = String(process.env.PROJECT_ID || "OCC-20260401-018").trim();
 const MAX_ROUNDS = Math.max(20, Number(process.env.MAX_ROUNDS || 120));
 const REQUEST_TIMEOUT_MS = Math.max(90000, Number(process.env.REQUEST_TIMEOUT_MS || 240000));
+const MAX_CONSECUTIVE_IN_PROGRESS = Math.max(8, Number(process.env.MAX_CONSECUTIVE_IN_PROGRESS || 30));
+const MAX_CONSECUTIVE_TRANSPORT_RETRY = Math.max(5, Number(process.env.MAX_CONSECUTIVE_TRANSPORT_RETRY || 20));
 const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const PLACEHOLDER_RE = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const STAGES = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
@@ -249,23 +251,47 @@ async function handleRequiredActions(project, actions, logs) {
 
 async function main() {
   const logs = [];
+  let targetProjectId = PROJECT_ID;
   try {
     await ensureApiReady(logs);
     await ensureAuth(logs);
+    let consecutiveInProgress = 0;
+    let consecutiveTransportRetry = 0;
 
-  let projectResp = await req("GET", `/api/projects/${encodeURIComponent(PROJECT_ID)}`);
-  if (projectResp.status !== 200) {
-    throw new Error(`project detail failed: ${projectResp.status}`);
-  }
-  let project = unwrap(projectResp.body);
+    let projectResp = await req("GET", `/api/projects/${encodeURIComponent(targetProjectId)}`);
+    if (projectResp.status === 404) {
+      const created = await req("POST", "/api/projects", {
+        name: `repeatable-${Date.now()}`,
+        description: "repeatable acceptance fallback project: create -> advance -> approve -> complete"
+      });
+      if (created.status !== 201) {
+        throw new Error(`project create fallback failed: ${created.status}`);
+      }
+      targetProjectId = created.body?.id || targetProjectId;
+      logs.push({
+        at: new Date().toISOString(),
+        type: "project_fallback_created",
+        requestedProjectId: PROJECT_ID,
+        actualProjectId: targetProjectId
+      });
+      projectResp = await req("GET", `/api/projects/${encodeURIComponent(targetProjectId)}`);
+    }
+    if (projectResp.status !== 200) {
+      throw new Error(`project detail failed: ${projectResp.status}`);
+    }
+    let project = unwrap(projectResp.body);
 
-  for (let i = 1; i <= MAX_ROUNDS; i += 1) {
-    projectResp = await req("GET", `/api/projects/${encodeURIComponent(PROJECT_ID)}`);
+    for (let i = 1; i <= MAX_ROUNDS; i += 1) {
+      projectResp = await req("GET", `/api/projects/${encodeURIComponent(targetProjectId)}`);
     if (isTransportRetryable(projectResp)) {
+      consecutiveTransportRetry += 1;
+      if (consecutiveTransportRetry > MAX_CONSECUTIVE_TRANSPORT_RETRY) {
+        throw new Error(`detail transport retry exceeded: ${consecutiveTransportRetry}`);
+      }
       await WAIT(1500);
-      i -= 1;
       continue;
     }
+    consecutiveTransportRetry = 0;
     if (projectResp.status !== 200) {
       throw new Error(`detail failed round=${i}: ${projectResp.status}`);
     }
@@ -284,14 +310,19 @@ async function main() {
     }
 
     if (project.pendingApproval) {
-      const approve = await req("POST", `/api/projects/${encodeURIComponent(PROJECT_ID)}/approve`, {}, 240000);
+      const approve = await req("POST", `/api/projects/${encodeURIComponent(targetProjectId)}/approve`, {}, 240000);
       if (isTransportRetryable(approve)) {
+        consecutiveTransportRetry += 1;
+        if (consecutiveTransportRetry > MAX_CONSECUTIVE_TRANSPORT_RETRY) {
+          throw new Error(`approve transport retry exceeded: ${consecutiveTransportRetry}`);
+        }
         await WAIT(2000);
-        i -= 1;
         continue;
       }
+      consecutiveTransportRetry = 0;
       if (approve.status === 200) {
         project = unwrap(approve.body);
+        consecutiveInProgress = 0;
         continue;
       }
       const code = approve.body?.error?.code;
@@ -308,18 +339,23 @@ async function main() {
       throw new Error(`approve failed round=${i}: ${approve.status} ${JSON.stringify(approve.body).slice(0, 500)}`);
     }
 
-    const advance = await req("POST", `/api/projects/${encodeURIComponent(PROJECT_ID)}/advance`, {}, 240000);
+    const advance = await req("POST", `/api/projects/${encodeURIComponent(targetProjectId)}/advance`, {}, 240000);
     const code = advance.body?.error?.code;
     if (advance.status === 200) {
       project = unwrap(advance.body);
+      consecutiveInProgress = 0;
       continue;
     }
     if (advance.status === 409 && code === "PROJECT_ADVANCE_IN_PROGRESS") {
+      consecutiveInProgress += 1;
+      if (consecutiveInProgress > MAX_CONSECUTIVE_IN_PROGRESS) {
+        throw new Error(`advance in-progress retry exceeded: ${consecutiveInProgress}`);
+      }
       const pollAfter = Number(advance.body?.error?.pollAfterMs || 2000);
       await WAIT(Math.max(1200, Math.min(15000, pollAfter)));
-      i -= 1;
       continue;
     }
+    consecutiveInProgress = 0;
     if (advance.status === 409 && code === "REQUIRES_USER_INTERVENTION") {
       project = await handleRequiredActions(project, advance.body?.error?.requiredActions, logs);
       await WAIT(1200);
@@ -335,20 +371,24 @@ async function main() {
       throw new Error(`advance failed: ${message}`);
     }
     if (isTransportRetryable(advance)) {
+      consecutiveTransportRetry += 1;
+      if (consecutiveTransportRetry > MAX_CONSECUTIVE_TRANSPORT_RETRY) {
+        throw new Error(`advance transport retry exceeded: ${consecutiveTransportRetry}`);
+      }
       await WAIT(2000);
-      i -= 1;
       continue;
     }
+    consecutiveTransportRetry = 0;
     throw new Error(`unexpected advance response: ${advance.status} ${JSON.stringify(advance.body).slice(0, 500)}`);
   }
 
-  const finalDetailResp = await req("GET", `/api/projects/${encodeURIComponent(PROJECT_ID)}`);
+  const finalDetailResp = await req("GET", `/api/projects/${encodeURIComponent(targetProjectId)}`);
   if (finalDetailResp.status !== 200) {
     throw new Error(`final detail failed: ${finalDetailResp.status}`);
   }
   const finalProject = unwrap(finalDetailResp.body);
 
-  const execResp = await req("GET", `/api/projects/${encodeURIComponent(PROJECT_ID)}/executions?limit=1000`);
+  const execResp = await req("GET", `/api/projects/${encodeURIComponent(targetProjectId)}/executions?limit=1000`);
   if (execResp.status !== 200) {
     throw new Error(`executions failed: ${execResp.status}`);
   }
@@ -400,7 +440,7 @@ async function main() {
   const report = {
     ok,
     apiBase: API_BASE,
-    projectId: PROJECT_ID,
+    projectId: targetProjectId,
     finishedAt: new Date().toISOString(),
     quality,
     finalProject: {
@@ -433,7 +473,7 @@ async function main() {
   console.log(JSON.stringify({
     ok,
     outPath,
-    projectId: PROJECT_ID,
+    projectId: targetProjectId,
     quality,
     pmStageEvidence
   }, null, 2));

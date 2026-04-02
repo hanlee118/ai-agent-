@@ -46,6 +46,10 @@ import {
   buildDeliverableTemplatePromptBlock,
   resolveDeliverableTemplate
 } from "../system/deliverable-templates.js";
+import {
+  buildRequirementAwareVisualPreviewHtml,
+  evaluateVisualDesignRequirementAlignment
+} from "../system/design-preview.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -525,6 +529,7 @@ function ensureDesignSubmissionContent(
     const keywordLine = [designReview.visualDirection, designReview.brandTone].filter(Boolean).join(" / ");
     const html = buildVisualDesignPreviewHtml({
       projectName: "设计阶段视觉确认稿",
+      projectDescription: normalized,
       keywordLine,
       visualDirection: designReview.visualDirection
     });
@@ -651,69 +656,16 @@ export function getDesignInterventionSignal(
 
 function buildVisualDesignPreviewHtml(input: {
   projectName: string;
+  projectDescription?: string;
   keywordLine: string;
   visualDirection?: string;
 }) {
-  const title = String(input.projectName || "设计预览").trim();
-  const keywords = String(input.keywordLine || "需求闭环 / 可执行 / 可验收").trim();
-  const direction = String(input.visualDirection || "强调业务主链路与执行证据的高可读视觉风格").trim();
-  return [
-    "<!doctype html>",
-    "<html lang=\"zh-CN\">",
-    "<head>",
-    "  <meta charset=\"UTF-8\" />",
-    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
-    `  <title>${title} · 视觉定稿预览</title>`,
-    "  <style>",
-    "    :root { --bg:#0b1220; --card:#111b2e; --text:#e2e8f0; --muted:#94a3b8; --accent:#22d3ee; --line:#20304a; }",
-    "    * { box-sizing:border-box; }",
-    "    body { margin:0; font-family:'SF Pro Display','Segoe UI','PingFang SC',sans-serif; background:linear-gradient(160deg,#07101d,#0b1626 55%,#132238); color:var(--text); }",
-    "    .wrap { max-width:1120px; margin:0 auto; padding:40px 24px 56px; }",
-    "    .hero { display:grid; grid-template-columns:1.25fr 1fr; gap:18px; }",
-    "    .card { background:rgba(17,27,46,.88); border:1px solid var(--line); border-radius:18px; padding:22px; backdrop-filter: blur(4px); }",
-    "    h1 { margin:0 0 12px; font-size:30px; line-height:1.2; }",
-    "    p { margin:0; color:var(--muted); line-height:1.7; }",
-    "    .tag { display:inline-flex; margin-bottom:12px; padding:4px 10px; border-radius:999px; background:rgba(34,211,238,.16); color:var(--accent); font-size:12px; font-weight:600; }",
-    "    .kpis { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }",
-    "    .kpi { border:1px solid var(--line); border-radius:12px; padding:10px 12px; }",
-    "    .kpi strong { display:block; font-size:18px; margin-bottom:4px; }",
-    "    .sec { margin-top:16px; }",
-    "    .flow { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }",
-    "    .node { border:1px solid var(--line); border-radius:10px; padding:10px; color:var(--muted); font-size:13px; }",
-    "    .cta { margin-top:14px; display:inline-flex; padding:10px 14px; border-radius:10px; background:var(--accent); color:#032029; text-decoration:none; font-weight:700; }",
-    "    @media (max-width:900px) { .hero { grid-template-columns:1fr; } .flow { grid-template-columns:repeat(2,minmax(0,1fr)); } }",
-    "  </style>",
-    "</head>",
-    "<body>",
-    "  <main class=\"wrap\">",
-    "    <section class=\"hero\">",
-    "      <article class=\"card\">",
-    "        <span class=\"tag\">视觉定稿单页</span>",
-    `        <h1>${title}</h1>`,
-    `        <p>视觉方向: ${direction}</p>`,
-    `        <p class=\"sec\">关键词: ${keywords}</p>`,
-    "        <div class=\"kpis\">",
-    "          <div class=\"kpi\"><strong>01</strong><span>需求确认</span></div>",
-    "          <div class=\"kpi\"><strong>02</strong><span>方案评审</span></div>",
-    "          <div class=\"kpi\"><strong>03</strong><span>开发落地</span></div>",
-    "        </div>",
-    "        <a class=\"cta\" href=\"#\" aria-label=\"确认视觉方案\">确认该视觉方案</a>",
-    "      </article>",
-    "      <article class=\"card\">",
-    "        <h2 style=\"margin:0 0 8px;font-size:20px;\">主链路结构</h2>",
-    "        <div class=\"flow\">",
-    "          <div class=\"node\">需求输入</div>",
-    "          <div class=\"node\">多 Agent 协作</div>",
-    "          <div class=\"node\">执行证据回写</div>",
-    "          <div class=\"node\">阶段验收与回填</div>",
-    "        </div>",
-    "        <p class=\"sec\">该预览用于设计确认，不替代开发实现代码。</p>",
-    "      </article>",
-    "    </section>",
-    "  </main>",
-    "</body>",
-    "</html>"
-  ].join("\n");
+  return buildRequirementAwareVisualPreviewHtml({
+    projectName: input.projectName,
+    projectDescription: input.projectDescription || input.keywordLine,
+    keywords: input.keywordLine.split(/\s*\/\s*/).filter(Boolean),
+    visualDirection: input.visualDirection
+  });
 }
 
 function normalizeDeliverableToken(value: string) {
@@ -743,6 +695,9 @@ function validateDeliverableTemplateGate(input: {
   stageType: StageType;
   deliverableName: string;
   content: string;
+  projectName?: string;
+  projectDescription?: string;
+  keywords?: string[];
 }) {
   const normalized = String(input.content || "").trim();
   const template = resolveDeliverableTemplate(input.deliverableName, input.stageType);
@@ -772,6 +727,16 @@ function validateDeliverableTemplateGate(input: {
 
   if (template.kind === "visual_mockup" && !hasVisualDesignPreview(normalized)) {
     issues.push("缺少可视化设计稿预览（需提供静态图链接或 ```html 单页代码）");
+  } else if (input.stageType === "DESIGN" && template.kind === "visual_mockup") {
+    const alignment = evaluateVisualDesignRequirementAlignment({
+      projectName: input.projectName || input.deliverableName,
+      projectDescription: input.projectDescription || "",
+      keywords: input.keywords || [],
+      content: normalized
+    });
+    if (!alignment.pass) {
+      issues.push(...alignment.issues);
+    }
   }
 
   return {
@@ -814,7 +779,10 @@ function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: S
     const gate = validateDeliverableTemplateGate({
       stageType,
       deliverableName: matched.name,
-      content: String(matched.content || "")
+      content: String(matched.content || ""),
+      projectName: project.name,
+      projectDescription: project.description,
+      keywords: project.parsedIntent.keywords
     });
     if (!gate.passed) {
       errors.push(`${matched.name} 未通过模板校验: ${gate.issues.join("；")}`);
@@ -863,7 +831,10 @@ export async function getProjectTemplateGatePrecheck(projectId: string) {
     const gate = validateDeliverableTemplateGate({
       stageType,
       deliverableName: matched.name,
-      content: String(matched.content || "")
+      content: String(matched.content || ""),
+      projectName: project.name,
+      projectDescription: project.description,
+      keywords: project.parsedIntent.keywords
     });
 
     return {
@@ -1684,6 +1655,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
           "```html",
           buildVisualDesignPreviewHtml({
             projectName: project.name,
+            projectDescription: project.description,
             keywordLine: keywords.join(" / "),
             visualDirection: "强调业务主链路、证据可追溯和行动可执行"
           }),
@@ -1823,6 +1795,7 @@ async function buildDeliverableBackfillContentWithAgent(
           "```html",
           buildVisualDesignPreviewHtml({
             projectName: project.name,
+            projectDescription: project.description,
             keywordLine: keywords.join(" / "),
             visualDirection: "强调业务主链路、证据可追溯和行动可执行"
           }),
@@ -3091,7 +3064,10 @@ export async function submitCurrentStage(
   const templateGate = validateDeliverableTemplateGate({
     stageType: currentStageType,
     deliverableName,
-    content: submittedContent
+    content: submittedContent,
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords
   });
   if (!templateGate.passed) {
     throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${deliverableName} 未通过模板校验（${templateGate.issues.join("；")}）`);
@@ -3604,6 +3580,7 @@ function toProjectDetail(project: {
       if (template?.kind === "visual_mockup" && !hasVisualDesignPreview(rawContent)) {
         const html = buildVisualDesignPreviewHtml({
           projectName: project.name || "视觉确认稿",
+          projectDescription: project.description,
           keywordLine,
           visualDirection: fallbackVisualDirection
         });

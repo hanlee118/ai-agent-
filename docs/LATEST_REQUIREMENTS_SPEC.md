@@ -85,6 +85,7 @@
 - `/api/projects/:id/advance` 必须支持 in-progress 轮询提示。
 - 必须具备风暴检测与软恢复机制，避免无限 `PROJECT_ADVANCE_IN_PROGRESS`。
 - 必须支持可恢复错误自动重试（超时/网络抖动/模板校验失败等）。
+- 手动推进单轮默认超时需支持慢模型场景（默认 `180000ms`，可由 `MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS` 覆盖）。
 
 验收标准：
 - 出现推进风暴时返回 `pollAfterMs` 与 `recoveryAttempted`。
@@ -136,13 +137,45 @@
   - API 端口约定
   - 阶段交付模板校验
   - `PROJECT_ADVANCE_IN_PROGRESS` 轮询契约
+- 固定项目验收脚本在目标项目不存在时，必须自动创建 fallback 项目继续执行，而不是直接 404 退出。
 - 自检脚本若临时切换运行时配置，必须在退出前恢复原配置，不得污染后续真实模型验收环境。
 - 脚本不允许因过期端口、旧请求体或简化模板而误报平台故障。
 
 验收标准：
 - `scripts/smoke-project-flow.mjs` 可直接命中当前 API。
+- `scripts/smoke-project-flow.mjs` 在连续 `PROJECT_ADVANCE_IN_PROGRESS` 场景下必须有限退出并返回可诊断错误。
+- `scripts/verify-repeatable-018.mjs` 在固定项目缺失时可自动创建 fallback 项目并继续推进，且在慢路径下必须有限退出。
 - `verify:closure` 的提交/驳回/重提断言与当前接口行为一致。
 - `verify:closure` 执行结束后，运行时模式仍保持执行前配置。
+
+### FR-015 前端本地托管与可达性（重要）
+
+- 必须提供前端 dev server 的标准化 daemon 脚本，避免临时启动后自动退出导致“页面打不开”误判。
+- 托管脚本必须支持：
+  - stale PID 自动清理
+  - 端口监听 PID 领养
+  - 启动健康检查与日志提示
+- 人工验收前必须同时确认 `5173`（web）和 `8787`（api）可达。
+
+验收标准：
+- `pnpm web:daemon:start` 后 `http://127.0.0.1:5173` 返回 `200`。
+- `pnpm web:daemon:status` 输出可反映真实健康状态。
+- `pnpm web:daemon:stop` 后前端端口不再监听。
+
+### FR-016 设计交付物业务对齐门禁（重要）
+
+- `DESIGN` 阶段的视觉稿不能只满足“有 HTML 预览”这一弱条件，必须与项目真实业务场景对齐。
+- 若需求属于电商/商品/榜单/监控/告警/跟踪/TikTok/Amazon/Temu 等场景，视觉稿必须直接展示：
+  - 业务对象本身
+  - 核心数据或榜单
+  - 平台来源
+  - 主动作（如跟踪/查看链接/继续观察）
+- 禁止把设计稿伪装成“需求输入 / 多 Agent 协作 / 执行证据回写 / 阶段验收回填”这类平台运转页面后通过 DESIGN 阶段。
+
+验收标准：
+- 视觉定稿单页若命中上述业务场景，却缺少业务信号，应在模板校验和自动质检中直接失败。
+- 设计阶段 required actions 应将“缺少真实可确认视觉稿”识别为未完成，而不是仅检查 HTML 代码块存在。
+- 针对跨境爆品监控类需求，视觉稿需能体现榜单、平台标签、爆量指标、商品链接与跟品动作。
 
 ### FR-020 真实模型强门禁（核心）
 
@@ -235,6 +268,7 @@ pnpm --filter @occ/api typecheck
 pnpm --filter @occ/api test:routes
 pnpm test:smoke
 pnpm health:check
+pnpm web:daemon:status
 node scripts/smoke-project-flow.mjs
 pnpm verify:closure
 pnpm verify:repeatable:018
@@ -251,5 +285,14 @@ pnpm verify:repeatable:018
 
 - 若外部模型路由不稳定，仍可能出现阶段推进延迟；需持续优化 route prewarm 与 cooldown 策略。
 - 真实模型门禁已收敛为单点前置条件：运行时配置未完成时，Round2 会按预期阻断。
-- daemon 托管层偶发出现“健康后退出”，仍需继续收敛。
+- API daemon 已趋于稳定；前端入口需通过 `web:daemon:*` 统一托管，避免临时命令导致端口失活。
 - 静态交付物预览与实时项目前端的入口区分还可继续增强，以降低误判成本。
+
+## 9. 2026-04-02 实机复核快照
+
+- `node scripts/verify-closure.mjs`：`ok=true`，总耗时约 `200s`。
+- 覆盖通过：预览、创建、消息、介入、恢复、提交、驳回、重提、审批、任务更新、runtime 恢复。
+- OpenClaw 单条消息调用仍可能返回 `stopReason=error`（warning），当前不阻断主闭环验收。
+- `scripts/smoke-project-flow.mjs` 已加入慢路径重试上限，避免无上限轮询。
+- `scripts/verify-repeatable-018.mjs` 已补齐“固定项目不存在自动创建 fallback”与“有限重试退出”。
+- DESIGN 阶段已新增“业务化视觉稿”门禁：通用协作平台模板不再能冒充业务设计稿通过。

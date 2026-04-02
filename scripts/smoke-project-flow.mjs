@@ -2,6 +2,7 @@ import { prisma } from '../apps/api/dist/db.js';
 import { generateSessionToken, hashSessionToken } from '../apps/api/dist/security/secret-store.js';
 
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.REQUEST_TIMEOUT_MS || 210000));
+const MAX_IN_PROGRESS_RETRIES = Math.max(8, Number(process.env.MAX_IN_PROGRESS_RETRIES || 40));
 const CANDIDATE_BASES = process.env.OCC_BASE_URL
   ? [String(process.env.OCC_BASE_URL).replace(/\/$/, '')]
   : [
@@ -118,6 +119,7 @@ function summarizeProject(p) {
 async function main() {
   const startedAt = Date.now();
   const steps = [];
+  let consecutiveInProgressRetries = 0;
   BASE = await resolveBase();
   await createTemporarySession();
   steps.push({ step: 'resolve_base', status: 200, durationMs: 0, summary: { base: BASE } });
@@ -141,18 +143,26 @@ async function main() {
     const advance = await req('POST', `/api/projects/${projectId}/advance`);
     const errorCode = advance.body?.error?.code;
     if (advance.status === 409 && errorCode === 'PROJECT_ADVANCE_IN_PROGRESS') {
+      consecutiveInProgressRetries += 1;
       const pollAfterMs = Math.max(800, Number(advance.body?.error?.pollAfterMs || 1500));
       steps.push({
         step: `advance_${i}_in_progress`,
         status: advance.status,
         durationMs: advance.durationMs,
         code: errorCode,
+        retryCount: consecutiveInProgressRetries,
         pollAfterMs,
       });
+      if (consecutiveInProgressRetries > MAX_IN_PROGRESS_RETRIES) {
+        throw new Error(
+          `advance_${i} stayed in PROJECT_ADVANCE_IN_PROGRESS for ${consecutiveInProgressRetries} consecutive retries (max=${MAX_IN_PROGRESS_RETRIES})`,
+        );
+      }
       await WAIT(pollAfterMs);
       i -= 1;
       continue;
     }
+    consecutiveInProgressRetries = 0;
 
     if (advance.status === 409 && errorCode === 'REQUIRES_USER_INTERVENTION') {
       const actions = advance.body?.error?.requiredActions || [];

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT_DIR"
+
+PID_FILE="$ROOT_DIR/.runtime/web-dev.pid"
+PORT="${WEB_PORT:-5173}"
+HOST="${WEB_HOST:-127.0.0.1}"
+HEALTH_URL="http://${HOST}:${PORT}"
+
+resolve_listener_pid() {
+  lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1
+}
+
+if [ ! -f "$PID_FILE" ]; then
+  if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+    PID="$(resolve_listener_pid || true)"
+    if [ -n "${PID:-}" ]; then
+      echo "Web dev server responds on :$PORT without PID file; adopting PID $PID for shutdown"
+    else
+      echo "Web dev server responds on :$PORT but listener PID could not be resolved; nothing to stop safely"
+      exit 0
+    fi
+  else
+    echo "Web dev server is not running"
+    exit 0
+  fi
+else
+  PID="$(cat "$PID_FILE")"
+fi
+
+if kill -0 "$PID" 2>/dev/null; then
+  kill "$PID"
+  for _ in $(seq 1 10); do
+    if ! kill -0 "$PID" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+
+  if kill -0 "$PID" 2>/dev/null; then
+    kill -9 "$PID" >/dev/null 2>&1 || true
+  fi
+  echo "Stopped web dev PID $PID"
+else
+  echo "Stale PID file found for $PID"
+fi
+
+rm -f "$PID_FILE"

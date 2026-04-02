@@ -74,6 +74,12 @@ import {
   resolveDeliverableTemplate
 } from "./system/deliverable-templates.js";
 import {
+  buildRequirementAwareDesignSections,
+  buildRequirementAwareVisualPreviewHtml,
+  evaluateVisualDesignRequirementAlignment,
+  resolveDesignRequirementProfile
+} from "./system/design-preview.js";
+import {
   getCachedLocalAgentMonitorOverview,
   subscribeLocalAgentMonitor,
   ensureLocalAgentMonitorLive
@@ -227,7 +233,7 @@ const GENERIC_OUTPUT_PATTERNS = [
 const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(2, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
-  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 120_000)
+  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 180_000)
 );
 const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
   900,
@@ -400,16 +406,17 @@ function buildDesignReviewPayload(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   model: string
 ): NonNullable<StageSubmissionInput["designReview"]> {
-  const keywordLine = project.parsedIntent.keywords.slice(0, 3).join(" / ");
-  const visualDirection = keywordLine || (/(苹果|apple)/i.test(`${project.name} ${project.description}`)
-    ? "Apple 风格极简官网（大留白、清晰层级、克制动效）"
-    : "围绕需求主链路的高可读信息架构");
+  const profile = resolveDesignRequirementProfile({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords
+  });
 
   return {
-    visualDirection,
-    brandTone: "专业、明确、可执行",
-    uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
-    accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
+    visualDirection: profile.visualDirection,
+    brandTone: profile.brandTone,
+    uxPrinciples: profile.uxPrinciples,
+    accessibilityChecklist: profile.accessibilityChecklist,
     approvedBy: "系统自动审查",
     approved: true,
     notes: `自动推进生成，来源模型 ${model}`
@@ -420,32 +427,12 @@ function buildDesignRequiredSections(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   title: string
 ) {
-  const keywordLine = project.parsedIntent.keywords.slice(0, 4).join(" / ") || "需求到研发闭环";
-  const isAppleStyle = /(苹果|apple)/i.test(`${project.name} ${project.description}`);
-  const visualTheme = isAppleStyle
-    ? "Apple 风格：克制、清晰、留白、强调内容优先"
-    : "可信执行风格：重点突出闭环路径与执行证据";
-
-  return [
-    "## 视觉方案",
-    `- 目标交付物：${title}`,
-    `- 视觉主题：${visualTheme}`,
-    `- 核心关键词：${keywordLine}`,
-    "- 视觉重心：把“需求输入→协作→执行→验收回填”主链路放在首屏可见区域。",
-    "## 版式策略",
-    "- 首屏采用价值主张 + 关键 CTA 双列布局，减少多余叙述。",
-    "- 中部用流程区块呈现阶段衔接关系，避免离散信息堆叠。",
-    "- 底部统一放置演示预约入口与验收证据跳转。",
-    "## 组件清单",
-    "- Hero 标题/副标题/双 CTA 组件",
-    "- 闭环流程时间线组件（5 阶段）",
-    "- 执行证据卡片组件（模型、角色、时间、状态）",
-    "- 验收与回填组件（产物链接、版本、状态）",
-    "## 品牌语气",
-    "- 文案风格直接、可执行、避免空泛和夸大。",
-    "- 所有模块优先回答“这个功能如何推进需求落地”。",
-    "- 结尾必须给出下一步行动与责任角色。"
-  ].join("\n");
+  return buildRequirementAwareDesignSections({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords,
+    title
+  });
 }
 
 function isVisualMockupDeliverableTitle(title: string) {
@@ -481,55 +468,27 @@ function buildVisualDesignPreviewHtml(
   title: string,
   visualDirection: string
 ) {
-  const keywordLine = project.parsedIntent.keywords.slice(0, 5).join(" / ") || "需求闭环 / 可执行 / 可验收";
-  return [
-    "<!doctype html>",
-    "<html lang=\"zh-CN\">",
-    "<head>",
-    "  <meta charset=\"UTF-8\" />",
-    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
-    `  <title>${project.name} · 视觉定稿预览</title>`,
-    "  <style>",
-    "    :root { --bg:#0b1220; --card:#111b2e; --text:#e2e8f0; --muted:#94a3b8; --accent:#22d3ee; --line:#20304a; }",
-    "    * { box-sizing:border-box; }",
-    "    body { margin:0; font-family:'SF Pro Display','Segoe UI','PingFang SC',sans-serif; background:linear-gradient(160deg,#07101d,#0b1626 55%,#132238); color:var(--text); }",
-    "    .wrap { max-width:1120px; margin:0 auto; padding:40px 24px 56px; }",
-    "    .hero { display:grid; grid-template-columns:1.25fr 1fr; gap:18px; }",
-    "    .card { background:rgba(17,27,46,.88); border:1px solid var(--line); border-radius:18px; padding:22px; backdrop-filter: blur(4px); }",
-    "    h1 { margin:0 0 12px; font-size:30px; line-height:1.2; }",
-    "    p { margin:0; color:var(--muted); line-height:1.7; }",
-    "    .tag { display:inline-flex; margin-bottom:12px; padding:4px 10px; border-radius:999px; background:rgba(34,211,238,.16); color:var(--accent); font-size:12px; font-weight:600; }",
-    "    .flow { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; margin-top:12px; }",
-    "    .node { border:1px solid var(--line); border-radius:10px; padding:10px; color:var(--muted); font-size:13px; }",
-    "    .cta { margin-top:14px; display:inline-flex; padding:10px 14px; border-radius:10px; background:var(--accent); color:#032029; text-decoration:none; font-weight:700; }",
-    "    @media (max-width:900px) { .hero { grid-template-columns:1fr; } .flow { grid-template-columns:repeat(2,minmax(0,1fr)); } }",
-    "  </style>",
-    "</head>",
-    "<body>",
-    "  <main class=\"wrap\">",
-    "    <section class=\"hero\">",
-    "      <article class=\"card\">",
-    "        <span class=\"tag\">视觉定稿单页</span>",
-    `        <h1>${project.name}</h1>`,
-    `        <p>目标交付物: ${title}</p>`,
-    `        <p>视觉方向: ${visualDirection}</p>`,
-    `        <p>关键词: ${keywordLine}</p>`,
-    "        <a class=\"cta\" href=\"#\" aria-label=\"确认视觉方案\">确认该视觉方案</a>",
-    "      </article>",
-    "      <article class=\"card\">",
-    "        <h2 style=\"margin:0 0 8px;font-size:20px;\">主链路结构</h2>",
-    "        <div class=\"flow\">",
-    "          <div class=\"node\">需求输入</div>",
-    "          <div class=\"node\">多 Agent 协作</div>",
-    "          <div class=\"node\">执行证据回写</div>",
-    "          <div class=\"node\">阶段验收与回填</div>",
-    "        </div>",
-    "      </article>",
-    "    </section>",
-    "  </main>",
-    "</body>",
-    "</html>"
-  ].join("\n");
+  return buildRequirementAwareVisualPreviewHtml({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords,
+    visualDirection: `${visualDirection}（${title}）`
+  });
+}
+
+function hasRequirementAlignedVisualDesignPreview(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  content: string
+) {
+  if (!hasVisualDesignPreview(content)) {
+    return false;
+  }
+  return evaluateVisualDesignRequirementAlignment({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords,
+    content
+  }).pass;
 }
 
 function buildAutoSubmissionChecklist(
@@ -692,6 +651,19 @@ function evaluateAutoSubmissionQuality(input: {
     score -= 20;
     issues.push("缺少可渲染视觉设计稿（需包含静态图或 ```html 单页代码）。");
   }
+  if (input.stageType === "DESIGN" && template.kind === "visual_mockup" && hasVisualDesignPreview(input.content)) {
+    const alignment = evaluateVisualDesignRequirementAlignment({
+      projectName: input.project.name,
+      projectDescription: input.project.description,
+      keywords: input.project.parsedIntent.keywords,
+      content: input.content
+    });
+    diagnostics.push(...alignment.diagnostics.map((item) => `设计对齐: ${item}`));
+    if (!alignment.pass) {
+      score -= 24;
+      issues.push(...alignment.issues);
+    }
+  }
 
   const pass = score >= 72 && issues.length === 0;
   return {
@@ -749,7 +721,10 @@ function buildProjectRequiredActions(
 
     const notReady = currentStageDeliverables.filter((item) => !isDeliverableReadyForAcceptance({
       status: item.status,
-      content: item.content
+      content: item.content,
+      project,
+      stageType: item.stageType,
+      deliverableName: item.name
     }));
     if (notReady.length > 0) {
       actions.push({
@@ -777,7 +752,7 @@ function buildProjectRequiredActions(
       }
 
       const hasVisualPreview = currentStageDeliverables.some((item) =>
-        isVisualMockupDeliverableTitle(item.name) && hasVisualDesignPreview(String(item.content || ""))
+        isVisualMockupDeliverableTitle(item.name) && hasRequirementAlignedVisualDesignPreview(project, String(item.content || ""))
       );
       if (!hasVisualPreview) {
         actions.push({
@@ -816,7 +791,7 @@ function buildProjectRequiredActions(
     });
   } else if (project.currentStage === "DESIGN" && designIntervention.required) {
     const hasVisualPreview = currentStageDeliverables.some((item) =>
-      isVisualMockupDeliverableTitle(item.name) && hasVisualDesignPreview(String(item.content || ""))
+      isVisualMockupDeliverableTitle(item.name) && hasRequirementAlignedVisualDesignPreview(project, String(item.content || ""))
     );
     if (!hasVisualPreview) {
       actions.push({
@@ -1646,6 +1621,9 @@ function buildExcerpt(content: string, limit = 120) {
 function isDeliverableReadyForAcceptance(input: {
   status?: string;
   content?: string;
+  project?: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+  stageType?: string;
+  deliverableName?: string;
 }) {
   const status = String(input.status || "").toLowerCase();
   const content = String(input.content || "");
@@ -1657,6 +1635,14 @@ function isDeliverableReadyForAcceptance(input: {
     return false;
   }
   if (content.includes("## 自动质检") && !/自动质检结论:\s*通过/.test(content)) {
+    return false;
+  }
+  if (
+    input.project
+    && String(input.stageType || "").toUpperCase() === "DESIGN"
+    && isVisualMockupDeliverableTitle(String(input.deliverableName || ""))
+    && !hasRequirementAlignedVisualDesignPreview(input.project, content)
+  ) {
     return false;
   }
   return true;
@@ -1742,7 +1728,10 @@ function buildProjectFinalArtifactsReport(
 
     const ready = isDeliverableReadyForAcceptance({
       status: matched.status,
-      content: matched.content
+      content: matched.content,
+      project,
+      stageType: matched.stageType,
+      deliverableName: matched.name
     });
     if (target.required && !ready) {
       missingRequired.push(target.category);
@@ -1774,7 +1763,10 @@ function buildProjectFinalArtifactsReport(
       required: false,
       ready: isDeliverableReadyForAcceptance({
         status: acceptedSummary.status,
-        content: acceptedSummary.content
+        content: acceptedSummary.content,
+        project,
+        stageType: acceptedSummary.stageType,
+        deliverableName: acceptedSummary.name
       }),
       source: "deliverable",
       deliverableId: acceptedSummary.id,
