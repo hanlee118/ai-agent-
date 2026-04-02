@@ -1513,6 +1513,7 @@ const ProjectRoom = ({
       ];
       await projectsApi.submitStage(project.id, {
         title: `设计审查卡 ${new Date().toLocaleDateString('zh-CN')}`,
+        finalizeApproval: false,
         content: [
           '# 设计阶段交付',
           '',

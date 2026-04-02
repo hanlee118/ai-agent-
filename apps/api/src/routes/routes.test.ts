@@ -469,6 +469,89 @@ describe("Error Matrix: auth + projects", () => {
     assert.equal(interveneSuccess.body.id, projectId);
     });
   });
+
+  describe("200 PROJECT_STAGE_SUBMIT", () => {
+    it("[200][PROJECT_STAGE_SUBMIT] finalizeApproval=false should not auto-complete DESIGN tasks", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-设计审查卡提交不自动完结",
+          description: "覆盖设计阶段提交审查卡后不应自动完成全部设计任务的行为。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 34
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 34 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          finalizeApproval: false,
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 面向跨境电商爆品监控，首屏展示爆量告警与跟品主入口。",
+            "## 版式策略",
+            "- 采用摘要区 + 榜单区 + 详情区三段布局，减少认知切换。",
+            "## 组件清单",
+            "- 爆品榜单卡片、趋势图、平台来源标签、跟品按钮、风险提示。",
+            "## 品牌语气",
+            "- 快速、专业、行动导向。",
+            "## UX 原则",
+            "- 主链路优先、状态可解释、反馈即时可感知。",
+            "## 可访问性检查",
+            "- 键盘可达、对比度达标、图表附加文字摘要。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "- 改进建议: 下一版补充多平台筛选交互动效。"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "TikTok 风格的数据运营看板",
+            brandTone: "快速、可执行、专业",
+            uxPrinciples: ["主链路优先", "关键指标高可读", "操作反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比度达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for finalizeApproval=false"
+          }
+        });
+      assert.equal(submitRes.status, 200);
+      assert.equal(submitRes.body.pendingApproval, false);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      assert.equal(detailRes.body.currentStage, "DESIGN");
+      assert.equal(detailRes.body.pendingApproval, false);
+
+      const designStage = (detailRes.body.stages as Array<{ type: string; progress: number }>).find((stage) => stage.type === "DESIGN");
+      assert.ok(designStage);
+      assert.equal(Number(designStage?.progress ?? 0), 34);
+
+      const designTasks = (detailRes.body.tasks as Array<{ stageType: string; status: string }>).filter((task) => task.stageType === "DESIGN");
+      assert.ok(designTasks.length > 0);
+      assert.equal(designTasks.every((task) => task.status === "done"), false);
+    });
+  });
 });
 
 describe("Error Matrix: issues + role-sets", () => {

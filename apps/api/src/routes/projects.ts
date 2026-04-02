@@ -2260,6 +2260,7 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as StageSubmissionInput;
   const content = String(payload?.content ?? "").trim();
+  const finalizeApproval = req.body?.finalizeApproval !== false;
 
   if (!content) {
     res.status(400).json({ message: "content is required" });
@@ -2272,6 +2273,8 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
       title: payload?.title,
       content,
       designReview: payload?.designReview
+    }, {
+      finalizeApproval
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "submit failed";

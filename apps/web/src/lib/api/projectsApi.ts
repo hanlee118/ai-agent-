@@ -511,6 +511,7 @@ export const projectsApi = {
     data: {
       title?: string;
       content: string;
+      finalizeApproval?: boolean;
       designReview?: {
         visualDirection: string;
         brandTone: string;

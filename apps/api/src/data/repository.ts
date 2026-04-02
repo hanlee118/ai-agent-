@@ -1512,7 +1512,15 @@ function needsDeliverableBackfill(content: string) {
   return !normalized.includes("## ");
 }
 
-function needsDeliverableAgentUpgrade(content: string, deliverableName: string, stageType: StageType) {
+function needsDeliverableAgentUpgrade(input: {
+  content: string;
+  deliverableName: string;
+  stageType: StageType;
+  projectName?: string;
+  projectDescription?: string;
+  keywords?: string[];
+}) {
+  const { content, deliverableName, stageType, projectName, projectDescription, keywords } = input;
   const normalized = String(content ?? "");
   const trimmed = normalized.trim();
   const name = String(deliverableName || "");
@@ -1560,6 +1568,18 @@ function needsDeliverableAgentUpgrade(content: string, deliverableName: string, 
 
   if (template.kind === "visual_mockup" && !hasVisualDesignPreview(trimmed)) {
     return true;
+  }
+
+  if (stageType === "DESIGN" && template.kind === "visual_mockup") {
+    const alignment = evaluateVisualDesignRequirementAlignment({
+      projectName: projectName || "",
+      projectDescription: projectDescription || "",
+      keywords: keywords || [],
+      content: trimmed
+    });
+    if (!alignment.pass) {
+      return true;
+    }
   }
 
   if (
@@ -1855,7 +1875,14 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
     const allowFastSubmitWithoutBackfill = shouldSubmitForPendingApproval;
     const needBackfill = !allowFastSubmitWithoutBackfill && (
       needsDeliverableBackfill(deliverable.content)
-      || needsDeliverableAgentUpgrade(deliverable.content, deliverable.name, resolveStageType(deliverable.stageType) || "ACCEPT")
+      || needsDeliverableAgentUpgrade({
+        content: deliverable.content,
+        deliverableName: deliverable.name,
+        stageType: resolveStageType(deliverable.stageType) || "ACCEPT",
+        projectName: project.name,
+        projectDescription: project.description,
+        keywords: readStringArray(project.parsedKeywords)
+      })
     );
     if (!needBackfill && !shouldPromoteStatus && !shouldSubmitForPendingApproval) {
       continue;
@@ -3073,6 +3100,10 @@ export async function submitCurrentStage(
     throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${deliverableName} 未通过模板校验（${templateGate.issues.join("；")}）`);
   }
   const finalizeApproval = options?.finalizeApproval !== false;
+  const currentStageRecord = project.stages.find((item) => item.type === currentStageType);
+  const nextProgress = finalizeApproval
+    ? 100
+    : Math.max(18, Math.min(92, Number(currentStageRecord?.progress || 18)));
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.deliverable.create({
@@ -3093,13 +3124,15 @@ export async function submitCurrentStage(
       where: { projectId_type: { projectId: id, type: currentStageType } },
       data: {
         status: "active",
-        progress: 100
+        progress: nextProgress
       }
     });
-    await tx.task.updateMany({
-      where: { projectId: id, stageType: currentStageType },
-      data: { status: "done" }
-    });
+    if (finalizeApproval) {
+      await tx.task.updateMany({
+        where: { projectId: id, stageType: currentStageType },
+        data: { status: "done" }
+      });
+    }
 
     await tx.project.update({
       where: { id },
