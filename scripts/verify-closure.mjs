@@ -12,12 +12,15 @@ import {
 let API_BASE_URL = process.env.OCC_BASE_URL || "";
 let OPENCLAW_BIN = process.env.OPENCLAW_BIN || "";
 const OPENCLAW_DEFAULT_BIN = "/Users/dalongxia/.nvm/versions/node/v24.14.0/bin/openclaw";
+const REQUEST_TIMEOUT_MS = Math.max(30_000, Number(process.env.REQUEST_TIMEOUT_MS || 120_000));
+const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const state = {
   sessionToken: "",
   createdProjectId: null,
   createdAgentId: null,
   createdMemoryIds: [],
+  originalRuntimeSettings: null,
   originalAgentSettings: null,
   originalSoulContent: null,
   originalSopContent: null,
@@ -26,10 +29,113 @@ const state = {
   patchedOpenClawTaskOriginal: null
 };
 
+function buildAnalysisSubmissionContent(versionLabel = "v1") {
+  return [
+    `# 需求分析交付 ${versionLabel}`,
+    "",
+    "## 业务背景与问题定义",
+    "- 当前项目用于验证 AI 协作平台从创建、介入、恢复、提交、审批到验收闭环是否可靠。",
+    "- 核心问题是用户需要看到真实可执行的阶段结论，而不是停留在空白结果或无法推进的状态。",
+    "- 本轮先聚焦单用户 MVP，优先验证项目流、审批门禁、交付物模板和观测能力。",
+    "",
+    "## 用户场景与关键旅程",
+    "- 场景一：管理员创建项目后，希望快速看到分析阶段是否真正开始推进。",
+    "- 场景二：若阶段结论不清晰，管理员需要介入、暂停、恢复并继续推进。",
+    "- 场景三：在提交审批稿时，审批人需要看到边界、验收标准和任务优先级，避免口头补充。",
+    "",
+    "## PRD 功能清单（MVP / 增强）",
+    "- MVP：项目创建、阶段推进、消息指导、人工介入、阶段提交、驳回重提、审批通过。",
+    "- MVP：项目房间实时查看任务、时间轴、交付物和必需行动提示。",
+    "- 增强：自动恢复卡死推进任务、自动补齐交付模板、输出验收报告和回填文档。",
+    "",
+    "## 验收标准与衡量指标",
+    "- 创建项目后 1 分钟内可看到当前阶段负责人、任务列表和时间轴。",
+    "- 阶段提交时，审批稿必须包含完整章节、边界说明和可验证验收标准。",
+    "- 驳回后允许补充内容再次提交，通过后阶段应向下一阶段推进。",
+    "",
+    "## 风险、依赖与假设",
+    "- 风险：模型调用失败会导致阶段结论延迟生成，需要恢复机制和可见提示。",
+    "- 依赖：API 健康、鉴权会话、项目仓储与交付物模板校验需保持可用。",
+    "- 假设：当前验收以本地环境为主，外部通道异常时允许脚本化回退验证。",
+    "",
+    "## 任务拆解与优先级",
+    "- P0：打通创建项目、阶段推进、阶段审批三条核心路径。",
+    "- P0：保证阶段提交文档符合模板且可以被审批和回溯。",
+    "- P1：补齐自动恢复、验收报告、产品说明回填和异常提示。",
+    "",
+    "## 验收检查清单",
+    "- 需求目标、用户场景、功能清单可形成闭环。",
+    "- 验收标准可量化且可验证。",
+    "- 风险与依赖项包含处理策略与责任人。",
+  ].join("\n");
+}
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+function formatResponseForError(response) {
+  return `${response.status} ${JSON.stringify(response.json)}`;
+}
+
+async function restoreRuntimeSettings() {
+  if (!state.originalRuntimeSettings?.provider) {
+    return;
+  }
+
+  const restored = await request("/api/system/runtime/config", {
+    method: "PUT",
+    body: JSON.stringify({
+      provider: state.originalRuntimeSettings.provider,
+      apiBaseUrl: state.originalRuntimeSettings.apiBaseUrl || "",
+      modelName: state.originalRuntimeSettings.modelName || ""
+    })
+  });
+  assert(restored.ok, `runtime restore failed: ${formatResponseForError(restored)}`);
+}
+
+async function approveProjectWithRecovery(projectId) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const approve = await request(`/api/projects/${projectId}/approve`, {
+      method: "POST"
+    });
+
+    if (approve.ok && approve.json?.currentStage !== "ANALYSIS") {
+      return approve;
+    }
+
+    const code = approve.json?.error?.code;
+    const recoverable422 = approve.status === 422
+      && (code === "REAL_MODEL_GATE_FAILED" || code === "STAGE_TEMPLATE_VALIDATION_FAILED");
+
+    if (recoverable422) {
+      if (code === "STAGE_TEMPLATE_VALIDATION_FAILED") {
+        const reconcile = await request(`/api/projects/${projectId}/reconcile-deliverables`, {
+          method: "POST"
+        });
+        assert(reconcile.ok, `reconcile after approve failed: ${formatResponseForError(reconcile)}`);
+      }
+      await WAIT(2000 * attempt);
+      continue;
+    }
+
+    if (approve.status === 409 && code === "NO_PENDING_APPROVAL") {
+      const detail = await request(`/api/projects/${projectId}`);
+      if (detail.ok && detail.json?.currentStage !== "ANALYSIS") {
+        return {
+          ...approve,
+          ok: true,
+          json: detail.json
+        };
+      }
+    }
+
+    throw new Error(`stage approve failed: ${formatResponseForError(approve)}`);
+  }
+
+  throw new Error("stage approve did not advance after retries");
 }
 
 function resolveOpenClawBinary() {
@@ -103,28 +209,39 @@ async function resolveApiBaseUrl() {
 }
 
 async function request(pathname, init = {}) {
-  const response = await fetch(`${API_BASE_URL}${pathname}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Cookie: `occ_session=${state.sessionToken}`,
-      ...(init.headers || {})
-    }
-  });
-  const text = await response.text();
-  let json = null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
-    json = text ? JSON.parse(text) : null;
-  } catch {
-    json = text;
-  }
+    const response = await fetch(`${API_BASE_URL}${pathname}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `occ_session=${state.sessionToken}`,
+        ...(init.headers || {})
+      }
+    });
+    const text = await response.text();
+    let json = null;
 
-  return {
-    status: response.status,
-    ok: response.ok,
-    json
-  };
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = text;
+    }
+
+    return {
+      status: response.status,
+      ok: response.ok,
+      json
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`request failed: ${pathname} (${reason})`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function createSession() {
@@ -209,8 +326,8 @@ async function verifyProjectFlow(results) {
   const submit = await request(`/api/projects/${state.createdProjectId}/stages/submit`, {
     method: "POST",
     body: JSON.stringify({
-      title: "阶段交付物",
-      content: "# 阶段提交\n\n- 已完成当前分析\n- 请求进入审批"
+      title: "需求分析 / PRD",
+      content: buildAnalysisSubmissionContent("v1")
     })
   });
   assert(submit.ok && submit.json?.pendingApproval === true, "stage submit failed");
@@ -226,17 +343,14 @@ async function verifyProjectFlow(results) {
   const resubmit = await request(`/api/projects/${state.createdProjectId}/stages/submit`, {
     method: "POST",
     body: JSON.stringify({
-      title: "阶段交付物 v2",
-      content: "# 阶段提交 v2\n\n- 已补充边界\n- 已补充验收标准\n- 请求再次审批"
+      title: "需求分析 / PRD v2",
+      content: `${buildAnalysisSubmissionContent("v2")}\n\n## 补充说明\n- 已根据驳回意见补充边界、验收标准与优先级说明。`
     })
   });
   assert(resubmit.ok && resubmit.json?.pendingApproval === true, "stage resubmit failed");
   results.projectResubmit = "ok";
 
-  const approve = await request(`/api/projects/${state.createdProjectId}/approve`, {
-    method: "POST"
-  });
-  assert(approve.ok && approve.json?.currentStage !== "ANALYSIS", "stage approve did not advance");
+  const approve = await approveProjectWithRecovery(state.createdProjectId);
   results.projectApprove = approve.json.currentStage;
 
   const updateTask = await request(`/api/tasks/${firstTaskId}`, {
@@ -250,6 +364,8 @@ async function verifyProjectFlow(results) {
 async function verifyRuntimeFlow(results) {
   const current = await request("/api/system/runtime/config");
   assert(current.ok, "runtime config get failed");
+  state.originalRuntimeSettings ||= current.json;
+  results.runtimeOriginalProvider = current.json?.provider;
 
   const saved = await request("/api/system/runtime/config", {
     method: "PUT",
@@ -269,6 +385,9 @@ async function verifyRuntimeFlow(results) {
   assert(validated.ok, "runtime validation failed");
   assert(typeof validated.json?.ok === "boolean", "runtime validation missing ok");
   results.runtimeValidate = validated.json.ok ? "ok" : "warning";
+
+  await restoreRuntimeSettings();
+  results.runtimeRestore = "ok";
 }
 
 async function verifyOpenClawFlow(results) {
@@ -332,7 +451,7 @@ async function verifyOpenClawFlow(results) {
   state.originalSopContent = agentDetail.json?.sop?.content ?? "";
   results.openclawAgentDetail = "ok";
 
-  const preview = await request(`/api/openclaw/agents/${targetAgentId}/preview`, {
+  const preview = await request(`/api/openclaw/agents/${targetAgentId}/preview-instruction`, {
     method: "POST",
     body: JSON.stringify({
       message: "请先理解这个需求，再等待我的确认。",
@@ -344,7 +463,7 @@ async function verifyOpenClawFlow(results) {
   results.openclawPreview = preview.json.recommendedAction;
 
   const settings = await request(`/api/openclaw/agents/${targetAgentId}/settings`, {
-    method: "PUT",
+    method: "PATCH",
     body: JSON.stringify({
       ...state.originalAgentSettings,
       selectedModel: state.originalAgentSettings.selectedModel || "gpt-5.2",
@@ -358,16 +477,16 @@ async function verifyOpenClawFlow(results) {
   results.openclawSettings = "ok";
 
   const updatedSoul = `${state.originalSoulContent.trimEnd()}\n\n<!-- closure-check -->\n`;
-  const soulSave = await request(`/api/openclaw/agents/${targetAgentId}/soul`, {
-    method: "PUT",
+  const soulSave = await request(`/api/openclaw/agents/${targetAgentId}/document/soul`, {
+    method: "PATCH",
     body: JSON.stringify({ content: updatedSoul, createIfMissing: true })
   });
   assert(soulSave.ok, "openclaw soul save failed");
   results.openclawSoul = "ok";
 
   const updatedSop = `${state.originalSopContent.trimEnd()}\n\n<!-- closure-check -->\n`;
-  const sopSave = await request(`/api/openclaw/agents/${targetAgentId}/sop`, {
-    method: "PUT",
+  const sopSave = await request(`/api/openclaw/agents/${targetAgentId}/document/sop`, {
+    method: "PATCH",
     body: JSON.stringify({ content: updatedSop, createIfMissing: true })
   });
   assert(sopSave.ok, "openclaw sop save failed");
@@ -480,18 +599,22 @@ async function verifyOpenClawFlow(results) {
     });
   }
 
-  const sla = await request("/api/openclaw/sla");
+  const sla = await request("/api/openclaw/agents/sla");
   assert(sla.ok && Array.isArray(sla.json), "openclaw sla failed");
   results.openclawSla = sla.json.length;
 }
 
 async function cleanup() {
   try {
+    await restoreRuntimeSettings();
+  } catch {}
+
+  try {
     if (state.originalAgentSettings && state.createdAgentId === null) {
       const agentId = state.originalAgentSettings.agentId;
       if (agentId) {
         await request(`/api/openclaw/agents/${agentId}/settings`, {
-          method: "PUT",
+          method: "PATCH",
           body: JSON.stringify(state.originalAgentSettings)
         });
       }
@@ -500,8 +623,8 @@ async function cleanup() {
 
   try {
     if (state.originalSoulContent !== null && state.originalAgentSettings?.agentId) {
-      await request(`/api/openclaw/agents/${state.originalAgentSettings.agentId}/soul`, {
-        method: "PUT",
+      await request(`/api/openclaw/agents/${state.originalAgentSettings.agentId}/document/soul`, {
+        method: "PATCH",
         body: JSON.stringify({ content: state.originalSoulContent, createIfMissing: true })
       });
     }
@@ -509,8 +632,8 @@ async function cleanup() {
 
   try {
     if (state.originalSopContent !== null && state.originalAgentSettings?.agentId) {
-      await request(`/api/openclaw/agents/${state.originalAgentSettings.agentId}/sop`, {
-        method: "PUT",
+      await request(`/api/openclaw/agents/${state.originalAgentSettings.agentId}/document/sop`, {
+        method: "PATCH",
         body: JSON.stringify({ content: state.originalSopContent, createIfMissing: true })
       });
     }

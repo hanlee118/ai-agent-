@@ -2748,6 +2748,75 @@ async function warmupNextStageAfterApprove(
   }
 }
 
+function buildRejectedStageFallbackRun(currentRole: RoleType, reason: string) {
+  return {
+    title: `${ROLE_LABELS[currentRole]}正在根据驳回意见返工`,
+    body: [
+      "## 返工计划",
+      `- 已接收驳回原因：${reason}`,
+      `- 将优先补齐${ROLE_LABELS[currentRole]}当前阶段的边界、证据与验收项。`,
+      "- 完成修订后会重新提交审批，并保留本次返工痕迹供复核。"
+    ].join("\n"),
+    thinkingSummary: "已即时生成返工计划骨架，详细返工说明将在后台补全。",
+    provider: "system-fallback",
+    model: "system-fallback"
+  };
+}
+
+async function warmupRejectedStageAfterReject(
+  project: ProjectDetail,
+  reason: string
+) {
+  try {
+    const run = await runProjectStageAgent({
+      projectId: project.id,
+      action: "project.reject.rework",
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType: project.currentStage,
+      role: project.currentRole,
+      summary: `审批被驳回，返工原因：${reason}`
+    });
+
+    const now = new Date();
+    const updated = await prisma.project.updateMany({
+      where: {
+        id: project.id,
+        status: "active",
+        currentStage: project.currentStage,
+        currentRole: project.currentRole,
+        pendingApproval: false
+      },
+      data: {
+        liveTitle: `${ROLE_LABELS[project.currentRole]}正在根据驳回意见返工`,
+        liveBody: `${run.body}\n\n### 驳回原因\n${reason}`,
+        liveProvider: run.provider,
+        liveStartedAt: now
+      }
+    });
+
+    if (updated.count > 0) {
+      await prisma.timelineEvent.create({
+        data: {
+          projectId: project.id,
+          timestamp: now,
+          agentId: project.currentRole,
+          type: "thinking",
+          title: "返工说明已补全",
+          content: `${run.thinkingSummary}\n执行引擎: ${run.provider} · 模型 ${run.model}`,
+          priority: "normal"
+        }
+      });
+    }
+  } catch (error) {
+    console.warn(
+      `[project] reject warmup failed for ${project.id}/${project.currentStage}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
 export async function rejectProjectStage(
   id: string,
   input: StageRejectInput
@@ -2769,16 +2838,7 @@ export async function rejectProjectStage(
       provider: "scripted",
       model: "scripted-agent"
     }
-    : await runProjectStageAgent({
-      projectId: id,
-      action: "project.reject.rework",
-      projectName: project.name,
-      projectDescription: project.description,
-      parsedIntent: project.parsedIntent,
-      stageType: currentStage,
-      role: currentRole,
-      summary: `审批被驳回，返工原因：${reason}`
-    });
+    : buildRejectedStageFallbackRun(currentRole, reason);
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.stage.update({
@@ -2844,7 +2904,11 @@ export async function rejectProjectStage(
     });
   });
 
-  return findProject(id);
+  const updated = await findProject(id);
+  if (updated && process.env.NODE_ENV !== "test") {
+    void warmupRejectedStageAfterReject(updated, reason);
+  }
+  return updated;
 }
 
 export async function interveneProject(id: string, command: string): Promise<ProjectDetail | undefined> {

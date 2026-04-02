@@ -44,6 +44,51 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
   const router = express.Router();
   const { asyncRoute, safeAudit } = options;
 
+  function normalizeBatchTaskUpdatesPayload(input: unknown) {
+    const queue = [input];
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (Array.isArray(current)) {
+        return { updates: current };
+      }
+      if (typeof current === "string") {
+        try {
+          queue.push(JSON.parse(current));
+        } catch {
+          // ignore invalid JSON text and continue probing other shapes
+        }
+        continue;
+      }
+      if (Buffer.isBuffer(current)) {
+        queue.push(current.toString("utf8"));
+        continue;
+      }
+      if (!current || typeof current !== "object") {
+        continue;
+      }
+
+      const candidate = current as {
+        updates?: unknown;
+        body?: unknown;
+        payload?: unknown;
+      };
+
+      if (Array.isArray(candidate.updates)) {
+        return { updates: candidate.updates };
+      }
+
+      if (candidate.body !== undefined) {
+        queue.push(candidate.body);
+      }
+      if (candidate.payload !== undefined) {
+        queue.push(candidate.payload);
+      }
+    }
+
+    return { updates: [] as unknown[] };
+  }
+
   router.get("/status", asyncRoute(async (_req, res) => {
     res.json(await getOpenClawStatusSummary());
   }));
@@ -78,8 +123,16 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
 
   router.patch("/projects/:projectId/tasks", asyncRoute(async (req, res) => {
     const projectId = String(req.params.projectId ?? "").trim();
-    const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
-    const updated = await updateOpenClawProjectTasks(projectId, updates);
+    const { updates } = normalizeBatchTaskUpdatesPayload(req.body);
+    if (updates.length === 0) {
+      res.status(400).json({ message: "updates is required" });
+      return;
+    }
+    const updated = await updateOpenClawProjectTasks(projectId, { updates });
+    if (!updated) {
+      res.status(404).json({ message: "Project or tasks not found" });
+      return;
+    }
     res.json(updated);
   }));
 
