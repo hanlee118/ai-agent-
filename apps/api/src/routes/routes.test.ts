@@ -551,6 +551,86 @@ describe("Error Matrix: auth + projects", () => {
       assert.ok(designTasks.length > 0);
       assert.equal(designTasks.every((task) => task.status === "done"), false);
     });
+
+    it("[200][PROJECT_STAGE_SUBMIT] finalizeApproval=true should stay in补充中 when DESIGN 核心交付物不齐", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-设计单项提交不触发审批",
+          description: "验证只提交设计审查卡时，不应直接进入待审批。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 40
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 40 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 首屏优先呈现爆品流量突增与跟品入口，支持平台来源筛选。",
+            "## 版式策略",
+            "- 采用流量总览 + 爆品榜单 + 商品详情抽屉结构。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、来源标签、跟踪按钮、告警条。",
+            "## 品牌语气",
+            "- 快节奏、偏实战、强调执行。",
+            "## UX 原则",
+            "- 关键动作显性、状态可解释、异常可追踪。",
+            "## 可访问性检查",
+            "- 键盘导航、语义标签、图表文字备份。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "- 改进建议: 下一轮补充详情页交互动效。"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "TikTok 风格的数据运营控制台",
+            brandTone: "直接、快速、数据导向",
+            uxPrinciples: ["主链路可达", "信息层级清晰", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比可读", "图表有文字说明"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for finalizeApproval=true with incomplete design deliverables"
+          }
+        });
+      assert.equal(submitRes.status, 200);
+      assert.equal(submitRes.body.pendingApproval, false);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      assert.equal(detailRes.body.currentStage, "DESIGN");
+      assert.equal(detailRes.body.pendingApproval, false);
+
+      const designStage = (detailRes.body.stages as Array<{ type: string; progress: number }>).find((stage) => stage.type === "DESIGN");
+      assert.ok(designStage);
+      assert.equal(Number(designStage?.progress ?? 0), 40);
+
+      const designTasks = (detailRes.body.tasks as Array<{ stageType: string; status: string }>).filter((task) => task.stageType === "DESIGN");
+      assert.ok(designTasks.length > 0);
+      assert.equal(designTasks.every((task) => task.status === "done"), false);
+    });
   });
 });
 

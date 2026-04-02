@@ -1624,6 +1624,74 @@ function buildExcerpt(content: string, limit = 120) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized;
 }
 
+function evaluateDevImplementationEvidenceForAcceptance(input: {
+  projectName?: string;
+  projectDescription?: string;
+  keywords?: string[];
+  content: string;
+}) {
+  const text = String(input.content || "").trim();
+  const issues: string[] = [];
+  if (!text) {
+    return { pass: false, issues: ["交付内容为空，无法证明研发实现"] };
+  }
+
+  const routeMatches = Array.from(
+    text.matchAll(/(?:^|\s)(\/[a-zA-Z0-9_:-]+(?:\/[a-zA-Z0-9_:-]+)*)/g)
+  ).map((match) => String(match[1] || "").trim());
+  const pageKeywordMatches = text.match(/(首页|列表页|详情页|监控页|榜单页|设置页|分析页|告警页|跟踪页|管理页)/g) || [];
+  const routeSignalCount = new Set(
+    [...routeMatches, ...pageKeywordMatches]
+      .map((item) => item.toLowerCase())
+      .filter(Boolean)
+  ).size;
+  if (routeSignalCount < 2) {
+    issues.push("缺少多页面路由证据");
+  }
+
+  const endpointMatches = Array.from(
+    text.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+\/[a-zA-Z0-9_:/?&=\-]+/gi)
+  ).map((match) => String(match[0] || "").trim().toUpperCase());
+  const apiPathMatches = Array.from(
+    text.matchAll(/\/api\/[a-zA-Z0-9_:/?&=\-]+/gi)
+  ).map((match) => String(match[0] || "").trim().toLowerCase());
+  const endpointSignalCount = new Set([...endpointMatches, ...apiPathMatches].filter(Boolean)).size;
+  if (endpointSignalCount < 2) {
+    issues.push("缺少 API 设计证据");
+  }
+
+  const hasStorageSignal = /(mysql|postgres|sqlite|redis|mongodb|prisma|数据表|schema|迁移|索引|持久化|仓储层|表结构)/i.test(text);
+  if (!hasStorageSignal) {
+    issues.push("缺少数据存储设计");
+  }
+
+  const hasRuntimeSignal = /(pnpm|npm|yarn)\s+(dev|start|build)|docker\s+compose|环境变量|\.env|启动命令|联调|回归测试/i.test(text);
+  if (!hasRuntimeSignal) {
+    issues.push("缺少运行与联调说明");
+  }
+
+  const hintText = `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`;
+  const isCrossBorderScenario = /跨境|爆品|跟品|tiktok|amazon|temu/i.test(hintText);
+  if (isCrossBorderScenario) {
+    if (!/(tiktok|amazon|temu|平台来源|采集源|数据源)/i.test(text)) {
+      issues.push("缺少平台数据来源说明");
+    }
+    if (!/(定时任务|轮询|webhook|增量同步|实时刷新|刷新频率|流式)/i.test(text)) {
+      issues.push("缺少数据更新机制说明");
+    }
+  }
+
+  const staticOnlySignal = /(仅静态|纯静态|单页面展示|单页展示|mock\s*数据|假数据|演示壳)/i.test(text);
+  if (staticOnlySignal && (endpointSignalCount < 2 || !hasStorageSignal)) {
+    issues.push("当前内容呈现为静态演示，未体现可运行数据链路");
+  }
+
+  return {
+    pass: issues.length === 0,
+    issues
+  };
+}
+
 function isDeliverableReadyForAcceptance(input: {
   status?: string;
   content?: string;
@@ -1634,6 +1702,7 @@ function isDeliverableReadyForAcceptance(input: {
   const status = String(input.status || "").toLowerCase();
   const content = String(input.content || "");
   const length = content.trim().length;
+  const stageType = String(input.stageType || "").toUpperCase();
   if (status === "draft" || !status) {
     return false;
   }
@@ -1645,11 +1714,25 @@ function isDeliverableReadyForAcceptance(input: {
   }
   if (
     input.project
-    && String(input.stageType || "").toUpperCase() === "DESIGN"
+    && stageType === "DESIGN"
     && isVisualMockupDeliverableTitle(String(input.deliverableName || ""))
     && !hasRequirementAlignedVisualDesignPreview(input.project, content)
   ) {
     return false;
+  }
+  if (input.project && stageType === "DEV") {
+    const template = resolveDeliverableTemplate(String(input.deliverableName || ""), "DEV");
+    if (template.kind === "demo_prototype" || template.kind === "implementation_word") {
+      const alignment = evaluateDevImplementationEvidenceForAcceptance({
+        projectName: input.project.name,
+        projectDescription: input.project.description,
+        keywords: input.project.parsedIntent.keywords,
+        content
+      });
+      if (!alignment.pass) {
+        return false;
+      }
+    }
   }
   return true;
 }
@@ -1787,6 +1870,11 @@ function buildProjectFinalArtifactsReport(
   }
 
   if (officialSite?.url) {
+    const officialSiteExcerpt = officialSite.url
+      ? `访问地址：${officialSite.url}`
+      : officialSite.filePath
+        ? `本地文件：${officialSite.filePath}`
+        : "可直接打开在线演示页";
     artifacts.push({
       key: "official_site",
       category: "演示站点链接",
@@ -1799,7 +1887,7 @@ function buildProjectFinalArtifactsReport(
       updatedAt: new Date().toISOString(),
       url: officialSite.url,
       filePath: officialSite.filePath,
-      excerpt: officialSite.filePath ? `本地文件：${officialSite.filePath}` : "可直接打开在线演示页"
+      excerpt: officialSiteExcerpt
     });
   }
 

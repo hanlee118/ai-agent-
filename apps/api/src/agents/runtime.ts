@@ -62,7 +62,7 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   INIT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "minima/MiniMax-M2.7-highspeed"],
   ANALYSIS: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "kimi-k2.5", "minima/MiniMax-M2.7-highspeed"],
   DESIGN: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "kimi-k2.5", "qwen3-coder-plus"],
-  DEV: ["openai/gpt-5.3-codex", "qwen3-coder-plus", "openai/gpt-5.4", "minima/MiniMax-M2.7-highspeed"],
+  DEV: ["openai/gpt-5.3-codex", "openai/gpt-5.4", "qwen3-coder-plus", "minima/MiniMax-M2.7-highspeed"],
   ACCEPT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "minima/MiniMax-M2.7-highspeed", "kimi-k2.5"]
 };
 
@@ -81,7 +81,7 @@ const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: str
   },
   DEV: {
     objective: "面向实现落地，强调代码可执行性和稳定性。",
-    bestFit: "openai/gpt-5.3-codex（代码导向） -> qwen3-coder-plus -> openai/gpt-5.4"
+    bestFit: "openai/gpt-5.3-codex（代码导向） -> openai/gpt-5.4（质量补位） -> qwen3-coder-plus（兜底）"
   },
   ACCEPT: {
     objective: "验收复盘与质量关口确认。",

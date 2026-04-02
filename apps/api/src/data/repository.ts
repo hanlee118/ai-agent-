@@ -668,6 +668,75 @@ function buildVisualDesignPreviewHtml(input: {
   });
 }
 
+function evaluateDevImplementationRequirementAlignment(input: {
+  projectName?: string;
+  projectDescription?: string;
+  keywords?: string[];
+  deliverableName?: string;
+  content: string;
+}) {
+  const text = String(input.content || "").trim();
+  const issues: string[] = [];
+  if (!text) {
+    return { pass: false, issues: ["交付内容为空，无法证明研发实现"] };
+  }
+
+  const routeMatches = Array.from(
+    text.matchAll(/(?:^|\s)(\/[a-zA-Z0-9_:-]+(?:\/[a-zA-Z0-9_:-]+)*)/g)
+  ).map((match) => String(match[1] || "").trim());
+  const pageKeywordMatches = text.match(/(首页|列表页|详情页|监控页|榜单页|设置页|分析页|告警页|跟踪页|管理页)/g) || [];
+  const routeSignalCount = new Set(
+    [...routeMatches, ...pageKeywordMatches]
+      .map((item) => item.toLowerCase())
+      .filter(Boolean)
+  ).size;
+  if (routeSignalCount < 2) {
+    issues.push("缺少多页面路由证据（至少 2 个页面/路由）");
+  }
+
+  const endpointMatches = Array.from(
+    text.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+\/[a-zA-Z0-9_:/?&=\-]+/gi)
+  ).map((match) => String(match[0] || "").trim().toUpperCase());
+  const apiPathMatches = Array.from(
+    text.matchAll(/\/api\/[a-zA-Z0-9_:/?&=\-]+/gi)
+  ).map((match) => String(match[0] || "").trim().toLowerCase());
+  const endpointSignalCount = new Set([...endpointMatches, ...apiPathMatches].filter(Boolean)).size;
+  if (endpointSignalCount < 2) {
+    issues.push("缺少 API 设计证据（至少 2 个接口）");
+  }
+
+  const hasStorageSignal = /(mysql|postgres|sqlite|redis|mongodb|prisma|数据表|schema|迁移|索引|持久化|仓储层|表结构)/i.test(text);
+  if (!hasStorageSignal) {
+    issues.push("缺少数据存储设计（数据库/表结构/迁移）");
+  }
+
+  const hasRuntimeSignal = /(pnpm|npm|yarn)\s+(dev|start|build)|docker\s+compose|环境变量|\.env|启动命令|联调|回归测试/i.test(text);
+  if (!hasRuntimeSignal) {
+    issues.push("缺少运行与联调说明（启动命令/环境变量/验证步骤）");
+  }
+
+  const hintText = `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`;
+  const isCrossBorderScenario = /跨境|爆品|跟品|tiktok|amazon|temu/i.test(hintText);
+  if (isCrossBorderScenario) {
+    if (!/(tiktok|amazon|temu|平台来源|采集源|数据源)/i.test(text)) {
+      issues.push("缺少平台数据来源说明（TikTok/Amazon/Temu）");
+    }
+    if (!/(定时任务|轮询|webhook|增量同步|实时刷新|刷新频率|流式)/i.test(text)) {
+      issues.push("缺少数据更新机制说明（轮询/Webhook/增量同步）");
+    }
+  }
+
+  const staticOnlySignal = /(仅静态|纯静态|单页面展示|单页展示|mock\s*数据|假数据|演示壳)/i.test(text);
+  if (staticOnlySignal && (endpointSignalCount < 2 || !hasStorageSignal)) {
+    issues.push("当前内容呈现为静态演示，未体现可运行数据链路");
+  }
+
+  return {
+    pass: issues.length === 0,
+    issues
+  };
+}
+
 function normalizeDeliverableToken(value: string) {
   return String(value || "")
     .trim()
@@ -739,6 +808,19 @@ function validateDeliverableTemplateGate(input: {
     }
   }
 
+  if (input.stageType === "DEV" && (template.kind === "demo_prototype" || template.kind === "implementation_word")) {
+    const devAlignment = evaluateDevImplementationRequirementAlignment({
+      projectName: input.projectName || input.deliverableName,
+      projectDescription: input.projectDescription || "",
+      keywords: input.keywords || [],
+      deliverableName: input.deliverableName,
+      content: normalized
+    });
+    if (!devAlignment.pass) {
+      issues.push(...devAlignment.issues);
+    }
+  }
+
   return {
     template,
     passed: issues.length === 0,
@@ -792,6 +874,92 @@ function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: S
   if (errors.length > 0) {
     throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${errors.join(" | ")}`);
   }
+}
+
+function evaluateStageFinalizeReadiness(input: {
+  project: ProjectDetail;
+  stageType: StageType;
+  deliverableName: string;
+  content: string;
+}) {
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[input.stageType] || [];
+  if (expectedNames.length === 0) {
+    return { canFinalize: true, reasons: [] as string[] };
+  }
+
+  const stageDeliverables = input.project.deliverables
+    .filter((item) => item.stageType === input.stageType)
+    .sort((left, right) => {
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+
+  const reasons: string[] = [];
+  const matched = expectedNames.map((expectedName) => {
+    if (isSameCoreDeliverable(input.deliverableName, expectedName, input.stageType)) {
+      return {
+        expectedName,
+        name: input.deliverableName,
+        status: "submitted",
+        content: input.content
+      };
+    }
+
+    const existing = stageDeliverables.find((item) => isSameCoreDeliverable(item.name, expectedName, input.stageType));
+    if (!existing) {
+      return null;
+    }
+    return {
+      expectedName,
+      name: existing.name,
+      status: existing.status,
+      content: String(existing.content || "")
+    };
+  });
+
+  for (let index = 0; index < expectedNames.length; index += 1) {
+    const expectedName = expectedNames[index];
+    const candidate = matched[index];
+    if (!candidate) {
+      reasons.push(`缺少核心交付物: ${expectedName}`);
+      continue;
+    }
+    if (candidate.status !== "submitted" && candidate.status !== "approved") {
+      reasons.push(`${candidate.name} 状态为 ${candidate.status}，未达到可审批状态`);
+      continue;
+    }
+
+    const gate = validateDeliverableTemplateGate({
+      stageType: input.stageType,
+      deliverableName: candidate.name,
+      content: candidate.content,
+      projectName: input.project.name,
+      projectDescription: input.project.description,
+      keywords: input.project.parsedIntent.keywords
+    });
+    if (!gate.passed) {
+      reasons.push(`${candidate.name} 未通过模板校验: ${gate.issues.join("；")}`);
+    }
+  }
+
+  if (input.stageType === "DESIGN") {
+    const designReview = matched.find((item) => item && isSameCoreDeliverable(item.expectedName, "设计审查卡.md", "DESIGN"));
+    if (!designReview || !hasApprovedDesignReview(String(designReview.content || ""))) {
+      reasons.push("设计阶段缺少已通过的设计审查卡");
+    }
+    const visualPreview = matched.find((item) => item && isSameCoreDeliverable(item.expectedName, "视觉定稿单页.preview.html.md", "DESIGN"));
+    if (!visualPreview || !hasVisualDesignPreview(String(visualPreview.content || ""))) {
+      reasons.push("设计阶段缺少可视化设计稿（静态图或单页 HTML）");
+    }
+  }
+
+  return {
+    canFinalize: reasons.length === 0,
+    reasons
+  };
 }
 
 export async function getProjectTemplateGatePrecheck(projectId: string) {
@@ -1568,6 +1736,19 @@ function needsDeliverableAgentUpgrade(input: {
 
   if (template.kind === "visual_mockup" && !hasVisualDesignPreview(trimmed)) {
     return true;
+  }
+
+  if (stageType === "DEV" && (template.kind === "demo_prototype" || template.kind === "implementation_word")) {
+    const devAlignment = evaluateDevImplementationRequirementAlignment({
+      projectName: projectName || "",
+      projectDescription: projectDescription || "",
+      keywords: keywords || [],
+      deliverableName: name,
+      content: trimmed
+    });
+    if (!devAlignment.pass) {
+      return true;
+    }
   }
 
   if (stageType === "DESIGN" && template.kind === "visual_mockup") {
@@ -3099,7 +3280,16 @@ export async function submitCurrentStage(
   if (!templateGate.passed) {
     throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${deliverableName} 未通过模板校验（${templateGate.issues.join("；")}）`);
   }
-  const finalizeApproval = options?.finalizeApproval !== false;
+  const requestedFinalizeApproval = options?.finalizeApproval !== false;
+  const finalizeReadiness = requestedFinalizeApproval
+    ? evaluateStageFinalizeReadiness({
+      project,
+      stageType: currentStageType,
+      deliverableName,
+      content: submittedContent
+    })
+    : { canFinalize: false, reasons: [] as string[] };
+  const finalizeApproval = requestedFinalizeApproval && finalizeReadiness.canFinalize;
   const currentStageRecord = project.stages.find((item) => item.type === currentStageType);
   const nextProgress = finalizeApproval
     ? 100
@@ -3140,7 +3330,9 @@ export async function submitCurrentStage(
         pendingApproval: finalizeApproval,
         summary: finalizeApproval
           ? `${stageLabel}阶段交付物已提交，等待你的审批。`
-          : `${stageLabel}阶段交付物持续补充中，正在整合验收材料。`,
+          : requestedFinalizeApproval && finalizeReadiness.reasons.length > 0
+            ? `${stageLabel}阶段交付物已提交，但核心交付物未齐，继续补充后再进入审批。`
+            : `${stageLabel}阶段交付物持续补充中，正在整合验收材料。`,
         liveTitle: `${ROLE_LABELS[currentRole]}已提交${stageLabel}阶段交付物`,
         liveBody: submittedContent,
         liveProvider: project.liveSession.provider,
@@ -3168,6 +3360,16 @@ export async function submitCurrentStage(
         title: `${stageLabel}阶段等待审批`,
         content: `${stageLabel}阶段已完成输出，请决定是否进入下一阶段。`,
         priority: "high"
+      });
+    } else if (requestedFinalizeApproval && finalizeReadiness.reasons.length > 0) {
+      timelineData.push({
+        projectId: id,
+        timestamp: new Date(),
+        agentId: "ROLE_PM",
+        type: "system",
+        title: `${stageLabel}阶段继续补充中`,
+        content: `未进入审批：${finalizeReadiness.reasons.slice(0, 4).join("；")}`,
+        priority: "normal"
       });
     }
 

@@ -1969,11 +1969,16 @@ router.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
   }
 
   const artifact = await generateOfficialSiteArtifact(project);
+  const publicPath = String(artifact.publicPath || "").trim();
+  const absoluteUrl = /^https?:\/\//i.test(publicPath)
+    ? publicPath
+    : `${req.protocol}://${req.get("host")}${publicPath.startsWith("/") ? publicPath : `/${publicPath}`}`;
   res.json({
     success: true,
     data: {
       projectId,
-      url: artifact.publicPath,
+      url: absoluteUrl,
+      publicPath,
       files: artifact.filePaths
     }
   });

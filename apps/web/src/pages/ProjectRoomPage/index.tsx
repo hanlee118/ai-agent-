@@ -1052,9 +1052,28 @@ const ProjectRoom = ({
     window.URL.revokeObjectURL(url);
   };
 
+  const resolveArtifactUrl = (rawUrl?: string) => {
+    const url = String(rawUrl || '').trim();
+    if (!url) {
+      return '';
+    }
+    if (/^https?:\/\//i.test(url) || /^file:\/\//i.test(url)) {
+      return url;
+    }
+    if (url.startsWith('/')) {
+      return `${window.location.origin}${url}`;
+    }
+    return `${window.location.origin}/${url.replace(/^\.?\//, '')}`;
+  };
+
   const handleOpenFinalArtifact = (artifact: FinalArtifactItem) => {
     if (artifact.source === 'link' && artifact.url) {
-      window.open(artifact.url, '_blank', 'noopener,noreferrer');
+      const resolvedUrl = resolveArtifactUrl(artifact.url);
+      if (!resolvedUrl) {
+        addToast('该成果链接无效，无法打开', 'error');
+        return;
+      }
+      window.open(resolvedUrl, '_blank', 'noopener,noreferrer');
       return;
     }
 
@@ -1146,16 +1165,17 @@ const ProjectRoom = ({
   };
 
   const handleCopyFinalArtifactLink = async (artifact: FinalArtifactItem) => {
-    if (!artifact.url) {
+    const resolvedUrl = resolveArtifactUrl(artifact.url);
+    if (!resolvedUrl) {
       addToast('该成果没有可复制链接', 'info');
       return;
     }
 
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(artifact.url);
+        await navigator.clipboard.writeText(resolvedUrl);
       } else {
-        window.prompt('复制以下链接', artifact.url);
+        window.prompt('复制以下链接', resolvedUrl);
       }
       addToast('成果链接已复制', 'success');
     } catch (error) {
