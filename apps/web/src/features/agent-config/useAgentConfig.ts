@@ -39,7 +39,7 @@ export function useAgentConfig({
   const [agentName, setAgentName] = useState(fallbackAgent.name);
   const [agentRole, setAgentRole] = useState(fallbackAgent.role);
   const [selectedModelId, setSelectedModelId] = useState(fallbackAgent.currentModelId || models[0]?.id || '');
-  const [loadedModelId, setLoadedModelId] = useState(fallbackAgent.currentModelId || '');
+  const [loadedModelRoute, setLoadedModelRoute] = useState(fallbackAgent.currentModelId || '');
   const [soulInput, setSoulInput] = useState('');
   const [loadedSoul, setLoadedSoul] = useState('');
   const [sopInput, setSopInput] = useState('');
@@ -47,6 +47,39 @@ export function useAgentConfig({
   const [configSource, setConfigSource] = useState<ConfigSource>('openclaw');
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+
+  const resolveModelOptionId = useCallback((modelRouteOrId: string) => {
+    const normalized = String(modelRouteOrId || '').trim();
+    if (!normalized) {
+      return '';
+    }
+    const byId = models.find((item) => String(item.id || '').trim() === normalized);
+    if (byId?.id) {
+      return byId.id;
+    }
+    const normalizedLower = normalized.toLowerCase();
+    const byName = models.find((item) => String(item.name || '').trim().toLowerCase() === normalizedLower);
+    if (byName?.id) {
+      return byName.id;
+    }
+    return normalized;
+  }, [models]);
+
+  const resolveModelRoute = useCallback((selectedIdOrRoute: string) => {
+    const normalized = String(selectedIdOrRoute || '').trim();
+    if (!normalized) {
+      return '';
+    }
+    const byId = models.find((item) => String(item.id || '').trim() === normalized);
+    if (byId?.name) {
+      return String(byId.name).trim();
+    }
+    const byName = models.find((item) => String(item.name || '').trim() === normalized);
+    if (byName?.name) {
+      return String(byName.name).trim();
+    }
+    return normalized;
+  }, [models]);
 
   const parseSopText = useCallback((value: string) => (
     value
@@ -56,16 +89,17 @@ export function useAgentConfig({
   ), []);
 
   useEffect(() => {
+    const seedModelOptionId = resolveModelOptionId(fallbackAgent.currentModelId || models[0]?.id || '');
     setAgentName(fallbackAgent.name);
     setAgentRole(fallbackAgent.role);
-    setSelectedModelId(fallbackAgent.currentModelId || models[0]?.id || '');
-    setLoadedModelId(fallbackAgent.currentModelId || '');
+    setSelectedModelId(seedModelOptionId);
+    setLoadedModelRoute(resolveModelRoute(seedModelOptionId));
     setSoulInput('');
     setLoadedSoul('');
     setSopInput('');
     setLoadedSop([]);
     setConfigSource('openclaw');
-  }, [fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, isOpen, models]);
+  }, [fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, isOpen, models, resolveModelOptionId, resolveModelRoute]);
 
   useEffect(() => {
     if (!isOpen || !fallbackAgent.id) {
@@ -95,8 +129,8 @@ export function useAgentConfig({
           setConfigSource('openclaw');
           setAgentName(detail.name || fallbackAgent.name);
           setAgentRole(detail.title || detail.responsibility || fallbackAgent.role);
-          setSelectedModelId(detailModelId);
-          setLoadedModelId(detailModelId);
+          setSelectedModelId(resolveModelOptionId(detailModelId));
+          setLoadedModelRoute(resolveModelRoute(detailModelId));
           setSoulInput(detailSoul);
           setLoadedSoul(detailSoul);
           setSopInput(detailSop.join('\n'));
@@ -116,8 +150,8 @@ export function useAgentConfig({
         setConfigSource('managed');
         setAgentName(detail.name || fallbackAgent.name);
         setAgentRole(detail.role || fallbackAgent.role);
-        setSelectedModelId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || '');
-        setLoadedModelId(detail.currentModelId || fallbackAgent.currentModelId || '');
+        setSelectedModelId(resolveModelOptionId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || ''));
+        setLoadedModelRoute(resolveModelRoute(detail.currentModelId || fallbackAgent.currentModelId || ''));
         setSoulInput(detailSoul);
         setLoadedSoul(detailSoul);
         setSopInput(detailSop.join('\n'));
@@ -135,7 +169,7 @@ export function useAgentConfig({
     return () => {
       active = false;
     };
-  }, [isOpen, fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, addToast, models, parseSopText]);
+  }, [isOpen, fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, addToast, models, parseSopText, resolveModelOptionId, resolveModelRoute]);
 
   const parseSopInput = useCallback(() => (
     sopInput
@@ -164,7 +198,8 @@ export function useAgentConfig({
     }
 
     const nextSop = parseSopInput();
-    const hasModelChange = Boolean(selectedModelId) && selectedModelId !== loadedModelId;
+    const selectedModelRoute = resolveModelRoute(selectedModelId);
+    const hasModelChange = Boolean(selectedModelRoute) && selectedModelRoute !== loadedModelRoute;
     const hasSoulChange = nextSoul !== loadedSoul.trim();
     const hasSopChange = !isSameStringArray(nextSop, loadedSop);
 
@@ -176,8 +211,8 @@ export function useAgentConfig({
     setIsSaving(true);
     try {
       if (configSource === 'openclaw') {
-        if (hasModelChange && selectedModelId) {
-          await openclawAgentsApi.updateSettings(fallbackAgent.id, { selectedModel: selectedModelId });
+        if (hasModelChange && selectedModelRoute) {
+          await openclawAgentsApi.updateSettings(fallbackAgent.id, { selectedModel: selectedModelRoute });
         }
         if (hasSoulChange) {
           if (!nextSoul) {
@@ -196,6 +231,11 @@ export function useAgentConfig({
         }
       } else {
         if (hasModelChange && selectedModelId) {
+          const matchedModel = models.find((item) => String(item.id || '').trim() === selectedModelId);
+          if (!matchedModel) {
+            addToast('当前选择的模型不是已注册模型，无法写入本地 Agent 配置', 'error');
+            return false;
+          }
           await agentsApi.switchModel(fallbackAgent.id, selectedModelId);
         }
         if (hasSoulChange && nextSoul) {
@@ -220,13 +260,15 @@ export function useAgentConfig({
   }, [
     fallbackAgent.id,
     selectedModelId,
-    loadedModelId,
+    loadedModelRoute,
     soulInput,
     loadedSoul,
     parseSopInput,
     isSameStringArray,
     loadedSop,
     configSource,
+    models,
+    resolveModelRoute,
     addToast,
   ]);
 

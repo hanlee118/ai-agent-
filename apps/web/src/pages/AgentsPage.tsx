@@ -13,6 +13,33 @@ type Props = {
 };
 
 export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, onOpenConfig }: Props) {
+  const resolveModelLabel = (modelKey: string) => {
+    const normalizedKey = String(modelKey || '').trim();
+    if (!normalizedKey) {
+      return '未设置模型';
+    }
+
+    const matchedById = models.find((model) => String(model.id || '').trim() === normalizedKey);
+    if (matchedById?.name) {
+      return matchedById.name;
+    }
+
+    const normalizedLower = normalizedKey.toLowerCase();
+    const matchedByName = models.find((model) => {
+      const name = String(model.name || '').trim();
+      if (!name) {
+        return false;
+      }
+      const lowerName = name.toLowerCase();
+      return lowerName === normalizedLower || lowerName.includes(normalizedLower) || normalizedLower.includes(lowerName);
+    });
+    if (matchedByName?.name) {
+      return matchedByName.name;
+    }
+
+    return normalizedKey;
+  };
+
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
       <header className="flex justify-between items-end">
@@ -55,7 +82,7 @@ export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, on
             <div className="grid grid-cols-2 gap-4">
               <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">模型</p>
-                <p className="text-xs text-white mt-1 font-medium">{models.find((model) => model.id === agent.currentModelId)?.name || '未设置模型'}</p>
+                <p className="text-xs text-white mt-1 font-medium">{resolveModelLabel(agent.currentModelId || agent.model || '')}</p>
               </div>
               <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">已用 Token</p>
