@@ -13,6 +13,9 @@ export interface Model {
   currentTask?: string;
   latency?: string;
   throughput?: string;
+  tokenSource?: 'usage_logs' | 'model_counter' | 'runtime_inferred' | 'unknown';
+  telemetryQuality?: 'measured' | 'estimated' | 'unknown';
+  costMode?: 'estimated' | 'unknown';
   createdAt: string;
   updatedAt: string;
 }
@@ -33,6 +36,18 @@ export interface ModelMetrics {
   avgThroughput: string;
   dailyCosts: { date: string; cost: number }[];
   tokenDistribution: { model: string; tokens: number }[];
+  dataSources?: {
+    tokens: 'usage_logs' | 'model_counter' | 'unknown';
+    latency: 'project_execution' | 'unknown';
+    throughput: 'usage_logs' | 'unknown';
+    cost: 'estimated_by_tokens' | 'unknown';
+  };
+  quality?: 'measured' | 'estimated' | 'unknown';
+  samples?: {
+    usageLogs: number;
+    projectExecutions: number;
+  };
+  notes?: string[];
 }
 
 export interface Agent {

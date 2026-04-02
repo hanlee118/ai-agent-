@@ -37,6 +37,46 @@ interface DiscoverModelsBody {
   apiKey?: unknown;
 }
 
+type MetricsSource = "usage_logs" | "model_counter" | "unknown";
+type MetricsQuality = "measured" | "estimated" | "unknown";
+
+function buildUsageLogMatcher(modelId: string, modelName: string) {
+  return {
+    OR: [
+      { model: modelId },
+      { model: modelName }
+    ]
+  };
+}
+
+function formatLatency(avgLatencyMs: number | null) {
+  if (avgLatencyMs === null || !Number.isFinite(avgLatencyMs)) {
+    return "unknown";
+  }
+  return `${Math.round(avgLatencyMs)}ms`;
+}
+
+function formatThroughput(tokensPerSecond: number | null) {
+  if (tokensPerSecond === null || !Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) {
+    return "unknown";
+  }
+  return `${tokensPerSecond.toFixed(2)} t/s`;
+}
+
+function inferMetricsQuality(input: {
+  usageLogCount: number;
+  executionCount: number;
+  tokenSource: MetricsSource;
+}): MetricsQuality {
+  if (input.tokenSource === "unknown" && input.executionCount === 0) {
+    return "unknown";
+  }
+  if (input.usageLogCount >= 20 || input.executionCount >= 20) {
+    return "measured";
+  }
+  return "estimated";
+}
+
 function normalizeApiBaseUrl(value: string) {
   return String(value || "").trim().replace(/\/$/, "");
 }
@@ -95,6 +135,7 @@ function toModelView(model: {
   createdAt: Date;
   updatedAt: Date;
 }) {
+  const hasTokenCounter = model.totalTokens > 0 || model.dailyTokens > 0;
   return {
     id: model.id,
     name: model.name,
@@ -105,6 +146,9 @@ function toModelView(model: {
     totalTokens: model.totalTokens,
     dailyTokens: model.dailyTokens,
     tokenLimit: model.tokenLimit,
+    tokenSource: hasTokenCounter ? "model_counter" : "unknown",
+    telemetryQuality: hasTokenCounter ? "estimated" : "unknown",
+    costMode: hasTokenCounter ? "estimated" : "unknown",
     createdAt: model.createdAt.toISOString(),
     updatedAt: model.updatedAt.toISOString()
   };
@@ -426,26 +470,46 @@ export function createModelsRouter() {
     const weekStart = new Date(start);
     weekStart.setDate(weekStart.getDate() - 6);
 
-    const usageLogs = await prisma.agentUsageLog.findMany({
-      where: {
-        createdAt: { gte: weekStart },
-        OR: [
-          { model: model.id },
-          { model: model.name }
-        ]
-      },
-      select: {
-        totalTokens: true,
-        createdAt: true
-      }
-    });
+    const usageLogMatcher = buildUsageLogMatcher(model.id, model.name);
 
-    const distributionGroups = await prisma.agentUsageLog.groupBy({
-      by: ["model"],
-      _sum: {
-        totalTokens: true
-      }
-    });
+    const [usageLogs, usageAggregate, distributionGroups, executionRows] = await Promise.all([
+      prisma.agentUsageLog.findMany({
+        where: {
+          createdAt: { gte: weekStart },
+          ...usageLogMatcher
+        },
+        select: {
+          totalTokens: true,
+          createdAt: true
+        }
+      }),
+      prisma.agentUsageLog.aggregate({
+        where: usageLogMatcher,
+        _sum: {
+          totalTokens: true
+        }
+      }),
+      prisma.agentUsageLog.groupBy({
+        by: ["model"],
+        _sum: {
+          totalTokens: true
+        }
+      }),
+      prisma.projectExecution.findMany({
+        where: {
+          createdAt: { gte: weekStart },
+          status: "success",
+          latencyMs: { not: null },
+          OR: [
+            { model: model.id },
+            { model: model.name }
+          ]
+        },
+        select: {
+          latencyMs: true
+        }
+      })
+    ]);
 
     const dayKeys = Array.from({ length: 7 }, (_, index) => {
       const day = new Date(weekStart);
@@ -463,6 +527,7 @@ export function createModelsRouter() {
     const weeklyTokens = dayKeys.map((key) => weeklyMap.get(key) ?? 0);
     const todayKey = isoDateOnly(start);
     const computedDailyTokens = weeklyMap.get(todayKey) ?? 0;
+    const usageTotalTokens = usageAggregate._sum.totalTokens ?? 0;
 
     const distribution = distributionGroups
       .map((item) => ({
@@ -471,19 +536,69 @@ export function createModelsRouter() {
       }))
       .sort((a, b) => b.tokens - a.tokens);
 
+    const latencyValues = executionRows
+      .map((row) => row.latencyMs)
+      .filter((value): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0);
+    const avgLatencyMs = latencyValues.length > 0
+      ? latencyValues.reduce((sum, value) => sum + value, 0) / latencyValues.length
+      : null;
+
+    const sortedUsageLogs = [...usageLogs].sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
+    const throughputTokensPerSecond = (() => {
+      if (sortedUsageLogs.length < 2) {
+        return null;
+      }
+      const durationMs = sortedUsageLogs.at(-1)!.createdAt.getTime() - sortedUsageLogs[0]!.createdAt.getTime();
+      if (durationMs < 30_000) {
+        return null;
+      }
+      const totalTokens = sortedUsageLogs.reduce((sum, item) => sum + item.totalTokens, 0);
+      if (totalTokens <= 0) {
+        return null;
+      }
+      return totalTokens / (durationMs / 1000);
+    })();
+
     const dailyCosts = dayKeys.map((date, index) => ({
       date,
       cost: Number(((weeklyTokens[index] / 1_000_000) * 1.5).toFixed(4))
     }));
 
+    const tokenSource: MetricsSource = usageTotalTokens > 0 || usageLogs.length > 0
+      ? "usage_logs"
+      : (model.totalTokens > 0 || model.dailyTokens > 0) ? "model_counter" : "unknown";
+    const totalTokens = tokenSource === "usage_logs" ? usageTotalTokens : model.totalTokens;
+    const dailyTokens = tokenSource === "usage_logs"
+      ? computedDailyTokens
+      : model.dailyTokens;
+    const quality = inferMetricsQuality({
+      usageLogCount: usageLogs.length,
+      executionCount: executionRows.length,
+      tokenSource
+    });
+
     sendSuccess(res, {
-      totalTokens: Math.max(model.totalTokens, usageLogs.reduce((acc, item) => acc + item.totalTokens, 0)),
-      dailyTokens: Math.max(model.dailyTokens, computedDailyTokens),
+      totalTokens,
+      dailyTokens,
       weeklyTokens,
-      avgLatency: "N/A",
-      avgThroughput: "N/A",
+      avgLatency: formatLatency(avgLatencyMs),
+      avgThroughput: formatThroughput(throughputTokensPerSecond),
       dailyCosts,
-      tokenDistribution: distribution
+      tokenDistribution: distribution,
+      dataSources: {
+        tokens: tokenSource,
+        latency: avgLatencyMs === null ? "unknown" : "project_execution",
+        throughput: throughputTokensPerSecond === null ? "unknown" : "usage_logs",
+        cost: weeklyTokens.some((item) => item > 0) ? "estimated_by_tokens" : "unknown"
+      },
+      quality,
+      samples: {
+        usageLogs: usageLogs.length,
+        projectExecutions: executionRows.length
+      },
+      notes: [
+        "token/cost metrics are computed from AgentUsageLog; current cost is estimated by token volume."
+      ]
     });
   }));
 

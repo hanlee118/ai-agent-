@@ -426,6 +426,9 @@ export default function App() {
         dailyTokens: Math.max(model.dailyTokens || 0, dynamicDailyTokens),
         totalTokens: Math.max(model.totalTokens || 0, dynamicDailyTokens),
         status: activeAgents > 0 ? 'Healthy' : model.status,
+        tokenSource: dynamicDailyTokens > 0 ? 'usage_logs' : (model.tokenSource || 'unknown'),
+        telemetryQuality: dynamicDailyTokens > 0 ? 'estimated' : (model.telemetryQuality || 'unknown'),
+        costMode: dynamicDailyTokens > 0 ? 'estimated' : (model.costMode || 'unknown'),
       } as Model;
     });
 
@@ -445,8 +448,11 @@ export default function App() {
         totalTokens: usage.dailyTokens,
         dailyTokens: usage.dailyTokens,
         currentTask: projects[0]?.name ? `推进项目: ${projects[0].name}` : '待分配任务',
-        latency: 'N/A',
-        throughput: 'N/A',
+        latency: 'unknown',
+        throughput: 'unknown',
+        tokenSource: 'runtime_inferred',
+        telemetryQuality: 'estimated',
+        costMode: 'estimated',
         logs: [],
       });
     }

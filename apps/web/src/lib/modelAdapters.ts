@@ -19,14 +19,10 @@ export function buildRuntimeModels(
   const modelName = runtimeInfo.modelName || runtimeInfo.model || `${provider} Core`;
   const runtimeMode = runtimeInfo.mode || 'normal';
 
-  const totalTokens = Math.max(
-    agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0) + sessions.reduce((sum, session) => sum + (session.tokens || 0), 0),
-    1,
-  );
-  const dailyTokens = Math.max(agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0), 1);
-  const activeSessions = sessions.filter((session) => session.status === 'active').length;
-  const throughputBase = Math.max(agents.length * 3 + activeSessions * 5 + tasks.length, 8);
-  const latencyBase = runtimeMode === 'production' ? 120 : 180;
+  const totalTokens =
+    agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0) +
+    sessions.reduce((sum, session) => sum + (session.tokens || 0), 0);
+  const dailyTokens = agents.reduce((sum, agent) => sum + (agent.tokensUsed || 0), 0);
 
   const status: Model['status'] = runtimeMode === 'degraded'
     ? 'Degraded'
@@ -43,8 +39,11 @@ export function buildRuntimeModels(
       totalTokens,
       dailyTokens,
       currentTask: projects[0]?.name ? `推进项目: ${projects[0].name}` : '等待任务分配',
-      latency: `${latencyBase + Math.min(activeSessions * 8, 220)}ms`,
-      throughput: `${throughputBase.toFixed(1)} t/s`,
+      latency: 'unknown',
+      throughput: 'unknown',
+      tokenSource: 'runtime_inferred',
+      telemetryQuality: 'estimated',
+      costMode: 'estimated',
       logs: [],
     },
   ];
@@ -69,8 +68,11 @@ export function toUiModel(model: ApiModel): Model {
     totalTokens: Number(model.totalTokens || 0),
     dailyTokens: Number(model.dailyTokens || 0),
     currentTask,
-    latency: model.latency || 'N/A',
-    throughput: model.throughput || 'N/A',
+    latency: model.latency || 'unknown',
+    throughput: model.throughput || 'unknown',
+    tokenSource: model.tokenSource || (Number(model.totalTokens || 0) > 0 || Number(model.dailyTokens || 0) > 0 ? 'model_counter' : 'unknown'),
+    telemetryQuality: model.telemetryQuality || (Number(model.totalTokens || 0) > 0 || Number(model.dailyTokens || 0) > 0 ? 'estimated' : 'unknown'),
+    costMode: model.costMode || (Number(model.totalTokens || 0) > 0 || Number(model.dailyTokens || 0) > 0 ? 'estimated' : 'unknown'),
     logs: [],
   };
 }

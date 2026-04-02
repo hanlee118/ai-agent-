@@ -11,6 +11,27 @@ type Props = {
   onRefreshData?: () => Promise<void> | void;
 };
 
+const TOKEN_SOURCE_LABEL: Record<string, string> = {
+  usage_logs: '来源: 使用日志',
+  model_counter: '来源: 模型计数器',
+  runtime_inferred: '来源: 运行态推断',
+  unknown: '来源: 未采集',
+};
+
+const QUALITY_LABEL: Record<string, string> = {
+  measured: '实测',
+  estimated: '估算',
+  unknown: '未知',
+};
+
+function normalizeMetricValue(value: string | undefined) {
+  const text = String(value || '').trim();
+  if (!text || text.toLowerCase() === 'n/a' || text.toLowerCase() === 'unknown') {
+    return '未采集';
+  }
+  return text;
+}
+
 export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData }: Props) {
   const [selectedModelId, setSelectedModelId] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -68,7 +89,7 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
         <div>
           <h1 className="text-4xl font-bold text-white tracking-tight">模型资源中心</h1>
           <p className="text-slate-400 mt-2 flex items-center gap-2">
-            Model Nexus: 实时观测多模型计算资源分配与消耗
+            Model Nexus: 观测多模型计算资源分配与消耗（按实测/估算来源标注）
             <span className="group relative inline-block">
               <Info size={14} className="text-slate-500 cursor-help hover:text-primary transition-colors" />
               <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-64 p-3 bg-surface-muted border border-border-subtle rounded-xl text-[10px] text-slate-300 opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 shadow-2xl leading-relaxed">
@@ -123,7 +144,7 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
         </div>
         <div className="bg-surface-soft border border-border-subtle p-8 rounded-3xl flex flex-col justify-center space-y-2 relative overflow-hidden">
           <div className="absolute top-0 right-0 p-4 opacity-10"><Zap size={80} /></div>
-          <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">TOTAL COST (USD)</p>
+          <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">ESTIMATED COST (USD)</p>
           <h2 className="text-5xl font-mono font-bold text-white tracking-tighter">${stats.totalCost.toLocaleString(undefined, { minimumFractionDigits: 4 })}</h2>
         </div>
         <div className="bg-surface-soft border border-border-subtle p-8 rounded-3xl flex flex-col justify-center space-y-2 relative overflow-hidden">
@@ -144,6 +165,9 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
                 <div>
                   <h3 className="font-bold text-white text-lg">{model.name}</h3>
                   <p className="text-xs text-slate-500">{model.provider}</p>
+                  <p className="text-[10px] text-slate-500 mt-1">
+                    {TOKEN_SOURCE_LABEL[model.tokenSource || 'unknown']} · {QUALITY_LABEL[model.telemetryQuality || 'unknown']}
+                  </p>
                 </div>
               </div>
               <Badge variant={model.status === 'Healthy' ? 'primary' : 'default'}>{model.status === 'Healthy' ? '运行良好' : '延迟波动'}</Badge>
@@ -165,12 +189,16 @@ export default function ModelNexusPage({ addToast, onOpenNewModel, onRefreshData
                 <p className="text-lg font-mono text-white mt-1">{(model.totalTokens / 1000000).toFixed(1)}M</p>
               </div>
               <div className="p-4 bg-white/5 rounded-2xl border border-border-subtle/50">
-                <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">实时吞吐</p>
-                <p className="text-lg font-mono text-primary mt-1">{model.throughput}</p>
+                <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">吞吐（来源标注）</p>
+                <p className={cn('text-lg font-mono mt-1', normalizeMetricValue(model.throughput) === '未采集' ? 'text-slate-400' : 'text-primary')}>
+                  {normalizeMetricValue(model.throughput)}
+                </p>
               </div>
               <div className="p-4 bg-white/5 rounded-2xl border border-border-subtle/50">
                 <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">平均延迟</p>
-                <p className="text-lg font-mono text-white mt-1">{model.latency}</p>
+                <p className={cn('text-lg font-mono mt-1', normalizeMetricValue(model.latency) === '未采集' ? 'text-slate-400' : 'text-white')}>
+                  {normalizeMetricValue(model.latency)}
+                </p>
               </div>
             </div>
           </div>
