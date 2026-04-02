@@ -3146,6 +3146,147 @@ export async function submitCurrentStage(
   return findProject(id);
 }
 
+export async function promoteReadyDraftDeliverablesForCurrentStage(
+  id: string
+): Promise<ProjectDetail | undefined> {
+  const project = await findProject(id);
+  if (!project || project.status !== "active" || project.pendingApproval) {
+    return project;
+  }
+
+  const currentStageType = resolveStageType(project.currentStage);
+  if (!currentStageType) {
+    return project;
+  }
+
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[currentStageType] || [];
+  if (expectedNames.length === 0) {
+    return project;
+  }
+
+  const stageDeliverables = project.deliverables
+    .filter((item) => item.stageType === currentStageType)
+    .sort((left, right) => {
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+
+  const matchedDraftCandidates = expectedNames.map((expectedName) =>
+    stageDeliverables.find((item) => isSameCoreDeliverable(item.name, expectedName, currentStageType))
+  );
+
+  if (matchedDraftCandidates.some((item) => !item || item.status !== "draft")) {
+    return project;
+  }
+
+  const matchedDrafts = matchedDraftCandidates.filter((item): item is typeof stageDeliverables[number] => Boolean(item));
+
+  for (const deliverable of matchedDrafts) {
+    const gate = validateDeliverableTemplateGate({
+      stageType: currentStageType,
+      deliverableName: deliverable.name,
+      content: String(deliverable.content || ""),
+      projectName: project.name,
+      projectDescription: project.description,
+      keywords: project.parsedIntent.keywords
+    });
+    if (!gate.passed) {
+      return project;
+    }
+  }
+
+  if (currentStageType === "DESIGN") {
+    const designReview = matchedDrafts.find((item) => isSameCoreDeliverable(item.name, "设计审查卡.md", "DESIGN"));
+    const visualPreview = matchedDrafts.find((item) => isSameCoreDeliverable(item.name, "视觉定稿单页.preview.html.md", "DESIGN"));
+    if (!designReview || !hasApprovedDesignReview(String(designReview.content || ""))) {
+      return project;
+    }
+    if (!visualPreview || !hasVisualDesignPreview(String(visualPreview.content || ""))) {
+      return project;
+    }
+  }
+
+  const now = new Date();
+  const stageLabel = STAGE_LABELS[currentStageType] || currentStageType;
+  const currentRole = project.currentRole as RoleType;
+  const latestDeliverable = matchedDrafts
+    .slice()
+    .sort((left, right) => {
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })[0];
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.deliverable.updateMany({
+      where: {
+        id: {
+          in: matchedDrafts.map((item) => item.id)
+        }
+      },
+      data: {
+        status: "submitted",
+        updatedAt: now
+      }
+    });
+
+    await tx.stage.update({
+      where: { projectId_type: { projectId: id, type: currentStageType } },
+      data: {
+        status: "active",
+        progress: 100
+      }
+    });
+
+    await tx.task.updateMany({
+      where: { projectId: id, stageType: currentStageType },
+      data: { status: "done" }
+    });
+
+    await tx.project.update({
+      where: { id },
+      data: {
+        pendingApproval: true,
+        summary: `${stageLabel}阶段交付物已整理完成，等待你的审批。`,
+        liveTitle: `${ROLE_LABELS[currentRole] || currentRole}已提交${stageLabel}阶段交付物`,
+        liveBody: String(latestDeliverable?.content || project.liveSession.body || ""),
+        liveProvider: project.liveSession.provider,
+        liveStartedAt: now
+      }
+    });
+
+    await tx.timelineEvent.createMany({
+      data: [
+        {
+          projectId: id,
+          timestamp: now,
+          agentId: currentRole,
+          type: "deliverable_submitted",
+          title: "阶段交付物已批量提交",
+          content: `${matchedDrafts.length} 份 ${stageLabel} 阶段草稿已自动转为待审批交付物。`,
+          priority: "high"
+        },
+        {
+          projectId: id,
+          timestamp: now,
+          agentId: "ROLE_PM",
+          type: "approval_required",
+          title: `${stageLabel}阶段等待审批`,
+          content: `${stageLabel}阶段已完成输出，请决定是否进入下一阶段。`,
+          priority: "high"
+        }
+      ]
+    });
+  });
+
+  return findProject(id);
+}
+
 export async function postProjectMessage(
   id: string,
   input: ProjectMessageInput

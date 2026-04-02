@@ -3,6 +3,10 @@ import { generateSessionToken, hashSessionToken } from '../apps/api/dist/securit
 
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.REQUEST_TIMEOUT_MS || 210000));
 const MAX_IN_PROGRESS_RETRIES = Math.max(8, Number(process.env.MAX_IN_PROGRESS_RETRIES || 40));
+const SESSION_TTL_MS = Math.max(
+  30 * 60 * 1000,
+  Number(process.env.SMOKE_SESSION_TTL_MS || 2 * 60 * 60 * 1000)
+);
 const CANDIDATE_BASES = process.env.OCC_BASE_URL
   ? [String(process.env.OCC_BASE_URL).replace(/\/$/, '')]
   : [
@@ -15,6 +19,24 @@ const CANDIDATE_BASES = process.env.OCC_BASE_URL
 let BASE = '';
 let SESSION_COOKIE = '';
 const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function formatProjectState(project) {
+  if (!project || typeof project !== 'object') {
+    return 'project=<unknown>';
+  }
+  return [
+    `project=${project.id || '<unknown>'}`,
+    `stage=${project.currentStage || '<unknown>'}`,
+    `status=${project.status || '<unknown>'}`,
+    `pending=${project.pendingApproval ? 1 : 0}`,
+    `progress=${Number(project.progress || 0)}`
+  ].join(' ');
+}
+
+function logProgress(message, extra) {
+  const suffix = extra ? ` ${extra}` : '';
+  process.stderr.write(`[smoke] ${message}${suffix}\n`);
+}
 
 async function resolveBase() {
   for (const candidate of CANDIDATE_BASES) {
@@ -35,7 +57,7 @@ async function createTemporarySession() {
   await prisma.authSession.create({
     data: {
       tokenHash: await hashSessionToken(sessionToken),
-      expiresAt: new Date(Date.now() + 15 * 60 * 1000),
+      expiresAt: new Date(Date.now() + SESSION_TTL_MS),
     },
   });
   SESSION_COOKIE = `occ_session=${sessionToken}`;
@@ -123,6 +145,7 @@ async function main() {
   BASE = await resolveBase();
   await createTemporarySession();
   steps.push({ step: 'resolve_base', status: 200, durationMs: 0, summary: { base: BASE } });
+  logProgress('resolved api base', BASE);
 
   const create = await req('POST', '/api/projects', {
     name: `smoke-${Date.now()}`,
@@ -134,9 +157,11 @@ async function main() {
   }
   const projectId = create.body.id;
   steps.push({ step: 'create', status: create.status, durationMs: create.durationMs, project: summarizeProject(create.body) });
+  logProgress('created project', formatProjectState(create.body));
 
   const detail1 = await req('GET', `/api/projects/${projectId}`);
   steps.push({ step: 'detail_after_create', status: detail1.status, durationMs: detail1.durationMs, project: summarizeProject(detail1.body) });
+  logProgress('fetched initial detail', formatProjectState(detail1.body));
 
   // iterate advance path until completed or max rounds
   for (let i = 1; i <= 18; i += 1) {
@@ -153,6 +178,10 @@ async function main() {
         retryCount: consecutiveInProgressRetries,
         pollAfterMs,
       });
+      logProgress(
+        `advance round ${i} still in progress`,
+        `retry=${consecutiveInProgressRetries} pollAfterMs=${pollAfterMs}`
+      );
       if (consecutiveInProgressRetries > MAX_IN_PROGRESS_RETRIES) {
         throw new Error(
           `advance_${i} stayed in PROJECT_ADVANCE_IN_PROGRESS for ${consecutiveInProgressRetries} consecutive retries (max=${MAX_IN_PROGRESS_RETRIES})`,
@@ -176,6 +205,10 @@ async function main() {
         code: advance.body?.error?.code,
         requiredActions: actions.map((a) => ({ id: a.id, action: a.action, severity: a.severity })),
       });
+      logProgress(
+        `advance round ${i} requires intervention`,
+        actions.map((a) => `${a.action}:${a.severity}`).join(', ')
+      );
 
       const hasReviewPending = actions.some((a) => a.action === 'review_pending_stage');
       if (hasReviewPending) {
@@ -184,6 +217,7 @@ async function main() {
           throw new Error(`approve_${i} failed: ${approve.status} ${JSON.stringify(approve.body)}`);
         }
         steps.push({ step: `approve_${i}`, status: approve.status, durationMs: approve.durationMs, project: summarizeProject(approve.body) });
+        logProgress(`approved round ${i}`, formatProjectState(approve.body));
       }
 
       const hasReconcile = actions.some((a) => a.action === 'reconcile_deliverables');
@@ -193,15 +227,18 @@ async function main() {
           throw new Error(`reconcile_${i} failed: ${reconcile.status} ${JSON.stringify(reconcile.body)}`);
         }
         steps.push({ step: `reconcile_${i}`, status: reconcile.status, durationMs: reconcile.durationMs, project: summarizeProject(reconcile.body) });
+        logProgress(`reconciled deliverables round ${i}`, formatProjectState(reconcile.body));
       }
     } else if (advance.status >= 400) {
       throw new Error(`advance_${i} failed: ${advance.status} ${JSON.stringify(advance.body)}`);
     } else {
       steps.push({ step: `advance_${i}`, status: advance.status, durationMs: advance.durationMs, project: summarizeProject(advance.body) });
+      logProgress(`advance round ${i} returned`, formatProjectState(advance.body));
     }
 
     const detail = await req('GET', `/api/projects/${projectId}`);
     steps.push({ step: `detail_after_round_${i}`, status: detail.status, durationMs: detail.durationMs, project: summarizeProject(detail.body) });
+    logProgress(`detail after round ${i}`, formatProjectState(detail.body));
 
     if (detail.body?.status === 'completed') {
       break;
@@ -211,6 +248,7 @@ async function main() {
   const finalDetail = await req('GET', `/api/projects/${projectId}`);
   const finalProject = unwrapEnvelope(finalDetail.body);
   steps.push({ step: 'detail_final', status: finalDetail.status, durationMs: finalDetail.durationMs, project: summarizeProject(finalProject) });
+  logProgress('final detail', formatProjectState(finalProject));
   if (finalProject?.status !== 'completed') {
     throw new Error(`project did not complete within smoke flow budget: ${JSON.stringify(summarizeProject(finalProject))}`);
   }
@@ -233,6 +271,7 @@ async function main() {
           }
         : artifacts.body,
   });
+  logProgress('final artifacts ready', `status=${artifacts.status}`);
 
   const timed = steps.filter((step) => typeof step.durationMs === 'number');
   const slowest = [...timed]

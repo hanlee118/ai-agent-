@@ -49,6 +49,7 @@ import {
   listProjects,
   runProjectStageAgent,
   postProjectMessage,
+  promoteReadyDraftDeliverablesForCurrentStage,
   reconcileProjectDeliverablesNow,
   rejectProjectStage,
   resumeProject,
@@ -312,6 +313,11 @@ async function executeManualAdvanceCycle(projectId: string) {
     for (let attempt = 1; attempt <= MANUAL_ADVANCE_MAX_ATTEMPTS; attempt += 1) {
       const current = await findProject(projectId);
       if (!current || current.status !== "active" || current.pendingApproval) {
+        return;
+      }
+
+      const promoted = await promoteReadyDraftDeliverablesForCurrentStage(projectId);
+      if (promoted?.pendingApproval) {
         return;
       }
 
