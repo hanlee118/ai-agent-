@@ -9,16 +9,26 @@ PORT="${PORT:-8787}"
 HEALTH_HOST="${HEALTH_HOST:-127.0.0.1}"
 HEALTH_URL="http://${HEALTH_HOST}:${PORT}/health"
 
+resolve_listener_pid() {
+  lsof -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | head -n 1
+}
+
 if [ ! -f "$PID_FILE" ]; then
   if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
-    echo "OpenClaw responds on :$PORT but no PID file exists; nothing to stop safely"
+    PID="$(resolve_listener_pid || true)"
+    if [ -n "${PID:-}" ]; then
+      echo "OpenClaw responds on :$PORT without PID file; adopting PID $PID for shutdown"
+    else
+      echo "OpenClaw responds on :$PORT but listener PID could not be resolved; nothing to stop safely"
+      exit 0
+    fi
   else
     echo "OpenClaw is not running"
+    exit 0
   fi
-  exit 0
+else
+  PID="$(cat "$PID_FILE")"
 fi
-
-PID="$(cat "$PID_FILE")"
 
 if kill -0 "$PID" 2>/dev/null; then
   kill "$PID"

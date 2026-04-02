@@ -1,7 +1,7 @@
 # 最新需求文档
 
 文档版本：Latest  
-更新时间：2026-04-01
+更新时间：2026-04-02
 
 ## 1. 文档目标
 
@@ -11,6 +11,9 @@
 - 阶段推进收敛与故障恢复
 - GitLab Harness 外部任务闭环
 - 健康检查与可重复验收
+- 新建项目预填与需求对齐链路
+- 非阻塞审批返工链路
+- 本地实时入口与静态交付物预览边界
 
 ## 2. 产品目标
 
@@ -86,6 +89,60 @@
 验收标准：
 - 出现推进风暴时返回 `pollAfterMs` 与 `recoveryAttempted`。
 - 可恢复故障不直接终止流程，能自动进入恢复重试。
+
+### FR-011 新建项目需求预填（核心）
+
+- `/api/issues/preview` 必须基于用户输入生成结构化预览：
+  - `matchedGoals`
+  - `matchedPrinciples`
+  - `missionAnchor`
+  - `requirementContract`
+- 当产品上下文中的 `goals/principles` 为空时，不得返回空白；必须基于当前需求语义自动生成初始建议。
+- 返回结果必须通过前端映射到新建项目弹窗的可编辑草稿。
+
+验收标准：
+- 空产品上下文下，`matchedGoals/matchedPrinciples` 非空。
+- `contextNotes` 明确标注这些建议为“基于本次需求自动生成”，避免误导为既有产品基线。
+
+### FR-012 审批驳回即时返回（核心）
+
+- `POST /api/projects/:id/reject` 必须优先完成状态回写，而不是同步等待模型返工说明。
+- 驳回后阶段任务状态必须立即切回可返工状态：
+  - `pendingApproval=false`
+  - 当前阶段首任务恢复 `in_progress`
+  - 其余任务按规则回退/阻塞
+- 返工说明允许异步补写到 `liveSession` 和 `timeline`。
+
+验收标准：
+- `reject` 接口应快速返回 `200`。
+- 驳回后用户可立即重新编辑并再次提交阶段交付物。
+
+### FR-013 本地入口一致性（重要）
+
+- 本地人工验收默认入口必须固定为：
+  - 前端：`http://127.0.0.1:5173`
+  - API：`http://127.0.0.1:8787`
+- `apps/web/public/generated/*.html` 仅作为静态交付物预览，不得替代实时前端状态判断。
+- 若存在 `4173/3001` 等其他本机服务，文档与验收说明必须明确其不属于当前 OCC 实时验收入口。
+
+验收标准：
+- 人工验收说明中明确区分“实时页面”和“静态交付物预览”。
+- 遇到页面不一致时，以 `5173` 页面和 `8787` API 返回为准。
+
+### FR-014 验收脚本契约一致性（重要）
+
+- 项目流验收脚本必须兼容当前平台的：
+  - 鉴权会话
+  - API 端口约定
+  - 阶段交付模板校验
+  - `PROJECT_ADVANCE_IN_PROGRESS` 轮询契约
+- 自检脚本若临时切换运行时配置，必须在退出前恢复原配置，不得污染后续真实模型验收环境。
+- 脚本不允许因过期端口、旧请求体或简化模板而误报平台故障。
+
+验收标准：
+- `scripts/smoke-project-flow.mjs` 可直接命中当前 API。
+- `verify:closure` 的提交/驳回/重提断言与当前接口行为一致。
+- `verify:closure` 执行结束后，运行时模式仍保持执行前配置。
 
 ### FR-020 真实模型强门禁（核心）
 
@@ -178,6 +235,8 @@ pnpm --filter @occ/api typecheck
 pnpm --filter @occ/api test:routes
 pnpm test:smoke
 pnpm health:check
+node scripts/smoke-project-flow.mjs
+pnpm verify:closure
 pnpm verify:repeatable:018
 ```
 
@@ -192,3 +251,5 @@ pnpm verify:repeatable:018
 
 - 若外部模型路由不稳定，仍可能出现阶段推进延迟；需持续优化 route prewarm 与 cooldown 策略。
 - 真实模型门禁已收敛为单点前置条件：运行时配置未完成时，Round2 会按预期阻断。
+- daemon 托管层偶发出现“健康后退出”，仍需继续收敛。
+- 静态交付物预览与实时项目前端的入口区分还可继续增强，以降低误判成本。
