@@ -703,7 +703,7 @@ const ProjectRoom = ({
 
   const isDesignPhase = useMemo(() => {
     const stageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
-    return stageType === 'DESIGN' && project.status === 'active';
+    return stageType === 'DESIGN' && project.status === 'Development';
   }, [detail?.currentStage, stageItems, project.status]);
 
   const recentLogs = useMemo(() => {
