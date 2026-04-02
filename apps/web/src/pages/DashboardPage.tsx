@@ -142,6 +142,30 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
         </div>
       </header>
 
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+        <div className="rounded-2xl border border-primary/25 bg-primary/8 p-4">
+          <div className="flex items-center gap-2 text-primary">
+            <Globe size={16} />
+            <span className="text-[11px] font-bold uppercase tracking-[0.18em]">实时验收入口</span>
+          </div>
+          <p className="mt-2 text-sm text-white font-semibold">当前控制台用于实时项目状态与新建项目弹窗验收</p>
+          <p className="mt-1 text-xs leading-6 text-slate-300">
+            请优先使用 <span className="font-semibold text-white">127.0.0.1:5173</span> 查看前端，
+            并以 <span className="font-semibold text-white">127.0.0.1:8787</span> 的 API 返回作为最终判断依据。
+          </p>
+        </div>
+        <div className="rounded-2xl border border-warning/25 bg-warning/8 p-4">
+          <div className="flex items-center gap-2 text-warning">
+            <History size={16} />
+            <span className="text-[11px] font-bold uppercase tracking-[0.18em]">静态预览边界</span>
+          </div>
+          <p className="mt-2 text-sm text-white font-semibold">`/generated/*.html` 仅代表已生成交付物，不代表实时项目状态</p>
+          <p className="mt-1 text-xs leading-6 text-slate-300">
+            如果你误开到 `4173` 或其他静态服务，请不要据此判断“新建项目弹窗”或“当前项目阶段”是否异常。
+          </p>
+        </div>
+      </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {stats.map((stat, i) => (
           <div 

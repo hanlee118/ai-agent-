@@ -3535,6 +3535,15 @@ const ProjectRoom = ({
                   复制正文
                 </button>
               </div>
+              {isVisualPreviewDeliverable(previewDeliverable) ? (
+                <div className="rounded-xl border border-warning/20 bg-warning/8 p-3">
+                  <p className="text-xs font-semibold text-white">这是交付物静态预览，不是 5173 的实时项目页面</p>
+                  <p className="mt-1 text-[11px] leading-5 text-slate-300">
+                    该窗口仅用于确认设计稿或 HTML 产物本身是否可读、可审查。
+                    如果要判断项目当前状态、审批结果或新建项目弹窗内容，请回到实时前端页面与 API 状态查看。
+                  </p>
+                </div>
+              ) : null}
               {canRenderVisualPreview ? (
                 <div className="rounded-xl border border-border-subtle bg-surface-soft/40 p-3 space-y-2">
                   <p className="text-xs text-slate-300">视觉设计预览（确认后再进入开发）</p>

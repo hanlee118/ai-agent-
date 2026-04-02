@@ -52,6 +52,21 @@ export default function IssueAnalysisPanel({ controller }: Props) {
         <Badge variant="primary">待补充</Badge>
       </div>
 
+      <div className="rounded-xl border border-primary/20 bg-primary/8 p-3 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="primary">5173 实时弹窗</Badge>
+          <Badge variant="accent">8787 实时接口</Badge>
+          <Badge variant="warning">非静态预览页</Badge>
+        </div>
+        <p className="text-xs leading-6 text-slate-300">
+          这里展示的是当前新建项目流程中的实时分析草稿。上面的使命锚点、目标对齐、原则对齐、需求确认单都可以直接编辑并继续提交。
+        </p>
+        <p className="text-[11px] leading-5 text-slate-400">
+          若你另开到 <span className="font-semibold text-white">`/generated/*.html`</span>、`4173` 或其他静态页面，
+          那些内容只代表某次已导出的交付物快照，不代表这个弹窗此刻的实时状态。
+        </p>
+      </div>
+
       <div className="space-y-3">
         <p className="text-xs text-slate-400">识别领域</p>
         <div className="flex flex-wrap gap-2">

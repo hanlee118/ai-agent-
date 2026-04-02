@@ -338,6 +338,25 @@ function renderAppleOfficialSiteHtml(input: {
       margin: 0 auto;
       padding: 48px 0 88px;
     }
+    .preview-notice {
+      margin-bottom: 18px;
+      border: 1px solid rgba(0,113,227,0.18);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.76);
+      color: #334155;
+      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+    }
+    .preview-notice strong {
+      display: block;
+      font-size: 13px;
+      color: #0f172a;
+    }
+    .preview-notice p {
+      margin: 6px 0 0;
+      font-size: 12px;
+      line-height: 1.7;
+    }
     .hero {
       border: 1px solid var(--line);
       border-radius: var(--radius-xl);
@@ -585,6 +604,10 @@ function renderAppleOfficialSiteHtml(input: {
 </head>
 <body>
   <main class="wrap">
+    <section class="preview-notice">
+      <strong>静态交付物预览页</strong>
+      <p>此页面仅用于查看已生成官网产物，不代表 5173 实时项目页面，也不代表当前项目房间、审批状态或新建项目弹窗的即时内容。</p>
+    </section>
     <section class="hero">
       <article>
         <span class="badge">Apple Style · ${escapeHtml(project.id)}</span>
@@ -808,6 +831,25 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
       filter: blur(1px);
     }
     .wrap { width: min(1160px, 92vw); margin: 0 auto; padding: 58px 0 88px; position: relative; }
+    .preview-notice {
+      margin-bottom: 18px;
+      border: 1px solid rgba(136, 177, 255, 0.24);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(4, 10, 22, 0.48);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+    }
+    .preview-notice strong {
+      display: block;
+      font-size: 13px;
+      color: #eff5ff;
+    }
+    .preview-notice p {
+      margin: 6px 0 0;
+      font-size: 12px;
+      line-height: 1.7;
+      color: #b7c7e6;
+    }
     .hero {
       display: grid;
       grid-template-columns: 1.2fr 0.8fr;
@@ -1106,6 +1148,10 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
   <div class="mesh"></div>
   <div class="mesh-2"></div>
   <main class="wrap">
+    <section class="preview-notice">
+      <strong>静态交付物预览页</strong>
+      <p>此页面仅用于查看已生成官网产物，不代表 5173 实时项目页面，也不代表当前项目房间、审批状态或新建项目弹窗的即时内容。</p>
+    </section>
     <section class="hero">
       <article class="hero-main">
         <span class="badge">Official Demo · ${escapeHtml(project.id)}</span>
