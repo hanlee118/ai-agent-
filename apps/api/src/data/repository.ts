@@ -85,6 +85,8 @@ const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true"
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
+const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
+  /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:\s*Agent\s*输出正文)?与任务证据补全本节/i;
 const STAGE_ROLE_MODEL_GATE_TARGETS: Partial<Record<StageType, RoleType[]>> = {
   DESIGN: ["ROLE_DESIGN"],
   DEV: ["ROLE_ARCH", "ROLE_DEV"],
@@ -715,6 +717,19 @@ function evaluateDevImplementationRequirementAlignment(input: {
     issues.push("缺少运行与联调说明（启动命令/环境变量/验证步骤）");
   }
 
+  const codePathSignals = Array.from(
+    text.matchAll(/(?:^|\s)((?:apps?|src|packages|server|client|web|api)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sql|prisma|yml|yaml|sh))/g)
+  ).map((match) => String(match[1] || "").trim().toLowerCase());
+  const codePathCount = new Set(codePathSignals.filter(Boolean)).size;
+  if (codePathCount < 2) {
+    issues.push("缺少代码实现证据（至少 2 个真实代码文件路径）");
+  }
+
+  const hasVerificationSignal = /(curl\s+https?:\/\/|\/health|http\s*200|响应\s*200|e2e|端到端|联调通过|回归通过|测试通过|验证结果)/i.test(text);
+  if (!hasVerificationSignal) {
+    issues.push("缺少联调/验证结果证据（如 health 检查或回归结论）");
+  }
+
   const hintText = `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`;
   const isCrossBorderScenario = /跨境|爆品|跟品|tiktok|amazon|temu/i.test(hintText);
   if (isCrossBorderScenario) {
@@ -792,6 +807,9 @@ function validateDeliverableTemplateGate(input: {
 
   if (DELIVERABLE_PLACEHOLDER_PATTERN.test(normalized)) {
     issues.push("包含占位词（待补充 / 占位 / TODO / TBD / lorem ipsum / xxx）");
+  }
+  if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(normalized)) {
+    issues.push("包含模板骨架占位语句（请补全本节），属于未完成交付物");
   }
 
   if (template.kind === "visual_mockup" && !hasVisualDesignPreview(normalized)) {
@@ -1728,6 +1746,9 @@ function needsDeliverableAgentUpgrade(input: {
   if (trimmed.includes("## 模板章节骨架（自动补齐）")) {
     return true;
   }
+  if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(trimmed)) {
+    return true;
+  }
 
   const missingTemplateSections = template.requiredSections.filter((section) => !trimmed.includes(section));
   if (missingTemplateSections.length > 0) {
@@ -1807,6 +1828,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
   const template = resolveDeliverableTemplate(deliverable.name, stageType);
   const isVisualMockup = template.kind === "visual_mockup";
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
+  const templateCoverageLines = template.requiredSections.map((section) => `- ${section.replace(/^##\s*/, "")}`);
 
   return [
     `# ${deliverable.name}`,
@@ -1827,8 +1849,9 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "## 当前任务清单",
     ...taskLines,
     "",
-    "## 模板章节骨架（请按模板补全）",
-    ...template.requiredSections.flatMap((section) => ([section, "- 请结合任务证据、约束与风险完善本节。"])),
+    "## 模板章节覆盖要求",
+    ...templateCoverageLines,
+    "- 缺失任一章节即视为未完成交付，需补写后再提交审批。",
     "",
     "## 关键约束",
     ...(constraints.length > 0 ? constraints.map((item) => `- ${item}`) : ["- 暂无明确约束，建议补充业务边界和非功能要求。"]),
@@ -1910,6 +1933,7 @@ async function buildDeliverableBackfillContentWithAgent(
   const template = resolveDeliverableTemplate(deliverable.name, stageType);
   const isVisualMockup = template.kind === "visual_mockup";
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
+  const templateCoverageLines = template.requiredSections.map((section) => `- ${section.replace(/^##\s*/, "")}`);
 
   // Visual mockup backfill should be deterministic and instantly renderable.
   // This avoids long model round-trips when historical content only has placeholders.
@@ -1968,8 +1992,9 @@ async function buildDeliverableBackfillContentWithAgent(
     "## 当前任务清单",
     ...taskLines,
     "",
-    "## 模板章节骨架（请按模板补全）",
-    ...template.requiredSections.flatMap((section) => ([section, "- 请结合 Agent 输出正文与任务证据补全本节。"])),
+    "## 模板章节覆盖要求",
+    ...templateCoverageLines,
+    "- 缺失任一章节即视为未完成交付，需补写后再提交审批。",
     "",
     "## Agent 输出正文",
     sanitizeDeliverablePlaceholders(run.body),

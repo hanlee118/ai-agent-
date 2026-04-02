@@ -1977,6 +1977,7 @@ router.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
     success: true,
     data: {
       projectId,
+      kind: "static_summary",
       url: absoluteUrl,
       publicPath,
       files: artifact.filePaths

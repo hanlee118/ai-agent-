@@ -906,6 +906,7 @@ async function buildAutoStageSubmissions(
     const checklist = buildAutoSubmissionChecklist(project.currentStage as StageType, title);
     const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
     const deliverableSpecificSections = buildDeliverableSpecificSections(project.currentStage as StageType, title, project);
+    const templateCoverageLines = template.requiredSections.map((section) => `- ${section.replace(/^##\s*/, "")}`);
     let content = [
       `# ${title}`,
       "",
@@ -935,8 +936,9 @@ async function buildAutoStageSubmissions(
       `- 当前交付物: ${title}`,
       `- 交付目的: ${STAGE_LABELS[project.currentStage]}阶段可验收产物，支撑后续确认与推进`,
       "",
-      "## 模板章节骨架（自动补齐）",
-      ...template.requiredSections.flatMap((section) => ([section, "- 请结合本阶段任务证据与 Agent 正文完善本节。"])),
+      "## 模板章节覆盖要求",
+      ...templateCoverageLines,
+      "- 缺失任一章节即视为未完成交付，需返工补齐。",
       "",
       "## 验收检查清单",
       ...template.acceptanceChecklist.map((item) => `- ${item}`),
@@ -1670,6 +1672,19 @@ function evaluateDevImplementationEvidenceForAcceptance(input: {
     issues.push("缺少运行与联调说明");
   }
 
+  const codePathSignals = Array.from(
+    text.matchAll(/(?:^|\s)((?:apps?|src|packages|server|client|web|api)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sql|prisma|yml|yaml|sh))/g)
+  ).map((match) => String(match[1] || "").trim().toLowerCase());
+  const codePathCount = new Set(codePathSignals.filter(Boolean)).size;
+  if (codePathCount < 2) {
+    issues.push("缺少代码实现证据");
+  }
+
+  const hasVerificationSignal = /(curl\s+https?:\/\/|\/health|http\s*200|响应\s*200|e2e|端到端|联调通过|回归通过|测试通过|验证结果)/i.test(text);
+  if (!hasVerificationSignal) {
+    issues.push("缺少联调/验证结果证据");
+  }
+
   const hintText = `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`;
   const isCrossBorderScenario = /跨境|爆品|跟品|tiktok|amazon|temu/i.test(hintText);
   if (isCrossBorderScenario) {
@@ -1871,13 +1886,13 @@ function buildProjectFinalArtifactsReport(
 
   if (officialSite?.url) {
     const officialSiteExcerpt = officialSite.url
-      ? `访问地址：${officialSite.url}`
+      ? `访问地址：${officialSite.url}（静态交付物汇总页）`
       : officialSite.filePath
         ? `本地文件：${officialSite.filePath}`
         : "可直接打开在线演示页";
     artifacts.push({
       key: "official_site",
-      category: "演示站点链接",
+      category: "静态交付物汇总页",
       required: false,
       ready: true,
       source: "link",

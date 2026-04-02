@@ -75,6 +75,19 @@ const STAGE_SECTION_HINTS: Record<NarrativeStage, RegExp[]> = {
   ACCEPT: [/验收|回填|发布|上线|复盘|结论|指标|质量|交付/i]
 };
 
+const STAGE_IGNORED_SECTION_HINTS = /交付物元信息|专业模板约束|当前任务清单|模板章节骨架|关键词上下文|关键约束|主要风险|下一阶段输入|自动推进元信息|模型尝试轨迹/i;
+const GENERIC_KEYWORD_STOPWORDS = new Set([
+  "系统",
+  "平台",
+  "项目",
+  "分析",
+  "设计",
+  "开发",
+  "研发",
+  "观测",
+  "验收"
+]);
+
 function dedupeList(items: string[]) {
   return Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
 }
@@ -102,6 +115,9 @@ function isMeaningfulNarrativeLine(line: string) {
     return false;
   }
   if (NOISY_TEXT_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+  if (/交付模板类型|模板章节骨架|请结合(?:\s*Agent\s*输出正文)?与任务证据补全本节|关键词上下文|专业模板约束|当前任务清单|交付物元信息/i.test(normalized)) {
     return false;
   }
   return true;
@@ -204,9 +220,10 @@ function extractStageHighlights(
   fallback: string[]
 ) {
   const sections = parseMarkdownSections(content);
+  const stageSections = sections.filter((section) => !STAGE_IGNORED_SECTION_HINTS.test(section.title));
   const sectionHints = STAGE_SECTION_HINTS[stage];
-  const preferredSections = sections.filter((section) => sectionHints.some((hint) => hint.test(section.title)));
-  const selectedSections = preferredSections.length > 0 ? preferredSections : sections;
+  const preferredSections = stageSections.filter((section) => sectionHints.some((hint) => hint.test(section.title)));
+  const selectedSections = preferredSections.length > 0 ? preferredSections : stageSections;
 
   const candidates = dedupeList(
     selectedSections.flatMap((section) => extractListItems(section.lines))
@@ -219,6 +236,33 @@ function extractStageHighlights(
   const intentFallback = buildIntentDrivenFallbacks(project, stage);
   const mergedFallback = dedupeList([...fallback, ...intentFallback]).filter((line) => isMeaningfulNarrativeLine(line) || line.startsWith("核心目标："));
   return mergedFallback.slice(0, 6);
+}
+
+function buildHeroKeywordLine(project: ProjectDetail) {
+  const keywords = dedupeList(project.parsedIntent?.keywords || []);
+  const filtered = keywords.filter((item) => {
+    const normalized = String(item || "").trim();
+    if (!normalized) {
+      return false;
+    }
+    if (GENERIC_KEYWORD_STOPWORDS.has(normalized)) {
+      return false;
+    }
+    return true;
+  });
+  if (filtered.length > 0) {
+    return filtered.slice(0, 3).join(" / ");
+  }
+
+  const source = `${project.name} ${project.description} ${project.parsedIntent?.summary || ""}`;
+  const inferred: string[] = [];
+  if (/tiktok/i.test(source)) inferred.push("TikTok");
+  if (/amazon/i.test(source)) inferred.push("Amazon");
+  if (/temu/i.test(source)) inferred.push("Temu");
+  if (/跨境/i.test(source)) inferred.push("跨境");
+  if (/爆品/i.test(source)) inferred.push("爆品监控");
+  if (/跟品/i.test(source)) inferred.push("跟品跟踪");
+  return dedupeList(inferred).slice(0, 3).join(" / ");
 }
 
 function buildTopSignals(project: ProjectDetail, stageBullets: string[][]) {
@@ -716,7 +760,7 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
 
   const teamLabels = project.team.map((role) => ROLE_LABELS[role] ?? role).slice(0, 8);
   const intentSummary = summarizeText(project.parsedIntent?.summary || project.description || "", 120);
-  const keywordLine = dedupeList(project.parsedIntent?.keywords || []).slice(0, 3).join(" / ");
+  const keywordLine = buildHeroKeywordLine(project);
   const constraintLine = dedupeList(project.parsedIntent?.constraints || []).slice(0, 2).join("；");
   const heroTitle = keywordLine
     ? `${project.name} · ${keywordLine}`

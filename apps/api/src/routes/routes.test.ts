@@ -631,6 +631,148 @@ describe("Error Matrix: auth + projects", () => {
       assert.ok(designTasks.length > 0);
       assert.equal(designTasks.every((task) => task.status === "done"), false);
     });
+
+    it("[422][PROJECT_STAGE_SUBMIT] should reject template scaffold placeholder content", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-禁止模板骨架占位通过",
+          description: "覆盖提交内容包含模板骨架占位语句时的拦截逻辑。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 38
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 38 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          finalizeApproval: false,
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 以跨境爆品榜单作为首屏主对象。",
+            "## 版式策略",
+            "- 榜单、详情、告警三列布局。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、来源标签、跟踪按钮。",
+            "## 品牌语气",
+            "- 专业、直接、证据导向。",
+            "## UX 原则",
+            "- 主链路优先、反馈即时、决策可追溯。",
+            "## 可访问性检查",
+            "- 键盘可达、对比达标、图表文字摘要。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "## 模板章节骨架（请按模板补全）",
+            "## 视觉方案",
+            "- 请结合 Agent 输出正文与任务证据补全本节。"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "跨境爆品监控控制台",
+            brandTone: "专业、可执行、证据优先",
+            uxPrinciples: ["主链路优先", "证据可追溯", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for scaffold placeholders"
+          }
+        });
+
+      assert.equal(submitRes.status, 422);
+      const message = String(submitRes.body?.error?.message || submitRes.body?.message || "");
+      assert.match(message, /模板骨架占位语句|未通过模板校验/);
+    });
+
+    it("[422][PROJECT_STAGE_SUBMIT] should reject DEV deliverable without code evidence", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-DEV 必须有代码证据",
+          description: "跨境电商爆品监控与跟品平台，要求真实研发与可运行数据链路。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DEV",
+            currentRole: "ROLE_DEV",
+            pendingApproval: false,
+            progress: 55
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DEV" } },
+          data: { status: "active", progress: 55 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DEV" },
+          data: { status: "in_progress" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "Demo原型说明.md",
+          finalizeApproval: false,
+          content: [
+            "# Demo原型说明.md",
+            "## Demo 访问入口与环境",
+            "- 入口地址: http://127.0.0.1:5173",
+            "- API: http://127.0.0.1:8787",
+            "## 页面清单与关键交互",
+            "- 爆品榜单页、商品详情页、告警管理页。",
+            "## 页面路由与核心流程（至少 3 页）",
+            "- /products -> /products/:id -> /alerts",
+            "## 真实数据链路（接口 / 数据源 / 存储）",
+            "- GET /api/products/top、GET /api/products/:id、POST /api/products/:id/follow",
+            "- 使用 TikTok 与 Amazon 数据源，存储在 PostgreSQL。",
+            "## 运行与联调说明（启动命令 / 环境变量）",
+            "- pnpm dev",
+            "## 演示脚本（逐步）",
+            "- 进入榜单查看实时增长商品，打开详情并点击跟踪。",
+            "## 已实现能力与已知限制",
+            "- 已有榜单展示与详情交互。",
+            "## 下一轮迭代建议",
+            "- 增加多语言与多时区。",
+            "## 验收检查清单",
+            "- 第三方可按文档独立复测主流程。",
+            "- 至少提供 2 个可执行 API 接口与对应数据来源说明。",
+            "- 至少提供 1 套持久化存储方案（表结构/Schema/迁移策略）。",
+            "- 桌面/移动基础体验与关键 CTA 可达。",
+            "- 限制与下一步计划清晰。"
+          ].join("\n")
+        });
+
+      assert.equal(submitRes.status, 422);
+      const message = String(submitRes.body?.error?.message || submitRes.body?.message || "");
+      assert.match(message, /缺少代码实现证据|缺少联调\/验证结果证据|未通过模板校验/);
+    });
   });
 });
 
