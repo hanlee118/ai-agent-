@@ -86,7 +86,7 @@ const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_M
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
-  /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:\s*Agent\s*输出正文)?与任务证据补全本节/i;
+  /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
 const STAGE_ROLE_MODEL_GATE_TARGETS: Partial<Record<StageType, RoleType[]>> = {
   DESIGN: ["ROLE_DESIGN"],
   DEV: ["ROLE_ARCH", "ROLE_DEV"],
@@ -475,91 +475,12 @@ function renderDesignReviewCard(input: {
 
 function ensureDesignSubmissionContent(
   content: string,
-  designReview: NonNullable<ReturnType<typeof normalizeDesignReview>>
+  _designReview: NonNullable<ReturnType<typeof normalizeDesignReview>>
 ) {
-  let normalized = String(content || "").trim();
-  const hasSection = (title: string) => normalized.includes(title);
-  const appendSection = (title: string, lines: string[]) => {
-    const block = [title, ...lines].join("\n");
-    normalized = normalized ? `${normalized}\n\n${block}` : block;
-  };
-
-  if (!hasSection("## 视觉方案")) {
-    appendSection("## 视觉方案", [
-      `- 视觉方向: ${designReview.visualDirection}`,
-      `- 目标语气: ${designReview.brandTone}`
-    ]);
-  }
-
-  if (!hasSection("## 版式策略")) {
-    appendSection("## 版式策略", [
-      "- 首屏先展示价值主张，再展开能力与流程。",
-      "- 关键路径优先，减少用户在主流程中的跳转。"
-    ]);
-  }
-
-  if (!hasSection("## 组件清单")) {
-    appendSection("## 组件清单", [
-      "- Hero 区块（标题 + 副标题 + CTA）",
-      "- 能力卡片区块（3-4 项核心能力）",
-      "- 流程区块（需求到研发闭环）",
-      "- 预约演示 CTA 区块"
-    ]);
-  }
-
-  if (!hasSection("## 品牌语气")) {
-    appendSection("## 品牌语气", [
-      `- 文案语气: ${designReview.brandTone}`,
-      "- 表达方式: 专业、直接、可执行，避免空泛口号。"
-    ]);
-  }
-
-  if (!hasSection("## UX 原则")) {
-    appendSection("## UX 原则", designReview.uxPrinciples.map((item) => `- ${item}`));
-  }
-
-  if (!hasSection("## 可访问性检查")) {
-    appendSection("## 可访问性检查", designReview.accessibilityChecklist.map((item) => `- ${item}`));
-  }
-
-  if (!hasSection("## 验收检查清单")) {
-    const checklist = resolveDeliverableTemplate("设计审查卡.md", "DESIGN").acceptanceChecklist;
-    appendSection("## 验收检查清单", checklist.map((item) => `- ${item}`));
-  }
-
-  if (!hasVisualDesignPreview(normalized)) {
-    const keywordLine = [designReview.visualDirection, designReview.brandTone].filter(Boolean).join(" / ");
-    const html = buildVisualDesignPreviewHtml({
-      projectName: "设计阶段视觉确认稿",
-      projectDescription: normalized,
-      keywordLine,
-      visualDirection: designReview.visualDirection
-    });
-    appendSection("## 单页预览代码（HTML）", ["```html", html, "```"]);
-  }
-
-  const bulletCount = normalized
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- "))
-    .length;
-
-  if (bulletCount < 8) {
-    appendSection("## 补充要点", [
-      "- 方案需可直接衔接开发实施与验收回填。",
-      "- 阶段交付需包含可追溯证据与验收口径。"
-    ]);
-  }
-
-  if (normalized.length < 260) {
-    appendSection("## 设计说明补充", [
-      `- 当前阶段目标: ${STAGE_OBJECTIVES.DESIGN}`,
-      `- 下一阶段输入: ${STAGE_NEXT_INPUT.DESIGN}`,
-      "- 本设计交付物用于驱动研发执行并减少返工风险。"
-    ]);
-  }
-
-  return normalized;
+  // Keep submission content source-of-truth from user/agent output.
+  // Do not auto-inject generic sections/HTML, otherwise a blank or templated
+  // design review can be incorrectly treated as a completed visual deliverable.
+  return String(content || "").trim();
 }
 
 function hasApprovedDesignReview(content: string) {
@@ -811,6 +732,13 @@ function validateDeliverableTemplateGate(input: {
   if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(normalized)) {
     issues.push("包含模板骨架占位语句（请补全本节），属于未完成交付物");
   }
+  if (
+    (input.stageType === "DESIGN" || input.stageType === "DEV")
+    && normalized.includes("## 交付物元信息")
+    && !normalized.includes("执行引擎:")
+  ) {
+    issues.push("检测到系统回填模板，缺少真实模型执行证据（执行引擎）");
+  }
 
   if (template.kind === "visual_mockup" && !hasVisualDesignPreview(normalized)) {
     issues.push("缺少可视化设计稿预览（需提供静态图链接或 ```html 单页代码）");
@@ -960,6 +888,14 @@ function evaluateStageFinalizeReadiness(input: {
     });
     if (!gate.passed) {
       reasons.push(`${candidate.name} 未通过模板校验: ${gate.issues.join("；")}`);
+    }
+
+    if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(String(candidate.content || ""))) {
+      reasons.push(`${candidate.name} 包含模板骨架占位语句，需补齐为真实交付内容`);
+    }
+
+    if (/自动质检结论:\s*未通过/.test(String(candidate.content || ""))) {
+      reasons.push(`${candidate.name} 自动质检未通过，禁止进入审批`);
     }
   }
 
@@ -1898,6 +1834,25 @@ function buildDeliverableChecklist(deliverableName: string, stageType: StageType
   return resolveDeliverableTemplate(deliverableName, stageType).acceptanceChecklist;
 }
 
+const DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS = Math.max(
+  12_000,
+  Number(process.env.DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS ?? 22_000)
+);
+
+async function withBackfillTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`BACKFILL_TIMEOUT: ${label} exceeded ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([task, timeout]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 async function buildDeliverableBackfillContentWithAgent(
   project: ProjectRecord,
   deliverable: ProjectRecord["deliverables"][number],
@@ -1945,23 +1900,27 @@ async function buildDeliverableBackfillContentWithAgent(
   let run = stageRunCache.get(runCacheKey);
   if (!run) {
     try {
-      run = await runProjectStageAgent({
-        projectId: project.id,
-        action: "deliverable.backfill",
-        metadata: {
-          deliverableId: deliverable.id,
-          deliverableName: deliverable.name
-        },
-        projectName: project.name,
-        projectDescription: project.description,
-        parsedIntent,
-        stageType,
-        role: stageRole,
-        summary: [
-          `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`,
-          ...templatePromptBlock
-        ].join("\n")
-      });
+      run = await withBackfillTimeout(
+        runProjectStageAgent({
+          projectId: project.id,
+          action: "deliverable.backfill",
+          metadata: {
+            deliverableId: deliverable.id,
+            deliverableName: deliverable.name
+          },
+          projectName: project.name,
+          projectDescription: project.description,
+          parsedIntent,
+          stageType,
+          role: stageRole,
+          summary: [
+            `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`,
+            ...templatePromptBlock
+          ].join("\n")
+        }),
+        DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS,
+        `${project.id}/${deliverable.name}`
+      );
     } catch (error) {
       console.warn(
         `[deliverable.backfill] fallback to deterministic template for ${project.id}/${deliverable.name}:`,
@@ -2031,17 +1990,6 @@ async function buildDeliverableBackfillContentWithAgent(
   ].join("\n");
 }
 
-function shouldUseDeterministicCurrentStageRecovery(
-  project: ProjectRecord,
-  stageType: StageType | null,
-  stageStatus: string | undefined
-) {
-  return project.status === "active"
-    && !project.pendingApproval
-    && stageType === resolveStageType(project.currentStage)
-    && stageStatus === "active";
-}
-
 async function reconcileProjectDeliverables(project: ProjectRecord) {
   const stageStatusByType = new Map(project.stages.map((stage) => [stage.type, stage.status]));
   const stageRunCache = new Map<string, Awaited<ReturnType<typeof runStageAgent>>>();
@@ -2064,22 +2012,14 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
   for (const deliverable of project.deliverables) {
     const stageStatus = stageStatusByType.get(deliverable.stageType);
     const deliverableStageType = resolveStageType(deliverable.stageType);
-    const useDeterministicRecovery = shouldUseDeterministicCurrentStageRecovery(
-      project,
-      deliverableStageType,
-      stageStatus
-    );
+    // 历史阶段补齐以模板确定性回填为主；当前阶段必须保留真实产出。
+    const useDeterministicRecovery =
+      Boolean(currentStageType) && Boolean(deliverableStageType) && deliverableStageType !== currentStageType;
     const shouldPromoteStatus =
       project.status === "completed"
       && stageStatus === "completed"
       && (deliverable.status === "draft" || deliverable.status === "submitted");
-    const shouldSubmitForPendingApproval =
-      project.pendingApproval
-      && deliverable.stageType === project.currentStage
-      && deliverable.status === "draft";
-
-    const allowFastSubmitWithoutBackfill = shouldSubmitForPendingApproval;
-    const needBackfill = !allowFastSubmitWithoutBackfill && (
+    const needBackfill = (
       needsDeliverableBackfill(deliverable.content)
       || needsDeliverableAgentUpgrade({
         content: deliverable.content,
@@ -2090,7 +2030,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         keywords: readStringArray(project.parsedKeywords)
       })
     );
-    if (!needBackfill && !shouldPromoteStatus && !shouldSubmitForPendingApproval) {
+    if (!needBackfill && !shouldPromoteStatus) {
       continue;
     }
 
@@ -2107,7 +2047,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
     updates.push({
       id: deliverable.id,
       content: backfilledContent,
-      status: shouldPromoteStatus ? "approved" : shouldSubmitForPendingApproval ? "submitted" : undefined
+      status: shouldPromoteStatus ? "approved" : undefined
     });
   }
 
@@ -2120,6 +2060,10 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
     const stageIndex = stageOrder.indexOf(stageType);
     if (currentStageIndex >= 0 && stageIndex > currentStageIndex) {
       // 不允许为未来阶段提前生成占位交付物，避免流程错位。
+      continue;
+    }
+    if (project.status === "active" && stage.type === project.currentStage) {
+      // 当前进行中的阶段禁止自动补齐核心交付物，避免模板稿冒充真实产物。
       continue;
     }
     const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
@@ -2160,14 +2104,8 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         createdAt: now,
         updatedAt: now
       };
-      const shouldFastFillCurrentPendingStage = project.pendingApproval && stage.type === project.currentStage;
-      const shouldFastFillCurrentActiveStage = shouldUseDeterministicCurrentStageRecovery(
-        project,
-        stageType,
-        stage.status
-      );
-      const content = shouldFastFillCurrentPendingStage
-        || shouldFastFillCurrentActiveStage
+      const shouldFastFillHistoricalStage = currentStageIndex >= 0 && stageIndex < currentStageIndex;
+      const content = shouldFastFillHistoricalStage
         ? buildDeliverableBackfillContent(project, templateDeliverable)
         : await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
       creates.push({

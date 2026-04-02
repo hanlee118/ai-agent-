@@ -471,6 +471,81 @@ describe("Error Matrix: auth + projects", () => {
   });
 
   describe("200 PROJECT_STAGE_SUBMIT", () => {
+    it("[200][PROJECT_STAGE_SUBMIT] DESIGN 设计审查卡默认不触发 finalizeApproval", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-设计审查卡默认不自动完结",
+          description: "验证未显式传 finalizeApproval 时，设计审查卡提交不会自动进入待审批。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 36
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 36 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 首屏突出爆品榜单、平台来源与跟品动作。",
+            "## 版式策略",
+            "- 总览 + 榜单 + 详情抽屉布局。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、来源标签、跟踪按钮。",
+            "## 品牌语气",
+            "- 专业、直接、证据导向。",
+            "## UX 原则",
+            "- 主链路优先、反馈即时、状态可解释。",
+            "## 可访问性检查",
+            "- 键盘可达、文本对比达标、图表文字摘要。",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。",
+            "## 设计审查卡",
+            "- 审查结论: 通过"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "跨境爆品监控控制台",
+            brandTone: "专业、可执行、证据优先",
+            uxPrinciples: ["主链路优先", "关键动作可达", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for default finalizeApproval on design review"
+          }
+        });
+      assert.equal(submitRes.status, 200);
+      assert.equal(submitRes.body.pendingApproval, false);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      assert.equal(detailRes.body.currentStage, "DESIGN");
+      assert.equal(detailRes.body.pendingApproval, false);
+    });
+
     it("[200][PROJECT_STAGE_SUBMIT] finalizeApproval=false should not auto-complete DESIGN tasks", async () => {
       const createRes = await request(fullApp)
         .post("/api/projects")
@@ -521,6 +596,10 @@ describe("Error Matrix: auth + projects", () => {
             "- 主链路优先、状态可解释、反馈即时可感知。",
             "## 可访问性检查",
             "- 键盘可达、对比度达标、图表附加文字摘要。",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。",
             "## 设计审查卡",
             "- 审查结论: 通过",
             "- 改进建议: 下一版补充多平台筛选交互动效。"
@@ -601,6 +680,10 @@ describe("Error Matrix: auth + projects", () => {
             "- 关键动作显性、状态可解释、异常可追踪。",
             "## 可访问性检查",
             "- 键盘导航、语义标签、图表文字备份。",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。",
             "## 设计审查卡",
             "- 审查结论: 通过",
             "- 改进建议: 下一轮补充详情页交互动效。"
@@ -630,6 +713,137 @@ describe("Error Matrix: auth + projects", () => {
       const designTasks = (detailRes.body.tasks as Array<{ stageType: string; status: string }>).filter((task) => task.stageType === "DESIGN");
       assert.ok(designTasks.length > 0);
       assert.equal(designTasks.every((task) => task.status === "done"), false);
+    });
+
+    it("[422][PROJECT_STAGE_SUBMIT] should reject DESIGN review card with auto-template-level sparse content", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-禁止空设计审查卡通过",
+          description: "验证设计审查卡提交不能依赖系统自动补齐章节和视觉稿。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 42
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 42 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          content: [
+            "# 设计审查卡.md",
+            "## 设计审查卡",
+            "- 审查结论: 通过"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "跨境爆品监控台",
+            brandTone: "直接、可执行",
+            uxPrinciples: ["主链路优先", "关键动作可达", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression: sparse content should be rejected"
+          }
+        });
+
+      assert.equal(submitRes.status, 422);
+      const message = String(submitRes.body?.error?.message || submitRes.body?.message || "");
+      assert.match(message, /未通过模板校验|缺少模板章节/);
+    });
+
+    it("[200][PROJECT_RECONCILE] should not auto-create missing core deliverables for current active stage", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-禁止当前阶段自动造交付物",
+          description: "验证 reconcile 不会为当前进行中的 DESIGN 阶段自动补齐核心交付物。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.project.update({
+        where: { id: projectId },
+        data: {
+          currentStage: "DESIGN",
+          currentRole: "ROLE_DESIGN",
+          pendingApproval: false,
+          progress: 44
+        }
+      });
+      await prismaClient.stage.update({
+        where: { projectId_type: { projectId, type: "DESIGN" } },
+        data: { status: "active", progress: 44 }
+      });
+      await prismaClient.deliverable.deleteMany({
+        where: { projectId, stageType: "DESIGN" }
+      });
+      await prismaClient.deliverable.create({
+        data: {
+          projectId,
+          stageType: "DESIGN",
+          name: "设计审查卡.md",
+          type: "markdown",
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 首屏聚焦跨境爆品榜单与平台来源。",
+            "## 版式策略",
+            "- 总览 + 榜单 + 详情抽屉。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、告警条、跟品按钮。",
+            "## 品牌语气",
+            "- 数据导向、快速决策。",
+            "## UX 原则",
+            "- 主链路优先、动作低摩擦、反馈即时。",
+            "## 可访问性检查",
+            "- 键盘可达、对比达标、图表文字摘要。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。"
+          ].join("\n"),
+          version: 1,
+          status: "submitted",
+          createdBy: "ROLE_DESIGN",
+          updatedAt: new Date()
+        }
+      });
+
+      const reconcileRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/reconcile-deliverables`)
+        .send({});
+      assert.equal(reconcileRes.status, 200);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+
+      const designDeliverables = (detailRes.body.deliverables as Array<{ stageType: string; name: string }>)
+        .filter((item) => item.stageType === "DESIGN");
+      assert.equal(designDeliverables.length, 1);
+      assert.equal(designDeliverables[0]?.name, "设计审查卡.md");
     });
 
     it("[422][PROJECT_STAGE_SUBMIT] should reject template scaffold placeholder content", async () => {

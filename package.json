@@ -1,7 +1,7 @@
 {
   "name": "occ-workspace",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "packageManager": "pnpm@10.32.1",
   "scripts": {
     "dev:web": "pnpm --filter @occ/web dev",
