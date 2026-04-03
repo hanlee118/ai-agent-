@@ -1,0 +1,48 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  buildTerminalStageExecutionMessage,
+  getProjectStageExecutionStrategy
+} from "./project-stage-execution.js";
+
+test("design stage uses terminal agent with strongest design models", () => {
+  const strategy = getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN");
+  assert.equal(strategy.mode, "terminal_agent");
+  assert.equal(strategy.openClawAgentId, "jeremy");
+  assert.equal(strategy.memoryEnabled, true);
+  assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
+  assert.equal(strategy.preferredModels[0], "anthropic/claude-opus-4-20250514");
+});
+
+test("analysis stage stays on direct model execution", () => {
+  const strategy = getProjectStageExecutionStrategy("ANALYSIS", "ROLE_ANALYST");
+  assert.equal(strategy.mode, "direct_model");
+  assert.equal(strategy.openClawAgentId, undefined);
+  assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
+});
+
+test("terminal stage message removes dangerous shell characters", () => {
+  const message = buildTerminalStageExecutionMessage({
+    projectName: "TrendHunter",
+    projectDescription: "需要避免复用旧模板;\n请重新思考<$bad>",
+    parsedIntent: {
+      keywords: ["跨境", "爆品"],
+      constraints: ["不能沿用旧项目&旧视觉"],
+      risks: ["模板污染|幻觉"],
+      suggestedTeam: ["ROLE_ANALYST", "ROLE_DESIGN"],
+      summary: "重新设计"
+    },
+    stageType: "DESIGN",
+    role: "ROLE_DESIGN",
+    summary: "输出新的视觉与交互方向"
+  });
+
+  assert.equal(message.includes("\n"), false);
+  assert.equal(message.includes(";"), false);
+  assert.equal(message.includes("&"), false);
+  assert.equal(message.includes("|"), false);
+  assert.equal(message.includes("<"), false);
+  assert.equal(message.includes(">"), false);
+  assert.equal(message.includes("允许参考长期记忆"), true);
+  assert.equal(message.includes("高度相关"), true);
+});

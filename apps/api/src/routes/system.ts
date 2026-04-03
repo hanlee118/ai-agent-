@@ -29,6 +29,7 @@ import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/d
 import { getIssue } from "../system/v1-method-store.js";
 import { getCachedLocalAgentMonitorOverview, subscribeLocalAgentMonitor } from "../system/local-agent-monitor.js";
 import { inspectOpenClawModelRouting } from "../openclaw/workspace.js";
+import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
 
 interface CreateSystemRouterOptions {
   asyncRoute: (
@@ -157,6 +158,35 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
 
   router.get("/readiness", asyncRoute(async (_req, res) => {
     res.json(await getSystemReadiness());
+  }));
+
+  router.get("/context-hygiene", asyncRoute(async (_req, res) => {
+    res.json(await getContextHygieneReport());
+  }));
+
+  router.post("/context-hygiene/cleanup", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as { apply?: unknown; maxDelete?: unknown };
+    const apply = payload.apply === undefined ? true : Boolean(payload.apply);
+    const maxDeleteRaw = Number(payload.maxDelete ?? 200);
+    const maxDelete = Number.isFinite(maxDeleteRaw) ? maxDeleteRaw : 200;
+    const result = await cleanupContextHygiene({ apply, maxDelete });
+
+    if (apply) {
+      await safeAudit(req, res, {
+        actorType: "admin",
+        actorLabel: "管理员",
+        action: "system.context_hygiene_cleanup",
+        resourceType: "system",
+        summary: `已清理上下文垃圾数据（memory=${result.deleted.agentMemoryEntries}, templates=${result.deleted.promptTemplates}）`,
+        detail: JSON.stringify({
+          scanned: result.scanned,
+          deleted: result.deleted,
+          counts: result.counts
+        })
+      });
+    }
+
+    res.json(result);
   }));
 
   router.get("/audit-logs", asyncRoute(async (req, res) => {

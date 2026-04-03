@@ -137,7 +137,7 @@ const BUILTIN_INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
       soulRoleId: "ROLE_ANALYST",
       minRoles: 4,
       maxRoles: 8,
-      fallbackStrategy: "template_first",
+      fallbackStrategy: "role_pool_auto",
       updatedAt: nowIso()
     }
   },
@@ -207,7 +207,7 @@ const BUILTIN_INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
       soulRoleId: "ROLE_ANALYST",
       minRoles: 4,
       maxRoles: 8,
-      fallbackStrategy: "template_first",
+      fallbackStrategy: "role_pool_auto",
       updatedAt: nowIso()
     }
   },
@@ -284,7 +284,7 @@ const BUILTIN_INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
       soulRoleId: "ROLE_ANALYST",
       minRoles: 4,
       maxRoles: 9,
-      fallbackStrategy: "template_first",
+      fallbackStrategy: "role_pool_auto",
       updatedAt: nowIso()
     }
   }
@@ -502,7 +502,7 @@ function buildDefaultAssemblyRule(roleSet: IndustryRoleSet): TeamAssemblyRule {
     soulRoleId: roleSet.defaultSoulRoleId,
     minRoles,
     maxRoles,
-    fallbackStrategy: "template_first",
+    fallbackStrategy: "role_pool_auto",
     updatedAt: nowIso()
   };
 }

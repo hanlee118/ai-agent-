@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   open,
@@ -103,6 +104,15 @@ type TeamMember = {
 };
 
 type OpenClawConfig = {
+  env?: Record<string, string>;
+  models?: {
+    providers?: Record<string, {
+      baseUrl?: string;
+      api?: string;
+      apiKey?: string;
+      models?: Array<Record<string, unknown>>;
+    }>;
+  };
   agents?: {
     defaults?: {
       workspace?: string;
@@ -1006,6 +1016,8 @@ export async function sendOpenClawAgentMessage(
   agentId: string,
   input: OpenClawAgentMessageInput
 ): Promise<OpenClawAgentCommandResult> {
+  await repairOpenClawProviderApis();
+
   const message = String(input.message ?? "").trim();
   if (!message) {
     throw new Error("message is required");
@@ -1051,8 +1063,17 @@ export async function sendOpenClawAgentMessage(
   ]);
   const fallbackQueue = fallbackCandidates.filter((modelId) => modelId !== activeModel);
   let fallbackCursor = 0;
+  const shouldIsolateSession = isDesignAgent;
+  const preferLocalExecution = isDesignAgent;
   const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
-  const commandTimeoutMs = Math.max(30_000, Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 8 * 60 * 1000));
+  const cliTimeoutSeconds = Math.max(
+    preferLocalExecution ? 45 : 15,
+    Number(process.env.OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS ?? 20)
+  );
+  const commandTimeoutMs = Math.max(
+    (cliTimeoutSeconds + 15) * 1000,
+    Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 45_000)
+  );
   let finalError: string | null = null;
 
   const selectedModelRaw = normalizeModelId(agent.commander.selectedModel) || "";
@@ -1077,13 +1098,20 @@ export async function sendOpenClawAgentMessage(
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     try {
+      const sessionId = shouldIsolateSession
+        ? `${agentId}-stage-${Date.now()}-${randomUUID().slice(0, 8)}`
+        : undefined;
       const result = await execFileAsync(OPENCLAW_BIN, [
         "agent",
         "--agent",
         agentId,
+        ...(preferLocalExecution ? ["--local"] : []),
+        ...(sessionId ? ["--session-id", sessionId] : []),
         "--message",
         message,
-        "--json"
+        "--json",
+        "--timeout",
+        String(cliTimeoutSeconds)
       ], {
         timeout: commandTimeoutMs,
         maxBuffer: 1024 * 1024 * 8
@@ -1093,6 +1121,11 @@ export async function sendOpenClawAgentMessage(
       const payloadError = extractOpenClawGatewayError(`${nextStdout || ""}\n${nextStderr || ""}`);
       if (payloadError) {
         throw new Error(payloadError);
+      }
+      const successPayload = parseOpenClawJson(nextStdout || nextStderr || "");
+      const actualModel = normalizeModelForRouting(successPayload.result?.meta?.agentMeta?.model);
+      if (isDesignAgent && actualModel && !isDesignModelPreferred(actualModel) && !fallbackCandidates.includes(actualModel)) {
+        throw new Error(`unexpected execution model: ${actualModel}`);
       }
       stdout = nextStdout;
       stderr = nextStderr;
@@ -1123,6 +1156,7 @@ export async function sendOpenClawAgentMessage(
       const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(finalError);
       const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(finalError);
       const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted|relay service error|bad_response_status_code|5\d{2}/i.test(finalError);
+      const isUnexpectedModelError = /unexpected execution model/i.test(finalError);
       if (isModelUnavailableError) {
         for (const modelId of listGroupFallbackModels(finalError)) {
           if (modelId !== activeModel && !fallbackQueue.includes(modelId)) {
@@ -1130,9 +1164,15 @@ export async function sendOpenClawAgentMessage(
           }
         }
       }
-      const nextFallbackModel = fallbackQueue[fallbackCursor];
+      const remainingFallbacks = fallbackQueue
+        .slice(fallbackCursor)
+        .filter((modelId) => modelId !== activeModel);
+      let nextFallbackModel = remainingFallbacks[0];
+      if (/claude_code|no available channel/i.test(finalError) && activeModel.startsWith("anthropic/")) {
+        nextFallbackModel = remainingFallbacks.find((modelId) => !modelId.startsWith("anthropic/")) ?? nextFallbackModel;
+      }
       const shouldRetryWithFallback =
-        (isTokenError || isModelUnavailableError)
+        (isTokenError || isModelUnavailableError || isUnexpectedModelError)
         && Boolean(nextFallbackModel)
         && nextFallbackModel !== activeModel;
 
@@ -1145,12 +1185,20 @@ export async function sendOpenClawAgentMessage(
           break;
         }
         activeModel = nextFallbackModel;
-        fallbackCursor += 1;
+        fallbackCursor = Math.max(fallbackCursor + 1, fallbackQueue.indexOf(nextFallbackModel) + 1);
         await sleep(450);
         continue;
       }
 
-      if ((isLockError || isTransportError) && attempt < maxAttempts) {
+      if (isLockError) {
+        if (preferLocalExecution && attempt < maxAttempts) {
+          await sleep(Math.min(1800, 400 * attempt));
+          continue;
+        }
+        break;
+      }
+
+      if ((isTransportError || isUnexpectedModelError) && attempt < maxAttempts) {
         await sleep(Math.min(2200, 450 * attempt));
         continue;
       }
@@ -1173,8 +1221,11 @@ export async function sendOpenClawAgentMessage(
         .join("\n\n")
     : "";
   const reply = replyFromPayload || extractAgentReplyFromRaw(raw);
-  const ok = payload?.status === "ok" || raw.includes('"status": "ok"');
   const summary = String(payload?.summary ?? extractJsonStringField(raw, "summary") ?? "completed");
+  const ok =
+    payload?.status === "ok"
+    || raw.includes('"status": "ok"')
+    || (Boolean(reply) && summary !== "failed");
   const estimatedCompletionTokens = estimateTokenCount(reply);
   const providerUsage = extractTokenUsageFromPayload(payload);
   const promptTokens = providerUsage?.promptTokens ?? estimatedPromptTokens;
@@ -2395,6 +2446,71 @@ function uniqueItems(values: string[]) {
 
 function dedupeStrings(values: string[]) {
   return [...new Set(values)];
+}
+
+function normalizeOpenClawBaseUrl(value: string | undefined) {
+  return String(value ?? "").trim().replace(/\/+$/, "");
+}
+
+function isOfficialOpenAiBaseUrl(baseUrl: string) {
+  return /^https:\/\/api\.openai\.com(?:\/v1)?$/i.test(baseUrl);
+}
+
+export function shouldRepairOpenAiProviderApi(provider?: {
+  baseUrl?: string;
+  api?: string;
+} | null) {
+  const api = String(provider?.api ?? "").trim().toLowerCase();
+  const baseUrl = normalizeOpenClawBaseUrl(provider?.baseUrl);
+
+  if (api !== "openai-responses" || !baseUrl) {
+    return false;
+  }
+
+  return !isOfficialOpenAiBaseUrl(baseUrl);
+}
+
+export function normalizeOpenClawProviderApis(config: OpenClawConfig) {
+  const repairs: Array<{
+    provider: string;
+    from: string;
+    to: string;
+    reason: string;
+  }> = [];
+
+  const openaiProvider = config.models?.providers?.openai;
+  if (shouldRepairOpenAiProviderApi(openaiProvider)) {
+    repairs.push({
+      provider: "openai",
+      from: String(openaiProvider?.api ?? "").trim() || "unknown",
+      to: "openai-completions",
+      reason: "non-official OpenAI compatible gateway does not expose /responses"
+    });
+    openaiProvider!.api = "openai-completions";
+  }
+
+  return {
+    config,
+    changed: repairs.length > 0,
+    repairs
+  };
+}
+
+async function repairOpenClawProviderApis() {
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
+  if (!config) {
+    return {
+      changed: false,
+      repairs: [] as Array<{ provider: string; from: string; to: string; reason: string }>
+    };
+  }
+
+  const normalized = normalizeOpenClawProviderApis(config);
+  if (normalized.changed) {
+    await writeJsonFile(OPENCLAW_CONFIG_PATH, normalized.config);
+  }
+
+  return normalized;
 }
 
 function toAgentSummary(agent: OpenClawAgentDetail): OpenClawAgentSummary {

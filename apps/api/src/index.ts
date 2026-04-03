@@ -159,6 +159,11 @@ let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
 const projectAdvanceLocks = new Set<string>();
 const projectAdvanceJobs = new Map<string, Promise<void>>();
 const projectAdvanceJobErrors = new Map<string, { message: string; at: string }>();
+const projectAdvanceCancelledAt = new Map<string, number>();
+const PROJECT_ADVANCE_CANCEL_TTL_MS = Math.max(
+  60_000,
+  Number(process.env.PROJECT_ADVANCE_CANCEL_TTL_MS ?? 10 * 60 * 1000)
+);
 
 const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
@@ -312,11 +317,73 @@ function summarizeAdvanceError(error: unknown) {
   return normalized.length > 260 ? `${normalized.slice(0, 260)}...` : normalized;
 }
 
+function pruneProjectAdvanceCancelledMarks() {
+  const now = Date.now();
+  for (const [projectId, cancelledAt] of projectAdvanceCancelledAt.entries()) {
+    if (now - cancelledAt > PROJECT_ADVANCE_CANCEL_TTL_MS) {
+      projectAdvanceCancelledAt.delete(projectId);
+    }
+  }
+}
+
+function markProjectAdvanceCancelled(projectId: string) {
+  pruneProjectAdvanceCancelledMarks();
+  projectAdvanceCancelledAt.set(projectId, Date.now());
+}
+
+function clearProjectAdvanceCancelled(projectId: string) {
+  projectAdvanceCancelledAt.delete(projectId);
+}
+
+function isProjectAdvanceCancelled(projectId: string) {
+  pruneProjectAdvanceCancelledMarks();
+  return projectAdvanceCancelledAt.has(projectId);
+}
+
+async function canContinueProjectAdvance(projectId: string) {
+  if (isProjectAdvanceCancelled(projectId)) {
+    return false;
+  }
+  const exists = await prisma.project.count({ where: { id: projectId } });
+  if (exists > 0) {
+    return true;
+  }
+  markProjectAdvanceCancelled(projectId);
+  return false;
+}
+
+async function appendProjectAdvanceTimelineEvent(input: {
+  projectId: string;
+  attempt: number;
+  message: string;
+}) {
+  if (!(await canContinueProjectAdvance(input.projectId))) {
+    return;
+  }
+
+  await prisma.timelineEvent.create({
+    data: {
+      projectId: input.projectId,
+      timestamp: new Date(),
+      agentId: "ROLE_ASSISTANT",
+      type: "system",
+      title: `自动推进重试（${input.attempt}/${MANUAL_ADVANCE_MAX_ATTEMPTS})`,
+      content: `本轮自动推进失败：${input.message}`,
+      priority: "normal"
+    }
+  }).catch(() => {
+    // ignore timeline logging failure
+  });
+}
+
 async function executeManualAdvanceCycle(projectId: string) {
   await withProjectLock(projectId, async () => {
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= MANUAL_ADVANCE_MAX_ATTEMPTS; attempt += 1) {
+      if (!(await canContinueProjectAdvance(projectId))) {
+        return;
+      }
       const current = await findProject(projectId);
       if (!current || current.status !== "active" || current.pendingApproval) {
         return;
@@ -339,6 +406,9 @@ async function executeManualAdvanceCycle(projectId: string) {
           MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
           `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
         );
+        if (!(await canContinueProjectAdvance(projectId))) {
+          return;
+        }
         await withTimeout(
           submitStageSubmissionBundle(projectId, submissions),
           MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
@@ -350,18 +420,10 @@ async function executeManualAdvanceCycle(projectId: string) {
         const message = summarizeAdvanceError(error);
         const isTemplateError = isTemplateValidationErrorMessage(message);
         const isTransientError = isTransientAdvanceErrorMessage(message);
-        await prisma.timelineEvent.create({
-          data: {
-            projectId,
-            timestamp: new Date(),
-            agentId: "ROLE_ASSISTANT",
-            type: "system",
-            title: `自动推进重试（${attempt}/${MANUAL_ADVANCE_MAX_ATTEMPTS})`,
-            content: `本轮自动推进失败：${message}`,
-            priority: "normal"
-          }
-        }).catch(() => {
-          // ignore timeline logging failure
+        await appendProjectAdvanceTimelineEvent({
+          projectId,
+          attempt,
+          message
         });
 
         if (!isTemplateError && !isTransientError) {
@@ -370,6 +432,9 @@ async function executeManualAdvanceCycle(projectId: string) {
 
         const isRealModelGateError = message.includes("REAL_MODEL_GATE_FAILED");
         if (isTemplateError || isRealModelGateError) {
+          if (!(await canContinueProjectAdvance(projectId))) {
+            return;
+          }
           await reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
             console.warn(
               `[project.advance] auto reconcile failed for ${projectId}:`,
@@ -405,8 +470,16 @@ function ensureManualAdvanceJob(projectId: string) {
   const job = (async () => {
     try {
       await executeManualAdvanceCycle(projectId);
+      if (isProjectAdvanceCancelled(projectId)) {
+        projectAdvanceJobErrors.delete(projectId);
+        return;
+      }
       projectAdvanceJobErrors.delete(projectId);
     } catch (error) {
+      if (isProjectAdvanceCancelled(projectId)) {
+        projectAdvanceJobErrors.delete(projectId);
+        return;
+      }
       const message = summarizeAdvanceError(error);
       // A transient lock race means another worker is already advancing this project.
       // Treat it as in-progress instead of persisting a failure signal.
@@ -2654,6 +2727,8 @@ app.use(createProjectsRouter({
   projectAdvanceLocks,
   projectAdvanceJobs,
   projectAdvanceJobErrors,
+  markProjectAdvanceCancelled,
+  clearProjectAdvanceCancelled,
   ensureManualAdvanceJob,
   buildProjectRequiredActions,
   formatRequiredActionsMessage,

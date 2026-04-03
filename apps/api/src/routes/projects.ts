@@ -788,6 +788,8 @@ interface CreateProjectsRouterOptions {
   projectAdvanceLocks: Set<string>;
   projectAdvanceJobs: Map<string, Promise<void>>;
   projectAdvanceJobErrors: Map<string, { message: string; at: string }>;
+  markProjectAdvanceCancelled: (projectId: string) => void;
+  clearProjectAdvanceCancelled: (projectId: string) => void;
   ensureManualAdvanceJob: (projectId: string) => void;
   buildProjectRequiredActions: (project: any, runtime: any) => ProjectRequiredAction[];
   formatRequiredActionsMessage: (actions: ProjectRequiredAction[]) => string;
@@ -1202,6 +1204,8 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
     projectAdvanceLocks,
     projectAdvanceJobs,
     projectAdvanceJobErrors,
+    markProjectAdvanceCancelled,
+    clearProjectAdvanceCancelled,
     ensureManualAdvanceJob,
     buildProjectRequiredActions,
     formatRequiredActionsMessage,
@@ -1364,6 +1368,7 @@ router.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
   if (!dryRun) {
     for (const id of targetIds) {
       try {
+        markProjectAdvanceCancelled(id);
         const removed = await deleteProject(id);
         if (!removed) {
           failed.push({ id, error: "not found" });
@@ -1488,6 +1493,7 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     },
     (await getRuntimeStatus()).mode
   );
+  clearProjectAdvanceCancelled(project.id);
 
   await safeAudit(req, res, {
     actorType: "admin",
@@ -2243,9 +2249,11 @@ router.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
 
 router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  markProjectAdvanceCancelled(projectId);
   const deleted = await deleteProject(projectId);
 
   if (!deleted) {
+    clearProjectAdvanceCancelled(projectId);
     res.status(404).json({ message: "Project not found" });
     return;
   }

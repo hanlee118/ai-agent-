@@ -23,7 +23,12 @@ import {
   type TimelineEvent
 } from "@occ/shared";
 import { prisma } from "../db.js";
-import { getRuntimeStatus, previewStageModelPlan, runStageAgent } from "../agents/runtime.js";
+import {
+  getRuntimeStatus,
+  previewStageModelPlan,
+  runStageAgent,
+  type StageAgentRunResult
+} from "../agents/runtime.js";
 import {
   finalizeRequirementBackfill,
   getIssueByProjectId,
@@ -49,6 +54,15 @@ import {
 import {
   evaluateVisualDesignRequirementAlignment
 } from "../system/design-preview.js";
+import {
+  buildTerminalStageExecutionMessage,
+  getProjectStageExecutionStrategy
+} from "../system/project-stage-execution.js";
+import {
+  findOpenClawAgent,
+  sendOpenClawAgentMessage,
+  updateOpenClawAgentSettings
+} from "../openclaw/workspace.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -191,6 +205,25 @@ function isExecutionDegraded(metadata: Prisma.JsonValue | null) {
   return Boolean((metadata as Record<string, unknown>).degraded);
 }
 
+function isTerminalExecutionMetadata(metadata: Prisma.JsonValue | null) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return String((metadata as Record<string, unknown>).executionMode ?? "").trim().toLowerCase() === "terminal_agent";
+}
+
+async function assertTerminalExecutionReadyForGate(stageExecutions: StageAgentExecutionRecord[]) {
+  const hasTerminalEvidence = stageExecutions.some((row) => isTerminalExecutionMetadata(row.metadata ?? null));
+  if (!hasTerminalEvidence) {
+    throw new Error("REAL_MODEL_GATE_FAILED: 当前阶段未发现终端 Agent 执行证据。");
+  }
+
+  const missingModelRows = stageExecutions.filter((row) => isTerminalExecutionMetadata(row.metadata ?? null) && !String(row.model ?? "").trim());
+  if (missingModelRows.length > 0) {
+    throw new Error("REAL_MODEL_GATE_FAILED: 终端 Agent 执行记录缺少模型信息。");
+  }
+}
+
 async function assertRealModelRuntimeReadyForGate() {
   if (!isRealModelGateEnabled()) {
     return;
@@ -213,8 +246,6 @@ async function assertRealModelRuntimeReadyForGate() {
 }
 
 async function assertCurrentStageRealModelGate(project: ProjectDetail) {
-  await assertRealModelRuntimeReadyForGate();
-
   const stageExecutions = await prisma.projectExecution.findMany({
     where: {
       projectId: project.id,
@@ -225,26 +256,40 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
     take: 80
   });
 
-  if (stageExecutions.length === 0) {
+  const normalizedStageExecutions = stageExecutions.map((row) => ({
+    ...row,
+    model: row.model ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString()
+  })) as StageAgentExecutionRecord[];
+
+  if (normalizedStageExecutions.length === 0) {
     throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少可验证执行记录。`);
   }
 
-  if (!stageExecutions.some((row) => row.role === project.currentRole)) {
+  if (!normalizedStageExecutions.some((row) => row.role === project.currentRole)) {
     throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段缺少当前角色 ${project.currentRole} 的执行证据。`);
   }
 
-  const scriptedRows = stageExecutions.filter((row) => String(row.provider || "").trim().toLowerCase() === "scripted");
+  const hasTerminalExecution = normalizedStageExecutions.some((row) => isTerminalExecutionMetadata(row.metadata ?? null));
+  if (hasTerminalExecution) {
+    await assertTerminalExecutionReadyForGate(normalizedStageExecutions);
+  } else {
+    await assertRealModelRuntimeReadyForGate();
+  }
+
+  const scriptedRows = normalizedStageExecutions.filter((row) => String(row.provider || "").trim().toLowerCase() === "scripted");
   if (scriptedRows.length > 0) {
     throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 scripted 输出，禁止通过验收。`);
   }
 
-  const degradedRows = stageExecutions.filter((row) => isExecutionDegraded(row.metadata));
+  const degradedRows = normalizedStageExecutions.filter((row) => isExecutionDegraded(row.metadata ?? null));
   if (degradedRows.length > 0) {
     throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 degraded 降级输出，禁止通过验收。`);
   }
 
-  assertPmExecutionGate(project, stageExecutions);
-  await assertStageRoleModelWhitelistGate(project, stageExecutions);
+  assertPmExecutionGate(project, normalizedStageExecutions);
+  await assertStageRoleModelWhitelistGate(project, normalizedStageExecutions);
 }
 
 function normalizeModelForGate(model: string | null | undefined) {
@@ -290,7 +335,7 @@ function assertPmExecutionGate(
 
 async function assertStageRoleModelWhitelistGate(
   project: ProjectDetail,
-  stageExecutions: Array<{ role: string; model: string | null }>
+  stageExecutions: Array<{ role: string; model?: string | null | undefined }>
 ) {
   const targetRoles = STAGE_ROLE_MODEL_GATE_TARGETS[project.currentStage] || [];
   if (targetRoles.length === 0) {
@@ -1538,12 +1583,44 @@ function composeExecutionMetadata(
   };
 }
 
-export async function runProjectStageAgent(input: StageAgentExecutionInput) {
-  const startedAt = Date.now();
-  const runtime = await getRuntimeStatus();
+async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Promise<StageAgentRunResult> {
+  const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
+  const agentId = strategy.openClawAgentId;
+  const preferredModels = strategy.preferredModels;
+  const attemptStartedAt = Date.now();
+
+  if (strategy.mode !== "terminal_agent" || !agentId) {
+    throw new Error(`TERMINAL_STAGE_STRATEGY_UNAVAILABLE: ${input.stageType}/${input.role}`);
+  }
+
+  const attemptTrace = {
+    stageType: input.stageType,
+    role: input.role,
+    model: preferredModels[0] || "unknown",
+    route: `openclaw-terminal:${agentId}`,
+    status: "failed" as const,
+    elapsedMs: 0,
+    startedAt: new Date(attemptStartedAt).toISOString(),
+    error: undefined as string | undefined
+  };
 
   try {
-    const run = await runStageAgent({
+    const agent = await findOpenClawAgent(agentId);
+    if (!agent) {
+      throw new Error(`OPENCLAW_AGENT_NOT_FOUND: ${agentId}`);
+    }
+
+    await updateOpenClawAgentSettings(agentId, {
+      selectedModel: preferredModels[0],
+      defaultModel: preferredModels[0],
+      fallbackModel: preferredModels[1] ?? preferredModels[0],
+      executionMode: strategy.executionMode,
+      requireConfirmation: strategy.requireConfirmation,
+      autoApproveMinorSteps: strategy.executionMode === "autonomous",
+      memoryEnabled: strategy.memoryEnabled
+    });
+
+    const command = buildTerminalStageExecutionMessage({
       projectName: input.projectName,
       projectDescription: input.projectDescription,
       parsedIntent: input.parsedIntent,
@@ -1551,6 +1628,75 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       role: input.role,
       summary: input.summary
     });
+    const result = await sendOpenClawAgentMessage(agentId, { message: command });
+    const model = String(result.model ?? preferredModels[0] ?? "").trim() || "unknown";
+
+    return {
+      provider: "openai-compatible",
+      model,
+      title: `${STAGE_LABELS[input.stageType]}阶段执行纪要`,
+      body: String(result.reply ?? "").trim() || String(result.summary ?? "").trim() || "终端 Agent 已执行，但未返回正文。",
+      thinkingSummary: String(result.summary ?? "").trim() || `${ROLE_LABELS[input.role]} 已完成终端执行`,
+      attempts: [
+        {
+          ...attemptTrace,
+          model,
+          status: "success",
+          elapsedMs: Math.max(0, Date.now() - attemptStartedAt),
+          error: undefined
+        }
+      ]
+    };
+  } catch (error) {
+    const failedError = error instanceof Error ? error.message : String(error);
+    const terminalError = new Error(failedError) as Error & { attempts?: Prisma.InputJsonValue[] };
+    terminalError.attempts = [
+      {
+        ...attemptTrace,
+        elapsedMs: Math.max(0, Date.now() - attemptStartedAt),
+        error: failedError
+      }
+    ];
+    throw terminalError;
+  }
+}
+
+export async function runProjectStageAgent(input: StageAgentExecutionInput) {
+  const startedAt = Date.now();
+  const runtime = await getRuntimeStatus();
+  const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
+
+  try {
+    let run: StageAgentRunResult;
+    let terminalFallbackReason: string | undefined;
+
+    if (strategy.mode === "terminal_agent") {
+      try {
+        run = await runTerminalProjectStageAgent(input);
+      } catch (terminalError) {
+        terminalFallbackReason = terminalError instanceof Error ? terminalError.message : String(terminalError);
+        if (runtime.requestedMode !== "openai-compatible") {
+          throw terminalError;
+        }
+        run = await runStageAgent({
+          projectName: input.projectName,
+          projectDescription: input.projectDescription,
+          parsedIntent: input.parsedIntent,
+          stageType: input.stageType,
+          role: input.role,
+          summary: input.summary
+        });
+      }
+    } else {
+      run = await runStageAgent({
+        projectName: input.projectName,
+        projectDescription: input.projectDescription,
+        parsedIntent: input.parsedIntent,
+        stageType: input.stageType,
+        role: input.role,
+        summary: input.summary
+      });
+    }
     const runAttempts = Array.isArray((run as { attempts?: unknown }).attempts)
       ? ((run as { attempts: Prisma.InputJsonValue[] }).attempts)
       : [];
@@ -1575,12 +1721,18 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       status: "success",
       provider: run.provider,
       model: run.model,
-      requestedMode: runtime.requestedMode,
-      runtimeMode: runtime.mode,
+      requestedMode: strategy.mode === "terminal_agent" ? "openai-compatible" : runtime.requestedMode,
+      runtimeMode: strategy.mode === "terminal_agent" ? "openai-compatible" : runtime.mode,
       promptSummary: input.summary || null,
       outputPreview: buildExecutionOutputPreview(run.body),
       latencyMs: Math.max(0, Date.now() - startedAt),
       metadata: composeExecutionMetadata(input.metadata, {
+        executionMode: strategy.mode,
+        executionStrategyReason: strategy.reason,
+        terminalAgentId: strategy.openClawAgentId,
+        memoryPolicy: strategy.memoryPolicy,
+        preferredModels: strategy.preferredModels,
+        terminalFallbackReason,
         modelAttempts: runAttempts,
         degraded: (run as { degraded?: boolean }).degraded ? true : undefined
       })
@@ -1599,12 +1751,17 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       status: "failed",
       provider: runtime.mode,
       model: runtime.modelName,
-      requestedMode: runtime.requestedMode,
-      runtimeMode: runtime.mode,
+      requestedMode: strategy.mode === "terminal_agent" ? "openai-compatible" : runtime.requestedMode,
+      runtimeMode: strategy.mode === "terminal_agent" ? "openai-compatible" : runtime.mode,
       promptSummary: input.summary || null,
       errorMessage: error instanceof Error ? error.message : String(error),
       latencyMs: Math.max(0, Date.now() - startedAt),
       metadata: composeExecutionMetadata(input.metadata, {
+        executionMode: strategy.mode,
+        executionStrategyReason: strategy.reason,
+        terminalAgentId: strategy.openClawAgentId,
+        memoryPolicy: strategy.memoryPolicy,
+        preferredModels: strategy.preferredModels,
         modelAttempts: errorAttempts.length > 0 ? errorAttempts : undefined
       })
     });
