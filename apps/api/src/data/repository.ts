@@ -1732,6 +1732,8 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         terminalAgentId: strategy.openClawAgentId,
         memoryPolicy: strategy.memoryPolicy,
         preferredModels: strategy.preferredModels,
+        requiredSkills: strategy.requiredSkills,
+        skillProtocol: strategy.skillProtocol,
         terminalFallbackReason,
         modelAttempts: runAttempts,
         degraded: (run as { degraded?: boolean }).degraded ? true : undefined
@@ -1762,6 +1764,8 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         terminalAgentId: strategy.openClawAgentId,
         memoryPolicy: strategy.memoryPolicy,
         preferredModels: strategy.preferredModels,
+        requiredSkills: strategy.requiredSkills,
+        skillProtocol: strategy.skillProtocol,
         modelAttempts: errorAttempts.length > 0 ? errorAttempts : undefined
       })
     });

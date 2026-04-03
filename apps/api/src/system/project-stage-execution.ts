@@ -14,6 +14,8 @@ export type ProjectStageExecutionStrategy = {
   openClawAgentId?: string;
   preferredModels: string[];
   allowDirectModelFallback: boolean;
+  requiredSkills: string[];
+  skillProtocol: string[];
   memoryEnabled: boolean;
   memoryPolicy: "all_allowed" | "current_project_or_high_relevance_only";
   executionMode: "confirm_first" | "autonomous";
@@ -125,8 +127,42 @@ export function getPreferredStageModels(stageType: StageType, role: RoleType) {
   ]);
 }
 
+function getStageRequiredSkills(stageType: StageType, role: RoleType) {
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
+    return ["design-to-code", "frontend-design", "frontend-design-pro"];
+  }
+
+  if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
+    return ["coding-agent"];
+  }
+
+  return [] as string[];
+}
+
+function getStageSkillProtocol(stageType: StageType, role: RoleType) {
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
+    return [
+      "先读取全部 requiredSkills，再开始设计分析与输出",
+      "先用技能完成风格探索、结构拆解与可落地界面方案，再产出最终结论",
+      "如果任一 requiredSkills 缺失，必须显式报告缺失项，不允许退化为普通模型模板直答"
+    ];
+  }
+
+  if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
+    return [
+      "先读取全部 requiredSkills，再开始研发分析与实现",
+      "必须通过终端工具链完成代码修改、验证与回归检查，再输出结论",
+      "如果 requiredSkills 或终端工具不可用，必须显式报告阻塞，不允许直接给出未经验证的实现答案"
+    ];
+  }
+
+  return [] as string[];
+}
+
 export function getProjectStageExecutionStrategy(stageType: StageType, role: RoleType): ProjectStageExecutionStrategy {
   const preferredModels = getPreferredStageModels(stageType, role);
+  const requiredSkills = getStageRequiredSkills(stageType, role);
+  const skillProtocol = getStageSkillProtocol(stageType, role);
   const useTerminalAgent = TERMINAL_STAGE_ROLE_SET.has(`${stageType}:${role}`);
   const openClawAgentId = ROLE_OPENCLAW_AGENT_MAP[role];
 
@@ -137,6 +173,8 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
       openClawAgentId,
       preferredModels,
       allowDirectModelFallback: false,
+      requiredSkills,
+      skillProtocol,
       memoryEnabled: true,
       memoryPolicy: "current_project_or_high_relevance_only",
       executionMode: "autonomous",
@@ -149,6 +187,8 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
     reason: "当前阶段保持直接模型执行，仍按最强候选模型顺序尝试。",
     preferredModels,
     allowDirectModelFallback: true,
+    requiredSkills,
+    skillProtocol,
     memoryEnabled: true,
     memoryPolicy: "all_allowed",
     executionMode: "confirm_first",
@@ -160,26 +200,6 @@ export function isTerminalStageExecution(stageType: StageType, role: RoleType) {
   return getProjectStageExecutionStrategy(stageType, role).mode === "terminal_agent";
 }
 
-function buildTerminalSkillDirective(stageType: StageType, role: RoleType) {
-  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
-    return [
-      "技能要求 先加载并使用 design-to-code、frontend-design、frontend-design-pro 相关技能再开始设计输出",
-      "执行方式 优先通过终端技能工作流完成分析、风格探索、结构设计与可落地界面方案，不要直接裸写模板化答案",
-      "设计原则 如果最强模型不可用，优先切换到仍可用的终端强模型继续，并继续沿用技能工作流，不要退化为普通模型直出"
-    ];
-  }
-
-  if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
-    return [
-      "技能要求 先使用终端编码工作流与可用工程技能，再进入实现、修复、验证与交付",
-      "执行方式 优先通过终端工具链完成代码分析、修改、测试与回归核验，不要直接输出未经验证的实现建议",
-      "研发原则 如果首选模型不可用，优先切换到仍可用的终端强模型继续执行，并保持工具驱动、验证先行"
-    ];
-  }
-
-  return [];
-}
-
 export function buildTerminalStageExecutionMessage(input: {
   projectName: string;
   projectDescription: string;
@@ -188,6 +208,7 @@ export function buildTerminalStageExecutionMessage(input: {
   role: RoleType;
   summary?: string;
 }) {
+  const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
   const objective = sanitizeTerminalSegment(
     input.summary || `${STAGE_LABELS[input.stageType]}阶段任务执行`,
     220
@@ -196,7 +217,8 @@ export function buildTerminalStageExecutionMessage(input: {
   const keywords = sanitizeTerminalSegment(input.parsedIntent.keywords.join("、") || "未提供", 180);
   const constraints = sanitizeTerminalSegment(input.parsedIntent.constraints.join("、") || "未提供", 180);
   const risks = sanitizeTerminalSegment(input.parsedIntent.risks.join("、") || "未提供", 180);
-  const skillDirectives = buildTerminalSkillDirective(input.stageType, input.role).map((item) =>
+  const requiredSkills = sanitizeTerminalSegment(strategy.requiredSkills.join("、") || "无", 220);
+  const skillDirectives = strategy.skillProtocol.map((item) =>
     sanitizeTerminalSegment(item, 220)
   );
 
@@ -212,6 +234,7 @@ export function buildTerminalStageExecutionMessage(input: {
     `关键词 ${keywords}`,
     `约束 ${constraints}`,
     `风险 ${risks}`,
+    `requiredSkills ${requiredSkills}`,
     ...skillDirectives,
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
   ].join("。");

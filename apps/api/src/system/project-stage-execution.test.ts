@@ -10,6 +10,8 @@ test("design stage uses terminal agent with strongest design models", () => {
   assert.equal(strategy.mode, "terminal_agent");
   assert.equal(strategy.openClawAgentId, "jeremy");
   assert.equal(strategy.allowDirectModelFallback, false);
+  assert.deepEqual(strategy.requiredSkills, ["design-to-code", "frontend-design", "frontend-design-pro"]);
+  assert.equal(strategy.skillProtocol.length, 3);
   assert.equal(strategy.memoryEnabled, true);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
   assert.equal(strategy.preferredModels[0], "anthropic/claude-opus-4-20250514");
@@ -20,6 +22,7 @@ test("analysis stage stays on direct model execution", () => {
   assert.equal(strategy.mode, "direct_model");
   assert.equal(strategy.openClawAgentId, undefined);
   assert.equal(strategy.allowDirectModelFallback, true);
+  assert.deepEqual(strategy.requiredSkills, []);
   assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
 });
 
@@ -49,7 +52,8 @@ test("terminal stage message removes dangerous shell characters", () => {
   assert.equal(message.includes("高度相关"), true);
   assert.equal(message.includes("design-to-code"), true);
   assert.equal(message.includes("frontend-design"), true);
-  assert.equal(message.includes("不要直接裸写模板化答案"), true);
+  assert.equal(message.includes("requiredSkills"), true);
+  assert.equal(message.includes("如果任一 requiredSkills 缺失"), true);
 });
 
 test("dev terminal stage message enforces tool-driven execution", () => {
@@ -68,7 +72,7 @@ test("dev terminal stage message enforces tool-driven execution", () => {
     summary: "完成代码实现与验证"
   });
 
-  assert.equal(message.includes("终端编码工作流"), true);
-  assert.equal(message.includes("工具驱动"), true);
-  assert.equal(message.includes("不要直接输出未经验证的实现建议"), true);
+  assert.equal(message.includes("coding-agent"), true);
+  assert.equal(message.includes("必须通过终端工具链完成代码修改"), true);
+  assert.equal(message.includes("如果 requiredSkills 或终端工具不可用"), true);
 });
