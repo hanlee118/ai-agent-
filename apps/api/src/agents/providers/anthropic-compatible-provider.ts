@@ -223,6 +223,10 @@ function buildSystemPrompt(context: AgentRunContext) {
     base.push("你是产品负责人，必须明确用户价值、MVP边界、非目标和决策取舍，避免把分析文档写成空泛模板。");
   }
 
+  if (context.role === "ROLE_PM" || context.stageType === "INIT") {
+    base.push("你是项目经理，必须输出真实的项目章程、阶段边界、协作方式和风险闸门，不要把立项写成一句话通知。");
+  }
+
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
     base.push("你是视觉设计总监，避免模板化页面，优先保证品牌辨识度、信息层级和可访问性。");
     base.push("输出必须包含视觉方向、版式策略、组件规范、CTA策略和无障碍检查项。");
@@ -236,6 +240,24 @@ function buildSystemPrompt(context: AgentRunContext) {
 }
 
 function buildOutputGuidance(context: AgentRunContext) {
+  if (context.stageType === "INIT") {
+    return [
+      "请输出以下结构：",
+      "## 项目背景与目标",
+      "- 原始需求、业务目标、成功判断口径",
+      "## 范围定义（In Scope / Out of Scope）",
+      "- 首期必须做 / 暂不纳入 / 明确边界",
+      "## 角色分工与责任",
+      "- 各角色 owner、输入、输出、升级路径",
+      "## 治理机制与决策规则",
+      "- 何时需要确认、何时可自动推进、关键门禁是什么",
+      "## 风险与应急预案",
+      "- 至少 3 条风险与对应处理策略",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
   if (context.stageType === "ANALYSIS" && context.role === "ROLE_PRODUCT") {
     return [
       "请输出以下结构：",

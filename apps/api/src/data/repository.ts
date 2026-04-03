@@ -2400,7 +2400,7 @@ export async function createProject(
 ): Promise<ProjectDetail> {
   const parsedIntent = previewRequirement(input.description);
   const id = await nextProjectId();
-  const currentStage: StageType = "ANALYSIS";
+  const currentStage: StageType = "INIT";
   const currentRole = stageAssignees[currentStage];
 
   const project = createSeedProject(
@@ -2410,34 +2410,24 @@ export async function createProject(
       description: input.description,
       parsedIntent,
       currentStage,
-      progress: 12,
+      progress: 4,
       pendingApproval: false,
       currentRole,
       updatedAt: new Date().toISOString(),
-      summary: "需求分析师已开始工作，你可以直接进入观测室查看实时输出。"
+      summary: "项目经理已开始立项，你可以直接进入观测室查看实时输出。"
     },
     runtimeMode
   );
 
   const now = new Date();
   const nowIso = now.toISOString();
-  const initDeliverable = project.deliverables.find((item) => item.stageType === "INIT");
 
   project.stages = project.stages.map((stage) => {
-    if (stage.type === "INIT") {
-      return {
-        ...stage,
-        status: "completed",
-        progress: 100,
-        startedAt: nowIso,
-        endedAt: nowIso
-      };
-    }
     if (stage.type === currentStage) {
       return {
         ...stage,
         status: "active",
-        progress: 48,
+        progress: 22,
         startedAt: nowIso,
         endedAt: undefined
       };
@@ -2457,9 +2447,7 @@ export async function createProject(
     stageTaskOrder.set(task.stageType, index + 1);
 
     let status = task.status;
-    if (task.stageType === "INIT") {
-      status = "done";
-    } else if (task.stageType === currentStage) {
+    if (task.stageType === currentStage) {
       status = index === 0 ? "in_progress" : "todo";
     } else {
       status = "todo";
@@ -2472,31 +2460,7 @@ export async function createProject(
     };
   });
 
-  project.deliverables = [
-    {
-      id: initDeliverable?.id || randomUUID(),
-      name: "项目章程.md",
-      type: "markdown",
-      content: [
-        "# 项目章程",
-        "",
-        `项目 ${id} 已创建。`,
-        `项目名称：${project.name}`,
-        "",
-        "## 原始需求",
-        input.description,
-        "",
-        "## 当前阶段",
-        `- ${STAGE_LABELS[currentStage]} (${currentStage})`,
-        `- 负责人：${ROLE_LABELS[currentRole] || currentRole}`
-      ].join("\n"),
-      version: 1,
-      status: "approved",
-      stageType: "INIT",
-      createdBy: "ROLE_PM",
-      updatedAt: nowIso
-    }
-  ];
+  project.deliverables = [];
 
   project.liveSession = {
     activeRole: currentRole,
@@ -2505,8 +2469,8 @@ export async function createProject(
       `## ${STAGE_LABELS[currentStage]}阶段准备中`,
       "",
       `- 当前负责人: ${ROLE_LABELS[currentRole] || currentRole}`,
-      "- 已完成项目初始化与上下文注入。",
-      "- 正在后台触发真实模型分析，请稍后查看实时输出流。"
+      "- 系统已完成项目登记，正在生成真实立项判断与章程建议。",
+      "- 通过审批后，项目将进入分析阶段继续细化。"
     ].join("\n"),
     provider: runtimeMode,
     startedAt: nowIso
@@ -2536,7 +2500,7 @@ export async function createProject(
       agentId: currentRole,
       type: "thinking",
       title: "Agent 已接管阶段",
-      content: "分析阶段已启动，正在后台预热模型并生成需求分析内容。",
+      content: "立项阶段已启动，正在后台预热模型并生成项目章程与治理建议。",
       priority: "normal"
     }
   ];
@@ -2555,8 +2519,8 @@ async function warmupProjectAfterCreate(project: ProjectDetail) {
     return;
   }
 
-  const stageType: StageType = "ANALYSIS";
-  const role = stageAssignees[stageType];
+  const stageType = project.currentStage;
+  const role = project.currentRole;
 
   try {
     const run = await runProjectStageAgent({
@@ -2567,7 +2531,7 @@ async function warmupProjectAfterCreate(project: ProjectDetail) {
       parsedIntent: project.parsedIntent,
       stageType,
       role,
-      summary: "需求分析师已开始工作，你可以直接进入观测室查看实时输出。"
+      summary: `${ROLE_LABELS[role]} 已开始 ${STAGE_LABELS[stageType]} 阶段，你可以直接进入观测室查看实时输出。`
     });
 
     const now = new Date();
@@ -3372,7 +3336,11 @@ export async function submitCurrentStage(
     .filter((item) => item.stageType === currentStageType)
     .map((item) => item.version);
   const nextVersion = (versions.length ? Math.max(...versions) : 0) + 1;
-  const deliverableName = input.title?.trim() || `${stageLabel}交付物 v${nextVersion}.md`;
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[currentStageType] || [];
+  const defaultDeliverableName = expectedNames.length === 1
+    ? expectedNames[0]
+    : `${stageLabel}交付物 v${nextVersion}.md`;
+  const deliverableName = input.title?.trim() || defaultDeliverableName;
   const normalizedDesignReview = currentStageType === "DESIGN" ? normalizeDesignReview(input.designReview) : null;
   const normalizedDesignContent = currentStageType === "DESIGN" && normalizedDesignReview
     ? ensureDesignSubmissionContent(input.content, normalizedDesignReview)
