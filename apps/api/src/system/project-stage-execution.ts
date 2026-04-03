@@ -7,6 +7,26 @@ import {
 } from "@occ/shared";
 
 export type ProjectStageExecutionMode = "direct_model" | "terminal_agent";
+export type TerminalSkillEvidenceField =
+  | "skillsUsed"
+  | "reasoningBasis"
+  | "artifactsProduced"
+  | "verification";
+
+export type TerminalSkillEvidence = {
+  skillsUsed: string[];
+  reasoningBasis: string;
+  artifactsProduced: string;
+  verification: string;
+};
+
+export type TerminalSkillEvidenceValidation = {
+  ok: boolean;
+  missingSkills: string[];
+  missingFields: TerminalSkillEvidenceField[];
+  hasEvidenceSection: boolean;
+  parsedEvidence: TerminalSkillEvidence | null;
+};
 
 export type ProjectStageExecutionStrategy = {
   mode: ProjectStageExecutionMode;
@@ -32,6 +52,13 @@ const ROLE_OPENCLAW_AGENT_MAP: Partial<Record<RoleType, string>> = {
   ROLE_QA: "qa_engineer",
   ROLE_HR: "hr_director"
 };
+
+const TERMINAL_EVIDENCE_FIELDS: TerminalSkillEvidenceField[] = [
+  "skillsUsed",
+  "reasoningBasis",
+  "artifactsProduced",
+  "verification"
+];
 
 const TERMINAL_STAGE_ROLE_SET = new Set<string>([
   "DESIGN:ROLE_PRODUCT",
@@ -236,12 +263,32 @@ export function buildTerminalStageExecutionMessage(input: {
     `风险 ${risks}`,
     `requiredSkills ${requiredSkills}`,
     ...skillDirectives,
+    "输出末尾必须追加结构化技能证据区块，字段名必须保持原样",
+    "证据区块格式为 技能执行记录；skillsUsed: 实际使用的技能列表；reasoningBasis: 本次判断依据；artifactsProduced: 已产出的页面、代码、文档或命令结果；verification: 已完成的检查、测试或人工校验",
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
   ].join("。");
 }
 
-export function validateTerminalSkillEvidence(output: string, requiredSkills: string[]) {
-  const normalizedOutput = String(output ?? "").trim().toLowerCase();
+function extractStructuredEvidenceField(output: string, field: TerminalSkillEvidenceField) {
+  const pattern = new RegExp(
+    `(?:^|\\n)\\s*(?:[-*]\\s*)?${field}\\s*[：:]\\s*([\\s\\S]*?)(?=\\n\\s*(?:[-*]\\s*)?(?:${TERMINAL_EVIDENCE_FIELDS.join("|")})\\s*[：:]|\\n##\\s|$)`,
+    "i"
+  );
+  const matched = pattern.exec(String(output ?? ""));
+  return String(matched?.[1] ?? "").replace(/\s+/g, " ").trim();
+}
+
+function splitSkillNames(input: string) {
+  return dedupe(
+    String(input ?? "")
+      .split(/[,\n\r;；、，]/g)
+      .map((item) => item.trim())
+  );
+}
+
+export function validateTerminalSkillEvidence(output: string, requiredSkills: string[]): TerminalSkillEvidenceValidation {
+  const source = String(output ?? "");
+  const normalizedOutput = source.trim().toLowerCase();
   const normalizedSkills = requiredSkills
     .map((item) => String(item ?? "").trim().toLowerCase())
     .filter(Boolean);
@@ -250,19 +297,42 @@ export function validateTerminalSkillEvidence(output: string, requiredSkills: st
     return {
       ok: true,
       missingSkills: [] as string[],
-      hasEvidenceSection: true
+      missingFields: [] as TerminalSkillEvidenceField[],
+      hasEvidenceSection: true,
+      parsedEvidence: null
     };
   }
 
   const hasEvidenceSection =
     normalizedOutput.includes("skillsused")
+    || normalizedOutput.includes("reasoningbasis")
+    || normalizedOutput.includes("artifactsproduced")
+    || normalizedOutput.includes("verification")
     || normalizedOutput.includes("技能执行记录")
-    || normalizedOutput.includes("已使用技能");
-  const missingSkills = normalizedSkills.filter((skill) => !normalizedOutput.includes(skill));
+    || normalizedOutput.includes("skill evidence");
+  const fieldValues = {
+    skillsUsed: extractStructuredEvidenceField(source, "skillsUsed"),
+    reasoningBasis: extractStructuredEvidenceField(source, "reasoningBasis"),
+    artifactsProduced: extractStructuredEvidenceField(source, "artifactsProduced"),
+    verification: extractStructuredEvidenceField(source, "verification")
+  };
+  const missingFields = TERMINAL_EVIDENCE_FIELDS.filter((field) => !fieldValues[field]);
+  const parsedSkills = splitSkillNames(fieldValues.skillsUsed).map((item) => item.toLowerCase());
+  const missingSkills = normalizedSkills.filter((skill) => !parsedSkills.includes(skill));
+  const parsedEvidence = missingFields.length === 0
+    ? {
+        skillsUsed: splitSkillNames(fieldValues.skillsUsed),
+        reasoningBasis: fieldValues.reasoningBasis,
+        artifactsProduced: fieldValues.artifactsProduced,
+        verification: fieldValues.verification
+      }
+    : null;
 
   return {
-    ok: hasEvidenceSection && missingSkills.length === 0,
+    ok: hasEvidenceSection && missingFields.length === 0 && missingSkills.length === 0,
     missingSkills,
-    hasEvidenceSection
+    missingFields,
+    hasEvidenceSection,
+    parsedEvidence
   };
 }

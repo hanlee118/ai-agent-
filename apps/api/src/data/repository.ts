@@ -1635,7 +1635,7 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
     const skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
     if (!skillEvidence.ok) {
       throw new Error(
-        `TERMINAL_SKILL_PROTOCOL_VIOLATION: missing_skills=${skillEvidence.missingSkills.join(",") || "none"}; evidence_section=${skillEvidence.hasEvidenceSection ? "present" : "missing"}`
+        `TERMINAL_SKILL_PROTOCOL_VIOLATION: missing_skills=${skillEvidence.missingSkills.join(",") || "none"}; missing_fields=${skillEvidence.missingFields.join(",") || "none"}; evidence_section=${skillEvidence.hasEvidenceSection ? "present" : "missing"}`
       );
     }
 
@@ -1645,6 +1645,7 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       title: `${STAGE_LABELS[input.stageType]}阶段执行纪要`,
       body,
       thinkingSummary: String(result.summary ?? "").trim() || `${ROLE_LABELS[input.role]} 已完成终端执行`,
+      skillEvidence: skillEvidence.parsedEvidence,
       attempts: [
         {
           ...attemptTrace,
@@ -1742,6 +1743,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         preferredModels: strategy.preferredModels,
         requiredSkills: strategy.requiredSkills,
         skillProtocol: strategy.skillProtocol,
+        terminalSkillEvidence: (run as { skillEvidence?: Prisma.InputJsonValue | null }).skillEvidence ?? undefined,
         terminalFallbackReason,
         modelAttempts: runAttempts,
         degraded: (run as { degraded?: boolean }).degraded ? true : undefined

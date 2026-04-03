@@ -55,6 +55,10 @@ test("terminal stage message removes dangerous shell characters", () => {
   assert.equal(message.includes("frontend-design"), true);
   assert.equal(message.includes("requiredSkills"), true);
   assert.equal(message.includes("如果任一 requiredSkills 缺失"), true);
+  assert.equal(message.includes("skillsUsed"), true);
+  assert.equal(message.includes("reasoningBasis"), true);
+  assert.equal(message.includes("artifactsProduced"), true);
+  assert.equal(message.includes("verification"), true);
 });
 
 test("dev terminal stage message enforces tool-driven execution", () => {
@@ -78,18 +82,48 @@ test("dev terminal stage message enforces tool-driven execution", () => {
   assert.equal(message.includes("如果 requiredSkills 或终端工具不可用"), true);
 });
 
-test("skill evidence validator requires explicit evidence section and all required skills", () => {
+test("skill evidence validator requires structured evidence fields and all required skills", () => {
   const valid = validateTerminalSkillEvidence(
-    "## 技能执行记录\n- skillsUsed: design-to-code, frontend-design, frontend-design-pro",
+    [
+      "## 技能执行记录",
+      "- skillsUsed: design-to-code, frontend-design, frontend-design-pro",
+      "- reasoningBasis: 基于 design-to-code 做结构拆解，并通过 frontend-design / frontend-design-pro 完成视觉和交互收敛。",
+      "- artifactsProduced: 已输出视觉方案、组件规范与最终交付稿。",
+      "- verification: 已完成人工审查和终端预览校验。"
+    ].join("\n"),
     ["design-to-code", "frontend-design", "frontend-design-pro"]
   );
   assert.equal(valid.ok, true);
   assert.deepEqual(valid.missingSkills, []);
+  assert.deepEqual(valid.missingFields, []);
+  assert.deepEqual(valid.parsedEvidence?.skillsUsed, ["design-to-code", "frontend-design", "frontend-design-pro"]);
 
   const missing = validateTerminalSkillEvidence(
-    "已使用技能: design-to-code, frontend-design",
+    [
+      "## 技能执行记录",
+      "- skillsUsed: design-to-code, frontend-design",
+      "- reasoningBasis: 只做了部分设计探索。",
+      "- verification: 仅完成了文本检查。"
+    ].join("\n"),
     ["design-to-code", "frontend-design", "frontend-design-pro"]
   );
   assert.equal(missing.ok, false);
   assert.deepEqual(missing.missingSkills, ["frontend-design-pro"]);
+  assert.deepEqual(missing.missingFields, ["artifactsProduced"]);
+});
+
+test("skill evidence validator rejects outputs without structured section", () => {
+  const invalid = validateTerminalSkillEvidence(
+    "已使用技能 design-to-code, frontend-design, frontend-design-pro，并做了验证。",
+    ["design-to-code", "frontend-design", "frontend-design-pro"]
+  );
+
+  assert.equal(invalid.ok, false);
+  assert.equal(invalid.hasEvidenceSection, false);
+  assert.deepEqual(invalid.missingFields, [
+    "skillsUsed",
+    "reasoningBasis",
+    "artifactsProduced",
+    "verification"
+  ]);
 });

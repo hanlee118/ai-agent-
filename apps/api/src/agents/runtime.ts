@@ -110,6 +110,7 @@ export type StageModelAttemptTrace = {
 export type StageAgentRunResult = AgentRunResult & {
   attempts: StageModelAttemptTrace[];
   degraded?: boolean;
+  skillEvidence?: Record<string, unknown> | null;
 };
 
 type ExecutionRoute = {
