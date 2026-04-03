@@ -324,33 +324,91 @@ function buildSystemPrompt(context: AgentRunContext) {
   ];
 
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
-    base.push("你是视觉设计总监，避免模板化页面，优先保证品牌辨识度、信息层级和可访问性。");
-    base.push("输出必须包含视觉方向、版式策略、组件规范、CTA策略和无障碍检查项。");
-    base.push("禁止把页面设计成“需求输入 / 多 Agent 协作 / 执行证据回写 / 阶段验收回填”这类平台运转页面。");
+    base.push("你是视觉设计总监，围绕真实业务场景展开设计，而非套用固定模板。");
+    base.push("重点关注：用户进来后能看到什么、做什么、感受如何。");
+    base.push("禁止把页面设计成【需求输入 / 多 Agent 协作 / 执行证据回写 / 阶段验收回填】这类平台运转页面。");
     base.push("必须直接呈现用户真实业务对象、关键数据列表、分析信息和主动作。");
+    // 把项目原始需求作为设计的核心输入，避免模板化
+    if (context.summary) {
+      base.push(`\n项目原始需求：\n${context.summary}`);
+    }
   }
 
   return base.join("\n");
 }
 
+/**
+ * Fix 3: 根据项目领域特征，动态注入相关设计要点，避免千篇一律
+ * 不再强制所有项目都加"爆品榜单"，而是按项目特性自然融入
+ */
+function inferDesignDomainContext(context: AgentRunContext) {
+  const combined = [
+    context.projectName,
+    context.projectDescription,
+    context.summary ?? "",
+    ...(context.parsedIntent?.keywords ?? [])
+  ].join(" ").toLowerCase();
+
+  // 电商 / 商品场景
+  if (/商品|电商|shop|店铺|mercad|temu|amazon|ebay|shopify/i.test(combined)) {
+    return {
+      section: "## 电商特有设计要点\n- 商品陈列逻辑（搜索/分类/推荐）、促销模块、购物流程、评价体系",
+      hint: "电商场景"
+    };
+  }
+  // 社交 / 内容平台
+  if (/社交|内容|tiktok|抖音|小红书|instagram|twitter|社群|feed/i.test(combined)) {
+    return {
+      section: "## 内容平台特有设计要点\n- 内容流展示、互动机制（点赞/评论/分享）、创作者工具、推荐逻辑",
+      hint: "内容平台场景"
+    };
+  }
+  // 数据 / 监控场景
+  if (/监控|dashboard|数据|指标|统计|BI|analytics|报表|仪表盘/i.test(combined)) {
+    return {
+      section: "## 数据产品特有设计要点\n- 核心指标选择、时间范围筛选、图表类型选择、数据导出",
+      hint: "数据监控场景"
+    };
+  }
+  // 企业 / SaaS / 内部工具
+  if (/企业|SaaS|内部|审批|工作流| OA | ERP | CRM |管理系统/i.test(combined)) {
+    return {
+      section: "## 企业应用特有设计要点\n- 权限层级、表单流程、审批状态、批量操作",
+      hint: "企业应用场景"
+    };
+  }
+  // AI / 工具类产品
+  if (/AI |chat|GPT|对话|助手|工具|生成|创作/i.test(combined)) {
+    return {
+      section: "## AI 产品特有设计要点\n- 对话界面、上下文管理、生成结果展示、多轮交互",
+      hint: "AI 产品场景"
+    };
+  }
+  // 默认：无特殊场景约束，让模型自由发挥
+  return {
+    section: "",
+    hint: "通用场景"
+  };
+}
+
 function buildOutputGuidance(context: AgentRunContext) {
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
+    // Fix 1: 软化结构约束，允许模型根据项目特性自由发挥
+    // Fix 2: 移除粗暴的"额外要求"，按需自然融入场景元素
+    const domainContext = inferDesignDomainContext(context);
     return [
-      "请输出以下结构：",
-      "## 视觉策略",
-      "- 视觉主题、品牌语气、主色与字体策略",
-      "## 页面信息架构",
-      "- 首屏/核心业务列表或榜单/分析区/CTA 的层级说明",
-      "## 组件规范",
-      "- 关键组件、状态与交互反馈",
-      "- 必须描述真实业务对象的列表、数据卡、操作按钮和详情区，而不是平台内部流程组件",
-      "## 设计审查卡",
-      "- UX 原则（3条）",
-      "- 可访问性检查清单（至少3条）",
-      "- 审查结论（通过/不通过）",
-      "## 下一步",
-      "- 2 到 3 条可执行动作",
-      "额外要求：如果需求涉及商品、电商、榜单、监控、告警、跟踪、TikTok、Amazon、Temu 等场景，页面首屏必须出现爆品榜单、平台筛选、增长指标、商品链接和跟踪动作。"
+      "围绕上述项目需求，提供设计输出（可自由组织结构，重点覆盖以下方面）：",
+      "## 视觉方向建议",
+      "- 主题语气、色板、字体体系",
+      "## 页面架构与信息层级",
+      "- 首屏布局、核心业务区块、CTA 区域",
+      `${domainContext.section}`,
+      "## 关键交互与状态",
+      "- 主要操作路径、异常状态、数据为空时表现",
+      "## 可访问性注意事项",
+      "- 对比度、键盘导航、屏幕阅读器兼容",
+      "## 下一步可执行动作",
+      "- 2 到 3 条设计落地建议"
     ];
   }
 
