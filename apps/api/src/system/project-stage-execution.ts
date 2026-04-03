@@ -74,6 +74,8 @@ const TERMINAL_EVIDENCE_FIELDS: TerminalSkillEvidenceField[] = [
 ];
 
 const TERMINAL_STAGE_ROLE_SET = new Set<string>([
+  "ANALYSIS:ROLE_ANALYST",
+  "ANALYSIS:ROLE_PRODUCT",
   "DESIGN:ROLE_PRODUCT",
   "DESIGN:ROLE_DESIGN",
   "DEV:ROLE_ARCH",
@@ -112,6 +114,16 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
 };
 
 const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
+  ROLE_ANALYST: [
+    "openai/gpt-5.4",
+    "anthropic/claude-sonnet-4-20250514",
+    "openai/gpt-5.3-codex"
+  ],
+  ROLE_PRODUCT: [
+    "openai/gpt-5.4",
+    "anthropic/claude-sonnet-4-20250514",
+    "openai/gpt-5.3-codex"
+  ],
   ROLE_DESIGN: [
     "anthropic/claude-opus-4-20250514",
     "anthropic/claude-sonnet-4-20250514",
@@ -188,6 +200,14 @@ function getStageRequiredSkills(stageType: StageType, role: RoleType) {
 }
 
 function getStageSkillProtocol(stageType: StageType, role: RoleType) {
+  if (stageType === "ANALYSIS" || role === "ROLE_ANALYST" || role === "ROLE_PRODUCT") {
+    return [
+      "先基于当前项目做需求澄清、边界判断与价值取舍，再输出阶段结论",
+      "必须显式区分已确认事实、推断假设与待确认项，避免把幻觉写成既定需求",
+      "输出末尾必须追加结构化证据区块，说明判断依据、产出物与校验结论"
+    ];
+  }
+
   if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
     return [
       "先读取全部 requiredSkills，再开始设计分析与输出",
@@ -217,7 +237,7 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
   if (useTerminalAgent && openClawAgentId) {
     return {
       mode: "terminal_agent",
-      reason: "设计与研发阶段优先走终端 Agent，并保留长期记忆能力，但只允许使用当前项目或高关联历史经验，降低模板复用与旧上下文污染。",
+      reason: "关键阶段优先走终端 Agent，并保留长期记忆能力，但只允许使用当前项目或高关联历史经验，降低模板复用与旧上下文污染。",
       openClawAgentId,
       preferredModels,
       allowDirectModelFallback: false,
@@ -314,16 +334,6 @@ export function validateTerminalSkillEvidence(output: string, requiredSkills: st
     .map((item) => String(item ?? "").trim().toLowerCase())
     .filter(Boolean);
 
-  if (normalizedSkills.length === 0) {
-    return {
-      ok: true,
-      missingSkills: [] as string[],
-      missingFields: [] as TerminalSkillEvidenceField[],
-      hasEvidenceSection: true,
-      parsedEvidence: null
-    };
-  }
-
   const hasEvidenceSection =
     normalizedOutput.includes("skillsused")
     || normalizedOutput.includes("reasoningbasis")
@@ -339,7 +349,9 @@ export function validateTerminalSkillEvidence(output: string, requiredSkills: st
   };
   const missingFields = TERMINAL_EVIDENCE_FIELDS.filter((field) => !fieldValues[field]);
   const parsedSkills = splitSkillNames(fieldValues.skillsUsed).map((item) => item.toLowerCase());
-  const missingSkills = normalizedSkills.filter((skill) => !parsedSkills.includes(skill));
+  const missingSkills = normalizedSkills.length > 0
+    ? normalizedSkills.filter((skill) => !parsedSkills.includes(skill))
+    : [];
   const parsedEvidence = missingFields.length === 0
     ? {
         skillsUsed: splitSkillNames(fieldValues.skillsUsed),

@@ -20,13 +20,20 @@ test("design stage uses terminal agent with strongest design models", () => {
   assert.equal(strategy.preferredModels[0], "anthropic/claude-opus-4-20250514");
 });
 
-test("analysis stage stays on direct model execution", () => {
+test("analysis stage uses terminal execution for analyst with strongest analysis models", () => {
   const strategy = getProjectStageExecutionStrategy("ANALYSIS", "ROLE_ANALYST");
-  assert.equal(strategy.mode, "direct_model");
-  assert.equal(strategy.openClawAgentId, undefined);
-  assert.equal(strategy.allowDirectModelFallback, true);
+  assert.equal(strategy.mode, "terminal_agent");
+  assert.equal(strategy.openClawAgentId, "requirements_analyst");
+  assert.equal(strategy.allowDirectModelFallback, false);
   assert.deepEqual(strategy.requiredSkills, []);
+  assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
   assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
+});
+
+test("pm still stays on direct model execution during analysis stage", () => {
+  const strategy = getProjectStageExecutionStrategy("ANALYSIS", "ROLE_PM");
+  assert.equal(strategy.mode, "direct_model");
+  assert.equal(strategy.allowDirectModelFallback, true);
 });
 
 test("analysis stage adds product companion for collaborative planning", () => {
@@ -139,4 +146,30 @@ test("skill evidence validator rejects outputs without structured section", () =
     "artifactsProduced",
     "verification"
   ]);
+});
+
+test("skill evidence validator still requires structured fields when no required skills are configured", () => {
+  const invalid = validateTerminalSkillEvidence(
+    "普通输出正文，没有结构化证据。",
+    []
+  );
+  assert.equal(invalid.ok, false);
+  assert.deepEqual(invalid.missingFields, [
+    "skillsUsed",
+    "reasoningBasis",
+    "artifactsProduced",
+    "verification"
+  ]);
+
+  const valid = validateTerminalSkillEvidence(
+    [
+      "## 技能执行记录",
+      "- skillsUsed: analysis-evidence",
+      "- reasoningBasis: 基于需求原文、约束和风险做边界澄清。",
+      "- artifactsProduced: 已产出需求分析结论和待确认问题列表。",
+      "- verification: 已完成结构校验与人工复核。"
+    ].join("\n"),
+    []
+  );
+  assert.equal(valid.ok, true);
 });
