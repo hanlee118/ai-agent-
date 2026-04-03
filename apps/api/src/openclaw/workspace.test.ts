@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   normalizeOpenClawProviderApis,
+  prioritizeFallbackModels,
   shouldRepairOpenAiProviderApi
 } from "./workspace.js";
 
@@ -46,4 +47,20 @@ test("ignores already-compatible openai completions config", () => {
   const result = normalizeOpenClawProviderApis(input);
   assert.equal(result.changed, false);
   assert.equal(result.config.models?.providers?.openai?.api, "openai-completions");
+});
+
+test("prioritizes openai family for generic fallback chains", () => {
+  const result = prioritizeFallbackModels([
+    "anthropic/claude-sonnet-4-20250514",
+    "openai/gpt-5.3-codex",
+    "minima/MiniMax-M2.7-highspeed",
+    "openai/gpt-5.4"
+  ]);
+
+  assert.deepEqual(result, [
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-20250514",
+    "minima/MiniMax-M2.7-highspeed"
+  ]);
 });

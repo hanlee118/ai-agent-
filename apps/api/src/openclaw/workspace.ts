@@ -210,8 +210,9 @@ const SOP_FILE_CANDIDATES = ["sop-document.md", "SOP.md"];
 const NON_DELETABLE_AGENT_IDS = new Set(["main"]);
 const MODEL_ROUTING_PLACEHOLDERS = new Set(["runtime", "unknown", "default", "auto"]);
 const HARD_FALLBACK_MODELS = [
-  "anthropic/claude-sonnet-4-20250514",
   "openai/gpt-5.4",
+  "openai/gpt-5.3-codex",
+  "anthropic/claude-sonnet-4-20250514",
   "minima/MiniMax-M2.7-highspeed"
 ];
 let statusCache: { expiresAt: number; value: OpenClawStatusSummary } | null = null;
@@ -246,6 +247,18 @@ export async function listOpenClawAgents(): Promise<OpenClawAgentSummary[]> {
 export async function findOpenClawAgent(agentId: string): Promise<OpenClawAgentDetail | undefined> {
   const { agents } = await buildWorkspaceSnapshot();
   return agents.find((agent) => agent.agentId === agentId);
+}
+
+function shouldUseIsolatedAgentSession(agent: Pick<OpenClawAgentDetail, "agentId" | "name" | "title" | "responsibility">, message: string) {
+  const profile = `${agent.agentId} ${agent.name} ${agent.title} ${agent.responsibility}`;
+  if (/(design|设计|ui|ux|jeremy)/i.test(profile)) {
+    return true;
+  }
+
+  const normalizedMessage = String(message || "");
+  return normalizedMessage.includes("项目 ")
+    && normalizedMessage.includes("阶段 ")
+    && normalizedMessage.includes("角色 ");
 }
 
 export async function inspectOpenClawModelRouting(input?: {
@@ -1061,9 +1074,10 @@ export async function sendOpenClawAgentMessage(
     ...(isDesignAgent ? [designPrimaryModel] : []),
     ...fallbackCandidates
   ]);
+  const requestedModel = activeModel;
   const fallbackQueue = fallbackCandidates.filter((modelId) => modelId !== activeModel);
   let fallbackCursor = 0;
-  const shouldIsolateSession = isDesignAgent;
+  const shouldIsolateSession = shouldUseIsolatedAgentSession(agent, message);
   const preferLocalExecution = isDesignAgent;
   let gatewayRepairAttempted = false;
   const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
@@ -1252,6 +1266,18 @@ export async function sendOpenClawAgentMessage(
       commandType: classifyInstruction(message)
     }
   });
+
+  const actualModel = normalizeModelForRouting(model);
+  if (requestedModel && actualModel && actualModel !== requestedModel) {
+    try {
+      await restoreAgentSelectedModel(agentId, requestedModel);
+    } catch (error) {
+      console.warn(
+        `[openclaw] failed to restore preferred model for ${agentId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
 
   return {
     ok,
@@ -2715,8 +2741,37 @@ function parseCsvModels(value?: string) {
     .filter((item): item is string => Boolean(item));
 }
 
+export function prioritizeFallbackModels(models: string[], options?: { preferOpenAi?: boolean }) {
+  const preferOpenAi = options?.preferOpenAi !== false;
+  if (!preferOpenAi) {
+    return dedupeStrings(models);
+  }
+
+  const rank = (model: string) => {
+    const normalized = normalizeModelForRouting(model)?.toLowerCase() ?? "";
+    if (normalized.startsWith("openai/gpt-5.4")) {
+      return 0;
+    }
+    if (normalized.startsWith("openai/gpt-5.3-codex")) {
+      return 1;
+    }
+    if (normalized.startsWith("openai/")) {
+      return 2;
+    }
+    if (normalized.startsWith("anthropic/")) {
+      return 3;
+    }
+    if (normalized.startsWith("minima/")) {
+      return 4;
+    }
+    return 5;
+  };
+
+  return dedupeStrings(models).slice().sort((left, right) => rank(left) - rank(right));
+}
+
 function listGlobalFallbackModels() {
-  return dedupeStrings([
+  return prioritizeFallbackModels([
     ...parseCsvModels(process.env.OPENCLAW_CLAUDE_CODE_DEV_MODELS),
     normalizeModelForRouting(process.env.OPENCLAW_AGENT_FALLBACK_MODEL),
     ...HARD_FALLBACK_MODELS.map((item) => normalizeModelForRouting(item)),
@@ -3158,6 +3213,35 @@ async function switchAgentModelForRetry(agentId: string, model: string) {
       fallbackModel: normalizedModel
     },
     update: {
+      selectedModel: normalizedModel
+    }
+  });
+}
+
+async function restoreAgentSelectedModel(agentId: string, model: string) {
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
+  if (!config?.agents?.list?.length) {
+    throw new Error("OpenClaw config missing agents.list");
+  }
+
+  const target = config.agents.list.find((item) => item.id === agentId);
+  if (!target) {
+    throw new Error(`Agent ${agentId} not found in OpenClaw config`);
+  }
+
+  const normalizedModel = normalizeModelForRouting(model);
+  if (!normalizedModel) {
+    return;
+  }
+
+  if (target.model !== normalizedModel) {
+    target.model = normalizedModel;
+    await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+  }
+
+  await prisma.managedAgentConfig.updateMany({
+    where: { agentId },
+    data: {
       selectedModel: normalizedModel
     }
   });
