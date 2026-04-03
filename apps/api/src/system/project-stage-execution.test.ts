@@ -2,7 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildTerminalStageExecutionMessage,
+  getStageCompanionRoles,
   getProjectStageExecutionStrategy,
+  getStageRealModelGateRoles,
   validateTerminalSkillEvidence
 } from "./project-stage-execution.js";
 
@@ -25,6 +27,17 @@ test("analysis stage stays on direct model execution", () => {
   assert.equal(strategy.allowDirectModelFallback, true);
   assert.deepEqual(strategy.requiredSkills, []);
   assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
+});
+
+test("analysis stage adds product companion for collaborative planning", () => {
+  assert.deepEqual(getStageCompanionRoles("ANALYSIS", "ROLE_ANALYST"), ["ROLE_PRODUCT"]);
+  assert.deepEqual(getStageCompanionRoles("DEV", "ROLE_ARCH"), []);
+});
+
+test("real model gate covers analysis, design and dev critical roles", () => {
+  assert.deepEqual(getStageRealModelGateRoles("ANALYSIS"), ["ROLE_ANALYST", "ROLE_PRODUCT"]);
+  assert.deepEqual(getStageRealModelGateRoles("DESIGN"), ["ROLE_PRODUCT", "ROLE_DESIGN"]);
+  assert.deepEqual(getStageRealModelGateRoles("DEV"), ["ROLE_ARCH", "ROLE_DEV"]);
 });
 
 test("terminal stage message removes dangerous shell characters", () => {

@@ -56,6 +56,8 @@ import {
 } from "../system/design-preview.js";
 import {
   buildTerminalStageExecutionMessage,
+  getStageCompanionRoles,
+  getStageRealModelGateRoles,
   getProjectStageExecutionStrategy,
   validateTerminalSkillEvidence
 } from "../system/project-stage-execution.js";
@@ -83,11 +85,6 @@ const STAGE_NEXT_INPUT: Record<StageType, string> = {
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
-const STAGE_COMPANION_ROLES: Partial<Record<StageType, RoleType[]>> = {
-  DESIGN: ["ROLE_PRODUCT"],
-  DEV: ["ROLE_ARCH"]
-};
-
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
@@ -101,12 +98,6 @@ const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
   /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
-const STAGE_ROLE_MODEL_GATE_TARGETS: Partial<Record<StageType, RoleType[]>> = {
-  DESIGN: ["ROLE_DESIGN"],
-  DEV: ["ROLE_ARCH", "ROLE_DEV"],
-  ACCEPT: ["ROLE_QA"]
-};
-
 export type DesignInterventionSignal = {
   required: boolean;
   reasonCode?: "design_ambiguity";
@@ -338,7 +329,7 @@ async function assertStageRoleModelWhitelistGate(
   project: ProjectDetail,
   stageExecutions: Array<{ role: string; model?: string | null | undefined }>
 ) {
-  const targetRoles = STAGE_ROLE_MODEL_GATE_TARGETS[project.currentStage] || [];
+  const targetRoles = getStageRealModelGateRoles(project.currentStage);
   if (targetRoles.length === 0) {
     return;
   }
@@ -2610,6 +2601,32 @@ async function warmupProjectAfterCreate(project: ProjectDetail) {
         }
       });
     }
+
+    await runCompanionStageExecutions({
+      projectId: project.id,
+      projectName: project.name,
+      projectDescription: project.description,
+      parsedIntent: project.parsedIntent,
+      stageType,
+      primaryRole: role,
+      actionPrefix: "project.create.bootstrap.async"
+    });
+
+    if (role !== "ROLE_PM") {
+      await runProjectStageAgent({
+        projectId: project.id,
+        action: "project.create.bootstrap.pm-chain",
+        metadata: {
+          chain: "pm-stage-evidence"
+        },
+        projectName: project.name,
+        projectDescription: project.description,
+        parsedIntent: project.parsedIntent,
+        stageType,
+        role: "ROLE_PM",
+        summary: `证据链补齐：请项目经理输出${STAGE_LABELS[stageType]}阶段的独立审阅与推进建议。`
+      });
+    }
   } catch (error) {
     console.warn(
       `[project] initial analysis warmup failed for ${project.id}:`,
@@ -2627,8 +2644,7 @@ async function runCompanionStageExecutions(input: {
   primaryRole: RoleType;
   actionPrefix: string;
 }) {
-  const companionRoles = (STAGE_COMPANION_ROLES[input.stageType] || [])
-    .filter((role) => role !== input.primaryRole);
+  const companionRoles = getStageCompanionRoles(input.stageType, input.primaryRole);
   if (companionRoles.length === 0) {
     return;
   }
@@ -2729,7 +2745,7 @@ async function ensureStageRoleModelGateExecution(project: ProjectDetail) {
   if (!isRealModelGateEnabled()) {
     return;
   }
-  const targetRoles = STAGE_ROLE_MODEL_GATE_TARGETS[project.currentStage] || [];
+  const targetRoles = getStageRealModelGateRoles(project.currentStage);
   if (targetRoles.length === 0) {
     return;
   }

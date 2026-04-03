@@ -42,6 +42,19 @@ export type ProjectStageExecutionStrategy = {
   requireConfirmation: boolean;
 };
 
+const STAGE_COMPANION_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
+  ANALYSIS: ["ROLE_PRODUCT"],
+  DESIGN: ["ROLE_PRODUCT"],
+  DEV: ["ROLE_ARCH"]
+};
+
+const STAGE_REAL_MODEL_GATE_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
+  ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
+  DESIGN: ["ROLE_PRODUCT", "ROLE_DESIGN"],
+  DEV: ["ROLE_ARCH", "ROLE_DEV"],
+  ACCEPT: ["ROLE_QA"]
+};
+
 const ROLE_OPENCLAW_AGENT_MAP: Partial<Record<RoleType, string>> = {
   ROLE_PM: "project_manager",
   ROLE_ANALYST: "requirements_analyst",
@@ -152,6 +165,14 @@ export function getPreferredStageModels(stageType: StageType, role: RoleType) {
     ...(ROLE_MODEL_OVERRIDES[role] ?? []),
     ...(STAGE_MODEL_PREFERENCES[stageType] ?? [])
   ]);
+}
+
+export function getStageCompanionRoles(stageType: StageType, primaryRole: RoleType) {
+  return (STAGE_COMPANION_ROLE_MAP[stageType] ?? []).filter((role) => role !== primaryRole);
+}
+
+export function getStageRealModelGateRoles(stageType: StageType) {
+  return [...(STAGE_REAL_MODEL_GATE_ROLE_MAP[stageType] ?? [])];
 }
 
 function getStageRequiredSkills(stageType: StageType, role: RoleType) {
