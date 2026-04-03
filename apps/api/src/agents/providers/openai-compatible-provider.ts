@@ -334,6 +334,7 @@ function buildSystemPrompt(context: AgentRunContext) {
 
   if (context.role === "ROLE_PM" || context.stageType === "INIT") {
     base.push("你是项目经理，必须输出真实的项目章程、阶段边界、协作方式和风险闸门，不要把立项写成一句话通知。");
+    base.push("禁止输出“待补充 / TODO / TBD / xxx / 占位”等占位词。");
   }
 
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
@@ -426,6 +427,7 @@ function buildOutputGuidance(context: AgentRunContext) {
       "- 目标、范围、角色、风险四类信息完整且无冲突。",
       "- 关键决策规则清晰，出现阻塞时可直接执行。",
       "- 章程可作为分析阶段输入，不依赖口头补充。",
+      "- 上述三条验收检查清单必须逐字保留，不可改写。",
       "## 下一步",
       "- 2 到 3 条可执行动作"
     ];
