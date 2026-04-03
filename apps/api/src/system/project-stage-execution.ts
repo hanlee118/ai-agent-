@@ -157,6 +157,26 @@ export function isTerminalStageExecution(stageType: StageType, role: RoleType) {
   return getProjectStageExecutionStrategy(stageType, role).mode === "terminal_agent";
 }
 
+function buildTerminalSkillDirective(stageType: StageType, role: RoleType) {
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
+    return [
+      "技能要求 先加载并使用 design-to-code、frontend-design、frontend-design-pro 相关技能再开始设计输出",
+      "执行方式 优先通过终端技能工作流完成分析、风格探索、结构设计与可落地界面方案，不要直接裸写模板化答案",
+      "设计原则 如果最强模型不可用，优先切换到仍可用的终端强模型继续，并继续沿用技能工作流，不要退化为普通模型直出"
+    ];
+  }
+
+  if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
+    return [
+      "技能要求 先使用终端编码工作流与可用工程技能，再进入实现、修复、验证与交付",
+      "执行方式 优先通过终端工具链完成代码分析、修改、测试与回归核验，不要直接输出未经验证的实现建议",
+      "研发原则 如果首选模型不可用，优先切换到仍可用的终端强模型继续执行，并保持工具驱动、验证先行"
+    ];
+  }
+
+  return [];
+}
+
 export function buildTerminalStageExecutionMessage(input: {
   projectName: string;
   projectDescription: string;
@@ -173,6 +193,9 @@ export function buildTerminalStageExecutionMessage(input: {
   const keywords = sanitizeTerminalSegment(input.parsedIntent.keywords.join("、") || "未提供", 180);
   const constraints = sanitizeTerminalSegment(input.parsedIntent.constraints.join("、") || "未提供", 180);
   const risks = sanitizeTerminalSegment(input.parsedIntent.risks.join("、") || "未提供", 180);
+  const skillDirectives = buildTerminalSkillDirective(input.stageType, input.role).map((item) =>
+    sanitizeTerminalSegment(item, 220)
+  );
 
   return [
     "请只基于当前项目执行阶段任务，允许参考长期记忆用于学习与复用经验",
@@ -186,6 +209,7 @@ export function buildTerminalStageExecutionMessage(input: {
     `关键词 ${keywords}`,
     `约束 ${constraints}`,
     `风险 ${risks}`,
+    ...skillDirectives,
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
   ].join("。");
 }

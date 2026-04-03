@@ -45,4 +45,28 @@ test("terminal stage message removes dangerous shell characters", () => {
   assert.equal(message.includes(">"), false);
   assert.equal(message.includes("允许参考长期记忆"), true);
   assert.equal(message.includes("高度相关"), true);
+  assert.equal(message.includes("design-to-code"), true);
+  assert.equal(message.includes("frontend-design"), true);
+  assert.equal(message.includes("不要直接裸写模板化答案"), true);
+});
+
+test("dev terminal stage message enforces tool-driven execution", () => {
+  const message = buildTerminalStageExecutionMessage({
+    projectName: "TrendHunter",
+    projectDescription: "实现真实后端与前端联调",
+    parsedIntent: {
+      keywords: ["Next.js", "Prisma"],
+      constraints: ["禁止只给建议不落代码"],
+      risks: ["回归风险"],
+      suggestedTeam: ["ROLE_ARCH", "ROLE_DEV"],
+      summary: "进入研发执行"
+    },
+    stageType: "DEV",
+    role: "ROLE_DEV",
+    summary: "完成代码实现与验证"
+  });
+
+  assert.equal(message.includes("终端编码工作流"), true);
+  assert.equal(message.includes("工具驱动"), true);
+  assert.equal(message.includes("不要直接输出未经验证的实现建议"), true);
 });
