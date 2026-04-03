@@ -62,6 +62,8 @@ export function useNewProjectModalController({
   const [isImporting, setIsImporting] = useState(false);
   const [step, setStep] = useState<ModalStep>('input');
   const [rawInput, setRawInput] = useState('');
+  const [prdInput, setPrdInput] = useState('');
+  const [importedFileName, setImportedFileName] = useState('');
   const [industryRoleSets, setIndustryRoleSets] = useState<IndustryRoleSetSummary[]>([]);
   const [selectedIndustryCode, setSelectedIndustryCode] = useState('');
   const [issueSourceType, setIssueSourceType] = useState<IssueSourceType>('text');
@@ -117,6 +119,11 @@ export function useNewProjectModalController({
   const hrRoleEnabled = useMemo(
     () => (selectedIndustryConfig?.roleSet.roleIds || []).some((roleId) => normalizeRoleId(roleId) === 'ROLE_HR'),
     [selectedIndustryConfig],
+  );
+
+  const sourceInput = useMemo(
+    () => (issueSourceType === 'prd' ? prdInput : rawInput),
+    [issueSourceType, prdInput, rawInput],
   );
 
   const industryAgents = useMemo(() => {
@@ -273,6 +280,8 @@ export function useNewProjectModalController({
     setIsImporting(false);
     setStep('input');
     setRawInput('');
+    setPrdInput('');
+    setImportedFileName('');
     setIssueSourceType('text');
     setParsedProject(null);
     setIssuePreview(null);
@@ -317,6 +326,8 @@ export function useNewProjectModalController({
       }
       const nextInput = normalized.slice(0, 6000);
       setRawInput(nextInput);
+      setIssueSourceType('file_import');
+      setImportedFileName(file.name);
       setIsImporting(false);
       setStep('input');
       addToast(`已导入文件: ${file.name}`, 'success');
@@ -363,7 +374,7 @@ export function useNewProjectModalController({
   };
 
   const handleRefreshDebate = async () => {
-    const input = rawInput.trim() || parsedProject?.description.trim() || issuePreview?.summary.trim() || '';
+    const input = sourceInput.trim() || parsedProject?.description.trim() || issuePreview?.summary.trim() || '';
     if (!input) {
       addToast('请先补充需求描述后再重新生成讨论', 'error');
       return;
@@ -428,7 +439,7 @@ export function useNewProjectModalController({
   };
 
   const handleParseInput = async () => {
-    const input = rawInput.trim();
+    const input = sourceInput.trim();
     if (!input) {
       addToast('请先输入项目需求', 'error');
       return;
@@ -764,7 +775,7 @@ export function useNewProjectModalController({
         created = await projectsApi.create({
           name: parsedProject.name,
           description: finalDescription,
-          requirements: rawInput.trim() || parsedProject.description,
+          requirements: sourceInput.trim() || parsedProject.description,
           team: parsedProject.team,
         });
       }
@@ -1031,6 +1042,10 @@ export function useNewProjectModalController({
     setStep,
     rawInput,
     setRawInput,
+    prdInput,
+    setPrdInput,
+    sourceInput,
+    importedFileName,
     industryRoleSets,
     selectedIndustryCode,
     setSelectedIndustryCode,

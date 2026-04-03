@@ -61,6 +61,22 @@ export interface IndustryTeamConfig {
   assemblyRule: TeamAssemblyRule;
 }
 
+export interface CreateIndustryRoleSetPayload {
+  industryCode: string;
+  industryName: string;
+  roleIds: RoleId[];
+  defaultSoulRoleId: RoleId;
+  status: RoleSetStatus;
+}
+
+export interface UpdateIndustryRoleSetPayload {
+  industryCode?: string;
+  industryName?: string;
+  roleIds?: RoleId[];
+  defaultSoulRoleId?: RoleId;
+  status?: RoleSetStatus;
+}
+
 export const roleSetsApi = {
   async list() {
     return request<IndustryRoleSetSummary[]>('/role-sets');
@@ -68,5 +84,25 @@ export const roleSetsApi = {
 
   async get(industryCode: string) {
     return request<IndustryTeamConfig>(`/role-sets/${encodeURIComponent(industryCode)}`);
+  },
+
+  async create(payload: CreateIndustryRoleSetPayload) {
+    return request<IndustryTeamConfig>('/role-sets', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async update(industryCode: string, payload: UpdateIndustryRoleSetPayload) {
+    return request<IndustryTeamConfig>(`/role-sets/${encodeURIComponent(industryCode)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async remove(industryCode: string) {
+    return request<{ deleted: boolean; industryCode: string }>(`/role-sets/${encodeURIComponent(industryCode)}`, {
+      method: 'DELETE',
+    });
   },
 };

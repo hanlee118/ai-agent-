@@ -33,6 +33,7 @@ const TeamTopologyModal = lazy(() => import('./pages/modals/TeamTopologyModal'))
 const DeployAgentModal = lazy(() => import('./pages/modals/DeployAgentModal'));
 const NewProjectModal = lazy(() => import('./pages/modals/NewProjectModal'));
 const DecisionCenterModal = lazy(() => import('./pages/modals/DecisionCenterModal'));
+const IndustryRoleSetsModal = lazy(() => import('./pages/modals/IndustryRoleSetsModal'));
 
 const APP_TABS = [
   'dashboard',
@@ -247,6 +248,7 @@ export default function App() {
   const [isAgentConfigOpen, setIsAgentConfigOpen] = useState(false);
   const [isTopologyOpen, setIsTopologyOpen] = useState(false);
   const [isDeployOpen, setIsDeployOpen] = useState(false);
+  const [isRoleSetsOpen, setIsRoleSetsOpen] = useState(false);
   const [isNewProjectOpen, setIsNewProjectOpen] = useState(false);
   const [isDecisionCenterOpen, setIsDecisionCenterOpen] = useState(false);
   const [showNotifications, setShowNotifications] = useState(false);
@@ -713,7 +715,19 @@ export default function App() {
                 {activeTab === 'model-nexus' && <ModelNexusPage addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} onRefreshData={refreshAllData} />}
                 {activeTab === 'monitoring' && <MonitoringPage addToast={addToast} onNavigate={handleNavigate} />}
                 {activeTab === 'projects' && <ProjectsPage onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onRefreshData={refreshAllData} />}
-                {activeTab === 'agents' && <AgentsPage onSelectAgent={handleSelectAgent} addToast={addToast} onOpenTopology={() => setIsTopologyOpen(true)} onOpenDeploy={() => setIsDeployOpen(true)} onOpenConfig={(id: string) => { setSelectedAgentId(id); setIsAgentConfigOpen(true); }} />}
+                {activeTab === 'agents' && (
+                  <AgentsPage
+                    onSelectAgent={handleSelectAgent}
+                    addToast={addToast}
+                    onOpenTopology={() => setIsTopologyOpen(true)}
+                    onOpenDeploy={() => setIsDeployOpen(true)}
+                    onOpenRoleSets={() => setIsRoleSetsOpen(true)}
+                    onOpenConfig={(id: string) => {
+                      setSelectedAgentId(id);
+                      setIsAgentConfigOpen(true);
+                    }}
+                  />
+                )}
                 {activeTab === 'workspace' && <WorkspacePage addToast={addToast} workspace={workspace} onRefreshData={refreshAllData} onNavigate={handleNavigate} />}
                 {activeTab === 'audit' && <AuditPage />}
                 {activeTab === 'settings' && <SettingsPage addToast={addToast} onRuntimeUpdated={refreshAllData} />}
@@ -734,6 +748,7 @@ export default function App() {
               {isAgentConfigOpen && <AgentConfigModal isOpen={isAgentConfigOpen} onClose={() => setIsAgentConfigOpen(false)} agentId={selectedAgentId} addToast={addToast} onUpdated={refreshAllData} />}
               {isTopologyOpen && <TeamTopologyModal isOpen={isTopologyOpen} onClose={() => setIsTopologyOpen(false)} />}
               {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} onDeployed={refreshAllData} />}
+              {isRoleSetsOpen && <IndustryRoleSetsModal isOpen={isRoleSetsOpen} onClose={() => setIsRoleSetsOpen(false)} addToast={addToast} onUpdated={refreshAllData} />}
               {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={() => { void refreshAllData(); }} />}
               {isDecisionCenterOpen && <DecisionCenterModal isOpen={isDecisionCenterOpen} onClose={() => setIsDecisionCenterOpen(false)} addToast={addToast} />}
             </AnimatePresence>

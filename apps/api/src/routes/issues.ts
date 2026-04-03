@@ -63,7 +63,13 @@ const ROLE_IDS: RoleType[] = [
 
 function normalizeSourceType(input: unknown): IssueSourceType {
   const value = String(input ?? "").trim().toLowerCase();
-  if (value === "meeting_notes" || value === "journey" || value === "competitor") {
+  if (
+    value === "meeting_notes"
+    || value === "journey"
+    || value === "competitor"
+    || value === "file_import"
+    || value === "prd"
+  ) {
     return value;
   }
   return "text";

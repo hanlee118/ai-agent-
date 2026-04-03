@@ -1,4 +1,4 @@
-import { BrainCircuit, Settings, UserPlus, Workflow } from 'lucide-react';
+import { Blocks, BrainCircuit, Settings, UserPlus, Workflow } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
 import { agents, models } from '../lib/runtimeCollections';
@@ -9,10 +9,18 @@ type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   onOpenTopology: () => void;
   onOpenDeploy: () => void;
+  onOpenRoleSets: () => void;
   onOpenConfig: (id: string) => void;
 };
 
-export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, onOpenConfig }: Props) {
+export default function AgentsPage({
+  onSelectAgent,
+  addToast,
+  onOpenTopology,
+  onOpenDeploy,
+  onOpenRoleSets,
+  onOpenConfig,
+}: Props) {
   const resolveModelLabel = (modelKey: string) => {
     const normalizedKey = String(modelKey || '').trim();
     if (!normalizedKey) {
@@ -48,6 +56,10 @@ export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, on
           <p className="text-slate-400 mt-1">监控和管理您的数字员工能力。</p>
         </div>
         <div className="flex gap-3">
+          <button onClick={onOpenRoleSets} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
+            <Blocks size={16} />
+            行业角色集
+          </button>
           <button onClick={onOpenTopology} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
             <Workflow size={16} />
             团队图谱

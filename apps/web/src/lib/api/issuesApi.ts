@@ -1,6 +1,12 @@
 import { request } from './core';
 
-export type IssueSourceType = 'text' | 'meeting_notes' | 'journey' | 'competitor';
+export type IssueSourceType =
+  | 'text'
+  | 'meeting_notes'
+  | 'journey'
+  | 'competitor'
+  | 'file_import'
+  | 'prd';
 export type ConflictSeverity = 'critical' | 'warning' | 'info';
 export type IssueDebateTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
 
