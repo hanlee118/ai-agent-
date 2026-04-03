@@ -24,6 +24,198 @@ function collectPlatforms(source: string) {
   return platforms.length > 0 ? platforms : ["TikTok", "Amazon"];
 }
 
+function hashSeed(source: string) {
+  let hash = 0;
+  for (const char of String(source || "")) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return hash >>> 0;
+}
+
+function normalizeKeywordTokens(values: string[] = []) {
+  return values
+    .map((item) => normalizeText(item))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+type PreviewThemeVariant = {
+  id: string;
+  label: string;
+  heroBadge: string;
+  fontStack: string;
+  bg: string;
+  panel: string;
+  panelSoft: string;
+  line: string;
+  text: string;
+  muted: string;
+  accentPrimary: string;
+  accentSecondary: string;
+  accentTertiary: string;
+  bodyBackdrop: string;
+};
+
+const CROSS_BORDER_THEME_VARIANTS: PreviewThemeVariant[] = [
+  {
+    id: "pulse_neon",
+    label: "Pulse Neon",
+    heroBadge: "爆量预警 / Hot Product Radar",
+    fontStack: "'SF Pro Display','PingFang SC','Segoe UI',sans-serif",
+    bg: "#08080f",
+    panel: "#12131f",
+    panelSoft: "#17192a",
+    line: "rgba(255,255,255,.08)",
+    text: "#f5f7fb",
+    muted: "#99a3b8",
+    accentPrimary: "#26f4ee",
+    accentSecondary: "#fe2c55",
+    accentTertiary: "#b7ff5f",
+    bodyBackdrop: "radial-gradient(circle at top right, rgba(254,44,85,.18), transparent 28%), radial-gradient(circle at top left, rgba(38,244,238,.18), transparent 26%), var(--bg)"
+  },
+  {
+    id: "midnight_terminal",
+    label: "Midnight Terminal",
+    heroBadge: "跨境风向 / Trend Terminal",
+    fontStack: "'Montserrat','PingFang SC','Segoe UI',sans-serif",
+    bg: "#0a1120",
+    panel: "#121a2f",
+    panelSoft: "#18233d",
+    line: "rgba(148,163,184,.25)",
+    text: "#e7ecf7",
+    muted: "#9fb0c9",
+    accentPrimary: "#43d1ff",
+    accentSecondary: "#7c5cff",
+    accentTertiary: "#9cff67",
+    bodyBackdrop: "radial-gradient(circle at top right, rgba(124,92,255,.24), transparent 30%), radial-gradient(circle at top left, rgba(67,209,255,.18), transparent 25%), linear-gradient(180deg,#070d18,#0a1120)"
+  },
+  {
+    id: "sunset_heatmap",
+    label: "Sunset Heatmap",
+    heroBadge: "热卖雷达 / Growth Watch",
+    fontStack: "'Space Grotesk','PingFang SC','Segoe UI',sans-serif",
+    bg: "#130b12",
+    panel: "#221126",
+    panelSoft: "#2a1730",
+    line: "rgba(255,214,179,.18)",
+    text: "#fff1e8",
+    muted: "#d8b8a4",
+    accentPrimary: "#ff9f43",
+    accentSecondary: "#ff5a8a",
+    accentTertiary: "#ffe87a",
+    bodyBackdrop: "radial-gradient(circle at 80% 0%, rgba(255,90,138,.24), transparent 32%), radial-gradient(circle at 10% 0%, rgba(255,159,67,.22), transparent 28%), linear-gradient(180deg,#140a12,#130b12)"
+  }
+];
+
+const GENERIC_THEME_VARIANTS: PreviewThemeVariant[] = [
+  {
+    id: "sandstone_editorial",
+    label: "Sandstone Editorial",
+    heroBadge: "真实业务界面预览",
+    fontStack: "'Avenir Next','PingFang SC','Segoe UI',sans-serif",
+    bg: "#f6f1e8",
+    panel: "#fffdf8",
+    panelSoft: "#fffaf0",
+    line: "rgba(15,23,42,.08)",
+    text: "#1f2937",
+    muted: "#6b7280",
+    accentPrimary: "#c4622d",
+    accentSecondary: "#f3d6c5",
+    accentTertiary: "#ffd287",
+    bodyBackdrop: "linear-gradient(180deg,#f7f2e9,#efe5d7)"
+  },
+  {
+    id: "forest_ops",
+    label: "Forest Ops",
+    heroBadge: "业务控制台预览",
+    fontStack: "'Manrope','PingFang SC','Segoe UI',sans-serif",
+    bg: "#edf2ec",
+    panel: "#f9fcf7",
+    panelSoft: "#f1f7ef",
+    line: "rgba(24,48,34,.13)",
+    text: "#1d2c22",
+    muted: "#5d6e63",
+    accentPrimary: "#2f7d4f",
+    accentSecondary: "#cde7d3",
+    accentTertiary: "#91d3a2",
+    bodyBackdrop: "linear-gradient(180deg,#edf4ee,#dfe9df)"
+  },
+  {
+    id: "slate_analytics",
+    label: "Slate Analytics",
+    heroBadge: "数据工作台预览",
+    fontStack: "'IBM Plex Sans','PingFang SC','Segoe UI',sans-serif",
+    bg: "#eef1f7",
+    panel: "#ffffff",
+    panelSoft: "#f5f7fc",
+    line: "rgba(30,41,59,.12)",
+    text: "#0f172a",
+    muted: "#64748b",
+    accentPrimary: "#2563eb",
+    accentSecondary: "#dbeafe",
+    accentTertiary: "#7dd3fc",
+    bodyBackdrop: "linear-gradient(180deg,#eef2ff,#e2e8f0)"
+  }
+];
+
+function pickCrossBorderTheme(seed: number, source: string) {
+  if (/tiktok|tik tok|抖音/i.test(source)) {
+    return CROSS_BORDER_THEME_VARIANTS[0];
+  }
+  if (/amazon|亚马逊|bsr|rank/i.test(source)) {
+    return CROSS_BORDER_THEME_VARIANTS[1];
+  }
+  if (/temu|aliexpress|采购|供应链/i.test(source)) {
+    return CROSS_BORDER_THEME_VARIANTS[2];
+  }
+  return CROSS_BORDER_THEME_VARIANTS[seed % CROSS_BORDER_THEME_VARIANTS.length];
+}
+
+function pickGenericTheme(seed: number, source: string) {
+  if (/运营|ops|运维|流程/i.test(source)) {
+    return GENERIC_THEME_VARIANTS[1];
+  }
+  if (/数据|分析|dashboard|报表|指标/i.test(source)) {
+    return GENERIC_THEME_VARIANTS[2];
+  }
+  return GENERIC_THEME_VARIANTS[seed % GENERIC_THEME_VARIANTS.length];
+}
+
+function pickProductCandidates(seed: number, keywords: string[]) {
+  const pool = [
+    "Magnetic Phone Cooler Clip",
+    "Portable Ice Bath Tub",
+    "Pet Hair Remover Roller",
+    "Mini Heatless Curl Ribbon",
+    "Seamless Shaping Bodysuit",
+    "Foldable Walking Pad",
+    "LED Sunset Projection Lamp",
+    "Reusable Cleaning Gel Kit",
+    "Smart Label Mini Printer",
+    "Quick Dry Yoga Towel"
+  ];
+  const candidates = [...pool];
+  for (const keyword of keywords) {
+    if (/美妆|beauty/i.test(keyword)) candidates.unshift("Peptide Lip Plumper Set");
+    if (/宠物|pet/i.test(keyword)) candidates.unshift("Pet Calming Lick Mat");
+    if (/家居|home/i.test(keyword)) candidates.unshift("Cordless Spin Scrubber");
+    if (/母婴|baby/i.test(keyword)) candidates.unshift("Portable Bottle Warmer");
+  }
+
+  const seen = new Set<string>();
+  const picked: string[] = [];
+  let cursor = seed % Math.max(1, candidates.length);
+  while (picked.length < 3 && picked.length < candidates.length) {
+    const item = candidates[cursor % candidates.length];
+    if (!seen.has(item)) {
+      picked.push(item);
+      seen.add(item);
+    }
+    cursor += 3;
+  }
+  return picked;
+}
+
 export type DesignRequirementProfile = {
   scenarioId: "cross_border_product_radar" | "generic_business_ui";
   scenarioLabel: string;
@@ -49,12 +241,25 @@ export function resolveDesignRequirementProfile(input: DesignProfileInput): Desi
   const isCrossBorderProductRadar = /(跨境|电商|选品|跟品|爆品|商品|sku|tiktok|tik tok|亚马逊|amazon|temu|榜单|排名|监控|告警)/i.test(source);
 
   if (isCrossBorderProductRadar) {
+    const seed = hashSeed(source);
+    const directionOptions = [
+      "实时爆量监控台：首屏突出榜单、增速、平台来源和跟品动作，减少流程性叙述。",
+      "数据终端式选品工作台：强化排名变化、成本与利润窗口，支持快速人工决策。",
+      "告警驱动的跟品面板：突出异常波动、风险信号和可执行动作，强调时效性。"
+    ];
+    const themeOptions = [
+      "深色高对比 + 霓虹强调，突出实时性与动作反馈。",
+      "冷色数据终端风格，聚焦指标密度与趋势解读。",
+      "暖色热度图风格，强化爆量与风险变化可视化。"
+    ];
+    const toneOptions = ["敏捷、锐利、可操作", "专业、克制、证据导向", "快速、果断、结果导向"];
+    const pick = seed % directionOptions.length;
     return {
       scenarioId: "cross_border_product_radar",
       scenarioLabel: "跨境爆品监控与跟品",
-      visualDirection: "TikTok 风格爆量雷达台，突出榜单、增速、平台标签和一键跟品动作。",
-      visualTheme: "黑底高对比 + 青蓝/玫红强调，营造实时监控与爆量警报氛围。",
-      brandTone: "敏捷、锐利、可操作",
+      visualDirection: directionOptions[pick] || directionOptions[0],
+      visualTheme: themeOptions[pick] || themeOptions[0],
+      brandTone: toneOptions[pick] || toneOptions[0],
       uxPrinciples: [
         "先展示爆品榜单与增长证据，再引导是否跟品",
         "每条推荐都必须带平台来源、指标变化和商品链接",
@@ -135,15 +340,35 @@ export function buildRequirementAwareDesignSections(
 
 function buildCrossBorderProductPreviewHtml(input: DesignProfileInput & { visualDirection?: string }) {
   const profile = resolveDesignRequirementProfile(input);
-  const platforms = collectPlatforms(`${input.projectName} ${input.projectDescription}`);
+  const seedSource = `${input.projectName || ""}|${input.projectDescription || ""}|${(input.keywords || []).join("|")}`;
+  const seed = hashSeed(seedSource);
+  const theme = pickCrossBorderTheme(seed, `${seedSource} ${(input.keywords || []).join(" ")}`);
+  const keywordTokens = normalizeKeywordTokens(input.keywords || []);
+  const platforms = collectPlatforms(`${input.projectName} ${input.projectDescription} ${keywordTokens.join(" ")}`);
   const heroDirection = escapeHtml(input.visualDirection || profile.visualDirection);
   const title = escapeHtml(input.projectName || "跨境爆品雷达");
   const topPlatforms = platforms.slice(0, 3);
-  const productRows = [
-    { name: "Portable Ice Bath Tub", platform: topPlatforms[0] || "TikTok", growth: "+268%", rank: "#3 -> #1", heat: "热度 9.6", margin: "毛利 34%", action: "加入跟品" },
-    { name: "Pet Hair Remover Roller", platform: topPlatforms[1] || "Amazon", growth: "+184%", rank: "#11 -> #4", heat: "热度 8.9", margin: "毛利 27%", action: "查看链接" },
-    { name: "Mini Heatless Curl Ribbon", platform: topPlatforms[2] || topPlatforms[0] || "Temu", growth: "+152%", rank: "#18 -> #7", heat: "热度 8.4", margin: "毛利 31%", action: "继续观察" }
-  ];
+  const productNames = pickProductCandidates(seed, keywordTokens);
+  const actionPool = ["加入跟品", "查看链接", "继续观察", "加入预警"];
+  const productRows = productNames.map((name, index) => {
+    const growth = 140 + ((seed + index * 37) % 145);
+    const fromRank = 6 + ((seed + index * 11) % 20);
+    const toRank = Math.max(1, fromRank - (3 + ((seed + index * 5) % 7)));
+    const heat = (8.1 + ((seed + index * 13) % 17) / 10).toFixed(1);
+    const margin = 22 + ((seed + index * 9) % 16);
+    return {
+      name,
+      platform: topPlatforms[index] || topPlatforms[0] || "TikTok",
+      growth: `+${growth}%`,
+      rank: `#${fromRank} -> #${toRank}`,
+      heat: `热度 ${heat}`,
+      margin: `毛利 ${margin}%`,
+      action: actionPool[(seed + index) % actionPool.length] || "加入跟品"
+    };
+  });
+  const newHotCount = 18 + (seed % 21);
+  const trackingCount = 4 + (seed % 8);
+  const riskCount = 2 + (seed % 4);
 
   return [
     "<!doctype html>",
@@ -153,9 +378,9 @@ function buildCrossBorderProductPreviewHtml(input: DesignProfileInput & { visual
     "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
     `  <title>${title} · 视觉定稿预览</title>`,
     "  <style>",
-    "    :root { --bg:#08080f; --panel:#12131f; --panel-soft:#17192a; --line:rgba(255,255,255,.08); --text:#f5f7fb; --muted:#99a3b8; --cyan:#26f4ee; --pink:#fe2c55; --lime:#b7ff5f; }",
+    `    :root { --bg:${theme.bg}; --panel:${theme.panel}; --panel-soft:${theme.panelSoft}; --line:${theme.line}; --text:${theme.text}; --muted:${theme.muted}; --cyan:${theme.accentPrimary}; --pink:${theme.accentSecondary}; --lime:${theme.accentTertiary}; }`,
     "    * { box-sizing:border-box; }",
-    "    body { margin:0; font-family:'SF Pro Display','PingFang SC','Segoe UI',sans-serif; background:radial-gradient(circle at top right, rgba(254,44,85,.18), transparent 28%), radial-gradient(circle at top left, rgba(38,244,238,.18), transparent 26%), var(--bg); color:var(--text); }",
+    `    body { margin:0; font-family:${theme.fontStack}; background:${theme.bodyBackdrop}; color:var(--text); }`,
     "    .wrap { max-width:1280px; margin:0 auto; padding:32px 20px 64px; }",
     "    .hero { display:grid; grid-template-columns:1.2fr .8fr; gap:18px; align-items:stretch; }",
     "    .card { background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02)); border:1px solid var(--line); border-radius:24px; padding:22px; box-shadow:0 18px 48px rgba(0,0,0,.26); }",
@@ -199,18 +424,19 @@ function buildCrossBorderProductPreviewHtml(input: DesignProfileInput & { visual
     "  <main class=\"wrap\">",
     "    <section class=\"hero\">",
     "      <article class=\"card\">",
-    "        <span class=\"eyebrow\">爆量预警 / Hot Product Radar</span>",
+    `        <span class=\"eyebrow\">${escapeHtml(theme.heroBadge)}</span>`,
     `        <h1>${title}</h1>`,
     `        <p class=\"hero-copy\">${heroDirection} 页面首屏直接展示爆品榜单、平台来源、增长指标和跟品动作，帮助运营人员在流量爆发窗口内快速决定是否持续跟踪。</p>`,
     "        <div class=\"chip-row\">",
     ...topPlatforms.map((platform) => `          <span class=\"chip\">${escapeHtml(platform)} 实时榜单</span>`),
+    `          <span class=\"chip\">视觉母版：${escapeHtml(theme.label)}</span>`,
     "          <span class=\"chip\">商品链接直达</span>",
     "          <span class=\"chip\">人工确认跟品</span>",
     "        </div>",
     "        <div class=\"metrics\">",
-    "          <div class=\"metric\"><strong>24</strong><span>过去 24h 新增爆量商品</span></div>",
-    "          <div class=\"metric\"><strong>7</strong><span>正在持续跟踪的候选品</span></div>",
-    "          <div class=\"metric\"><strong>3</strong><span>高波动风险需人工复核</span></div>",
+    `          <div class=\"metric\"><strong>${newHotCount}</strong><span>过去 24h 新增爆量商品</span></div>`,
+    `          <div class=\"metric\"><strong>${trackingCount}</strong><span>正在持续跟踪的候选品</span></div>`,
+    `          <div class=\"metric\"><strong>${riskCount}</strong><span>高波动风险需人工复核</span></div>`,
     "        </div>",
     "        <div class=\"actions\">",
     "          <a class=\"btn btn-primary\" href=\"#hot-list\">查看今日爆品榜</a>",
@@ -278,6 +504,9 @@ function buildCrossBorderProductPreviewHtml(input: DesignProfileInput & { visual
 
 function buildGenericBusinessPreviewHtml(input: DesignProfileInput & { visualDirection?: string }) {
   const profile = resolveDesignRequirementProfile(input);
+  const seedSource = `${input.projectName || ""}|${input.projectDescription || ""}|${(input.keywords || []).join("|")}`;
+  const seed = hashSeed(seedSource);
+  const theme = pickGenericTheme(seed, `${seedSource} ${(input.keywords || []).join(" ")}`);
   const title = escapeHtml(input.projectName || "业务界面");
   const direction = escapeHtml(input.visualDirection || profile.visualDirection);
   const keywords = escapeHtml(input.keywords?.slice(0, 6).join(" / ") || profile.scenarioLabel);
@@ -290,12 +519,12 @@ function buildGenericBusinessPreviewHtml(input: DesignProfileInput & { visualDir
     "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
     `  <title>${title} · 视觉定稿预览</title>`,
     "  <style>",
-    "    :root { --bg:#f6f1e8; --panel:#fffdf8; --text:#1f2937; --muted:#6b7280; --line:rgba(15,23,42,.08); --accent:#c4622d; --accent-soft:#f3d6c5; }",
+    `    :root { --bg:${theme.bg}; --panel:${theme.panel}; --panel-soft:${theme.panelSoft}; --text:${theme.text}; --muted:${theme.muted}; --line:${theme.line}; --accent:${theme.accentPrimary}; --accent-soft:${theme.accentSecondary}; }`,
     "    * { box-sizing:border-box; }",
-    "    body { margin:0; font-family:'Avenir Next','PingFang SC','Segoe UI',sans-serif; background:linear-gradient(180deg,#f7f2e9,#efe5d7); color:var(--text); }",
+    `    body { margin:0; font-family:${theme.fontStack}; background:${theme.bodyBackdrop}; color:var(--text); }`,
     "    .wrap { max-width:1180px; margin:0 auto; padding:36px 20px 56px; }",
     "    .grid { display:grid; grid-template-columns:1.15fr .85fr; gap:18px; }",
-    "    .card { background:rgba(255,253,248,.92); border:1px solid var(--line); border-radius:26px; padding:24px; box-shadow:0 18px 44px rgba(78,56,36,.08); }",
+    "    .card { background:rgba(255,255,255,.88); border:1px solid var(--line); border-radius:26px; padding:24px; box-shadow:0 18px 44px rgba(15,23,42,.08); }",
     "    h1 { margin:12px 0; font-size:38px; line-height:1.08; max-width:11ch; }",
     "    h2 { margin:0; font-size:22px; }",
     "    p { color:var(--muted); line-height:1.7; }",
@@ -312,7 +541,7 @@ function buildGenericBusinessPreviewHtml(input: DesignProfileInput & { visualDir
     "  <main class=\"wrap\">",
     "    <section class=\"grid\">",
     "      <article class=\"card\">",
-    "        <span class=\"tag\">真实业务界面预览</span>",
+    `        <span class=\"tag\">${escapeHtml(theme.heroBadge)} · ${escapeHtml(theme.label)}</span>`,
     `        <h1>${title}</h1>`,
     `        <p>${direction}</p>`,
     `        <p>关键词：${keywords}</p>`,

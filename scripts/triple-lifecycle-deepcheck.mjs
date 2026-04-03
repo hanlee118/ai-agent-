@@ -9,6 +9,8 @@ const BASE = String(process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/
 const REQUEST_TIMEOUT_MS = Math.max(15000, Number(process.env.REQUEST_TIMEOUT_MS || 240000));
 const MAX_ROUNDS = Math.max(36, Number(process.env.MAX_ROUNDS || 220));
 const RUN_TIMEOUT_MS = Math.max(180000, Number(process.env.RUN_TIMEOUT_MS || 18 * 60 * 1000));
+const SESSION_TTL_MS = Math.max(30 * 60 * 1000, Number(process.env.SESSION_TTL_MS || 4 * 60 * 60 * 1000));
+const MAX_IN_PROGRESS_WAIT_MS = Math.max(60 * 1000, Number(process.env.MAX_IN_PROGRESS_WAIT_MS || 12 * 60 * 1000));
 const CLEANUP_PROJECTS = String(process.env.CLEANUP_PROJECTS || "true").toLowerCase() !== "false";
 const OUT_DIR = path.resolve(process.cwd(), "docs/reports");
 
@@ -176,7 +178,7 @@ async function ensureAuth() {
   await prisma.authSession.create({
     data: {
       tokenHash: await hashSessionToken(sessionToken),
-      expiresAt: new Date(Date.now() + 20 * 60 * 1000)
+      expiresAt: new Date(Date.now() + SESSION_TTL_MS)
     }
   });
   SESSION_COOKIE = `occ_session=${sessionToken}`;
@@ -457,26 +459,34 @@ async function runSingleLifecycle(requirement, index) {
     warnings: []
   };
 
-  const create = await req("POST", "/api/projects", {
-    name: `triple-check-${index}-${Date.now()}`,
-    description: requirement,
-    team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"]
-  });
-  run.steps.push({ step: "project_create", status: create.status, durationMs: create.durationMs });
-  if (create.status !== 201 || !create.unwrapped?.id) {
-    throw new Error(`PROJECT_CREATE_FAILED(run=${index}): ${create.status} ${JSON.stringify(create.body).slice(0, 500)}`);
-  }
-  run.projectId = String(create.unwrapped.id);
+  try {
+    const create = await req("POST", "/api/projects", {
+      name: `triple-check-${index}-${Date.now()}`,
+      description: requirement,
+      team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"]
+    });
+    run.steps.push({ step: "project_create", status: create.status, durationMs: create.durationMs });
+    if (create.status !== 201 || !create.unwrapped?.id) {
+      throw new Error(`PROJECT_CREATE_FAILED(run=${index}): ${create.status} ${JSON.stringify(create.body).slice(0, 500)}`);
+    }
+    run.projectId = String(create.unwrapped.id);
 
-  let project = await getProject(run.projectId);
-  run.steps.push({ step: "detail_after_create", project: summarizeProject(project) });
-  const stageSeen = new Set([project.currentStage]);
-  let inProgressRetries = 0;
+    let project = await getProject(run.projectId);
+    run.steps.push({ step: "detail_after_create", project: summarizeProject(project) });
+    const stageSeen = new Set([project.currentStage]);
+    let inProgressRetries = 0;
+    let inProgressStartedAt = 0;
+    let lastObservedStage = project.currentStage;
 
   for (let round = 1; round <= MAX_ROUNDS; round += 1) {
     project = await getProject(run.projectId);
     run.steps.push({ step: `detail_round_${round}`, project: summarizeProject(project) });
     stageSeen.add(project.currentStage);
+    if (project.currentStage !== lastObservedStage) {
+      inProgressRetries = 0;
+      inProgressStartedAt = 0;
+      lastObservedStage = project.currentStage;
+    }
     if (round % 8 === 0) {
       console.log(`[triple-check][run=${index}] round=${round} stage=${project.currentStage} pending=${project.pendingApproval} status=${project.status}`);
     }
@@ -486,6 +496,8 @@ async function runSingleLifecycle(requirement, index) {
     }
 
     if (project.pendingApproval) {
+      inProgressRetries = 0;
+      inProgressStartedAt = 0;
       project = await approve(run.projectId, run, `pending_${round}`);
       continue;
     }
@@ -502,14 +514,19 @@ async function runSingleLifecycle(requirement, index) {
 
     if (advance.status === 200) {
       inProgressRetries = 0;
+      inProgressStartedAt = 0;
       project = advance.unwrapped;
       continue;
     }
 
     if (advance.status === 409 && advance.body?.error?.code === "PROJECT_ADVANCE_IN_PROGRESS") {
+      if (!inProgressStartedAt) {
+        inProgressStartedAt = Date.now();
+      }
       inProgressRetries += 1;
-      if (inProgressRetries > 24) {
-        throw new Error(`ADVANCE_STUCK_IN_PROGRESS(run=${index}): retries=${inProgressRetries}`);
+      const waitedMs = Date.now() - inProgressStartedAt;
+      if (waitedMs > MAX_IN_PROGRESS_WAIT_MS) {
+        throw new Error(`ADVANCE_STUCK_IN_PROGRESS(run=${index}): retries=${inProgressRetries}, waitedMs=${waitedMs}`);
       }
       const pollAfterMs = Math.max(800, Number(advance.body?.error?.pollAfterMs || 1400));
       await sleep(pollAfterMs);
@@ -518,6 +535,7 @@ async function runSingleLifecycle(requirement, index) {
 
     if (advance.status === 409 && advance.body?.error?.code === "REQUIRES_USER_INTERVENTION") {
       inProgressRetries = 0;
+      inProgressStartedAt = 0;
       project = await handleRequiredActions(project, advance.body?.error?.requiredActions, run);
       continue;
     }
@@ -533,77 +551,83 @@ async function runSingleLifecycle(requirement, index) {
     throw new Error(`ADVANCE_FAILED(run=${index}): ${advance.status} ${JSON.stringify(advance.body).slice(0, 500)}`);
   }
 
-  project = await getProject(run.projectId);
-  run.steps.push({ step: "detail_final", project: summarizeProject(project) });
+    project = await getProject(run.projectId);
+    run.steps.push({ step: "detail_final", project: summarizeProject(project) });
 
-  const checks = [];
-  const failures = [];
-  const warnings = [];
+    const checks = [];
+    const failures = [];
+    const warnings = [];
 
-  const assertCheck = (name, pass, detail = "") => {
-    const item = { name, pass, detail };
-    checks.push(item);
-    if (!pass) {
-      failures.push(item);
+    const assertCheck = (name, pass, detail = "") => {
+      const item = { name, pass, detail };
+      checks.push(item);
+      if (!pass) {
+        failures.push(item);
+      }
+    };
+
+    assertCheck("项目到达 completed", project.status === "completed", `status=${project.status}, stage=${project.currentStage}`);
+    assertCheck("阶段推进至少覆盖到 ACCEPT", stageSeen.has("ACCEPT"), `stageSeen=${Array.from(stageSeen).join(",")}`);
+
+    const executions = await listExecutions(run.projectId);
+    const successExecutions = executions.filter((item) => item.status === "success");
+    for (const stage of ["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]) {
+      const stageSuccess = successExecutions.filter((item) => item.stageType === stage);
+      assertCheck(`${stage} 有成功模型执行记录`, stageSuccess.length > 0, `count=${stageSuccess.length}`);
+      const realSuccess = stageSuccess.filter((item) => item.provider === "openai-compatible");
+      assertCheck(`${stage} 使用真实模型通道`, realSuccess.length > 0, `realCount=${realSuccess.length}`);
     }
-  };
 
-  assertCheck("项目到达 completed", project.status === "completed", `status=${project.status}, stage=${project.currentStage}`);
-  assertCheck("阶段推进至少覆盖到 ACCEPT", stageSeen.has("ACCEPT"), `stageSeen=${Array.from(stageSeen).join(",")}`);
+    const projectDeliverables = Array.isArray(project.deliverables) ? project.deliverables : [];
+    const scaffoldDeliverables = projectDeliverables.filter((item) =>
+      SCAFFOLD_PATTERN.test(String(item.content || ""))
+    );
+    assertCheck("交付物不含模板骨架占位语句", scaffoldDeliverables.length === 0, scaffoldDeliverables.map((d) => d.name).join(", "));
 
-  const executions = await listExecutions(run.projectId);
-  const successExecutions = executions.filter((item) => item.status === "success");
-  for (const stage of ["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]) {
-    const stageSuccess = successExecutions.filter((item) => item.stageType === stage);
-    assertCheck(`${stage} 有成功模型执行记录`, stageSuccess.length > 0, `count=${stageSuccess.length}`);
-    const realSuccess = stageSuccess.filter((item) => item.provider === "openai-compatible");
-    assertCheck(`${stage} 使用真实模型通道`, realSuccess.length > 0, `realCount=${realSuccess.length}`);
+    const devDeliverables = projectDeliverables.filter((item) => item.stageType === "DEV");
+    const weakDev = devDeliverables.filter((item) => {
+      const text = String(item.content || "");
+      return !hasCodeEvidence(text) || !hasValidationEvidence(text);
+    });
+    assertCheck("DEV 交付具备代码与验证证据", weakDev.length === 0, weakDev.map((d) => d.name).join(", "));
+
+    const finalArtifacts = await getFinalArtifacts(run.projectId);
+    assertCheck("最终交付 readyForAcceptance=true", finalArtifacts.readyForAcceptance === true, JSON.stringify(finalArtifacts.coverage || {}));
+
+    const officialSite = await getOfficialSite(run.projectId);
+    assertCheck("官方页链接可访问", Boolean(officialSite.url), String(officialSite.url || ""));
+    const officialHtml = officialSite.url ? await fetchOfficialSiteHtml(officialSite.url) : "";
+    assertCheck("官方页明确是静态交付物预览", /静态交付物预览页/.test(officialHtml), "missing preview notice");
+
+    const requirementSignals = collectRequirementSignals(requirement);
+    if (requirementSignals.length > 0 && officialHtml) {
+      const htmlLower = officialHtml.toLowerCase();
+      const matched = requirementSignals.filter((token) => htmlLower.includes(token));
+      assertCheck("官方页命中需求语义关键词", matched.length > 0, `signals=${requirementSignals.join(",")}, matched=${matched.join(",")}`);
+    }
+
+    const futureStageLeak = projectDeliverables.filter((item) => stageIndex(item.stageType) > stageIndex(project.currentStage));
+    if (futureStageLeak.length > 0) {
+      warnings.push(`发现未来阶段交付物泄漏: ${futureStageLeak.map((item) => `${item.stageType}:${item.name}`).join(" | ")}`);
+    }
+
+    run.checks = checks;
+    run.warnings.push(...warnings);
+    run.ok = failures.length === 0;
+    run.finishedAt = new Date().toISOString();
+    run.summary = {
+      executionCount: executions.length,
+      successExecutionCount: successExecutions.length,
+      deliverableCount: projectDeliverables.length
+    };
+
+    return run;
+  } catch (error) {
+    run.ok = false;
+    run.error = error instanceof Error ? error.message : String(error);
+    run.finishedAt = new Date().toISOString();
+    return run;
   }
-
-  const projectDeliverables = Array.isArray(project.deliverables) ? project.deliverables : [];
-  const scaffoldDeliverables = projectDeliverables.filter((item) =>
-    SCAFFOLD_PATTERN.test(String(item.content || ""))
-  );
-  assertCheck("交付物不含模板骨架占位语句", scaffoldDeliverables.length === 0, scaffoldDeliverables.map((d) => d.name).join(", "));
-
-  const devDeliverables = projectDeliverables.filter((item) => item.stageType === "DEV");
-  const weakDev = devDeliverables.filter((item) => {
-    const text = String(item.content || "");
-    return !hasCodeEvidence(text) || !hasValidationEvidence(text);
-  });
-  assertCheck("DEV 交付具备代码与验证证据", weakDev.length === 0, weakDev.map((d) => d.name).join(", "));
-
-  const finalArtifacts = await getFinalArtifacts(run.projectId);
-  assertCheck("最终交付 readyForAcceptance=true", finalArtifacts.readyForAcceptance === true, JSON.stringify(finalArtifacts.coverage || {}));
-
-  const officialSite = await getOfficialSite(run.projectId);
-  assertCheck("官方页链接可访问", Boolean(officialSite.url), String(officialSite.url || ""));
-  const officialHtml = officialSite.url ? await fetchOfficialSiteHtml(officialSite.url) : "";
-  assertCheck("官方页明确是静态交付物预览", /静态交付物预览页/.test(officialHtml), "missing preview notice");
-
-  const requirementSignals = collectRequirementSignals(requirement);
-  if (requirementSignals.length > 0 && officialHtml) {
-    const htmlLower = officialHtml.toLowerCase();
-    const matched = requirementSignals.filter((token) => htmlLower.includes(token));
-    assertCheck("官方页命中需求语义关键词", matched.length > 0, `signals=${requirementSignals.join(",")}, matched=${matched.join(",")}`);
-  }
-
-  const futureStageLeak = projectDeliverables.filter((item) => stageIndex(item.stageType) > stageIndex(project.currentStage));
-  if (futureStageLeak.length > 0) {
-    warnings.push(`发现未来阶段交付物泄漏: ${futureStageLeak.map((item) => `${item.stageType}:${item.name}`).join(" | ")}`);
-  }
-
-  run.checks = checks;
-  run.warnings.push(...warnings);
-  run.ok = failures.length === 0;
-  run.finishedAt = new Date().toISOString();
-  run.summary = {
-    executionCount: executions.length,
-    successExecutionCount: successExecutions.length,
-    deliverableCount: projectDeliverables.length
-  };
-
-  return run;
 }
 
 async function deleteProject(projectId) {

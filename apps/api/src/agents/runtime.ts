@@ -15,11 +15,11 @@ import {
 import { OPENCLAW_CONFIG_PATH } from "../openclaw/paths.js";
 
 const STAGE_AGENT_MAX_MODELS = Math.max(1, Number(process.env.STAGE_AGENT_MAX_MODELS ?? 3));
-const STAGE_AGENT_TOTAL_TIMEOUT_MS = Math.max(12000, Number(process.env.STAGE_AGENT_TOTAL_TIMEOUT_MS ?? 35000));
+const STAGE_AGENT_TOTAL_TIMEOUT_MS = Math.max(12000, Number(process.env.STAGE_AGENT_TOTAL_TIMEOUT_MS ?? 90000));
 const MIN_ATTEMPT_BUDGET_MS = 8000;
 const MAX_SINGLE_ATTEMPT_TIMEOUT_MS = Math.max(
   MIN_ATTEMPT_BUDGET_MS,
-  Number(process.env.STAGE_AGENT_SINGLE_ATTEMPT_TIMEOUT_MS ?? 12000)
+  Number(process.env.STAGE_AGENT_SINGLE_ATTEMPT_TIMEOUT_MS ?? 45000)
 );
 const STAGE_TIMEOUT_BASELINE_MS: Record<StageType, number> = {
   INIT: 30000,
@@ -44,6 +44,8 @@ const routePrewarmCache = new Map<string, { reason: string | null; expiresAt: nu
 
 const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_PM: 120000,
+  ROLE_ANALYST: 120000,
+  ROLE_PRODUCT: 120000,
   ROLE_DESIGN: 180000,
   ROLE_ARCH: 160000,
   ROLE_DEV: 180000,
@@ -52,6 +54,8 @@ const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
 
 const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_PM: 90000,
+  ROLE_ANALYST: 90000,
+  ROLE_PRODUCT: 90000,
   ROLE_DESIGN: 120000,
   ROLE_ARCH: 100000,
   ROLE_DEV: 120000,
