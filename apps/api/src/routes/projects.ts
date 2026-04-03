@@ -986,12 +986,15 @@ function tryRecoverStalledAdvanceJob(input: {
 
 function isRecoverableAdvanceFailure(message: string) {
   const normalized = String(message || "").toUpperCase();
+  if (normalized.includes("REAL_MODEL_GATE_FAILED")) {
+    // 门禁失败通常需要人工修复运行时配置或链路，不应进入无限自动重试。
+    return false;
+  }
   return normalized.includes("MODEL_ATTEMPT_TIMEOUT")
     || normalized.includes("REQUEST_TIMEOUT")
     || normalized.includes("ETIMEDOUT")
     || normalized.includes("ECONNRESET")
     || normalized.includes("EAI_AGAIN")
-    || normalized.includes("REAL_MODEL_GATE_FAILED")
     || normalized.includes("STAGE_TEMPLATE_VALIDATION_FAILED");
 }
 
@@ -2266,7 +2269,10 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as StageSubmissionInput;
   const content = String(payload?.content ?? "").trim();
-  const finalizeApproval = req.body?.finalizeApproval !== false;
+  const finalizeApproval =
+    typeof req.body?.finalizeApproval === "boolean"
+      ? req.body.finalizeApproval
+      : !/设计审查卡/i.test(String(payload?.title || ""));
 
   if (!content) {
     res.status(400).json({ message: "content is required" });
