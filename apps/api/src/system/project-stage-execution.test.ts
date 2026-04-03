@@ -9,6 +9,7 @@ test("design stage uses terminal agent with strongest design models", () => {
   const strategy = getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN");
   assert.equal(strategy.mode, "terminal_agent");
   assert.equal(strategy.openClawAgentId, "jeremy");
+  assert.equal(strategy.allowDirectModelFallback, false);
   assert.equal(strategy.memoryEnabled, true);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
   assert.equal(strategy.preferredModels[0], "anthropic/claude-opus-4-20250514");
@@ -18,6 +19,7 @@ test("analysis stage stays on direct model execution", () => {
   const strategy = getProjectStageExecutionStrategy("ANALYSIS", "ROLE_ANALYST");
   assert.equal(strategy.mode, "direct_model");
   assert.equal(strategy.openClawAgentId, undefined);
+  assert.equal(strategy.allowDirectModelFallback, true);
   assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
 });
 

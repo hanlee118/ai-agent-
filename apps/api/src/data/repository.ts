@@ -1675,7 +1675,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         run = await runTerminalProjectStageAgent(input);
       } catch (terminalError) {
         terminalFallbackReason = terminalError instanceof Error ? terminalError.message : String(terminalError);
-        if (runtime.requestedMode !== "openai-compatible") {
+        if (!strategy.allowDirectModelFallback || runtime.requestedMode !== "openai-compatible") {
           throw terminalError;
         }
         run = await runStageAgent({

@@ -1065,6 +1065,7 @@ export async function sendOpenClawAgentMessage(
   let fallbackCursor = 0;
   const shouldIsolateSession = isDesignAgent;
   const preferLocalExecution = isDesignAgent;
+  let gatewayRepairAttempted = false;
   const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
   const cliTimeoutSeconds = Math.max(
     preferLocalExecution ? 45 : 15,
@@ -1157,12 +1158,19 @@ export async function sendOpenClawAgentMessage(
       const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(finalError);
       const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted|relay service error|bad_response_status_code|5\d{2}/i.test(finalError);
       const isUnexpectedModelError = /unexpected execution model/i.test(finalError);
+      const isGatewayRepairableError = /gateway closed|gateway connect failed|connect challenge timeout|session file locked|locked \(timeout/i.test(finalError);
       if (isModelUnavailableError) {
         for (const modelId of listGroupFallbackModels(finalError)) {
           if (modelId !== activeModel && !fallbackQueue.includes(modelId)) {
             fallbackQueue.push(modelId);
           }
         }
+      }
+      if (isGatewayRepairableError && !gatewayRepairAttempted) {
+        gatewayRepairAttempted = true;
+        await restartOpenClawGateway();
+        await sleep(800);
+        continue;
       }
       const remainingFallbacks = fallbackQueue
         .slice(fallbackCursor)
@@ -2511,6 +2519,18 @@ async function repairOpenClawProviderApis() {
   }
 
   return normalized;
+}
+
+async function restartOpenClawGateway() {
+  try {
+    await execFileAsync(OPENCLAW_BIN, ["gateway", "restart"], {
+      timeout: 20_000,
+      maxBuffer: 1024 * 1024 * 4
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function toAgentSummary(agent: OpenClawAgentDetail): OpenClawAgentSummary {

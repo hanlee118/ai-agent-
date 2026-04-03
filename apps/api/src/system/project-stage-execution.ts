@@ -13,6 +13,7 @@ export type ProjectStageExecutionStrategy = {
   reason: string;
   openClawAgentId?: string;
   preferredModels: string[];
+  allowDirectModelFallback: boolean;
   memoryEnabled: boolean;
   memoryPolicy: "all_allowed" | "current_project_or_high_relevance_only";
   executionMode: "confirm_first" | "autonomous";
@@ -135,6 +136,7 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
       reason: "设计与研发阶段优先走终端 Agent，并保留长期记忆能力，但只允许使用当前项目或高关联历史经验，降低模板复用与旧上下文污染。",
       openClawAgentId,
       preferredModels,
+      allowDirectModelFallback: false,
       memoryEnabled: true,
       memoryPolicy: "current_project_or_high_relevance_only",
       executionMode: "autonomous",
@@ -146,6 +148,7 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
     mode: "direct_model",
     reason: "当前阶段保持直接模型执行，仍按最强候选模型顺序尝试。",
     preferredModels,
+    allowDirectModelFallback: true,
     memoryEnabled: true,
     memoryPolicy: "all_allowed",
     executionMode: "confirm_first",
