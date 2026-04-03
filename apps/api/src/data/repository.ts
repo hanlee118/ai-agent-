@@ -56,7 +56,8 @@ import {
 } from "../system/design-preview.js";
 import {
   buildTerminalStageExecutionMessage,
-  getProjectStageExecutionStrategy
+  getProjectStageExecutionStrategy,
+  validateTerminalSkillEvidence
 } from "../system/project-stage-execution.js";
 import {
   findOpenClawAgent,
@@ -1630,12 +1631,19 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
     });
     const result = await sendOpenClawAgentMessage(agentId, { message: command });
     const model = String(result.model ?? preferredModels[0] ?? "").trim() || "unknown";
+    const body = String(result.reply ?? "").trim() || String(result.summary ?? "").trim() || "终端 Agent 已执行，但未返回正文。";
+    const skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
+    if (!skillEvidence.ok) {
+      throw new Error(
+        `TERMINAL_SKILL_PROTOCOL_VIOLATION: missing_skills=${skillEvidence.missingSkills.join(",") || "none"}; evidence_section=${skillEvidence.hasEvidenceSection ? "present" : "missing"}`
+      );
+    }
 
     return {
       provider: "openai-compatible",
       model,
       title: `${STAGE_LABELS[input.stageType]}阶段执行纪要`,
-      body: String(result.reply ?? "").trim() || String(result.summary ?? "").trim() || "终端 Agent 已执行，但未返回正文。",
+      body,
       thinkingSummary: String(result.summary ?? "").trim() || `${ROLE_LABELS[input.role]} 已完成终端执行`,
       attempts: [
         {

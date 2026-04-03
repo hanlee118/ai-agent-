@@ -239,3 +239,30 @@ export function buildTerminalStageExecutionMessage(input: {
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
   ].join("。");
 }
+
+export function validateTerminalSkillEvidence(output: string, requiredSkills: string[]) {
+  const normalizedOutput = String(output ?? "").trim().toLowerCase();
+  const normalizedSkills = requiredSkills
+    .map((item) => String(item ?? "").trim().toLowerCase())
+    .filter(Boolean);
+
+  if (normalizedSkills.length === 0) {
+    return {
+      ok: true,
+      missingSkills: [] as string[],
+      hasEvidenceSection: true
+    };
+  }
+
+  const hasEvidenceSection =
+    normalizedOutput.includes("skillsused")
+    || normalizedOutput.includes("技能执行记录")
+    || normalizedOutput.includes("已使用技能");
+  const missingSkills = normalizedSkills.filter((skill) => !normalizedOutput.includes(skill));
+
+  return {
+    ok: hasEvidenceSection && missingSkills.length === 0,
+    missingSkills,
+    hasEvidenceSection
+  };
+}

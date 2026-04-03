@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildTerminalStageExecutionMessage,
-  getProjectStageExecutionStrategy
+  getProjectStageExecutionStrategy,
+  validateTerminalSkillEvidence
 } from "./project-stage-execution.js";
 
 test("design stage uses terminal agent with strongest design models", () => {
@@ -75,4 +76,20 @@ test("dev terminal stage message enforces tool-driven execution", () => {
   assert.equal(message.includes("coding-agent"), true);
   assert.equal(message.includes("必须通过终端工具链完成代码修改"), true);
   assert.equal(message.includes("如果 requiredSkills 或终端工具不可用"), true);
+});
+
+test("skill evidence validator requires explicit evidence section and all required skills", () => {
+  const valid = validateTerminalSkillEvidence(
+    "## 技能执行记录\n- skillsUsed: design-to-code, frontend-design, frontend-design-pro",
+    ["design-to-code", "frontend-design", "frontend-design-pro"]
+  );
+  assert.equal(valid.ok, true);
+  assert.deepEqual(valid.missingSkills, []);
+
+  const missing = validateTerminalSkillEvidence(
+    "已使用技能: design-to-code, frontend-design",
+    ["design-to-code", "frontend-design", "frontend-design-pro"]
+  );
+  assert.equal(missing.ok, false);
+  assert.deepEqual(missing.missingSkills, ["frontend-design-pro"]);
 });
