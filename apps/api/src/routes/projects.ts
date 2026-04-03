@@ -1980,9 +1980,10 @@ router.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
     success: true,
     data: {
       projectId,
-      kind: "static_summary",
+      kind: artifact.kind,
       url: absoluteUrl,
       publicPath,
+      sourceDeliverableName: artifact.sourceDeliverableName,
       files: artifact.filePaths
     }
   });

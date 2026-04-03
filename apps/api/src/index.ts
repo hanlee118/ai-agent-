@@ -77,7 +77,6 @@ import {
 } from "./system/deliverable-templates.js";
 import {
   buildRequirementAwareDesignSections,
-  buildRequirementAwareVisualPreviewHtml,
   evaluateVisualDesignRequirementAlignment,
   resolveDesignRequirementProfile
 } from "./system/design-preview.js";
@@ -489,19 +488,6 @@ function hasVisualDesignPreview(content: string) {
     || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
 }
 
-function buildVisualDesignPreviewHtml(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
-  title: string,
-  visualDirection: string
-) {
-  return buildRequirementAwareVisualPreviewHtml({
-    projectName: project.name,
-    projectDescription: project.description,
-    keywords: project.parsedIntent.keywords,
-    visualDirection: `${visualDirection}（${title}）`
-  });
-}
-
 function hasRequirementAlignedVisualDesignPreview(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   content: string
@@ -736,6 +722,10 @@ function ensureTemplateSectionCoverage(
   context: { stageLabel: string; deliverableTitle: string }
 ) {
   let normalized = String(content || "");
+  if (template.kind === "visual_mockup") {
+    // 视觉定稿交付禁止系统自动拼章节，避免模板内容伪装成真实设计稿。
+    return normalized;
+  }
   const missing = template.requiredSections.filter((section) => !normalized.includes(section));
   if (missing.length === 0) {
     return normalized;
@@ -1037,22 +1027,6 @@ async function buildAutoStageSubmissions(
       "## 审阅要点",
       ...checklist
     ].join("\n");
-
-    if (project.currentStage === "DESIGN" && isVisualMockupDeliverableTitle(title) && !hasVisualDesignPreview(content)) {
-      const designReview = buildDesignReviewPayload(project, run.model);
-      content = [
-        content,
-        "",
-        "## 单页预览代码（HTML）",
-        "```html",
-        buildVisualDesignPreviewHtml(project, title, designReview.visualDirection),
-        "```",
-        "",
-        "## 预览说明",
-        "- 该 HTML 用于设计确认，开发阶段可按此结构实现真实页面。",
-        "- 若需静态图，可对该单页截图并附在交付物中。"
-      ].join("\n");
-    }
 
     content = ensureTemplateSectionCoverage(content, template, {
       stageLabel: STAGE_LABELS[project.currentStage as StageType] || project.currentStage,
@@ -1444,6 +1418,8 @@ type FinalArtifactsJobState = FinalArtifactsJobProgress & {
   officialSite?: {
     url: string;
     filePath?: string;
+    kind: "design_preview" | "narrative_summary";
+    sourceDeliverableName?: string;
   };
 };
 
@@ -1613,7 +1589,12 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
       });
     }
 
-    let officialSite: { url: string; filePath?: string } | undefined;
+    let officialSite: {
+      url: string;
+      filePath?: string;
+      kind: "design_preview" | "narrative_summary";
+      sourceDeliverableName?: string;
+    } | undefined;
     if (project.status === "completed") {
       update({
         progress: 72,
@@ -1632,7 +1613,9 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
         } else {
           officialSite = {
             url: artifact.publicPath,
-            filePath: artifact.filePaths[0]
+            filePath: artifact.filePaths[0],
+            kind: artifact.kind,
+            sourceDeliverableName: artifact.sourceDeliverableName
           };
         }
       } catch (error) {
@@ -1904,7 +1887,12 @@ function pickBestDeliverable(
 
 function buildProjectFinalArtifactsReport(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
-  officialSite?: { url: string; filePath?: string }
+  officialSite?: {
+    url: string;
+    filePath?: string;
+    kind: "design_preview" | "narrative_summary";
+    sourceDeliverableName?: string;
+  }
 ): ProjectFinalArtifactsReport {
   const deliverables = [...project.deliverables]
     .sort((left, right) => {
@@ -1982,14 +1970,16 @@ function buildProjectFinalArtifactsReport(
   }
 
   if (officialSite?.url) {
+    const isDesignPreview = officialSite.kind === "design_preview";
+    const sourceHint = officialSite.sourceDeliverableName ? `，来源：${officialSite.sourceDeliverableName}` : "";
     const officialSiteExcerpt = officialSite.url
-      ? `访问地址：${officialSite.url}（静态交付物汇总页）`
+      ? `访问地址：${officialSite.url}（${isDesignPreview ? "视觉定稿直出页" : "交付物叙事汇总页"}${sourceHint}）`
       : officialSite.filePath
         ? `本地文件：${officialSite.filePath}`
         : "可直接打开在线演示页";
     artifacts.push({
       key: "official_site",
-      category: "静态交付物汇总页",
+      category: isDesignPreview ? "官网演示页（视觉定稿直出）" : "官网演示页（交付物汇总）",
       required: false,
       ready: true,
       source: "link",

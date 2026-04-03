@@ -7,6 +7,8 @@ import { ROLE_LABELS, STAGE_LABELS, type ProjectDetail } from "@occ/shared";
 export interface OfficialSiteArtifact {
   publicPath: string;
   filePaths: string[];
+  kind: "design_preview" | "narrative_summary";
+  sourceDeliverableName?: string;
 }
 
 function findWorkspaceRoot(startDir: string) {
@@ -41,6 +43,55 @@ function escapeHtml(input: string) {
 
 function listToHtml(items: string[]) {
   return items.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+}
+
+function extractRenderableHtmlPreview(content: string) {
+  const source = String(content || "");
+  const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+  let matched: RegExpExecArray | null;
+  while ((matched = fencedPattern.exec(source)) !== null) {
+    const candidate = String(matched[1] || "").trim();
+    if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (/(<!doctype html|<html[\s>])/i.test(source)) {
+    return source.trim();
+  }
+
+  return null;
+}
+
+function wrapPreviewSnippetAsHtml(snippet: string, projectName: string) {
+  const normalized = String(snippet || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (/(<!doctype html|<html[\s>])/i.test(normalized)) {
+    return normalized;
+  }
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(projectName)} · 视觉定稿预览</title>
+  <style>
+    body { margin: 0; font-family: "SF Pro Display","PingFang SC","Segoe UI",sans-serif; background: #0b0f17; color: #eef2ff; }
+    .preview-shell { padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,.12); background: rgba(6,10,18,.85); }
+    .preview-shell strong { display: block; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; color: #8ea3ff; }
+    .preview-shell p { margin: 6px 0 0; font-size: 12px; color: #b7c4e8; }
+  </style>
+</head>
+<body>
+  <section class="preview-shell">
+    <strong>Design Preview Source</strong>
+    <p>当前官网演示页直接渲染“视觉定稿单页”交付物中的 HTML 片段。</p>
+  </section>
+  ${normalized}
+</body>
+</html>`;
 }
 
 type NarrativeStage = "ANALYSIS" | "DESIGN" | "DEV" | "ACCEPT";
@@ -649,8 +700,8 @@ function renderAppleOfficialSiteHtml(input: {
 <body>
   <main class="wrap">
     <section class="preview-notice">
-      <strong>静态交付物预览页</strong>
-      <p>此页面仅用于查看已生成官网产物，不代表 5173 实时项目页面，也不代表当前项目房间、审批状态或新建项目弹窗的即时内容。</p>
+      <strong>交付物快照页</strong>
+      <p>此页面用于呈现当前项目交付物生成结果快照；审批状态与项目房间实时信息以平台主界面为准。</p>
     </section>
     <section class="hero">
       <article>
@@ -714,7 +765,30 @@ function renderAppleOfficialSiteHtml(input: {
 </html>`;
 }
 
-function renderOfficialSiteHtml(project: ProjectDetail) {
+function renderOfficialSiteHtml(project: ProjectDetail): {
+  html: string;
+  kind: "design_preview" | "narrative_summary";
+  sourceDeliverableName?: string;
+} {
+  const visualPreviewCandidate = project.deliverables
+    .filter((item) => item.stageType === "DESIGN")
+    .sort((left, right) => {
+      const byVersion = right.version - left.version;
+      if (byVersion !== 0) {
+        return byVersion;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })
+    .find((item) => /视觉定稿|preview\.html|单页预览|mockup|wireframe|design preview/i.test(String(item.name || "")));
+  const previewHtml = extractRenderableHtmlPreview(String(visualPreviewCandidate?.content || ""));
+  if (previewHtml) {
+    return {
+      html: wrapPreviewSnippetAsHtml(previewHtml, project.name),
+      kind: "design_preview",
+      sourceDeliverableName: String(visualPreviewCandidate?.name || "").trim() || undefined
+    };
+  }
+
   const latestDesign = latestStageContent(project, "DESIGN");
   const visualPreset = detectVisualPreset(project, latestDesign);
   const analysisBullets = extractStageHighlights(
@@ -807,24 +881,29 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
   const teamChips = teamLabels.map((label) => `<span class="chip">${escapeHtml(label)}</span>`).join("");
 
   if (visualPreset === "apple") {
-    return renderAppleOfficialSiteHtml({
-      project,
-      heroTitle,
-      heroLead,
-      stageCompletionPercent,
-      completedStages,
-      analysisBullets,
-      designBullets,
-      devBullets,
-      acceptBullets,
-      signalCards,
-      stageTrack,
-      stageCards,
-      teamChips
-    });
+    return {
+      html: renderAppleOfficialSiteHtml({
+        project,
+        heroTitle,
+        heroLead,
+        stageCompletionPercent,
+        completedStages,
+        analysisBullets,
+        designBullets,
+        devBullets,
+        acceptBullets,
+        signalCards,
+        stageTrack,
+        stageCards,
+        teamChips
+      }),
+      kind: "narrative_summary"
+    };
   }
 
-  return `<!doctype html>
+  return {
+    kind: "narrative_summary",
+    html: `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -1193,8 +1272,8 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
   <div class="mesh-2"></div>
   <main class="wrap">
     <section class="preview-notice">
-      <strong>静态交付物预览页</strong>
-      <p>此页面仅用于查看已生成官网产物，不代表 5173 实时项目页面，也不代表当前项目房间、审批状态或新建项目弹窗的即时内容。</p>
+      <strong>交付物快照页</strong>
+      <p>此页面用于呈现当前项目交付物生成结果快照；审批状态与项目房间实时信息以平台主界面为准。</p>
     </section>
     <section class="hero">
       <article class="hero-main">
@@ -1257,7 +1336,8 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
     </section>
   </main>
 </body>
-</html>`;
+</html>`
+  };
 }
 
 export async function generateOfficialSiteArtifact(project: ProjectDetail): Promise<OfficialSiteArtifact> {
@@ -1265,7 +1345,8 @@ export async function generateOfficialSiteArtifact(project: ProjectDetail): Prom
   const workspaceRoot = findWorkspaceRoot(moduleDir);
   const fileName = `ai-collab-official-${project.id}.html`;
   const relativePath = path.join("generated", fileName);
-  const html = renderOfficialSiteHtml(project);
+  const rendered = renderOfficialSiteHtml(project);
+  const html = rendered.html;
 
   const targets = [
     path.join(workspaceRoot, "apps", "web", "public", relativePath),
@@ -1280,6 +1361,8 @@ export async function generateOfficialSiteArtifact(project: ProjectDetail): Prom
 
   return {
     publicPath: `/${relativePath.replaceAll("\\", "/")}`,
-    filePaths: targets
+    filePaths: targets,
+    kind: rendered.kind,
+    sourceDeliverableName: rendered.sourceDeliverableName
   };
 }

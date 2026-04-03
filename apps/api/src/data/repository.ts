@@ -47,7 +47,6 @@ import {
   resolveDeliverableTemplate
 } from "../system/deliverable-templates.js";
 import {
-  buildRequirementAwareVisualPreviewHtml,
   evaluateVisualDesignRequirementAlignment
 } from "../system/design-preview.js";
 
@@ -575,20 +574,6 @@ export function getDesignInterventionSignal(
   }
 
   return { required: false };
-}
-
-function buildVisualDesignPreviewHtml(input: {
-  projectName: string;
-  projectDescription?: string;
-  keywordLine: string;
-  visualDirection?: string;
-}) {
-  return buildRequirementAwareVisualPreviewHtml({
-    projectName: input.projectName,
-    projectDescription: input.projectDescription || input.keywordLine,
-    keywords: input.keywordLine.split(/\s*\/\s*/).filter(Boolean),
-    visualDirection: input.visualDirection
-  });
 }
 
 function evaluateDevImplementationRequirementAlignment(input: {
@@ -1127,7 +1112,12 @@ async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail)
       const content = [
         "# 官网演示页",
         "",
-        "此页面由设计/开发/验收交付物自动汇总生成。",
+        artifact.kind === "design_preview"
+          ? "此页面直接渲染 DESIGN 阶段视觉定稿 HTML。"
+          : "此页面由设计/开发/验收交付物自动汇总生成。",
+        artifact.sourceDeliverableName
+          ? `渲染来源: ${artifact.sourceDeliverableName}`
+          : "渲染来源: 叙事汇总渲染",
         `访问地址: ${artifact.publicPath}`,
         `本地文件: ${artifact.filePaths[0]}`
       ].join("\n");
@@ -1762,7 +1752,6 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
   const objective = STAGE_OBJECTIVES[stageType] || "围绕当前阶段目标沉淀可审阅产物。";
   const nextInput = STAGE_NEXT_INPUT[stageType] || "将本阶段产物同步给下一阶段执行角色。";
   const template = resolveDeliverableTemplate(deliverable.name, stageType);
-  const isVisualMockup = template.kind === "visual_mockup";
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
   const templateCoverageLines = template.requiredSections.map((section) => `- ${section.replace(/^##\s*/, "")}`);
 
@@ -1807,21 +1796,7 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "",
     "## 审阅与验收建议",
     "- 审阅是否覆盖目标、范围、风险、任务与交付证据。",
-    "- 若信息不足，请在当前文档补全后再次提交阶段审批。",
-    ...(isVisualMockup
-      ? [
-          "",
-          "## 单页预览代码（HTML）",
-          "```html",
-          buildVisualDesignPreviewHtml({
-            projectName: project.name,
-            projectDescription: project.description,
-            keywordLine: keywords.join(" / "),
-            visualDirection: "强调业务主链路、证据可追溯和行动可执行"
-          }),
-          "```"
-        ]
-      : [])
+    "- 若信息不足，请在当前文档补全后再次提交阶段审批。"
   ].join("\n");
 }
 
@@ -1890,12 +1865,6 @@ async function buildDeliverableBackfillContentWithAgent(
   const templatePromptBlock = buildDeliverableTemplatePromptBlock(deliverable.name, stageType, keywords);
   const templateCoverageLines = template.requiredSections.map((section) => `- ${section.replace(/^##\s*/, "")}`);
 
-  // Visual mockup backfill should be deterministic and instantly renderable.
-  // This avoids long model round-trips when historical content only has placeholders.
-  if (isVisualMockup && !hasVisualDesignPreview(String(deliverable.content || ""))) {
-    return buildDeliverableBackfillContent(project, deliverable);
-  }
-
   const runCacheKey = `${project.id}:${stageType}:shared`;
   let run = stageRunCache.get(runCacheKey);
   if (!run) {
@@ -1922,6 +1891,9 @@ async function buildDeliverableBackfillContentWithAgent(
         `${project.id}/${deliverable.name}`
       );
     } catch (error) {
+      if (isVisualMockup) {
+        throw error;
+      }
       console.warn(
         `[deliverable.backfill] fallback to deterministic template for ${project.id}/${deliverable.name}:`,
         error instanceof Error ? error.message : String(error)
@@ -1972,21 +1944,7 @@ async function buildDeliverableBackfillContentWithAgent(
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
-    "- 如需变更目标或范围，请先在需求确认单中更新后再推进。",
-    ...(isVisualMockup
-      ? [
-          "",
-          "## 单页预览代码（HTML）",
-          "```html",
-          buildVisualDesignPreviewHtml({
-            projectName: project.name,
-            projectDescription: project.description,
-            keywordLine: keywords.join(" / "),
-            visualDirection: "强调业务主链路、证据可追溯和行动可执行"
-          }),
-          "```"
-        ]
-      : [])
+    "- 如需变更目标或范围，请先在需求确认单中更新后再推进。"
   ].join("\n");
 }
 
@@ -2012,6 +1970,9 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
   for (const deliverable of project.deliverables) {
     const stageStatus = stageStatusByType.get(deliverable.stageType);
     const deliverableStageType = resolveStageType(deliverable.stageType);
+    const deliverableTemplate = deliverableStageType
+      ? resolveDeliverableTemplate(deliverable.name, deliverableStageType)
+      : null;
     // 历史阶段补齐以模板确定性回填为主；当前阶段必须保留真实产出。
     const useDeterministicRecovery =
       Boolean(currentStageType) && Boolean(deliverableStageType) && deliverableStageType !== currentStageType;
@@ -2031,6 +1992,15 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       })
     );
     if (!needBackfill && !shouldPromoteStatus) {
+      continue;
+    }
+
+    if (
+      needBackfill
+      && useDeterministicRecovery
+      && deliverableTemplate?.kind === "visual_mockup"
+    ) {
+      // 历史阶段缺失视觉稿时禁止回填固定模板，避免“假视觉稿”被误认成真实产物。
       continue;
     }
 
@@ -2085,6 +2055,13 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         continue;
       }
 
+      const expectedTemplate = resolveDeliverableTemplate(expectedName, stageType);
+      const shouldFastFillHistoricalStage = currentStageIndex >= 0 && stageIndex < currentStageIndex;
+      if (shouldFastFillHistoricalStage && expectedTemplate.kind === "visual_mockup") {
+        // 历史阶段缺失视觉稿时不再自动生成固定模板，避免误导验收。
+        continue;
+      }
+
       const maxVersion = existingStageDeliverables.reduce((max, item) => Math.max(max, item.version), 0);
       const stageStatus = stage.status === "completed"
         ? "approved"
@@ -2104,7 +2081,6 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         createdAt: now,
         updatedAt: now
       };
-      const shouldFastFillHistoricalStage = currentStageIndex >= 0 && stageIndex < currentStageIndex;
       const content = shouldFastFillHistoricalStage
         ? buildDeliverableBackfillContent(project, templateDeliverable)
         : await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
@@ -3865,8 +3841,6 @@ function toProjectDetail(project: {
   }>;
 }): ProjectDetail {
   const latestDeliverables = selectLatestDeliverablesByCoreName(project.deliverables);
-  const keywordLine = readStringArray(project.parsedKeywords).join(" / ");
-  const fallbackVisualDirection = "强调业务主链路、证据可追溯和行动可执行";
 
   const stages: Stage[] = project.stages.map((stage) => ({
     type: stage.type as StageType,
@@ -3911,27 +3885,11 @@ function toProjectDetail(project: {
     stages,
     tasks: project.tasks.map(toTask),
     deliverables: latestDeliverables.map((deliverable) => {
-      const stageType = resolveStageType(deliverable.stageType);
-      const template = stageType ? resolveDeliverableTemplate(deliverable.name, stageType) : null;
-      const rawContent = String(deliverable.content || "");
-      let content = rawContent;
-
-      if (template?.kind === "visual_mockup" && !hasVisualDesignPreview(rawContent)) {
-        const html = buildVisualDesignPreviewHtml({
-          projectName: project.name || "视觉确认稿",
-          projectDescription: project.description,
-          keywordLine,
-          visualDirection: fallbackVisualDirection
-        });
-        const section = ["## 单页预览代码（HTML）", "```html", html, "```"].join("\n");
-        content = rawContent.trim() ? `${rawContent.trim()}\n\n${section}` : section;
-      }
-
       return {
         id: deliverable.id,
         name: deliverable.name,
         type: deliverable.type as "markdown" | "pdf" | "code",
-        content,
+        content: String(deliverable.content || ""),
         version: deliverable.version,
         status: deliverable.status as ProjectDetail["deliverables"][number]["status"],
         stageType: deliverable.stageType as StageType,

@@ -291,6 +291,33 @@
 验收标准：
 - `pnpm verify:repeatable:018` 可输出 `ok=true` 报告。
 
+### FR-071 自动推进收敛防抖（新增）
+
+- `REAL_MODEL_GATE_FAILED` 不得无条件进入无限自动重试链路。
+- 对门禁失败应优先给出可观测失败与修复路径，避免长期 `PROJECT_ADVANCE_IN_PROGRESS`。
+- `deliverable.backfill` 必须设置硬超时并在超时后降级为确定性回填，避免 `reconcile-deliverables` 长时间阻塞。
+
+验收标准：
+- 出现真实模型门禁失败时，流程不会无限空转。
+- `reconcile-deliverables` 在慢模型场景下可在有限时长内返回。
+
+### FR-072 DEV 自动提交可验收性（新增）
+
+- DEV 自动提交内容必须在落库前强制补齐模板必需章节。
+- DEV 自动提交必须内嵌最小研发证据信号：
+  - 页面/路由
+  - 至少 2 个 API
+  - 存储/Schema/迁移
+  - 运行与联调命令
+  - 代码路径证据
+  - 平台来源与更新机制
+- 自动提交正文必须清洗占位词（`TODO/TBD/xxx/待补充`），防止模板门禁误拦截。
+- 自动质检结论的阻断逻辑应聚焦关键风险，避免低风险告警导致阶段永久不收敛。
+
+验收标准：
+- DEV 阶段可从自动提交顺利进入 `pendingApproval`/后续验收，而非重复提交同阶段。
+- 自动提交内容可通过模板门禁且保留真实研发链路证据。
+
 ## 6. 非功能需求
 
 ### NFR-001 稳定性
@@ -349,3 +376,18 @@ pnpm verify:repeatable:018
 - `scripts/smoke-project-flow.mjs` 已加入慢路径重试上限，避免无上限轮询。
 - `scripts/verify-repeatable-018.mjs` 已补齐“固定项目不存在自动创建 fallback”与“有限重试退出”。
 - DESIGN 阶段已新增“业务化视觉稿”门禁：通用协作平台模板不再能冒充业务设计稿通过。
+
+## 10. 2026-04-03 深度复核快照
+
+- 三轮链路回归脚本：`/tmp/triple-create-finish-check-v2.mjs`
+  - Run#1：通过（round=50）
+  - Run#2：通过（round=59）
+  - Run#3：通过（round=57）
+- 三轮统一通过项：
+  - 覆盖 `ANALYSIS -> DESIGN -> DEV -> ACCEPT -> completed`
+  - 各阶段存在 `success` 执行证据且 provider 为 `openai-compatible`
+  - 交付物无模板骨架占位
+  - DEV 交付物具备代码证据与联调验证信号
+- 复核时间窗（UTC）：`2026-04-02T20:46:13.116Z` ~ `2026-04-02T21:15:23.945Z`
+- 数据清理：
+  - 已清理 `triple-check* / single-check*` 测试项目，当前残留数 `0`，避免污染项目列表与模型中心。
