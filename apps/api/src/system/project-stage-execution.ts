@@ -12,12 +12,26 @@ export type TerminalSkillEvidenceField =
   | "reasoningBasis"
   | "artifactsProduced"
   | "verification";
+export type TerminalCollaborationField =
+  | "factsConfirmed"
+  | "assumptions"
+  | "decisions"
+  | "handoff"
+  | "openQuestions";
 
 export type TerminalSkillEvidence = {
   skillsUsed: string[];
   reasoningBasis: string;
   artifactsProduced: string;
   verification: string;
+};
+
+export type TerminalCollaborationEvidence = {
+  factsConfirmed: string;
+  assumptions: string;
+  decisions: string;
+  handoff: string;
+  openQuestions: string;
 };
 
 export type TerminalSkillEvidenceValidation = {
@@ -28,6 +42,13 @@ export type TerminalSkillEvidenceValidation = {
   parsedEvidence: TerminalSkillEvidence | null;
 };
 
+export type TerminalCollaborationValidation = {
+  ok: boolean;
+  missingFields: TerminalCollaborationField[];
+  hasSection: boolean;
+  parsedEvidence: TerminalCollaborationEvidence | null;
+};
+
 export type ProjectStageExecutionStrategy = {
   mode: ProjectStageExecutionMode;
   reason: string;
@@ -36,8 +57,10 @@ export type ProjectStageExecutionStrategy = {
   allowDirectModelFallback: boolean;
   requiredSkills: string[];
   skillProtocol: string[];
+  collaborationProtocol: string[];
+  requiredCollaborationFields: TerminalCollaborationField[];
   memoryEnabled: boolean;
-  memoryPolicy: "all_allowed" | "current_project_or_high_relevance_only";
+  memoryPolicy: "current_project_or_high_relevance_only";
   executionMode: "confirm_first" | "autonomous";
   requireConfirmation: boolean;
 };
@@ -72,8 +95,16 @@ const TERMINAL_EVIDENCE_FIELDS: TerminalSkillEvidenceField[] = [
   "artifactsProduced",
   "verification"
 ];
+const TERMINAL_COLLABORATION_FIELDS: TerminalCollaborationField[] = [
+  "factsConfirmed",
+  "assumptions",
+  "decisions",
+  "handoff",
+  "openQuestions"
+];
 
 const TERMINAL_STAGE_ROLE_SET = new Set<string>([
+  "INIT:ROLE_PM",
   "ANALYSIS:ROLE_ANALYST",
   "ANALYSIS:ROLE_PRODUCT",
   "DESIGN:ROLE_PRODUCT",
@@ -90,8 +121,8 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   ],
   ANALYSIS: [
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-20250514",
     "openai/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-20250514",
     "kimi-k2.5"
   ],
   DESIGN: [
@@ -116,13 +147,13 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
 const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
   ROLE_ANALYST: [
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-20250514",
-    "openai/gpt-5.3-codex"
+    "openai/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-20250514"
   ],
   ROLE_PRODUCT: [
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-20250514",
-    "openai/gpt-5.3-codex"
+    "openai/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-20250514"
   ],
   ROLE_DESIGN: [
     "anthropic/claude-opus-4-20250514",
@@ -227,10 +258,47 @@ function getStageSkillProtocol(stageType: StageType, role: RoleType) {
   return [] as string[];
 }
 
+function getStageCollaborationProtocol(stageType: StageType, role: RoleType) {
+  if (stageType === "INIT" || role === "ROLE_PM") {
+    return [
+      "先沉淀项目目标、边界、参与角色与阶段推进规则，再把 kickoff 结论交给分析角色",
+      "必须明确哪些输入已确认、哪些仍是假设，不能把含糊描述直接写成正式项目章程",
+      "handoff 必须写清分析阶段的关键问题、优先级和需要继续验证的事项"
+    ];
+  }
+
+  if (stageType === "ANALYSIS" || role === "ROLE_ANALYST" || role === "ROLE_PRODUCT") {
+    return [
+      "分析角色先产出事实、边界、约束与风险，产品角色再补充方案、优先级与验收标准",
+      "每一条关键判断都要能区分事实、假设和决策，避免旧模板口径覆盖当前项目实际",
+      "handoff 必须能直接交给设计或下一位协作 Agent 使用，而不是停留在泛泛建议"
+    ];
+  }
+
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
+    return [
+      "产品角色先给出体验目标、页面范围和内容优先级，设计角色再给出视觉与交互方案",
+      "必须显式说明哪些设计决策来自本项目事实，哪些是合理假设，禁止套用旧项目风格模板",
+      "handoff 必须写清设计约束、关键状态、响应式/交互规则和交给研发的实现边界"
+    ];
+  }
+
+  if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
+    return [
+      "架构角色先沉淀技术方案、接口和风险，研发角色再基于该契约完成实现与验证",
+      "必须留下真实实现证据，包括改动范围、验证结果和未解决风险，不能只输出口头方案",
+      "handoff 必须能交给下游 QA 或协作者继续执行，包括已完成项、待补项和回归关注点"
+    ];
+  }
+
+  return [] as string[];
+}
+
 export function getProjectStageExecutionStrategy(stageType: StageType, role: RoleType): ProjectStageExecutionStrategy {
   const preferredModels = getPreferredStageModels(stageType, role);
   const requiredSkills = getStageRequiredSkills(stageType, role);
   const skillProtocol = getStageSkillProtocol(stageType, role);
+  const collaborationProtocol = getStageCollaborationProtocol(stageType, role);
   const useTerminalAgent = TERMINAL_STAGE_ROLE_SET.has(`${stageType}:${role}`);
   const openClawAgentId = ROLE_OPENCLAW_AGENT_MAP[role];
 
@@ -243,6 +311,8 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
       allowDirectModelFallback: false,
       requiredSkills,
       skillProtocol,
+      collaborationProtocol,
+      requiredCollaborationFields: TERMINAL_COLLABORATION_FIELDS,
       memoryEnabled: true,
       memoryPolicy: "current_project_or_high_relevance_only",
       executionMode: "autonomous",
@@ -252,13 +322,15 @@ export function getProjectStageExecutionStrategy(stageType: StageType, role: Rol
 
   return {
     mode: "direct_model",
-    reason: "当前阶段保持直接模型执行，仍按最强候选模型顺序尝试。",
+    reason: "当前阶段保持直接模型执行，仍按最强候选模型顺序尝试，并继续保留长期记忆，但只允许当前项目或高关联经验参与。",
     preferredModels,
     allowDirectModelFallback: true,
     requiredSkills,
     skillProtocol,
+    collaborationProtocol,
+    requiredCollaborationFields: [],
     memoryEnabled: true,
-    memoryPolicy: "all_allowed",
+    memoryPolicy: "current_project_or_high_relevance_only",
     executionMode: "confirm_first",
     requireConfirmation: true
   };
@@ -289,6 +361,13 @@ export function buildTerminalStageExecutionMessage(input: {
   const skillDirectives = strategy.skillProtocol.map((item) =>
     sanitizeTerminalSegment(item, 220)
   );
+  const collaborationDirectives = strategy.collaborationProtocol.map((item) =>
+    sanitizeTerminalSegment(item, 220)
+  );
+  const collaborationFields = sanitizeTerminalSegment(
+    strategy.requiredCollaborationFields.join("、") || "无",
+    220
+  );
 
   return [
     "请只基于当前项目执行阶段任务，允许参考长期记忆用于学习与复用经验",
@@ -303,7 +382,11 @@ export function buildTerminalStageExecutionMessage(input: {
     `约束 ${constraints}`,
     `风险 ${risks}`,
     `requiredSkills ${requiredSkills}`,
+    `requiredCollaborationFields ${collaborationFields}`,
     ...skillDirectives,
+    ...collaborationDirectives,
+    "正文中必须给出可供下游 Agent 继续执行的协作交接卡，字段名必须保持原样",
+    "协作交接卡格式为 协作交接卡；factsConfirmed: 已确认事实；assumptions: 当前假设；decisions: 已做决策与取舍；handoff: 交给下游 Agent 的明确输入与动作；openQuestions: 待确认问题或风险空白",
     "输出末尾必须追加结构化技能证据区块，字段名必须保持原样",
     "证据区块格式为 技能执行记录；skillsUsed: 实际使用的技能列表；reasoningBasis: 本次判断依据；artifactsProduced: 已产出的页面、代码、文档或命令结果；verification: 已完成的检查、测试或人工校验",
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
@@ -325,6 +408,15 @@ function splitSkillNames(input: string) {
       .split(/[,\n\r;；、，]/g)
       .map((item) => item.trim())
   );
+}
+
+function extractStructuredCollaborationField(output: string, field: TerminalCollaborationField) {
+  const pattern = new RegExp(
+    `(?:^|\\n)\\s*(?:[-*]\\s*)?${field}\\s*[：:]\\s*([\\s\\S]*?)(?=\\n\\s*(?:[-*]\\s*)?(?:${TERMINAL_COLLABORATION_FIELDS.join("|")})\\s*[：:]|\\n##\\s|$)`,
+    "i"
+  );
+  const matched = pattern.exec(String(output ?? ""));
+  return String(matched?.[1] ?? "").replace(/\s+/g, " ").trim();
 }
 
 export function validateTerminalSkillEvidence(output: string, requiredSkills: string[]): TerminalSkillEvidenceValidation {
@@ -366,6 +458,36 @@ export function validateTerminalSkillEvidence(output: string, requiredSkills: st
     missingSkills,
     missingFields,
     hasEvidenceSection,
+    parsedEvidence
+  };
+}
+
+export function validateTerminalCollaborationEvidence(output: string): TerminalCollaborationValidation {
+  const source = String(output ?? "");
+  const normalizedOutput = source.trim().toLowerCase();
+  const hasSection =
+    normalizedOutput.includes("factsconfirmed")
+    || normalizedOutput.includes("assumptions")
+    || normalizedOutput.includes("decisions")
+    || normalizedOutput.includes("handoff")
+    || normalizedOutput.includes("openquestions")
+    || normalizedOutput.includes("协作交接卡");
+  const fieldValues = {
+    factsConfirmed: extractStructuredCollaborationField(source, "factsConfirmed"),
+    assumptions: extractStructuredCollaborationField(source, "assumptions"),
+    decisions: extractStructuredCollaborationField(source, "decisions"),
+    handoff: extractStructuredCollaborationField(source, "handoff"),
+    openQuestions: extractStructuredCollaborationField(source, "openQuestions")
+  };
+  const missingFields = TERMINAL_COLLABORATION_FIELDS.filter((field) => !fieldValues[field]);
+  const parsedEvidence = missingFields.length === 0
+    ? fieldValues
+    : null;
+
+  return {
+    ok: hasSection && missingFields.length === 0,
+    missingFields,
+    hasSection,
     parsedEvidence
   };
 }

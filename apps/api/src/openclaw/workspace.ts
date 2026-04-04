@@ -5,15 +5,18 @@ import {
   open,
   copyFile,
   mkdir,
+  mkdtemp,
   rm,
   readdir,
   readFile,
   stat,
   writeFile
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import type {
   OpenClawAgentDetail,
+  OpenClawAgentAttemptTrace,
   OpenClawBatchAgentCommandResult,
   OpenClawAgentCommandResult,
   OpenClawAgentCommanderSettings,
@@ -125,7 +128,10 @@ type OpenClawConfig = {
       name?: string;
       workspace?: string;
       agentDir?: string;
-      model?: string;
+      model?: string | {
+        primary?: string;
+        fallbacks?: string[];
+      };
       subagents?: {
         allowAgents?: string[];
       };
@@ -146,6 +152,15 @@ type SessionRecord = {
   subject?: string;
   systemSent?: boolean;
   abortedLastRun?: boolean;
+  sessionId?: string;
+  sessionFile?: string;
+  model?: string;
+  modelProvider?: string;
+  modelOverride?: string;
+  providerOverride?: string;
+  fallbackNoticeSelectedModel?: string;
+  fallbackNoticeActiveModel?: string;
+  fallbackNoticeReason?: string;
 };
 
 type ProjectBuild = {
@@ -249,9 +264,14 @@ export async function findOpenClawAgent(agentId: string): Promise<OpenClawAgentD
   return agents.find((agent) => agent.agentId === agentId);
 }
 
+export function isDesignAgentProfile(profile: string) {
+  const normalized = String(profile || "").replace(/[_-]+/g, " ").toLowerCase();
+  return /\b(design|ui|ux|jeremy)\b|设计/i.test(normalized);
+}
+
 function shouldUseIsolatedAgentSession(agent: Pick<OpenClawAgentDetail, "agentId" | "name" | "title" | "responsibility">, message: string) {
   const profile = `${agent.agentId} ${agent.name} ${agent.title} ${agent.responsibility}`;
-  if (/(design|设计|ui|ux|jeremy)/i.test(profile)) {
+  if (isDesignAgentProfile(profile)) {
     return true;
   }
 
@@ -259,6 +279,292 @@ function shouldUseIsolatedAgentSession(agent: Pick<OpenClawAgentDetail, "agentId
   return normalizedMessage.includes("项目 ")
     && normalizedMessage.includes("阶段 ")
     && normalizedMessage.includes("角色 ");
+}
+
+function shouldPreferLocalAgentExecution(input: {
+  isDesignAgent: boolean;
+  shouldIsolateSession: boolean;
+}) {
+  return input.isDesignAgent || input.shouldIsolateSession;
+}
+
+type OpenClawAttemptFailureFlags = {
+  kind: "lock" | "token" | "model_unavailable" | "transport" | "unexpected_model" | "gateway_repairable" | "other";
+  isLockError: boolean;
+  isTokenError: boolean;
+  isModelUnavailableError: boolean;
+  isTransportError: boolean;
+  isUnexpectedModelError: boolean;
+  isGatewayRepairableError: boolean;
+};
+
+export function classifyOpenClawAttemptFailure(errorText: string): OpenClawAttemptFailureFlags {
+  const normalized = String(errorText || "").trim();
+  const isLockError = /session file locked|locked \(timeout|gateway closed/i.test(normalized);
+  const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(normalized);
+  const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(normalized);
+  const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted|relay service error|bad_response_status_code|5\d{2}/i.test(normalized);
+  const isUnexpectedModelError = /unexpected execution model/i.test(normalized);
+  const isGatewayRepairableError = /gateway closed|gateway connect failed|connect challenge timeout|session file locked|locked \(timeout/i.test(normalized);
+  const kind = isLockError
+    ? "lock"
+    : isTokenError
+      ? "token"
+      : isModelUnavailableError
+        ? "model_unavailable"
+        : isUnexpectedModelError
+          ? "unexpected_model"
+          : isGatewayRepairableError
+            ? "gateway_repairable"
+            : isTransportError
+              ? "transport"
+              : "other";
+
+  return {
+    kind,
+    isLockError,
+    isTokenError,
+    isModelUnavailableError,
+    isTransportError,
+    isUnexpectedModelError,
+    isGatewayRepairableError
+  };
+}
+
+export function selectOpenClawFallbackModel(input: {
+  activeModel: string;
+  fallbackQueue: string[];
+  fallbackCursor: number;
+  errorText: string;
+}) {
+  const remainingFallbacks = input.fallbackQueue
+    .slice(input.fallbackCursor)
+    .filter((modelId) => modelId !== input.activeModel);
+  let nextFallbackModel = remainingFallbacks[0];
+
+  if (/claude_code|no available channel/i.test(input.errorText) && input.activeModel.startsWith("anthropic/")) {
+    nextFallbackModel = remainingFallbacks.find((modelId) => !modelId.startsWith("anthropic/")) ?? nextFallbackModel;
+  }
+
+  return nextFallbackModel;
+}
+
+function buildAgentMainSessionKey(agentId: string) {
+  return `agent:${agentId}:main`;
+}
+
+function resolveAgentConfiguredPrimaryModel(
+  value?: string | { primary?: string; fallbacks?: string[] }
+) {
+  if (!value) {
+    return undefined;
+  }
+
+  if (typeof value === "string") {
+    return normalizeModelForRouting(value);
+  }
+
+  return normalizeModelForRouting(value.primary);
+}
+
+function resolveAgentConfiguredFallbackModels(
+  value?: string | { primary?: string; fallbacks?: string[] }
+) {
+  if (!value || typeof value === "string") {
+    return [];
+  }
+
+  return dedupeStrings(
+    (value.fallbacks ?? [])
+      .map((item) => normalizeModelForRouting(item))
+      .filter((item): item is string => Boolean(item))
+  );
+}
+
+function buildOpenClawAgentModelConfig(
+  primaryModel: string,
+  fallbackModels: string[],
+  options?: { forceObject?: boolean }
+) {
+  const primary = normalizeModelForRouting(primaryModel);
+  if (!primary) {
+    return undefined;
+  }
+
+  const fallbacks = dedupeStrings(
+    fallbackModels
+      .map((item) => normalizeModelForRouting(item))
+      .filter((item): item is string => Boolean(item) && item !== primary)
+  );
+
+  if (fallbacks.length === 0 && !options?.forceObject) {
+    return primary;
+  }
+
+  return {
+    primary,
+    fallbacks
+  };
+}
+
+export function applyScopedAgentModelConfig(
+  config: OpenClawConfig | null | undefined,
+  input: {
+    agentId: string;
+    model: string;
+    fallbackModels?: string[];
+  }
+) {
+  if (!config?.agents?.list?.length) {
+    throw new Error("OpenClaw config missing agents.list");
+  }
+
+  const normalizedModel = normalizeModelForRouting(input.model);
+  if (!normalizedModel) {
+    throw new Error(`Invalid model override for ${input.agentId}`);
+  }
+
+  const nextConfig = JSON.parse(JSON.stringify(config)) as OpenClawConfig;
+  const target = nextConfig.agents?.list?.find((item) => item.id === input.agentId);
+  if (!target) {
+    throw new Error(`Agent ${input.agentId} not found in OpenClaw config`);
+  }
+
+  const fallbackModels = dedupeStrings(
+    (input.fallbackModels ?? [])
+      .map((item) => normalizeModelForRouting(item))
+      .filter((item): item is string => Boolean(item) && item !== normalizedModel)
+  );
+  target.model = buildOpenClawAgentModelConfig(normalizedModel, fallbackModels, { forceObject: true });
+  return nextConfig;
+}
+
+async function createScopedOpenClawCommandEnv(input: {
+  agentId: string;
+  model: string;
+  fallbackModels?: string[];
+}) {
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
+  const scopedConfig = applyScopedAgentModelConfig(config, input);
+  const tempDir = await mkdtemp(path.join(tmpdir(), "openclaw-agent-config-"));
+  const configPath = path.join(tempDir, "openclaw.json");
+  await writeJsonFile(configPath, scopedConfig);
+
+  return {
+    env: {
+      ...process.env,
+      OPENCLAW_CONFIG_PATH: configPath
+    },
+    async cleanup() {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  };
+}
+
+function splitSessionRuntimeModel(model: string) {
+  const normalized = normalizeModelForRouting(model);
+  if (!normalized) {
+    return {
+      model: undefined,
+      provider: undefined
+    };
+  }
+
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex <= 0 || slashIndex >= normalized.length - 1) {
+    return {
+      model: normalized,
+      provider: undefined
+    };
+  }
+
+  return {
+    provider: normalized.slice(0, slashIndex),
+    model: normalized.slice(slashIndex + 1)
+  };
+}
+
+export function applyOpenClawAgentMainSessionModelSync(
+  sessionStore: Record<string, SessionRecord> | null | undefined,
+  input: { agentId: string; model: string }
+) {
+  const existingStore = sessionStore ?? {};
+  const sessionKey = buildAgentMainSessionKey(input.agentId);
+  const sessionEntry = existingStore[sessionKey];
+  const runtimeModel = splitSessionRuntimeModel(input.model);
+
+  if (!sessionEntry || !runtimeModel.model) {
+    return {
+      changed: false,
+      sessionStore: existingStore
+    };
+  }
+
+  let nextEntry = sessionEntry;
+
+  if (sessionEntry.model !== runtimeModel.model) {
+    nextEntry = {
+      ...nextEntry,
+      model: runtimeModel.model
+    };
+  }
+
+  if (nextEntry.modelOverride !== runtimeModel.model) {
+    nextEntry = {
+      ...nextEntry,
+      modelOverride: runtimeModel.model
+    };
+  }
+
+  if (runtimeModel.provider) {
+    if (nextEntry.modelProvider !== runtimeModel.provider) {
+      nextEntry = {
+        ...nextEntry,
+        modelProvider: runtimeModel.provider
+      };
+    }
+    if (nextEntry.providerOverride !== runtimeModel.provider) {
+      nextEntry = {
+        ...nextEntry,
+        providerOverride: runtimeModel.provider
+      };
+    }
+  } else if (nextEntry.modelProvider !== undefined) {
+    nextEntry = { ...nextEntry };
+    delete nextEntry.modelProvider;
+    if (nextEntry.providerOverride !== undefined) {
+      delete nextEntry.providerOverride;
+    }
+  }
+
+  if (
+    nextEntry.fallbackNoticeSelectedModel !== undefined
+    || nextEntry.fallbackNoticeActiveModel !== undefined
+    || nextEntry.fallbackNoticeReason !== undefined
+  ) {
+    if (nextEntry === sessionEntry) {
+      nextEntry = { ...nextEntry };
+    }
+    delete nextEntry.fallbackNoticeSelectedModel;
+    delete nextEntry.fallbackNoticeActiveModel;
+    delete nextEntry.fallbackNoticeReason;
+  }
+
+  if (nextEntry === sessionEntry) {
+    return {
+      changed: false,
+      sessionStore: existingStore
+    };
+  }
+
+  nextEntry.updatedAt = Date.now();
+  return {
+    changed: true,
+    sessionStore: {
+      ...existingStore,
+      [sessionKey]: nextEntry
+    }
+  };
 }
 
 export async function inspectOpenClawModelRouting(input?: {
@@ -288,7 +594,7 @@ export async function inspectOpenClawModelRouting(input?: {
 
   for (const item of agentConfigs) {
     scannedOpenClawAgents += 1;
-    const before = normalizeModelId(item.model) ?? null;
+    const before = resolveAgentConfiguredPrimaryModel(item.model) ?? null;
     const next = pickPreferredModel([before ?? undefined], fallbackModel);
     if (before === next) {
       continue;
@@ -311,7 +617,7 @@ export async function inspectOpenClawModelRouting(input?: {
     });
 
     if (repair) {
-      item.model = next;
+      item.model = buildOpenClawAgentModelConfig(next, resolveAgentConfiguredFallbackModels(item.model));
       configChanged = true;
       fixed += 1;
     } else {
@@ -433,7 +739,7 @@ export async function updateOpenClawAgentSettings(
     return undefined;
   }
 
-  const currentModel = String(agentConfig.model ?? "").trim() || "unknown";
+  const currentModel = resolveAgentConfiguredPrimaryModel(agentConfig.model) || "unknown";
   const existingRecord = await prisma.managedAgentConfig.findUnique({ where: { agentId } });
   const existingSettings = normalizeCommanderSettings(currentModel, existingRecord ?? undefined);
   const globalFallbacks = listGlobalFallbackModels();
@@ -459,18 +765,6 @@ export async function updateOpenClawAgentSettings(
       ?? agentConfig.tools?.allow
   );
 
-  agentConfig.model = nextSelectedModel;
-  if (nextDisplayName) {
-    agentConfig.name = nextDisplayName;
-  }
-  agentConfig.subagents = {
-    allowAgents: nextAllowedAgentIds
-  };
-  agentConfig.tools = {
-    allow: nextTools
-  };
-  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
-
   const nextDefaultModel = pickPreferredModel([
     input.defaultModel,
     existingSettings.defaultModel,
@@ -483,6 +777,22 @@ export async function updateOpenClawAgentSettings(
     existingSettings.fallbackModel ?? undefined,
     ...globalFallbacks
   ], nextDefaultModel);
+  const agentFallbackStack = dedupeStrings([
+    nextFallbackModel,
+    ...globalFallbacks
+  ].filter((item): item is string => Boolean(item) && item !== nextSelectedModel));
+
+  agentConfig.model = buildOpenClawAgentModelConfig(nextSelectedModel, agentFallbackStack);
+  if (nextDisplayName) {
+    agentConfig.name = nextDisplayName;
+  }
+  agentConfig.subagents = {
+    allowAgents: nextAllowedAgentIds
+  };
+  agentConfig.tools = {
+    allow: nextTools
+  };
+  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
 
   const nextSettings: OpenClawAgentCommanderSettings = {
     selectedModel: nextSelectedModel,
@@ -551,6 +861,8 @@ export async function updateOpenClawAgentSettings(
       intro: nextIntro
     }
   );
+
+  await syncOpenClawAgentMainSessionRuntimeModel(agentId, nextSelectedModel);
 
   return findOpenClawAgent(agentId);
 }
@@ -1051,12 +1363,20 @@ export async function sendOpenClawAgentMessage(
 
   let stdout = "";
   let stderr = "";
-  const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(
+  const isDesignAgent = isDesignAgentProfile(
     `${agent.agentId} ${agent.name} ${agent.title} ${agent.responsibility}`
   );
+  const preferredModelOverride = normalizeModelForRouting(input.preferredModel);
+  const explicitFallbackModels = dedupeStrings(
+    (input.fallbackModels ?? [])
+      .map((item) => normalizeModelForRouting(item))
+      .filter((item): item is string => Boolean(item))
+  );
+  const externalFallbackControl = explicitFallbackModels.length > 0;
   const designPrimaryModel = normalizeModelForRouting(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
   const globalFallbackCandidates = listGlobalFallbackModels();
   const defaultFallbackCandidates = dedupeStrings([
+    ...explicitFallbackModels,
     normalizeModelForRouting(agent.commander.defaultModel),
     normalizeModelForRouting(agent.commander.fallbackModel),
     ...globalFallbackCandidates
@@ -1068,6 +1388,7 @@ export async function sendOpenClawAgentMessage(
   ].filter((item): item is string => Boolean(item)));
   const fallbackCandidates = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates);
   let activeModel = pickPreferredModel([
+    preferredModelOverride,
     agent.commander.selectedModel,
     agent.commander.defaultModel,
     agent.commander.fallbackModel ?? undefined,
@@ -1078,7 +1399,10 @@ export async function sendOpenClawAgentMessage(
   const fallbackQueue = fallbackCandidates.filter((modelId) => modelId !== activeModel);
   let fallbackCursor = 0;
   const shouldIsolateSession = shouldUseIsolatedAgentSession(agent, message);
-  const preferLocalExecution = isDesignAgent;
+  const preferLocalExecution = shouldPreferLocalAgentExecution({
+    isDesignAgent,
+    shouldIsolateSession
+  });
   let gatewayRepairAttempted = false;
   const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
   const cliTimeoutSeconds = Math.max(
@@ -1090,14 +1414,31 @@ export async function sendOpenClawAgentMessage(
     Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 45_000)
   );
   let finalError: string | null = null;
+  const attempts: OpenClawAgentAttemptTrace[] = [];
 
   const selectedModelRaw = normalizeModelId(agent.commander.selectedModel) || "";
-  if (selectedModelRaw !== activeModel) {
+  if (!externalFallbackControl && (selectedModelRaw !== activeModel || externalFallbackControl)) {
     try {
-      await switchAgentModelForRetry(agentId, activeModel);
+      await switchAgentModelForRetry(agentId, activeModel, {
+        explicitFallbacks: externalFallbackControl ? [] : undefined
+      });
     } catch (switchError) {
       const reason = switchError instanceof Error ? switchError.message : "initial model sanitize failed";
       finalError = `[model-sanitize] ${reason}`;
+      attempts.push({
+        attempt: 0,
+        route: "openclaw-cli:preflight",
+        status: "failed",
+        startedAt: new Date().toISOString(),
+        elapsedMs: 0,
+        requestedModel,
+        selectedModel: activeModel,
+        isolatedSession: shouldIsolateSession,
+        localExecution: preferLocalExecution,
+        failureKind: "preflight",
+        recoveryAction: "abort",
+        error: finalError
+      });
     }
   }
 
@@ -1108,14 +1449,40 @@ export async function sendOpenClawAgentMessage(
     } catch (switchError) {
       const reason = switchError instanceof Error ? switchError.message : "primary model switch failed";
       finalError = `[model-primary] ${reason}`;
+      attempts.push({
+        attempt: 0,
+        route: "openclaw-cli:preflight",
+        status: "failed",
+        startedAt: new Date().toISOString(),
+        elapsedMs: 0,
+        requestedModel,
+        selectedModel: designPrimaryModel,
+        isolatedSession: shouldIsolateSession,
+        localExecution: preferLocalExecution,
+        failureKind: "preflight",
+        recoveryAction: "abort",
+        error: finalError
+      });
     }
   }
 
+  await syncOpenClawAgentMainSessionRuntimeModel(agentId, activeModel);
+
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptStartedAtMs = Date.now();
+    const attemptStartedAt = new Date(attemptStartedAtMs).toISOString();
+    const sessionId = shouldIsolateSession
+      ? `${agentId}-stage-${Date.now()}-${randomUUID().slice(0, 8)}`
+      : undefined;
+    let scopedCommandEnv: Awaited<ReturnType<typeof createScopedOpenClawCommandEnv>> | null = null;
     try {
-      const sessionId = shouldIsolateSession
-        ? `${agentId}-stage-${Date.now()}-${randomUUID().slice(0, 8)}`
-        : undefined;
+      if (externalFallbackControl) {
+        scopedCommandEnv = await createScopedOpenClawCommandEnv({
+          agentId,
+          model: activeModel,
+          fallbackModels: []
+        });
+      }
       const result = await execFileAsync(OPENCLAW_BIN, [
         "agent",
         "--agent",
@@ -1128,6 +1495,7 @@ export async function sendOpenClawAgentMessage(
         "--timeout",
         String(cliTimeoutSeconds)
       ], {
+        env: scopedCommandEnv?.env,
         timeout: commandTimeoutMs,
         maxBuffer: 1024 * 1024 * 8
       });
@@ -1145,6 +1513,20 @@ export async function sendOpenClawAgentMessage(
       stdout = nextStdout;
       stderr = nextStderr;
       finalError = null;
+      attempts.push({
+        attempt,
+        route: "openclaw-cli",
+        status: "success",
+        startedAt: attemptStartedAt,
+        elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+        requestedModel,
+        selectedModel: activeModel,
+        executedModel: actualModel ?? activeModel,
+        provider: String(successPayload.result?.meta?.agentMeta?.provider ?? "").trim() || undefined,
+        isolatedSession: shouldIsolateSession,
+        sessionId,
+        localExecution: preferLocalExecution
+      });
       break;
     } catch (error) {
       const detail =
@@ -1167,12 +1549,15 @@ export async function sendOpenClawAgentMessage(
         }
       });
 
-      const isLockError = /session file locked|locked \(timeout|gateway closed/i.test(finalError);
-      const isTokenError = /401|invalid token|无效的令牌|令牌无效/i.test(finalError);
-      const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(finalError);
-      const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted|relay service error|bad_response_status_code|5\d{2}/i.test(finalError);
-      const isUnexpectedModelError = /unexpected execution model/i.test(finalError);
-      const isGatewayRepairableError = /gateway closed|gateway connect failed|connect challenge timeout|session file locked|locked \(timeout/i.test(finalError);
+      const failure = classifyOpenClawAttemptFailure(finalError);
+      const {
+        isLockError,
+        isTokenError,
+        isModelUnavailableError,
+        isTransportError,
+        isUnexpectedModelError,
+        isGatewayRepairableError
+      } = failure;
       if (isModelUnavailableError) {
         for (const modelId of listGroupFallbackModels(finalError)) {
           if (modelId !== activeModel && !fallbackQueue.includes(modelId)) {
@@ -1180,27 +1565,69 @@ export async function sendOpenClawAgentMessage(
           }
         }
       }
+      let recoveryAction: string | undefined;
+      let recoveryTargetModel: string | undefined;
+
       if (isGatewayRepairableError && !gatewayRepairAttempted) {
         gatewayRepairAttempted = true;
+        recoveryAction = "restart_gateway";
+        attempts.push({
+          attempt,
+          route: "openclaw-cli",
+          status: "failed",
+          startedAt: attemptStartedAt,
+          elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+          requestedModel,
+          selectedModel: activeModel,
+          isolatedSession: shouldIsolateSession,
+          sessionId,
+          localExecution: preferLocalExecution,
+          failureKind: failure.kind,
+          recoveryAction,
+          error: finalError
+        });
         await restartOpenClawGateway();
         await sleep(800);
         continue;
       }
-      const remainingFallbacks = fallbackQueue
-        .slice(fallbackCursor)
-        .filter((modelId) => modelId !== activeModel);
-      let nextFallbackModel = remainingFallbacks[0];
-      if (/claude_code|no available channel/i.test(finalError) && activeModel.startsWith("anthropic/")) {
-        nextFallbackModel = remainingFallbacks.find((modelId) => !modelId.startsWith("anthropic/")) ?? nextFallbackModel;
-      }
+      const nextFallbackModel = selectOpenClawFallbackModel({
+        activeModel,
+        fallbackQueue,
+        fallbackCursor,
+        errorText: finalError
+      });
       const shouldRetryWithFallback =
         (isTokenError || isModelUnavailableError || isUnexpectedModelError)
         && Boolean(nextFallbackModel)
         && nextFallbackModel !== activeModel;
 
       if (shouldRetryWithFallback) {
+        recoveryAction = "switch_model";
+        recoveryTargetModel = nextFallbackModel;
+        attempts.push({
+          attempt,
+          route: "openclaw-cli",
+          status: "failed",
+          startedAt: attemptStartedAt,
+          elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+          requestedModel,
+          selectedModel: activeModel,
+          isolatedSession: shouldIsolateSession,
+          sessionId,
+          localExecution: preferLocalExecution,
+          failureKind: failure.kind,
+          recoveryAction,
+          recoveryTargetModel,
+          error: finalError
+        });
         try {
-          await switchAgentModelForRetry(agentId, nextFallbackModel);
+          if (externalFallbackControl) {
+            await syncOpenClawAgentMainSessionRuntimeModel(agentId, nextFallbackModel);
+          } else {
+            await switchAgentModelForRetry(agentId, nextFallbackModel, {
+              explicitFallbacks: undefined
+            });
+          }
         } catch (switchError) {
           const reason = switchError instanceof Error ? switchError.message : "fallback switch failed";
           finalError = `${finalError}\n[model-fallback] ${reason}`;
@@ -1214,23 +1641,87 @@ export async function sendOpenClawAgentMessage(
 
       if (isLockError) {
         if (preferLocalExecution && attempt < maxAttempts) {
+          attempts.push({
+            attempt,
+            route: "openclaw-cli",
+            status: "failed",
+            startedAt: attemptStartedAt,
+            elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+            requestedModel,
+            selectedModel: activeModel,
+            isolatedSession: shouldIsolateSession,
+            sessionId,
+            localExecution: preferLocalExecution,
+            failureKind: failure.kind,
+            recoveryAction: "retry_same_model",
+            error: finalError
+          });
           await sleep(Math.min(1800, 400 * attempt));
           continue;
         }
+        attempts.push({
+          attempt,
+          route: "openclaw-cli",
+          status: "failed",
+          startedAt: attemptStartedAt,
+          elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+          requestedModel,
+          selectedModel: activeModel,
+          isolatedSession: shouldIsolateSession,
+          sessionId,
+          localExecution: preferLocalExecution,
+          failureKind: failure.kind,
+          recoveryAction: "abort",
+          error: finalError
+        });
         break;
       }
 
       if ((isTransportError || isUnexpectedModelError) && attempt < maxAttempts) {
+        attempts.push({
+          attempt,
+          route: "openclaw-cli",
+          status: "failed",
+          startedAt: attemptStartedAt,
+          elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+          requestedModel,
+          selectedModel: activeModel,
+          isolatedSession: shouldIsolateSession,
+          sessionId,
+          localExecution: preferLocalExecution,
+          failureKind: failure.kind,
+          recoveryAction: "retry_same_model",
+          error: finalError
+        });
         await sleep(Math.min(2200, 450 * attempt));
         continue;
       }
 
+      attempts.push({
+        attempt,
+        route: "openclaw-cli",
+        status: "failed",
+        startedAt: attemptStartedAt,
+        elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+        requestedModel,
+        selectedModel: activeModel,
+        isolatedSession: shouldIsolateSession,
+        sessionId,
+        localExecution: preferLocalExecution,
+        failureKind: failure.kind,
+        recoveryAction: "abort",
+        error: finalError
+      });
       break;
+    } finally {
+      await scopedCommandEnv?.cleanup();
     }
   }
 
   if (finalError) {
-    throw new Error(finalError);
+    const commandError = new Error(finalError) as Error & { attempts?: OpenClawAgentAttemptTrace[] };
+    commandError.attempts = attempts;
+    throw commandError;
   }
 
   const raw = (stdout || stderr).trim();
@@ -1287,7 +1778,8 @@ export async function sendOpenClawAgentMessage(
     model,
     provider: result?.meta?.agentMeta?.provider,
     durationMs: Number(result?.meta?.durationMs ?? 0) || undefined,
-    reply
+    reply,
+    attempts
   };
 }
 
@@ -1478,7 +1970,7 @@ async function buildAgent(
   const intro = managedConfig?.intro || buildAgentIntro(soul.content, responsibility);
   const lastActiveAt = sessions[0]?.updatedAt;
   const status = deriveAgentPresence(lastActiveAt, tasks);
-  const currentModel = String(agentConfig.model ?? "").trim() || "unknown";
+  const currentModel = resolveAgentConfiguredPrimaryModel(agentConfig.model) || "unknown";
   const commander = normalizeCommanderSettings(currentModel, managedConfig);
   const availableModels = buildModelCatalog(commander.selectedModel);
   const usage = buildUsageSummary(managedConfig?.usageLogs ?? [], commander.maxDailyTokens);
@@ -3013,7 +3505,7 @@ async function ensureManagedAgentConfigExists(
   title: string,
   model: string
 ) {
-  const isDesignAgent = /(design|设计|ui|ux|jeremy)/i.test(`${agentId} ${displayName} ${title}`);
+  const isDesignAgent = isDesignAgentProfile(`${agentId} ${displayName} ${title}`);
   const designPrimaryModel = normalizeModelForRouting(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
   const designFallbackModel =
     normalizeModelForRouting(process.env.DESIGN_FALLBACK_MODEL)
@@ -3185,7 +3677,11 @@ function sleep(ms: number) {
   });
 }
 
-async function switchAgentModelForRetry(agentId: string, model: string) {
+async function switchAgentModelForRetry(
+  agentId: string,
+  model: string,
+  options?: { explicitFallbacks?: string[] }
+) {
   const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
   if (!config?.agents?.list?.length) {
     throw new Error("OpenClaw config missing agents.list");
@@ -3197,11 +3693,17 @@ async function switchAgentModelForRetry(agentId: string, model: string) {
   }
 
   const normalizedModel = normalizeModelForRouting(model);
-  if (!normalizedModel || target.model === normalizedModel) {
+  const currentPrimaryModel = resolveAgentConfiguredPrimaryModel(target.model);
+  if (!normalizedModel || currentPrimaryModel === normalizedModel) {
     return;
   }
 
-  target.model = normalizedModel;
+  const explicitFallbacks = options?.explicitFallbacks;
+  target.model = buildOpenClawAgentModelConfig(
+    normalizedModel,
+    explicitFallbacks ?? resolveAgentConfiguredFallbackModels(target.model),
+    explicitFallbacks ? { forceObject: true } : undefined
+  );
   await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
 
   await prisma.managedAgentConfig.upsert({
@@ -3216,6 +3718,8 @@ async function switchAgentModelForRetry(agentId: string, model: string) {
       selectedModel: normalizedModel
     }
   });
+
+  await syncOpenClawAgentMainSessionRuntimeModel(agentId, normalizedModel);
 }
 
 async function restoreAgentSelectedModel(agentId: string, model: string) {
@@ -3234,8 +3738,11 @@ async function restoreAgentSelectedModel(agentId: string, model: string) {
     return;
   }
 
-  if (target.model !== normalizedModel) {
-    target.model = normalizedModel;
+  if (resolveAgentConfiguredPrimaryModel(target.model) !== normalizedModel) {
+    target.model = buildOpenClawAgentModelConfig(
+      normalizedModel,
+      resolveAgentConfiguredFallbackModels(target.model)
+    );
     await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
   }
 
@@ -3245,6 +3752,32 @@ async function restoreAgentSelectedModel(agentId: string, model: string) {
       selectedModel: normalizedModel
     }
   });
+
+  await syncOpenClawAgentMainSessionRuntimeModel(agentId, normalizedModel);
+}
+
+async function syncOpenClawAgentMainSessionRuntimeModel(agentId: string, model: string) {
+  const normalizedModel = normalizeModelForRouting(model);
+  if (!normalizedModel) {
+    return false;
+  }
+
+  const sessionStorePath = path.join(OPENCLAW_ROOT, "agents", agentId, "sessions", "sessions.json");
+  const sessionStore = await readJsonFile<Record<string, SessionRecord>>(sessionStorePath);
+  if (!sessionStore) {
+    return false;
+  }
+
+  const result = applyOpenClawAgentMainSessionModelSync(sessionStore, {
+    agentId,
+    model: normalizedModel
+  });
+  if (!result.changed) {
+    return false;
+  }
+
+  await writeJsonFile(sessionStorePath, result.sessionStore);
+  return true;
 }
 
 async function readTextFile(filePath: string) {
@@ -3292,39 +3825,136 @@ async function readLastChunk(filePath: string, maxBytes: number) {
   }
 }
 
-function parseOpenClawJson(raw: string) {
-  // 安全验证输入
-  if (!raw || raw.length > 10 * 1024 * 1024) { // 限制最大10MB
-    throw new Error("OpenClaw command returned invalid or too large payload");
+function sanitizeOpenClawJsonRaw(raw: string) {
+  return String(raw || "")
+    .replace(/\u0000/g, "")
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .trim();
+}
+
+function extractJsonObjectCandidates(raw: string) {
+  const candidates: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}") {
+      if (depth === 0) {
+        continue;
+      }
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        candidates.push(raw.slice(start, index + 1));
+        start = -1;
+      }
+    }
   }
 
-  // 验证JSON结构的合法性
-  if (!isValidJsonStructure(raw)) {
-    throw new Error("OpenClaw command returned malformed JSON structure");
+  return candidates;
+}
+
+function tryParseJsonObjectCandidate(raw: string) {
+  const candidate = sanitizeOpenClawJsonRaw(raw);
+  if (!candidate) {
+    return null;
   }
-
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
-
-  if (start === -1 || end === -1 || end <= start) {
-    throw new Error("OpenClaw command returned no JSON payload");
-  }
-
-  const jsonStr = raw.slice(start, end + 1);
-
-  // 验证提取的JSON长度合理性
-  if (jsonStr.length > 5 * 1024 * 1024) { // 限制JSON最大5MB
-    throw new Error("Extracted JSON payload is too large");
+  if (!isValidJsonStructure(candidate)) {
+    return null;
   }
 
   try {
-    const parsed = JSON.parse(jsonStr);
-
-    // 验证解析后的对象结构
-    if (typeof parsed !== "object" || parsed === null) {
-      throw new Error("Invalid JSON object structure");
+    const parsed = JSON.parse(candidate);
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+      return null;
     }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
 
+export function parseOpenClawJson(raw: string) {
+  const normalizedRaw = sanitizeOpenClawJsonRaw(raw);
+
+  // 安全验证输入
+  if (!normalizedRaw || normalizedRaw.length > 10 * 1024 * 1024) { // 限制最大10MB
+    throw new Error("OpenClaw command returned invalid or too large payload");
+  }
+
+  const directParsed = tryParseJsonObjectCandidate(normalizedRaw);
+  if (directParsed) {
+    return directParsed as {
+      status?: string;
+      summary?: string;
+      result?: {
+        payloads?: Array<{ text?: string; usage?: unknown; [key: string]: unknown }>;
+        meta?: {
+          durationMs?: number;
+          stopReason?: string;
+          usage?: unknown;
+          tokenUsage?: unknown;
+          agentMeta?: {
+            sessionId?: string;
+            provider?: string;
+            model?: string;
+            usage?: unknown;
+            [key: string]: unknown;
+          };
+          [key: string]: unknown;
+        };
+        usage?: unknown;
+        [key: string]: unknown;
+      };
+      usage?: unknown;
+      [key: string]: unknown;
+    };
+  }
+
+  const candidates = extractJsonObjectCandidates(normalizedRaw);
+  if (candidates.length === 0) {
+    throw new Error("OpenClaw command returned no JSON payload");
+  }
+
+  for (let index = candidates.length - 1; index >= 0; index -= 1) {
+    const jsonStr = candidates[index];
+    if (jsonStr.length > 5 * 1024 * 1024) {
+      continue;
+    }
+    const parsed = tryParseJsonObjectCandidate(jsonStr);
+    if (!parsed) {
+      continue;
+    }
     return parsed as {
       status?: string;
       summary?: string;
@@ -3350,9 +3980,9 @@ function parseOpenClawJson(raw: string) {
       usage?: unknown;
       [key: string]: unknown;
     };
-  } catch (error) {
-    throw new Error(`Failed to parse OpenClaw JSON: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
+
+  throw new Error("Failed to parse OpenClaw JSON: no valid JSON object found in mixed output");
 }
 
 function extractTokenUsageFromPayload(payload: ReturnType<typeof parseOpenClawJson>) {
@@ -3462,15 +4092,18 @@ function decodeJsonString(value: string) {
   }
 }
 
-function parseOpenClawStatusJson(raw: string) {
-  const start = raw.indexOf("{");
-  const end = raw.lastIndexOf("}");
+export function parseOpenClawStatusJson(raw: string) {
+  const parsed = tryParseJsonObjectCandidate(sanitizeOpenClawJsonRaw(raw))
+    ?? extractJsonObjectCandidates(sanitizeOpenClawJsonRaw(raw))
+      .map((candidate) => tryParseJsonObjectCandidate(candidate))
+      .filter((item): item is Record<string, unknown> => Boolean(item))
+      .at(-1);
 
-  if (start === -1 || end === -1 || end <= start) {
+  if (!parsed) {
     throw new Error("OpenClaw status returned no JSON payload");
   }
 
-  return JSON.parse(raw.slice(start, end + 1)) as {
+  return parsed as {
     runtimeVersion?: string;
     heartbeat?: {
       defaultAgentId?: string;

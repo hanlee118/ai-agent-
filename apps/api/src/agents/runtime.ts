@@ -104,6 +104,17 @@ export type StageModelAttemptTrace = {
   status: StageModelAttemptStatus;
   elapsedMs: number;
   startedAt: string;
+  attempt?: number;
+  requestedModel?: string;
+  selectedModel?: string;
+  executedModel?: string;
+  provider?: string;
+  isolatedSession?: boolean;
+  sessionId?: string;
+  localExecution?: boolean;
+  failureKind?: string;
+  recoveryAction?: string;
+  recoveryTargetModel?: string;
   error?: string;
 };
 
@@ -111,6 +122,7 @@ export type StageAgentRunResult = AgentRunResult & {
   attempts: StageModelAttemptTrace[];
   degraded?: boolean;
   skillEvidence?: Record<string, unknown> | null;
+  collaborationEvidence?: Record<string, unknown> | null;
 };
 
 type ExecutionRoute = {

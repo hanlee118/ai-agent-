@@ -781,7 +781,7 @@ function renderOfficialSiteHtml(project: ProjectDetail): {
     })
     .find((item) => /视觉定稿|preview\.html|单页预览|mockup|wireframe|design preview/i.test(String(item.name || "")));
   const previewHtml = extractRenderableHtmlPreview(String(visualPreviewCandidate?.content || ""));
-  if (previewHtml) {
+  if (previewHtml && project.status !== "completed") {
     return {
       html: wrapPreviewSnippetAsHtml(previewHtml, project.name),
       kind: "design_preview",

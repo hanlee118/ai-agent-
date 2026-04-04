@@ -6,6 +6,8 @@ export type DeliverableTemplateKind =
   | "schedule"
   | "presentation_ppt"
   | "implementation_word"
+  | "implementation_result"
+  | "runtime_delivery"
   | "design_review"
   | "visual_mockup"
   | "demo_prototype"
@@ -148,6 +150,59 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "优先给设计决策和权衡，不只给结果。",
       "对复杂模块补充输入/输出/失败处理。"
+    ]
+  },
+  implementation_result: {
+    kind: "implementation_result",
+    label: "实现结果说明模板",
+    requiredSections: [
+      "## 本轮实现范围",
+      "## 页面 / 路由结果",
+      "## 接口与数据链路",
+      "## 代码改动清单",
+      "## 验证结果与截图 / 日志",
+      "## 已知问题与未完成项"
+    ],
+    sectionBlueprint: [
+      "- 页面 / 路由至少列出 2 个真实访问路径或页面职责。",
+      "- 接口与数据链路必须写清 API、数据源、存储或状态流转。",
+      "- 代码改动清单至少包含 2 个真实文件路径。",
+      "- 验证结果必须包含命令、日志、HTTP 结果或人工回归结论。"
+    ],
+    acceptanceChecklist: [
+      "可证明存在真实实现，而不是只停留在设计或演示壳。",
+      "页面、接口、代码路径、验证结果四类证据齐全。",
+      "未完成项与风险边界清晰。"
+    ],
+    authoringRules: [
+      "不要只写“已完成”，必须写清实现证据。",
+      "优先给真实路径、接口、文件和验证结果。"
+    ]
+  },
+  runtime_delivery: {
+    kind: "runtime_delivery",
+    label: "运行地址与部署说明模板",
+    requiredSections: [
+      "## 运行地址清单",
+      "## 启动方式与环境变量",
+      "## 部署拓扑与依赖",
+      "## 联调 / 验证步骤",
+      "## 监控与回滚方案"
+    ],
+    sectionBlueprint: [
+      "- 地址清单需区分前端、后端、管理端或预发环境。",
+      "- 环境变量说明必须包含关键配置项和来源。",
+      "- 验证步骤至少给出 3 步可复现场景。",
+      "- 回滚方案必须给触发条件。"
+    ],
+    acceptanceChecklist: [
+      "第三方可按文档启动、访问和验证系统。",
+      "关键地址、启动命令、环境变量、验证步骤齐全。",
+      "部署依赖和回滚策略明确。"
+    ],
+    authoringRules: [
+      "优先写可复现步骤，不写抽象部署概念。",
+      "地址与命令必须可直接执行或核对。"
     ]
   },
   design_review: {
@@ -325,6 +380,12 @@ export function resolveDeliverableTemplate(title: string, stageType: StageType):
   if (/ppt|汇报|路演|演示文稿|slides/.test(normalized)) {
     return TEMPLATE_LIBRARY.presentation_ppt;
   }
+  if (/实现结果|implementation result|开发结果|研发结果/.test(normalized)) {
+    return TEMPLATE_LIBRARY.implementation_result;
+  }
+  if (/运行地址|部署说明|deployment|runtime delivery|运行说明/.test(normalized)) {
+    return TEMPLATE_LIBRARY.runtime_delivery;
+  }
   if (/word|实施方案|技术方案|solution|architecture/.test(normalized)) {
     return TEMPLATE_LIBRARY.implementation_word;
   }
@@ -354,7 +415,7 @@ export function resolveDeliverableTemplate(title: string, stageType: StageType):
     return TEMPLATE_LIBRARY.design_review;
   }
   if (stageType === "DEV") {
-    return TEMPLATE_LIBRARY.demo_prototype;
+    return TEMPLATE_LIBRARY.implementation_result;
   }
   if (stageType === "ACCEPT") {
     return TEMPLATE_LIBRARY.product_backfill;

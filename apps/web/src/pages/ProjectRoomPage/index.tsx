@@ -21,8 +21,10 @@ import {
   type IssueListItem,
   type ProjectAcceptanceReport,
   type ProjectExecutionRecord,
+  type ProjectExecutionProtocolPrecheck,
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
+  type SystemExecutionProtocolSnapshot,
   type ProjectTemplateGatePrecheck,
 } from '../../lib/api';
 import { agents, projects, tasks } from '../../lib/runtimeCollections';
@@ -39,6 +41,7 @@ import DesignReviewHistoryPanel, { type ProjectRoomDesignReviewHistoryItem } fro
 import ProjectAgentsPanel from './ProjectAgentsPanel';
 import AcceptanceReportModal from './AcceptanceReportModal';
 import DesignReviewModal, { type ProjectRoomDesignReviewForm } from './DesignReviewModal';
+import StageExecutionTemplateCard from './StageExecutionTemplateCard';
 import { useProjectRoomSseLogs } from './hooks/useProjectRoomSseLogs';
 import { useProjectRoomUrlState } from './hooks/useProjectRoomUrlState';
 import { useProjectRoomFinalArtifacts } from './hooks/useProjectRoomFinalArtifacts';
@@ -173,6 +176,8 @@ const ProjectRoom = ({
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
   const [templateGatePrecheck, setTemplateGatePrecheck] = useState<ProjectTemplateGatePrecheck | null>(null);
+  const [executionProtocolPrecheck, setExecutionProtocolPrecheck] = useState<ProjectExecutionProtocolPrecheck | null>(null);
+  const [executionProtocol, setExecutionProtocol] = useState<SystemExecutionProtocolSnapshot | null>(null);
   const [isLoadingTemplateGatePrecheck, setIsLoadingTemplateGatePrecheck] = useState(false);
   const [isRegeneratingTemplateGate, setIsRegeneratingTemplateGate] = useState(false);
   const [designReviewHistory, setDesignReviewHistory] = useState<ProjectRoomDesignReviewHistoryItem[]>([]);
@@ -309,7 +314,7 @@ const ProjectRoom = ({
   }, [effectiveProjectId]);
 
   const loadTemplateGatePrecheck = useCallback(async (options?: { silent?: boolean }) => {
-    if (!effectiveProjectId || !detail?.pendingApproval) {
+    if (!effectiveProjectId || !detail?.currentStage) {
       setTemplateGatePrecheck(null);
       return;
     }
@@ -325,7 +330,23 @@ const ProjectRoom = ({
     } finally {
       setIsLoadingTemplateGatePrecheck(false);
     }
-  }, [addToast, detail?.pendingApproval, effectiveProjectId]);
+  }, [addToast, detail?.currentStage, effectiveProjectId]);
+
+  const loadExecutionProtocolPrecheck = useCallback(async (options?: { silent?: boolean }) => {
+    if (!effectiveProjectId || !detail?.currentStage) {
+      setExecutionProtocolPrecheck(null);
+      return;
+    }
+    try {
+      const next = await projectsApi.getExecutionProtocolPrecheck(effectiveProjectId);
+      setExecutionProtocolPrecheck(next);
+    } catch (error) {
+      setExecutionProtocolPrecheck(null);
+      if (!options?.silent && !isProjectNotFoundError(error)) {
+        addToast(`加载执行协议预检失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    }
+  }, [addToast, detail?.currentStage, effectiveProjectId]);
 
   useEffect(() => {
     void loadProjectDetail();
@@ -334,6 +355,32 @@ const ProjectRoom = ({
   useEffect(() => {
     void loadTemplateGatePrecheck({ silent: true });
   }, [detail?.pendingApproval, detail?.currentStage, loadTemplateGatePrecheck]);
+
+  useEffect(() => {
+    void loadExecutionProtocolPrecheck({ silent: true });
+  }, [detail?.currentStage, loadExecutionProtocolPrecheck]);
+
+  useEffect(() => {
+    let canceled = false;
+
+    const loadExecutionProtocol = async () => {
+      try {
+        const snapshot = await systemApi.getExecutionProtocol();
+        if (!canceled) {
+          setExecutionProtocol(snapshot);
+        }
+      } catch {
+        if (!canceled) {
+          setExecutionProtocol(null);
+        }
+      }
+    };
+
+    void loadExecutionProtocol();
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!project.id) {
@@ -790,6 +837,10 @@ const ProjectRoom = ({
 
   const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
+  const currentStageProtocolRules = useMemo(
+    () => (executionProtocol?.stageMatrix || []).filter((item) => item.stageType === currentStageType),
+    [currentStageType, executionProtocol?.stageMatrix],
+  );
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const currentStageExecution = currentStageType ? (latestExecutionByStage.get(currentStageType) || null) : null;
   const stageApprovalBlockedReason = useMemo(() => {
@@ -960,8 +1011,9 @@ const ProjectRoom = ({
       loadFinalArtifacts(),
       loadExecutions({ silent: true }),
       loadTemplateGatePrecheck({ silent: true }),
+      loadExecutionProtocolPrecheck({ silent: true }),
     ]);
-  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadTemplateGatePrecheck]);
+  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadTemplateGatePrecheck, loadExecutionProtocolPrecheck]);
 
   useEffect(() => {
     void loadExecutions({ silent: true });
@@ -1159,6 +1211,25 @@ const ProjectRoom = ({
         window.prompt('复制以下交付物正文', content);
       }
       addToast('交付物正文已复制', 'success');
+    } catch (error) {
+      addToast(`复制失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
+  };
+
+  const handleCopyStageAgentPrompt = async (content: string) => {
+    const normalized = String(content || '').trim();
+    if (!normalized) {
+      addToast('当前阶段暂无可复制的 Agent 指令模板', 'info');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(normalized);
+      } else {
+        window.prompt('复制以下 Agent 指令模板', normalized);
+      }
+      addToast('阶段 Agent 指令模板已复制', 'success');
     } catch (error) {
       addToast(`复制失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     }
@@ -1637,6 +1708,12 @@ const ProjectRoom = ({
       addToast(error.message || '交付物未通过模板门禁，请先补齐后再验收', 'error');
       return true;
     }
+    if (error.code === 'EXECUTION_PROTOCOL_GATE_FAILED') {
+      setActiveTab('交付物');
+      addToast(error.message || '当前阶段未通过执行协议门禁，请先修复阻断项', 'error');
+      void loadProjectDetail();
+      return true;
+    }
     const required = Array.isArray(error.details?.requiredActions)
       ? (error.details.requiredActions as ProjectRequiredAction[])
       : [];
@@ -1918,30 +1995,45 @@ const ProjectRoom = ({
           ) : null}
 
           {activeTab === '阶段' ? (
-            <StageNavigator
-              currentStageLabel={currentStageLabel}
-              pendingApproval={Boolean(detail?.pendingApproval)}
-              currentStageDeliverables={currentStageDeliverables}
-              stageItems={stageItems}
-              deliverablesByStage={deliverablesByStage}
-              stageReviewAction={stageReviewAction}
-              isReviewingStage={isReviewingStage}
-              DELIVERABLE_STATUS_LABELS={DELIVERABLE_STATUS_LABELS}
-              CORE_STAGE_STATUS_LABELS={CORE_STAGE_STATUS_LABELS}
-              onPreviewDeliverable={(item) => setPreviewDeliverable(item)}
-              onApproveStage={() => { void handleApproveStage(); }}
-              onRejectStage={() => { void handleRejectStage(); }}
-              isDeliverableReadable={isDeliverableReadable}
-              roleLabel={roleLabel}
-              statusVariantByDeliverable={statusVariantByDeliverable}
-              statusVariantByStage={statusVariantByStage}
-              getStageModelLabel={getStageModelLabel}
-              getStageAcceptance={getStageAcceptance}
-              getStageDeliverableStats={getStageDeliverableStats}
-              stageLabelMap={STAGE_LABELS}
-              stageApprovalBlockedReason={stageApprovalBlockedReason}
-              onOpenRuntimeConfig={openRuntimeConfigHint}
-            />
+            <>
+              <StageExecutionTemplateCard
+                projectName={detail?.name || project.name}
+                stageType={currentStageType}
+                stageLabel={currentStageLabel}
+                stageRules={currentStageProtocolRules}
+                stageDeliverables={currentStageDeliverables}
+                stageExecutionRecords={executionRecords.filter((item) => item.stageType === currentStageType)}
+                templateGatePrecheck={templateGatePrecheck}
+                executionProtocolPrecheck={executionProtocolPrecheck}
+                requiredActions={requiredActions}
+                finalArtifacts={currentStageType === 'ACCEPT' ? finalArtifacts : null}
+                onCopyAgentPrompt={(content) => { void handleCopyStageAgentPrompt(content); }}
+              />
+              <StageNavigator
+                currentStageLabel={currentStageLabel}
+                pendingApproval={Boolean(detail?.pendingApproval)}
+                currentStageDeliverables={currentStageDeliverables}
+                stageItems={stageItems}
+                deliverablesByStage={deliverablesByStage}
+                stageReviewAction={stageReviewAction}
+                isReviewingStage={isReviewingStage}
+                DELIVERABLE_STATUS_LABELS={DELIVERABLE_STATUS_LABELS}
+                CORE_STAGE_STATUS_LABELS={CORE_STAGE_STATUS_LABELS}
+                onPreviewDeliverable={(item) => setPreviewDeliverable(item)}
+                onApproveStage={() => { void handleApproveStage(); }}
+                onRejectStage={() => { void handleRejectStage(); }}
+                isDeliverableReadable={isDeliverableReadable}
+                roleLabel={roleLabel}
+                statusVariantByDeliverable={statusVariantByDeliverable}
+                statusVariantByStage={statusVariantByStage}
+                getStageModelLabel={getStageModelLabel}
+                getStageAcceptance={getStageAcceptance}
+                getStageDeliverableStats={getStageDeliverableStats}
+                stageLabelMap={STAGE_LABELS}
+                stageApprovalBlockedReason={stageApprovalBlockedReason}
+                onOpenRuntimeConfig={openRuntimeConfigHint}
+              />
+            </>
           ) : null}
 
           {activeTab === '时间线' ? (

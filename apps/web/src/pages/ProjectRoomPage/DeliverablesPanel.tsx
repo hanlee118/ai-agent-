@@ -95,7 +95,9 @@ export default function DeliverablesPanel({
               <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
                 {finalArtifacts.readyForAcceptance
                   ? `已就绪 ${finalArtifacts.coverage.provided}/${finalArtifacts.coverage.required}`
-                  : `待补齐 ${finalArtifacts.coverage.missing} 项`}
+                  : finalArtifacts.blockingIssues.length > 0
+                    ? `阻断 ${finalArtifacts.blockingIssues.length} 项`
+                    : `待补齐 ${finalArtifacts.coverage.missing} 项`}
               </Badge>
             ) : (
               <Badge variant="default">暂无</Badge>
@@ -128,6 +130,14 @@ export default function DeliverablesPanel({
             {finalArtifacts.missingRequired.length > 0 ? (
               <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                 缺失验收产物：{finalArtifacts.missingRequired.join('、')}
+              </div>
+            ) : null}
+            {finalArtifacts.blockingIssues.length > 0 ? (
+              <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-xs text-danger space-y-1">
+                <p className="font-semibold">当前仍存在阻断项：</p>
+                {finalArtifacts.blockingIssues.map((item) => (
+                  <p key={item}>- {item}</p>
+                ))}
               </div>
             ) : null}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

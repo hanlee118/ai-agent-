@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/hanlee118/ai-agent-/actions/workflows/ci.yml/badge.svg)](https://github.com/hanlee118/ai-agent-/actions/workflows/ci.yml)
 [![Pages](https://github.com/hanlee118/ai-agent-/actions/workflows/pages.yml/badge.svg)](https://github.com/hanlee118/ai-agent-/actions/workflows/pages.yml)
-[![Version](https://img.shields.io/badge/version-1.0.1-0f172a.svg)](https://github.com/hanlee118/ai-agent-/releases)
+[![Version](https://img.shields.io/badge/version-1.0.3-0f172a.svg)](https://github.com/hanlee118/ai-agent-/releases)
 
 一个面向真实 OpenClaw 团队协作的 Agent 工作台。它把项目管理、Agent 指挥、任务治理、SOUL/SOP 配置、长期记忆、审计追踪和系统运行检查收敛到一个更接近 SaaS 管理后台的工作平台中。
 
@@ -18,7 +18,7 @@
 - 不是纯演示页面，而是可连接真实 OpenClaw 工作区的运行平台
 - 不是只看结果，而是能管理模型、执行策略、审批机制、Token 上限、长期记忆和审计日志
 
-## v1.0.1 当前已实现能力
+## v1.0.3 当前已实现能力
 
 - 自然语言创建项目，并生成理解确认卡
 - 统一查看 `Dashboard`、`Projects`、`Project Room`、`OpenClaw Workspace`、`Agents`、`Agent Commander`、`System`、`Audit`、`Settings`
@@ -59,6 +59,22 @@ flowchart LR
   A --> R["Runtime Provider"]
   R --> M["Scripted or OpenAI-compatible Model"]
 ```
+
+## Agent Team 执行协议
+
+当前平台已经把“立项 -> 分析 -> 设计 -> 研发 -> 验收 -> 回填”统一到一套更适合 Agent Team 的执行协议里：
+
+- 长期记忆默认保持开启，但只允许当前项目或高关联经验参与关键执行
+- 关键阶段优先走终端 Agent、技能驱动和真实验证
+- 每个关键阶段必须产出协作交接卡与技能执行记录
+- 关键阶段若触发 `scripted` / `degraded`，不得当作真实成功结果写回
+
+详细规则见：
+
+- [Agent Team 执行协议](docs/AGENT_TEAM_EXECUTION_PROTOCOL.md)
+- [Agent Team 立项协议 v1](docs/AGENT_TEAM_INIT_PROTOCOL.md)
+- [Agent Team 研发执行协议 v1](docs/AGENT_TEAM_DELIVERY_PROTOCOL.md)
+- [设计模型调用标准](docs/DESIGN_MODEL_POLICY.md)
 
 ## 快速开始
 
@@ -250,6 +266,7 @@ pnpm start:prod
 - [产品说明文档](docs/V1_0_1_PRODUCT_OVERVIEW.md)
 - [需求文档](docs/V1_0_1_REQUIREMENTS_SPEC.md)
 - [技术文档](docs/V1_0_0_TECHNICAL_DOCUMENTATION.md)
+- [v1.0.3 发布说明](docs/release-notes/v1.0.3.md)
 - [v1.0.1 发布说明](docs/RELEASE_NOTES_1.0.1.md)
 - [部署指南](docs/DEPLOYMENT_GUIDE.md)
 - [操作手册](docs/OPERATION_MANUAL.md)
@@ -316,14 +333,22 @@ pnpm test:acceptance
 
 ## 当前版本说明
 
-v1.0.1 是在 v1.0.0 基础上的闭环验收补丁版本。它已经通过自动化主链路验证，不再只是“页面可看”的版本，而是能对关键操作进行真实回路校验的本地生产版本。它适合作为：
+v1.0.3 是在 v1.0.2 基础上的协议执行与真实交付收敛补丁版本。它继续强化“真实执行、真实门禁、真实派工”，避免把静态演示页、模板稿或混杂日志误判成真实结果。它适合作为：
 
 - 企业 Agent 协作平台原型
 - 私有化部署的本地工作台
 - 多 Agent 团队治理底座
 - 后续 1.x 版本持续演进的基线
 
-### 2026-04-01 最新更新（收敛与验收）
+### 2026-04-04 最新更新（协议收敛、垃圾数据清理与发版）
+
+- 修复 OpenClaw `agent --json` 混合 stdout/stderr 噪音导致的 JSON 解析失败。
+- 修复 INIT 审批门禁对技能证据的误拦截，以及协作证据缺失时不能从当前交付物回填的问题。
+- 加强阶段执行卡：仅显示当前阶段相关角色按钮，并为研发 / QA 增加轻量派工摘要、阻断/全部缺口切换、纯文本/Markdown 切换。
+- 清理本地推荐测试项目 7 个，避免复测项目继续污染项目列表。
+- 清空 `apps/web/public/generated` 下历史静态生成页，避免演示残留干扰真实交付判断。
+
+### 2026-04-01 历史更新（收敛与验收）
 
 - 完成后端收敛增强：`advance` 退避恢复、门禁与健康检查链路强化。
 - 增加可重复验收脚本：`pnpm verify:repeatable:018`。

@@ -15,6 +15,7 @@ import {
   deleteProject,
   findProject,
   getDesignInterventionSignal,
+  getProjectExecutionProtocolPrecheck,
   interveneProject,
   listProjectExecutions,
   listProjectTasks,
@@ -797,7 +798,7 @@ interface CreateProjectsRouterOptions {
   renderAcceptanceReportMarkdown: (report: any) => string;
   getLatestFinalArtifactsJob: (projectId: string) => any;
   startFinalArtifactsGenerationJob: (projectId: string, options?: { force?: boolean }) => any;
-  buildProjectFinalArtifactsReport: (project: any, officialSite?: any) => any;
+  buildProjectFinalArtifactsReport: (project: any, officialSite?: any, executions?: any) => any;
   attachFinalArtifactsGeneration: (report: any, job?: any) => any;
   toFinalArtifactsJobProgress: (job?: any) => any;
   finalArtifactsJobsById: Map<string, any>;
@@ -1701,6 +1702,16 @@ router.get("/api/projects/:id/template-gate-precheck", asyncRoute(async (req, re
   res.json(precheck);
 }));
 
+router.get("/api/projects/:id/execution-protocol-precheck", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const precheck = await getProjectExecutionProtocolPrecheck(projectId);
+  if (!precheck) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  res.json(precheck);
+}));
+
 router.get("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
@@ -1847,7 +1858,11 @@ router.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
 
   const report = activeJob?.status === "completed" && activeJob.report
     ? activeJob.report
-    : buildProjectFinalArtifactsReport(project, activeJob?.officialSite);
+    : buildProjectFinalArtifactsReport(
+      project,
+      activeJob?.officialSite,
+      await listProjectExecutions(projectId, 80)
+    );
 
   res.json({
     success: true,
@@ -2076,6 +2091,18 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
             ? `${message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim()}（已自动触发交付物补齐，请稍后重试验收）`
             : message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim(),
           templateGatePrecheck
+        }
+      });
+      return;
+    }
+    if (message.startsWith("EXECUTION_PROTOCOL_GATE_FAILED:")) {
+      const protocolGatePrecheck = await getProjectExecutionProtocolPrecheck(projectId);
+      res.status(422).json({
+        success: false,
+        error: {
+          code: "EXECUTION_PROTOCOL_GATE_FAILED",
+          message: message.replace("EXECUTION_PROTOCOL_GATE_FAILED:", "").trim(),
+          protocolGatePrecheck
         }
       });
       return;

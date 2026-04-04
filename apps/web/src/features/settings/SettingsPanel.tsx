@@ -5,6 +5,8 @@ import { useSettings } from './useSettings';
 import RuntimeConfigPanel from '../runtime-config/RuntimeConfigPanel';
 import { useRuntimeConfig } from '../runtime-config/useRuntimeConfig';
 import ProductContextPanel from './ProductContextPanel';
+import ExecutionProtocolPanel from './ExecutionProtocolPanel';
+import { useExecutionProtocol } from './useExecutionProtocol';
 
 type SettingsPanelProps = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -15,12 +17,14 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
   const [isSaving, setIsSaving] = useState(false);
   const settings = useSettings();
   const runtime = useRuntimeConfig();
+  const executionProtocol = useExecutionProtocol();
 
   const handleSave = async () => {
     setIsSaving(true);
     try {
       settings.saveToStorage();
       await runtime.saveRuntimeConfig();
+      await executionProtocol.saveExecutionProtocol();
       if (onRuntimeUpdated) {
         await onRuntimeUpdated();
       }
@@ -35,6 +39,7 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
   const handleReset = () => {
     settings.resetToDefaults();
     runtime.resetRuntimeConfig();
+    executionProtocol.resetExecutionProtocol();
     addToast('设置已重置', 'info');
   };
 
@@ -117,6 +122,21 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
 
       <div className="space-y-8">
         <ProductContextPanel addToast={addToast} />
+
+        <ExecutionProtocolPanel
+          isLoading={executionProtocol.isExecutionProtocolLoading}
+          source={executionProtocol.executionProtocolSource}
+          updatedAt={executionProtocol.executionProtocolUpdatedAt}
+          locks={executionProtocol.executionProtocolLocks}
+          stageMatrix={executionProtocol.executionProtocolStageMatrix}
+          requireSkillEvidence={executionProtocol.requireSkillEvidence}
+          requireCollaborationHandoff={executionProtocol.requireCollaborationHandoff}
+          blockDegradedWrites={executionProtocol.blockDegradedWrites}
+          onRequireSkillEvidenceChange={executionProtocol.setRequireSkillEvidence}
+          onRequireCollaborationHandoffChange={executionProtocol.setRequireCollaborationHandoff}
+          onBlockDegradedWritesChange={executionProtocol.setBlockDegradedWrites}
+          onReload={() => void executionProtocol.loadExecutionProtocol()}
+        />
 
         <section className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
           <div className="px-6 py-4 border-b border-border-subtle bg-white/5">

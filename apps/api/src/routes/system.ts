@@ -23,6 +23,10 @@ import {
   updateRuntimeSettings,
   validateRuntimeSettings
 } from "../system/runtime-config.js";
+import {
+  getExecutionProtocolSnapshot,
+  updateExecutionProtocolSettings
+} from "../system/execution-protocol.js";
 import { getSystemReadiness } from "../system/readiness.js";
 import { listAuditLogs } from "../system/audit-log.js";
 import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/design-model-policy-health.js";
@@ -127,6 +131,35 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
   router.post("/runtime/validate", asyncRoute(async (_req, res) => {
     const result = await validateRuntimeSettings();
     res.status(result.ok ? 200 : 422).json(result);
+  }));
+
+  router.get("/execution-protocol", asyncRoute(async (_req, res) => {
+    res.json(await getExecutionProtocolSnapshot());
+  }));
+
+  router.put("/execution-protocol", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as {
+      requireSkillEvidence?: unknown;
+      requireCollaborationHandoff?: unknown;
+      blockDegradedWrites?: unknown;
+    };
+
+    const updated = await updateExecutionProtocolSettings({
+      requireSkillEvidence: payload.requireSkillEvidence === undefined ? undefined : Boolean(payload.requireSkillEvidence),
+      requireCollaborationHandoff: payload.requireCollaborationHandoff === undefined ? undefined : Boolean(payload.requireCollaborationHandoff),
+      blockDegradedWrites: payload.blockDegradedWrites === undefined ? undefined : Boolean(payload.blockDegradedWrites)
+    });
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "system.execution_protocol_updated",
+      resourceType: "system",
+      summary: "已更新 Agent Team 执行协议治理规则",
+      detail: JSON.stringify(updated.settings)
+    });
+
+    res.json(updated);
   }));
 
   router.get("/model-routing/self-check", asyncRoute(async (_req, res) => {

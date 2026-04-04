@@ -22,12 +22,14 @@ import {
   type TaskStatus,
   type TimelineEvent
 } from "@occ/shared";
+import type { OpenClawAgentAttemptTrace } from "@occ/shared";
 import { prisma } from "../db.js";
 import {
   getRuntimeStatus,
   previewStageModelPlan,
   runStageAgent,
-  type StageAgentRunResult
+  type StageAgentRunResult,
+  type StageModelAttemptTrace
 } from "../agents/runtime.js";
 import {
   finalizeRequirementBackfill,
@@ -59,8 +61,11 @@ import {
   getStageCompanionRoles,
   getStageRealModelGateRoles,
   getProjectStageExecutionStrategy,
+  validateTerminalCollaborationEvidence,
   validateTerminalSkillEvidence
 } from "../system/project-stage-execution.js";
+import { getExecutionProtocolSettings } from "../system/execution-protocol.js";
+import { evaluateStageExecutionProtocolGate } from "../system/stage-protocol-gates.js";
 import {
   findOpenClawAgent,
   sendOpenClawAgentMessage,
@@ -89,12 +94,13 @@ const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
   DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
-  DEV: ["技术方案与选型.md", "Demo原型说明.md"],
+  DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
 const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true").trim().toLowerCase() !== "false";
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
+const STAGE_SKILL_EVIDENCE_REQUIRED_SET = new Set<StageType>(["DESIGN", "DEV", "ACCEPT"]);
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
   /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
@@ -275,8 +281,9 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
     throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 scripted 输出，禁止通过验收。`);
   }
 
+  const protocolSettings = await getExecutionProtocolSettings();
   const degradedRows = normalizedStageExecutions.filter((row) => isExecutionDegraded(row.metadata ?? null));
-  if (degradedRows.length > 0) {
+  if (protocolSettings.blockDegradedWrites && degradedRows.length > 0) {
     throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 degraded 降级输出，禁止通过验收。`);
   }
 
@@ -702,19 +709,77 @@ function normalizeDeliverableToken(value: string) {
     .replace(/[\s._\-()（）【】\[\]{}]/g, "");
 }
 
+function detectDeliverableTemplateKindFromTitle(
+  deliverableName: string,
+  stageType: StageType
+) {
+  const normalized = String(deliverableName || "").trim().toLowerCase();
+  if (!normalized) {
+    return "generic";
+  }
+
+  // Only treat a deliverable as a concrete template match when its own title
+  // contains the identifying keywords. This avoids stage-level fallback making
+  // unrelated files (for example an auxiliary HTML page) look like a required
+  // core artifact.
+  if (/章程|charter/.test(normalized)) {
+    return resolveDeliverableTemplate("项目章程.md", stageType).kind;
+  }
+  if (/排期|里程碑|schedule|roadmap/.test(normalized)) {
+    return resolveDeliverableTemplate("项目排期方案.md", stageType).kind;
+  }
+  if (/需求分析|prd|需求文档|requirement/.test(normalized)) {
+    return resolveDeliverableTemplate("需求分析文档.md", stageType).kind;
+  }
+  if (/ppt|汇报|路演|演示文稿|slides/.test(normalized)) {
+    return resolveDeliverableTemplate("客户汇报方案.ppt.md", stageType).kind;
+  }
+  if (/实现结果|implementation result|开发结果|研发结果/.test(normalized)) {
+    return resolveDeliverableTemplate("实现结果说明.md", stageType).kind;
+  }
+  if (/运行地址|部署说明|deployment|runtime delivery|运行说明/.test(normalized)) {
+    return resolveDeliverableTemplate("运行地址与部署说明.md", stageType).kind;
+  }
+  if (/word|实施方案|技术方案|solution|architecture/.test(normalized)) {
+    return resolveDeliverableTemplate("技术方案与选型.md", stageType).kind;
+  }
+  if (/审查卡|design review|设计审查/.test(normalized)) {
+    return resolveDeliverableTemplate("设计审查卡.md", stageType).kind;
+  }
+  if (/视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/.test(normalized)) {
+    return resolveDeliverableTemplate("视觉定稿单页.preview.html.md", stageType).kind;
+  }
+  if (/demo|原型|演示页|官网/.test(normalized)) {
+    return resolveDeliverableTemplate("Demo原型说明.md", stageType).kind;
+  }
+  if (/测试|test|qa/.test(normalized)) {
+    return resolveDeliverableTemplate("测试报告.md", stageType).kind;
+  }
+  if (/回填|产品说明文档|backfill|acceptance/.test(normalized)) {
+    return resolveDeliverableTemplate("产品说明文档回填.md", stageType).kind;
+  }
+
+  return "generic";
+}
+
 function isSameCoreDeliverable(
   deliverableName: string,
   expectedName: string,
   stageType: StageType
 ) {
-  const expectedTemplate = resolveDeliverableTemplate(expectedName, stageType);
-  const candidateTemplate = resolveDeliverableTemplate(deliverableName, stageType);
-  if (expectedTemplate.kind !== "generic" && candidateTemplate.kind === expectedTemplate.kind) {
+  const expectedToken = normalizeDeliverableToken(expectedName);
+  const candidateToken = normalizeDeliverableToken(deliverableName);
+
+  if (candidateToken === expectedToken) {
     return true;
   }
 
-  const expectedToken = normalizeDeliverableToken(expectedName);
-  const candidateToken = normalizeDeliverableToken(deliverableName);
+  const expectedKind = detectDeliverableTemplateKindFromTitle(expectedName, stageType);
+  const candidateKind = detectDeliverableTemplateKindFromTitle(deliverableName, stageType);
+  if (expectedKind !== "generic" && candidateKind === expectedKind) {
+    return true;
+  }
+
   return candidateToken.includes(expectedToken) || expectedToken.includes(candidateToken);
 }
 
@@ -844,7 +909,164 @@ function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: S
   }
 }
 
-function evaluateStageFinalizeReadiness(input: {
+function buildStageProtocolDeliverables(
+  project: ProjectDetail,
+  stageType: StageType,
+  candidate?: {
+    deliverableName: string;
+    content: string;
+    status?: string;
+    createdBy?: RoleType;
+  }
+) {
+  const stageDeliverables = project.deliverables
+    .filter((item) => item.stageType === stageType)
+    .map((item) => ({
+      name: item.name,
+      content: String(item.content || ""),
+      status: item.status,
+      createdBy: item.createdBy
+    }));
+
+  if (!candidate) {
+    return stageDeliverables;
+  }
+
+  return [
+    {
+      name: candidate.deliverableName,
+      content: candidate.content,
+      status: candidate.status ?? "submitted",
+      createdBy: candidate.createdBy ?? project.currentRole
+    },
+    ...stageDeliverables.filter((item) =>
+      !isSameCoreDeliverable(item.name, candidate.deliverableName, stageType)
+    )
+  ];
+}
+
+async function evaluateStageExecutionProtocolPrecheck(input: {
+  project: ProjectDetail;
+  stageType: StageType;
+  candidate?: {
+    deliverableName: string;
+    content: string;
+    status?: string;
+    createdBy?: RoleType;
+  };
+}) {
+  const executionProtocol = await getExecutionProtocolSettings();
+  const executions = await prisma.projectExecution.findMany({
+    where: {
+      projectId: input.project.id,
+      stageType: input.stageType,
+      status: "success"
+    },
+    orderBy: { createdAt: "desc" },
+    take: 24,
+    select: {
+      role: true,
+      status: true,
+      metadata: true
+    }
+  });
+
+  return evaluateStageExecutionProtocolGate({
+    stageType: input.stageType,
+    liveBody: input.candidate?.content ?? input.project.liveSession.body,
+    deliverables: buildStageProtocolDeliverables(input.project, input.stageType, input.candidate),
+    executions,
+    requireSkillEvidence: executionProtocol.requireSkillEvidence,
+    requireCollaborationHandoff: executionProtocol.requireCollaborationHandoff
+  });
+}
+
+async function assertStageExecutionProtocolGate(project: ProjectDetail, stageType: StageType) {
+  const protocolGate = await evaluateStageExecutionProtocolPrecheck({
+    project,
+    stageType
+  });
+  const executionBlockingIssues = await collectStageExecutionBlockingIssues(project, stageType);
+
+  if (!protocolGate.passed || executionBlockingIssues.length > 0) {
+    throw new Error(
+      `EXECUTION_PROTOCOL_GATE_FAILED: ${[
+        ...protocolGate.issues,
+        ...executionBlockingIssues
+      ].join(" | ")}`
+    );
+  }
+}
+
+function hasAcceptableDevImplementationEvidence(project: ProjectDetail) {
+  const devDeliverables = project.deliverables
+    .filter((item) => item.stageType === "DEV")
+    .filter((item) => item.status === "submitted" || item.status === "approved")
+    .sort((left, right) => {
+      const statusDelta = deliverableStatusRank(right.status) - deliverableStatusRank(left.status);
+      if (statusDelta !== 0) {
+        return statusDelta;
+      }
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+
+  return devDeliverables.some((deliverable) => {
+    const alignment = evaluateDevImplementationRequirementAlignment({
+      projectName: project.name,
+      projectDescription: project.description,
+      keywords: project.parsedIntent.keywords,
+      deliverableName: deliverable.name,
+      content: String(deliverable.content || "")
+    });
+    return alignment.pass;
+  });
+}
+
+async function collectStageExecutionBlockingIssues(project: ProjectDetail, stageType: StageType) {
+  const extraRoles: RoleType[] = stageType === "ACCEPT" ? ["ROLE_QA"] : [];
+  const rolesToCheck = Array.from(new Set<RoleType>([
+    project.currentRole,
+    ...extraRoles
+  ]));
+  const latestRows = await prisma.projectExecution.findMany({
+    where: {
+      projectId: project.id,
+      stageType,
+      role: { in: rolesToCheck }
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      role: true,
+      status: true,
+      errorMessage: true,
+      createdAt: true
+    }
+  });
+
+  const issues: string[] = [];
+  for (const role of rolesToCheck) {
+    const latest = latestRows.find((row) => row.role === role);
+    if (!latest) {
+      continue;
+    }
+    if (latest.status === "failed") {
+      const label = ROLE_LABELS[role] || role;
+      issues.push(`最新${label}执行失败，需先修复后再推进（${String(latest.errorMessage || "未返回具体错误").trim()}）`);
+    }
+  }
+
+  if (stageType === "ACCEPT" && !hasAcceptableDevImplementationEvidence(project)) {
+    issues.push("缺少真实研发实现证据：当前 DEV 产物仍无法证明存在可运行页面、接口、存储、代码路径与验证结果，不能把设计预览或静态演示当作最终交付。");
+  }
+
+  return issues;
+}
+
+async function evaluateStageFinalizeReadiness(input: {
   project: ProjectDetail;
   stageType: StageType;
   deliverableName: string;
@@ -852,7 +1074,7 @@ function evaluateStageFinalizeReadiness(input: {
 }) {
   const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[input.stageType] || [];
   if (expectedNames.length === 0) {
-    return { canFinalize: true, reasons: [] as string[] };
+    return Promise.resolve({ canFinalize: true, reasons: [] as string[] });
   }
 
   const stageDeliverables = input.project.deliverables
@@ -932,9 +1154,25 @@ function evaluateStageFinalizeReadiness(input: {
     }
   }
 
+  const protocolGate = await evaluateStageExecutionProtocolPrecheck({
+    project: input.project,
+    stageType: input.stageType,
+    candidate: {
+      deliverableName: input.deliverableName,
+      content: input.content,
+      status: "submitted",
+      createdBy: input.project.currentRole
+    }
+  });
+  const executionBlockingIssues = await collectStageExecutionBlockingIssues(input.project, input.stageType);
+
   return {
-    canFinalize: reasons.length === 0,
-    reasons
+    canFinalize: reasons.length === 0 && protocolGate.passed && executionBlockingIssues.length === 0,
+    reasons: [
+      ...reasons,
+      ...(protocolGate.passed ? [] : protocolGate.issues),
+      ...executionBlockingIssues
+    ]
   };
 }
 
@@ -1001,6 +1239,39 @@ export async function getProjectTemplateGatePrecheck(projectId: string) {
     passed: checks.every((item) => item.passed),
     missingExpected,
     checks
+  };
+}
+
+export async function getProjectExecutionProtocolPrecheck(projectId: string) {
+  const project = await findProject(projectId);
+  if (!project) {
+    return undefined;
+  }
+
+  const stageType = project.currentStage as StageType;
+  const protocolGate = await evaluateStageExecutionProtocolPrecheck({
+    project,
+    stageType
+  });
+  const blockingIssues = await collectStageExecutionBlockingIssues(project, stageType);
+
+  return {
+    projectId: project.id,
+    stageType,
+    stageLabel: STAGE_LABELS[stageType],
+    generatedAt: new Date().toISOString(),
+    pass: protocolGate.passed && blockingIssues.length === 0,
+    issues: [...protocolGate.issues, ...blockingIssues],
+    blockingIssues,
+    protocolChecks: protocolGate.protocolChecks,
+    requiredSkills: protocolGate.requiredSkills,
+    collaborationRequired: protocolGate.collaborationRequired,
+    skillEvidenceRequired: protocolGate.skillEvidenceRequired,
+    collaborationSatisfiedBy: protocolGate.collaborationSatisfiedBy,
+    skillEvidenceSatisfiedBy: protocolGate.skillEvidenceSatisfiedBy,
+    deliverableCount: protocolGate.deliverableCount,
+    executionCount: protocolGate.executionCount,
+    contentChecks: protocolGate.contentChecks
   };
 }
 
@@ -1132,53 +1403,34 @@ async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail)
 
   try {
     const artifact = await generateOfficialSiteArtifact(project);
-    const currentAcceptMaxVersion = project.deliverables
-      .filter((item) => item.stageType === "ACCEPT")
-      .reduce((max, item) => Math.max(max, item.version), 0);
-
     await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      const existing = await tx.deliverable.findFirst({
+      const legacyEntries = await tx.deliverable.findMany({
         where: {
           projectId: project.id,
-          stageType: "ACCEPT",
           name: "官网演示页.html"
         },
         orderBy: { version: "desc" }
       });
 
-      const content = [
-        "# 官网演示页",
-        "",
-        artifact.kind === "design_preview"
-          ? "此页面直接渲染 DESIGN 阶段视觉定稿 HTML。"
-          : "此页面由设计/开发/验收交付物自动汇总生成。",
-        artifact.sourceDeliverableName
-          ? `渲染来源: ${artifact.sourceDeliverableName}`
-          : "渲染来源: 叙事汇总渲染",
-        `访问地址: ${artifact.publicPath}`,
-        `本地文件: ${artifact.filePaths[0]}`
-      ].join("\n");
-
-      if (existing) {
+      for (const legacy of legacyEntries) {
         await tx.deliverable.update({
-          where: { id: existing.id },
+          where: { id: legacy.id },
           data: {
-            status: "approved",
-            content,
-            updatedAt: new Date()
-          }
-        });
-      } else {
-        await tx.deliverable.create({
-          data: {
-            projectId: project.id,
-            stageType: "ACCEPT",
-            name: "官网演示页.html",
-            type: "code",
-            content,
-            version: currentAcceptMaxVersion + 1,
-            status: "approved",
-            createdBy: "ROLE_DESIGN",
+            name: artifact.kind === "design_preview" ? "设计预览快照.html" : "交付成果导航页.html",
+            stageType: artifact.kind === "design_preview" ? "DESIGN" : "ACCEPT",
+            createdBy: artifact.kind === "design_preview" ? "ROLE_DESIGN" : "ROLE_DEV",
+            content: [
+              artifact.kind === "design_preview" ? "# 设计预览快照" : "# 交付成果导航页",
+              "",
+              artifact.kind === "design_preview"
+                ? "该页面仅用于回看 DESIGN 阶段视觉预览，不得作为最终研发交付。"
+                : "该页面仅用于辅助查阅交付物，不得替代真实研发结果、运行入口和测试结论。",
+              artifact.sourceDeliverableName
+                ? `渲染来源: ${artifact.sourceDeliverableName}`
+                : "渲染来源: 交付物汇总渲染",
+              `访问地址: ${artifact.publicPath}`,
+              `本地文件: ${artifact.filePaths[0]}`
+            ].join("\n"),
             updatedAt: new Date()
           }
         });
@@ -1188,10 +1440,12 @@ async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail)
         data: {
           projectId: project.id,
           timestamp: new Date(),
-          agentId: "ROLE_DESIGN",
+          agentId: artifact.kind === "design_preview" ? "ROLE_DESIGN" : "ROLE_DEV",
           type: "system",
-          title: "官网演示页已生成",
-          content: `已生成高保真官网产物，路径：${artifact.publicPath}`,
+          title: artifact.kind === "design_preview" ? "设计预览快照已生成" : "交付成果导航页已生成",
+          content: artifact.kind === "design_preview"
+            ? `已生成设计预览快照，路径：${artifact.publicPath}。该链接仅用于看稿，不得作为最终研发交付。`
+            : `已生成交付成果导航页，路径：${artifact.publicPath}。该链接仅用于辅助查阅，不替代真实研发结果。`,
           priority: "normal"
         }
       });
@@ -1575,6 +1829,63 @@ function composeExecutionMetadata(
   };
 }
 
+function buildTerminalStageAttemptRecords(input: {
+  stageType: StageType;
+  role: RoleType;
+  agentId: string;
+  preferredModel: string | undefined;
+  startedAtMs: number;
+  attempts?: OpenClawAgentAttemptTrace[];
+  fallbackError?: string;
+}): StageModelAttemptTrace[] {
+  const route = `openclaw-terminal:${input.agentId}`;
+  const baseStartedAt = new Date(input.startedAtMs).toISOString();
+  const internalAttempts = Array.isArray(input.attempts) ? input.attempts : [];
+
+  if (internalAttempts.length > 0) {
+    return internalAttempts.map((attempt) => ({
+      stageType: input.stageType,
+      role: input.role,
+      model: String(
+        attempt.executedModel
+        ?? attempt.selectedModel
+        ?? attempt.requestedModel
+        ?? input.preferredModel
+        ?? "unknown"
+      ).trim() || "unknown",
+      route: String(attempt.route || route),
+      status: attempt.status,
+      startedAt: String(attempt.startedAt || baseStartedAt),
+      elapsedMs: Math.max(0, Number(attempt.elapsedMs ?? 0)),
+      attempt: Number(attempt.attempt ?? 0),
+      requestedModel: attempt.requestedModel,
+      selectedModel: attempt.selectedModel,
+      executedModel: attempt.executedModel,
+      provider: attempt.provider,
+      isolatedSession: attempt.isolatedSession,
+      sessionId: attempt.sessionId,
+      localExecution: attempt.localExecution,
+      failureKind: attempt.failureKind,
+      recoveryAction: attempt.recoveryAction,
+      recoveryTargetModel: attempt.recoveryTargetModel,
+      error: attempt.error
+    }));
+  }
+
+  return [
+    {
+      stageType: input.stageType,
+      role: input.role,
+      model: input.preferredModel || "unknown",
+      route,
+      status: "failed",
+      elapsedMs: Math.max(0, Date.now() - input.startedAtMs),
+      startedAt: baseStartedAt,
+      error: input.fallbackError
+    }
+  ];
+}
+
 async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Promise<StageAgentRunResult> {
   const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
   const agentId = strategy.openClawAgentId;
@@ -1584,17 +1895,6 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
   if (strategy.mode !== "terminal_agent" || !agentId) {
     throw new Error(`TERMINAL_STAGE_STRATEGY_UNAVAILABLE: ${input.stageType}/${input.role}`);
   }
-
-  const attemptTrace = {
-    stageType: input.stageType,
-    role: input.role,
-    model: preferredModels[0] || "unknown",
-    route: `openclaw-terminal:${agentId}`,
-    status: "failed" as const,
-    elapsedMs: 0,
-    startedAt: new Date(attemptStartedAt).toISOString(),
-    error: undefined as string | undefined
-  };
 
   try {
     const agent = await findOpenClawAgent(agentId);
@@ -1620,14 +1920,74 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       role: input.role,
       summary: input.summary
     });
-    const result = await sendOpenClawAgentMessage(agentId, { message: command });
+    const result = await sendOpenClawAgentMessage(agentId, {
+      message: command,
+      preferredModel: preferredModels[0],
+      fallbackModels: preferredModels.slice(1)
+    });
+    if (preferredModels[0] && result.model && String(result.model).trim() !== preferredModels[0]) {
+      try {
+        await updateOpenClawAgentSettings(agentId, {
+          selectedModel: preferredModels[0],
+          defaultModel: preferredModels[0],
+          fallbackModel: preferredModels[1] ?? preferredModels[0],
+          executionMode: strategy.executionMode,
+          requireConfirmation: strategy.requireConfirmation,
+          autoApproveMinorSteps: strategy.executionMode === "autonomous",
+          memoryEnabled: strategy.memoryEnabled
+        });
+      } catch (restoreError) {
+        console.warn(
+          `[terminal-stage] failed to restore preferred model stack for ${agentId}:`,
+          restoreError instanceof Error ? restoreError.message : String(restoreError)
+        );
+      }
+    }
     const model = String(result.model ?? preferredModels[0] ?? "").trim() || "unknown";
     const body = String(result.reply ?? "").trim() || String(result.summary ?? "").trim() || "终端 Agent 已执行，但未返回正文。";
+    const attempts = buildTerminalStageAttemptRecords({
+      stageType: input.stageType,
+      role: input.role,
+      agentId,
+      preferredModel: preferredModels[0],
+      startedAtMs: attemptStartedAt,
+      attempts: result.attempts
+    });
+    const executionProtocol = await getExecutionProtocolSettings();
     const skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
-    if (!skillEvidence.ok) {
-      throw new Error(
+    const skillEvidenceRequiredForStage =
+      executionProtocol.requireSkillEvidence && STAGE_SKILL_EVIDENCE_REQUIRED_SET.has(input.stageType);
+    if (skillEvidenceRequiredForStage && !skillEvidence.ok) {
+      const protocolError = new Error(
         `TERMINAL_SKILL_PROTOCOL_VIOLATION: missing_skills=${skillEvidence.missingSkills.join(",") || "none"}; missing_fields=${skillEvidence.missingFields.join(",") || "none"}; evidence_section=${skillEvidence.hasEvidenceSection ? "present" : "missing"}`
-      );
+      ) as Error & { attempts?: StageModelAttemptTrace[] };
+      protocolError.attempts = attempts;
+      throw protocolError;
+    }
+
+    let collaborationEvidence = validateTerminalCollaborationEvidence(body);
+    if (executionProtocol.requireCollaborationHandoff && !collaborationEvidence.ok && input.action.startsWith("project.approve.")) {
+      const currentProject = await findProject(input.projectId);
+      if (currentProject) {
+        const fallbackSource = [
+          String(currentProject.liveSession.body || "").trim(),
+          ...currentProject.deliverables
+            .filter((item) => item.stageType === input.stageType)
+            .map((item) => String(item.content || "").trim())
+            .filter(Boolean)
+        ].join("\n\n");
+        const fallbackEvidence = validateTerminalCollaborationEvidence(fallbackSource);
+        if (fallbackEvidence.ok) {
+          collaborationEvidence = fallbackEvidence;
+        }
+      }
+    }
+    if (executionProtocol.requireCollaborationHandoff && !collaborationEvidence.ok) {
+      const protocolError = new Error(
+        `TERMINAL_COLLAB_PROTOCOL_VIOLATION: missing_fields=${collaborationEvidence.missingFields.join(",") || "none"}; section=${collaborationEvidence.hasSection ? "present" : "missing"}`
+      ) as Error & { attempts?: StageModelAttemptTrace[] };
+      protocolError.attempts = attempts;
+      throw protocolError;
     }
 
     return {
@@ -1637,26 +1997,24 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       body,
       thinkingSummary: String(result.summary ?? "").trim() || `${ROLE_LABELS[input.role]} 已完成终端执行`,
       skillEvidence: skillEvidence.parsedEvidence,
-      attempts: [
-        {
-          ...attemptTrace,
-          model,
-          status: "success",
-          elapsedMs: Math.max(0, Date.now() - attemptStartedAt),
-          error: undefined
-        }
-      ]
+      collaborationEvidence: collaborationEvidence.parsedEvidence,
+      attempts
     };
   } catch (error) {
     const failedError = error instanceof Error ? error.message : String(error);
-    const terminalError = new Error(failedError) as Error & { attempts?: Prisma.InputJsonValue[] };
-    terminalError.attempts = [
-      {
-        ...attemptTrace,
-        elapsedMs: Math.max(0, Date.now() - attemptStartedAt),
-        error: failedError
-      }
-    ];
+    const terminalError = new Error(failedError) as Error & { attempts?: StageModelAttemptTrace[] };
+    const internalAttempts = Array.isArray((error as { attempts?: unknown })?.attempts)
+      ? ((error as { attempts: OpenClawAgentAttemptTrace[] }).attempts)
+      : undefined;
+    terminalError.attempts = buildTerminalStageAttemptRecords({
+      stageType: input.stageType,
+      role: input.role,
+      agentId,
+      preferredModel: preferredModels[0],
+      startedAtMs: attemptStartedAt,
+      attempts: internalAttempts,
+      fallbackError: failedError
+    });
     throw terminalError;
   }
 }
@@ -1698,15 +2056,16 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       });
     }
     const runAttempts = Array.isArray((run as { attempts?: unknown }).attempts)
-      ? ((run as { attempts: Prisma.InputJsonValue[] }).attempts)
+      ? ((run as { attempts: StageModelAttemptTrace[] }).attempts)
       : [];
 
     if (isRealModelGateEnabled()) {
+      const executionProtocol = await getExecutionProtocolSettings();
       const provider = String(run.provider || "").trim().toLowerCase();
       const degraded = Boolean((run as { degraded?: boolean }).degraded);
-      if (provider === "scripted" || degraded) {
+      if (provider === "scripted" || (executionProtocol.blockDegradedWrites && degraded)) {
         const gateError = new Error("REAL_MODEL_GATE_FAILED: 当前阶段输出触发 scripted/degraded 降级，不允许写入为成功结果。") as Error & {
-          attempts?: Prisma.InputJsonValue[];
+          attempts?: StageModelAttemptTrace[];
         };
         gateError.attempts = runAttempts;
         throw gateError;
@@ -1735,8 +2094,9 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         requiredSkills: strategy.requiredSkills,
         skillProtocol: strategy.skillProtocol,
         terminalSkillEvidence: (run as { skillEvidence?: Prisma.InputJsonValue | null }).skillEvidence ?? undefined,
+        terminalCollaborationEvidence: (run as { collaborationEvidence?: Prisma.InputJsonValue | null }).collaborationEvidence ?? undefined,
         terminalFallbackReason,
-        modelAttempts: runAttempts,
+        modelAttempts: runAttempts as unknown as Prisma.InputJsonValue,
         degraded: (run as { degraded?: boolean }).degraded ? true : undefined
       })
     });
@@ -1744,7 +2104,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
     return run;
   } catch (error) {
     const errorAttempts = Array.isArray((error as { attempts?: unknown })?.attempts)
-      ? ((error as { attempts: Prisma.InputJsonValue[] }).attempts)
+      ? ((error as { attempts: StageModelAttemptTrace[] }).attempts)
       : [];
     await persistProjectExecutionSafe({
       projectId: input.projectId,
@@ -1767,7 +2127,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         preferredModels: strategy.preferredModels,
         requiredSkills: strategy.requiredSkills,
         skillProtocol: strategy.skillProtocol,
-        modelAttempts: errorAttempts.length > 0 ? errorAttempts : undefined
+        modelAttempts: errorAttempts.length > 0 ? (errorAttempts as unknown as Prisma.InputJsonValue) : undefined
       })
     });
 
@@ -2798,6 +3158,7 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
   project = (await findProject(id)) ?? project;
   await assertCurrentStageRealModelGate(project);
   assertCoreDeliverablesTemplateGate(project, project.currentStage);
+  await assertStageExecutionProtocolGate(project, project.currentStage);
 
   const currentIndex = stageOrder.indexOf(project.currentStage);
   const currentStage = project.stages[currentIndex];
@@ -3376,7 +3737,7 @@ export async function submitCurrentStage(
   }
   const requestedFinalizeApproval = options?.finalizeApproval !== false;
   const finalizeReadiness = requestedFinalizeApproval
-    ? evaluateStageFinalizeReadiness({
+    ? await evaluateStageFinalizeReadiness({
       project,
       stageType: currentStageType,
       deliverableName,

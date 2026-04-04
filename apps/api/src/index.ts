@@ -169,7 +169,7 @@ const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
   DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
-  DEV: ["技术方案与选型.md", "Demo原型说明.md"],
+  DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
 
@@ -181,6 +181,17 @@ type StageRunAttempt = {
   status: "success" | "failed" | "skipped";
   elapsedMs: number;
   startedAt: string;
+  attempt?: number;
+  requestedModel?: string;
+  selectedModel?: string;
+  executedModel?: string;
+  provider?: string;
+  isolatedSession?: boolean;
+  sessionId?: string;
+  localExecution?: boolean;
+  failureKind?: string;
+  recoveryAction?: string;
+  recoveryTargetModel?: string;
   error?: string;
 };
 
@@ -895,6 +906,30 @@ function buildProjectRequiredActions(
       });
     }
 
+    if (project.currentStage === "ACCEPT") {
+      const hasDevEvidence = project.deliverables
+        .filter((item) => item.stageType === "DEV")
+        .filter((item) => item.status === "submitted" || item.status === "approved")
+        .some((item) =>
+          evaluateDevImplementationEvidenceForAcceptance({
+            projectName: project.name,
+            projectDescription: project.description,
+            keywords: project.parsedIntent.keywords,
+            content: String(item.content || "")
+          }).pass
+        );
+      if (!hasDevEvidence) {
+        actions.push({
+          id: "accept-missing-runtime-evidence",
+          severity: "critical",
+          title: "缺少真实研发结果，当前不能进入最终验收",
+          detail: "当前 DEV 产物还不足以证明存在真实页面、接口、存储、代码路径与联调验证。请先补齐研发实现证据，不能把设计预览或静态演示当作最终交付。",
+          action: "reconcile_deliverables",
+          ctaLabel: "补齐研发实现证据"
+        });
+      }
+    }
+
     if (project.currentStage === "DESIGN" && designIntervention.required) {
       if (!currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
         actions.push({
@@ -1461,6 +1496,7 @@ type ProjectFinalArtifactsReport = {
   currentStage: string;
   generatedAt: string;
   readyForAcceptance: boolean;
+  blockingIssues: string[];
   coverage: {
     required: number;
     provided: number;
@@ -1523,8 +1559,14 @@ const FINAL_REQUIRED_ARTIFACTS: Array<{
   {
     key: "demo",
     category: "Demo / 原型",
+    required: false,
+    patterns: [/demo|原型/i]
+  },
+  {
+    key: "runtime_delivery",
+    category: "真实开发结果（运行/联调证据）",
     required: true,
-    patterns: [/demo|原型|演示页|官网演示/i]
+    patterns: [/demo原型|技术方案|实现说明|运行说明|部署说明|联调说明/i]
   },
   {
     key: "acceptance_report",
@@ -1704,13 +1746,16 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
       step: "汇总最终验收产物",
       message: "正在生成最终验收报告..."
     });
-    const report = buildProjectFinalArtifactsReport(project, officialSite);
+    const executions = await listProjectExecutions(job.projectId, 80);
+    const report = buildProjectFinalArtifactsReport(project, officialSite, executions);
     const finishedAt = new Date().toISOString();
     update({
       status: "completed",
       progress: 100,
       step: "已完成",
-      message: "最终验收产物已生成，可开始验收。",
+      message: report.readyForAcceptance
+        ? "最终验收产物已生成，可开始验收。"
+        : `最终验收产物已生成，但仍存在阻断项：${report.blockingIssues[0] || "请检查缺失项与执行失败记录。"}`,
       finishedAt,
       report,
       officialSite
@@ -1958,6 +2003,51 @@ function pickBestDeliverable(
   })[0];
 }
 
+function buildFinalArtifactsBlockingIssues(input: {
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+  executions: Awaited<ReturnType<typeof listProjectExecutions>>;
+  officialSite?: {
+    url: string;
+    filePath?: string;
+    kind: "design_preview" | "narrative_summary";
+    sourceDeliverableName?: string;
+  };
+}) {
+  const issues: string[] = [];
+  const latestQaExecution = input.executions.find((item) =>
+    item.stageType === "ACCEPT" && item.role === "ROLE_QA"
+  );
+  if (latestQaExecution?.status === "failed") {
+    issues.push(`QA 最新一次验收执行失败：${latestQaExecution.errorMessage || "未返回具体错误"}`);
+  }
+
+  const devEvidenceReady = input.project.deliverables
+    .filter((item) => item.stageType === "DEV")
+    .filter((item) => item.status === "submitted" || item.status === "approved")
+    .some((item) =>
+      evaluateDevImplementationEvidenceForAcceptance({
+        projectName: input.project.name,
+        projectDescription: input.project.description,
+        keywords: input.project.parsedIntent.keywords,
+        content: String(item.content || "")
+      }).pass
+    );
+
+  if (!devEvidenceReady) {
+    issues.push("缺少真实研发实现证据，当前 DEV 产物还不足以证明存在可运行页面、接口、存储、代码路径与联调结果。");
+  }
+
+  if (input.officialSite?.kind === "design_preview") {
+    issues.push("当前生成链接来自 DESIGN 阶段视觉预览，只能算设计快照，不能充当最终研发交付。");
+  }
+
+  if (input.officialSite?.filePath && !existsSync(input.officialSite.filePath)) {
+    issues.push(`最终成果链接对应文件不存在：${input.officialSite.filePath}`);
+  }
+
+  return issues;
+}
+
 function buildProjectFinalArtifactsReport(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   officialSite?: {
@@ -1965,7 +2055,8 @@ function buildProjectFinalArtifactsReport(
     filePath?: string;
     kind: "design_preview" | "narrative_summary";
     sourceDeliverableName?: string;
-  }
+  },
+  executions: Awaited<ReturnType<typeof listProjectExecutions>> = []
 ): ProjectFinalArtifactsReport {
   const deliverables = [...project.deliverables]
     .sort((left, right) => {
@@ -2044,27 +2135,39 @@ function buildProjectFinalArtifactsReport(
 
   if (officialSite?.url) {
     const isDesignPreview = officialSite.kind === "design_preview";
+    const linkExists = !officialSite.filePath || existsSync(officialSite.filePath);
     const sourceHint = officialSite.sourceDeliverableName ? `，来源：${officialSite.sourceDeliverableName}` : "";
     const officialSiteExcerpt = officialSite.url
-      ? `访问地址：${officialSite.url}（${isDesignPreview ? "视觉定稿直出页" : "交付物叙事汇总页"}${sourceHint}）`
+      ? `访问地址：${officialSite.url}（${isDesignPreview ? "设计预览快照" : "交付物导航页"}${sourceHint}）`
       : officialSite.filePath
         ? `本地文件：${officialSite.filePath}`
         : "可直接打开在线演示页";
     artifacts.push({
       key: "official_site",
-      category: isDesignPreview ? "官网演示页（视觉定稿直出）" : "官网演示页（交付物汇总）",
+      category: isDesignPreview ? "设计预览快照（非最终研发成果）" : "交付成果导航页（辅助查阅）",
       required: false,
-      ready: true,
+      ready: linkExists && !isDesignPreview,
+      issue: !linkExists
+        ? "链接文件不存在，当前地址不可作为验收依据。"
+        : isDesignPreview
+          ? "该页面直接来源于 DESIGN 视觉预览，只能用于看稿，不能替代真实开发结果。"
+          : "该页面仅作为成果导航页，最终验收仍需以真实研发交付和测试结果为准。",
       source: "link",
-      name: "官网演示页",
+      name: isDesignPreview ? "设计预览快照" : "交付成果导航页",
       stageType: "ACCEPT",
-      status: "approved",
+      status: isDesignPreview ? "submitted" : "approved",
       updatedAt: new Date().toISOString(),
       url: officialSite.url,
       filePath: officialSite.filePath,
       excerpt: officialSiteExcerpt
     });
   }
+
+  const blockingIssues = buildFinalArtifactsBlockingIssues({
+    project,
+    executions,
+    officialSite
+  });
 
   const required = FINAL_REQUIRED_ARTIFACTS.filter((item) => item.required).length;
   const provided = FINAL_REQUIRED_ARTIFACTS
@@ -2074,10 +2177,11 @@ function buildProjectFinalArtifactsReport(
       return count + (matched?.ready ? 1 : 0);
     }, 0);
   const readyForAcceptance = missingRequired.length === 0
+    && blockingIssues.length === 0
     && project.status === "completed"
     && project.currentStage === "ACCEPT";
   const checklist = [
-    readyForAcceptance ? "关键验收产物齐全，可进入最终验收确认。" : "关键验收产物尚不完整，请先补齐缺失项。",
+    readyForAcceptance ? "关键验收产物齐全，且未发现阻断项，可进入最终验收确认。" : "当前仍存在阻断项或缺失项，不能进入最终验收确认。",
     "请逐项打开并核对：目标一致性、内容完整性、可演示性。",
     "确认无误后，建议执行“归档到交付物”并保留验收报告版本。"
   ];
@@ -2089,6 +2193,7 @@ function buildProjectFinalArtifactsReport(
     currentStage: project.currentStage,
     generatedAt: new Date().toISOString(),
     readyForAcceptance,
+    blockingIssues,
     coverage: {
       required,
       provided,

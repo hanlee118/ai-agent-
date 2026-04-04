@@ -28,12 +28,16 @@ test("analysis stage uses terminal execution for analyst with strongest analysis
   assert.deepEqual(strategy.requiredSkills, []);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
   assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
+  assert.equal(strategy.preferredModels[1], "openai/gpt-5.3-codex");
 });
 
 test("pm still stays on direct model execution during analysis stage", () => {
   const strategy = getProjectStageExecutionStrategy("ANALYSIS", "ROLE_PM");
   assert.equal(strategy.mode, "direct_model");
   assert.equal(strategy.allowDirectModelFallback, true);
+  assert.equal(strategy.memoryEnabled, true);
+  assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
+  assert.equal(strategy.reason.includes("高关联经验"), true);
 });
 
 test("analysis stage adds product companion for collaborative planning", () => {
