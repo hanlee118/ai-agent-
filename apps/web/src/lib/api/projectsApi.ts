@@ -110,6 +110,7 @@ export type ProjectFinalArtifactsReport = {
   currentStage: string;
   generatedAt: string;
   readyForAcceptance: boolean;
+  blockingIssues: string[];
   coverage: {
     required: number;
     provided: number;
@@ -191,6 +192,8 @@ export type ProjectRequiredAction = {
     | 'reconcile_deliverables'
     | 'refresh_runtime';
   ctaLabel: string;
+  reasonCode?: 'design_ambiguity';
+  prefillContent?: string;
 };
 
 export type ProjectTemplateGatePrecheck = {
@@ -233,6 +236,35 @@ export type ProjectTemplateGatePrecheck = {
       updatedAt: string;
       matchScore: number;
     }>;
+  }>;
+};
+
+export type ProjectExecutionProtocolPrecheck = {
+  projectId: string;
+  stageType: string;
+  stageLabel: string;
+  generatedAt: string;
+  pass: boolean;
+  issues: string[];
+  blockingIssues: string[];
+  protocolChecks: Array<{
+    key: string;
+    label: string;
+    passed: boolean;
+    category: 'collaboration' | 'skill' | 'content';
+    detail?: string;
+  }>;
+  requiredSkills: string[];
+  collaborationRequired: boolean;
+  skillEvidenceRequired: boolean;
+  collaborationSatisfiedBy: 'metadata' | 'content' | 'not_required' | 'missing';
+  skillEvidenceSatisfiedBy: 'metadata' | 'content' | 'not_required' | 'missing';
+  deliverableCount: number;
+  executionCount: number;
+  contentChecks: Array<{
+    key: string;
+    label: string;
+    passed: boolean;
   }>;
 };
 
@@ -283,6 +315,10 @@ export const projectsApi = {
       total: number;
       executions: ProjectExecutionRecord[];
     }>(`/projects/${toProjectPathId(id)}/executions?limit=${encodeURIComponent(String(limit))}`);
+  },
+
+  async getExecutionProtocolPrecheck(id: string) {
+    return request<ProjectExecutionProtocolPrecheck>(`/projects/${toProjectPathId(id)}/execution-protocol-precheck`);
   },
 
   async getCleanupCandidates() {
@@ -509,6 +545,7 @@ export const projectsApi = {
     data: {
       title?: string;
       content: string;
+      finalizeApproval?: boolean;
       designReview?: {
         visualDirection: string;
         brandTone: string;

@@ -142,6 +142,16 @@ const Dashboard = ({ onNavigate, onSelectProject, onSelectAgent, addToast, onOpe
         </div>
       </header>
 
+      <details className="rounded-xl border border-border-subtle bg-white/[0.02] px-4 py-3 text-[11px] text-slate-500">
+        <summary className="cursor-pointer select-none text-slate-400 transition-colors hover:text-slate-200">
+          联调说明（可选查看）
+        </summary>
+        <div className="mt-2 space-y-1 leading-5">
+          <p>控制台展示的是当前项目与新建项目流程的实时状态。</p>
+          <p><code>/generated/*.html</code> 仅代表已导出的交付物快照，不用于判断当前阶段是否正常。</p>
+        </div>
+      </details>
+
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         {stats.map((stat, i) => (
           <div 

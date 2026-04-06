@@ -1,4 +1,4 @@
-import { BrainCircuit, Settings, UserPlus, Workflow } from 'lucide-react';
+import { Blocks, BrainCircuit, Settings, UserPlus, Workflow } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
 import { agents, models } from '../lib/runtimeCollections';
@@ -9,10 +9,45 @@ type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   onOpenTopology: () => void;
   onOpenDeploy: () => void;
+  onOpenRoleSets: () => void;
   onOpenConfig: (id: string) => void;
 };
 
-export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, onOpenDeploy, onOpenConfig }: Props) {
+export default function AgentsPage({
+  onSelectAgent,
+  addToast,
+  onOpenTopology,
+  onOpenDeploy,
+  onOpenRoleSets,
+  onOpenConfig,
+}: Props) {
+  const resolveModelLabel = (modelKey: string) => {
+    const normalizedKey = String(modelKey || '').trim();
+    if (!normalizedKey) {
+      return '未设置模型';
+    }
+
+    const matchedById = models.find((model) => String(model.id || '').trim() === normalizedKey);
+    if (matchedById?.name) {
+      return matchedById.name;
+    }
+
+    const normalizedLower = normalizedKey.toLowerCase();
+    const matchedByName = models.find((model) => {
+      const name = String(model.name || '').trim();
+      if (!name) {
+        return false;
+      }
+      const lowerName = name.toLowerCase();
+      return lowerName === normalizedLower || lowerName.includes(normalizedLower) || normalizedLower.includes(lowerName);
+    });
+    if (matchedByName?.name) {
+      return matchedByName.name;
+    }
+
+    return normalizedKey;
+  };
+
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
       <header className="flex justify-between items-end">
@@ -21,6 +56,10 @@ export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, on
           <p className="text-slate-400 mt-1">监控和管理您的数字员工能力。</p>
         </div>
         <div className="flex gap-3">
+          <button onClick={onOpenRoleSets} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
+            <Blocks size={16} />
+            行业角色集
+          </button>
           <button onClick={onOpenTopology} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
             <Workflow size={16} />
             团队图谱
@@ -55,7 +94,7 @@ export default function AgentsPage({ onSelectAgent, addToast, onOpenTopology, on
             <div className="grid grid-cols-2 gap-4">
               <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">模型</p>
-                <p className="text-xs text-white mt-1 font-medium">{models.find((model) => model.id === agent.currentModelId)?.name || '未设置模型'}</p>
+                <p className="text-xs text-white mt-1 font-medium">{resolveModelLabel(agent.currentModelId || agent.model || '')}</p>
               </div>
               <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
                 <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">已用 Token</p>

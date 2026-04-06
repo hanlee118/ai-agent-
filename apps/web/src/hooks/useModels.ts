@@ -11,8 +11,11 @@ function mapApiModel(model: ApiModel): Model {
     totalTokens: Number(model.totalTokens || 0),
     dailyTokens: Number(model.dailyTokens || 0),
     currentTask: model.currentTask || '待分配任务',
-    latency: model.latency || 'N/A',
-    throughput: model.throughput || 'N/A',
+    latency: model.latency || 'unknown',
+    throughput: model.throughput || 'unknown',
+    tokenSource: model.tokenSource || (Number(model.totalTokens || 0) > 0 || Number(model.dailyTokens || 0) > 0 ? 'model_counter' : 'unknown'),
+    telemetryQuality: model.telemetryQuality || (Number(model.totalTokens || 0) > 0 || Number(model.dailyTokens || 0) > 0 ? 'estimated' : 'unknown'),
+    costMode: model.costMode || (Number(model.totalTokens || 0) > 0 || Number(model.dailyTokens || 0) > 0 ? 'estimated' : 'unknown'),
     logs: [],
   };
 }

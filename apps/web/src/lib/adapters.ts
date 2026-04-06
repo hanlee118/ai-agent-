@@ -445,6 +445,7 @@ function mapProjectOwner(project: OpenClawProjectDetail): string {
 function mapAgent(agent: OpenClawAgentSummary): Agent {
   const load = clamp(agent.activeSessionCount * 35 + agent.taskCount * 12 + agent.blockedTaskCount * 8, 0, 100);
   const tokenLimit = agent.commander?.maxDailyTokens ?? agent.usage?.dailyLimit ?? 100000;
+  const runtimeModel = String(agent.model || '').trim();
 
   return {
     id: agent.agentId,
@@ -452,8 +453,9 @@ function mapAgent(agent: OpenClawAgentSummary): Agent {
     role: agent.title || agent.responsibility || 'OpenClaw Agent',
     status: mapAgentStatus(agent.status, agent.activeSessionCount, agent.taskCount),
     load,
-    currentModelId: inferModelId(agent.model),
-    model: agent.model,
+    // Keep runtime model route string to avoid lossy m1/m2/m3 placeholders.
+    currentModelId: runtimeModel,
+    model: runtimeModel,
     tasks: agent.taskCount,
     memoryCount: agent.memoryEntryCount,
     tokensUsed: agent.usage?.totalTokensToday ?? 0,

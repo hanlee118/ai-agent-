@@ -141,7 +141,7 @@ export const fallbackParseNaturalLanguage = (input: string): ParsedProjectIntent
 
 export const normalizeRoleId = (value: string) => value.trim().toUpperCase();
 
-export const getAgentRoleId = (agent: { id: string; role: string }) => {
+export const getAgentRoleId = (agent: { id: string; role: string; name?: string }) => {
   const id = normalizeRoleId(agent.id);
   const role = normalizeRoleId(agent.role);
   if (id.startsWith('ROLE_')) {
@@ -150,6 +150,14 @@ export const getAgentRoleId = (agent: { id: string; role: string }) => {
   if (role.startsWith('ROLE_')) {
     return role;
   }
+
+  const profile = `${agent.name || ''} ${agent.role || ''}`.toLowerCase();
+  const matchedRole = (Object.entries(ROLE_HINTS) as Array<[string, RegExp[]]>)
+    .find(([, patterns]) => patterns.some((pattern) => pattern.test(profile)))?.[0];
+  if (matchedRole) {
+    return matchedRole;
+  }
+
   return role || id;
 };
 
@@ -167,9 +175,10 @@ export const buildAgentRecommendations = (
   const normalizedInput = input.trim();
   const domains = detectDomains(normalizedInput);
   const allowedRoleSet = new Set((options?.allowedRoleIds || []).map((role) => normalizeRoleId(role)));
-  const candidateAgents = allowedRoleSet.size > 0
+  const filteredAgents = allowedRoleSet.size > 0
     ? agents.filter((agent) => allowedRoleSet.has(getAgentRoleId(agent)))
     : agents;
+  const candidateAgents = filteredAgents.length > 0 ? filteredAgents : agents;
 
   const recommendations = candidateAgents
     .map((agent) => {

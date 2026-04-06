@@ -85,6 +85,7 @@ model SystemConfig {
   apiBaseUrl           String   @default("")
   apiKey               String   @default("")
   modelName            String   @default("")
+  executionProtocol    Json?
   adminPasswordHash    String   @default("")
   adminPasswordSalt    String   @default("")
   adminPasswordUpdatedAt DateTime?

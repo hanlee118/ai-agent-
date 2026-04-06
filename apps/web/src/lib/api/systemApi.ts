@@ -3,6 +3,8 @@ import type {
   DebateCompareLogInput,
   DebateCompareLogResult,
   RuntimeRouteHealthSnapshot,
+  SystemExecutionProtocolInput,
+  SystemExecutionProtocolSnapshot,
   SystemHealth,
   SystemRuntime,
   SystemRuntimeConfig,
@@ -24,6 +26,17 @@ export const systemApi = {
 
   async updateRuntimeConfig(data: SystemRuntimeConfigInput) {
     return request<SystemRuntimeConfig>('/system/runtime/config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async getExecutionProtocol() {
+    return request<SystemExecutionProtocolSnapshot>('/system/execution-protocol');
+  },
+
+  async updateExecutionProtocol(data: SystemExecutionProtocolInput) {
+    return request<SystemExecutionProtocolSnapshot>('/system/execution-protocol', {
       method: 'PUT',
       body: JSON.stringify(data),
     });

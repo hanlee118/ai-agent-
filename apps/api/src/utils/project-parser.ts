@@ -27,6 +27,25 @@ export function previewRequirement(description: string): ParsedIntent {
 }
 
 function collectKeywords(input: string): string[] {
+  const normalized = input.toLowerCase();
+  const domainHints: Array<{ label: string; pattern: RegExp }> = [
+    { label: "跨境电商", pattern: /跨境|cross[\s-]?border/ },
+    { label: "爆品监控", pattern: /爆品|爆量|热销|趋势商品/ },
+    { label: "选品", pattern: /选品|选款|候选商品/ },
+    { label: "跟品", pattern: /跟品|跟踪|持续追踪/ },
+    { label: "商品榜单", pattern: /榜单|排名|top\s*\d+/ },
+    { label: "TikTok", pattern: /tiktok|tik tok|抖音/ },
+    { label: "Amazon", pattern: /amazon|亚马逊/ },
+    { label: "Temu", pattern: /temu/ }
+  ];
+
+  const domainMatched = domainHints
+    .filter((item) => item.pattern.test(normalized))
+    .map((item) => item.label);
+  if (domainMatched.length >= 2) {
+    return Array.from(new Set(domainMatched)).slice(0, 8);
+  }
+
   const dictionary = [
     "智能客服",
     "工作台",
@@ -103,5 +122,5 @@ function collectRisks(input: string): string[] {
 function summarize(input: string, keywords: string[], constraints: string[]): string {
   const focus = keywords.slice(0, 3).join(" / ") || "产品主路径";
   const limit = constraints[0] ?? "按 MVP 方式推进";
-  return `系统将围绕 ${focus} 展开，优先验证项目创建、实时观测与人工闸门，并遵循「${limit}」的约束。原始需求摘要：${input.slice(0, 50)}${input.length > 50 ? "..." : ""}`;
+  return `系统将围绕 ${focus} 展开，优先交付首个可验收版本，并遵循「${limit}」约束。原始需求摘要：${input.slice(0, 50)}${input.length > 50 ? "..." : ""}`;
 }

@@ -1,7 +1,7 @@
 {
   "name": "occ-workspace",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.3",
   "packageManager": "pnpm@10.32.1",
   "scripts": {
     "dev:web": "pnpm --filter @occ/web dev",
@@ -19,6 +19,9 @@
     "daemon:start": "./scripts/daemon-start.sh",
     "daemon:stop": "./scripts/daemon-stop.sh",
     "daemon:status": "./scripts/daemon-status.sh",
+    "web:daemon:start": "./scripts/web-daemon-start.sh",
+    "web:daemon:stop": "./scripts/web-daemon-stop.sh",
+    "web:daemon:status": "./scripts/web-daemon-status.sh",
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "gen:api-types": "node scripts/generate-api-types.mjs",

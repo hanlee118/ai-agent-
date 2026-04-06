@@ -14,12 +14,15 @@ export type RoleType =
   | "ROLE_HR";
 export type TimelinePriority = "low" | "normal" | "high" | "urgent";
 export type RuntimeMode = "scripted" | "openai-compatible";
+export type ProjectStageExecutionMode = "direct_model" | "terminal_agent";
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
 export type TaskPriority = "low" | "normal" | "high";
 export type ServiceStatus = "healthy" | "degraded";
 export type RuntimeValidationStatus = "unknown" | "healthy" | "failed";
 export type NotificationSeverity = "critical" | "warning" | "info";
 export type NotificationWorkflowStatus = "open" | "acknowledged" | "resolved";
+export type ExecutionProtocolMemoryPolicy = "current_project_or_high_relevance_only";
+export type ExecutionProtocolCriticalStageMode = "terminal_agent_first";
 export type PromptTemplateScope = "global" | "project" | "personal";
 export type PromptTemplateChannel =
   | "project_room_guidance"
@@ -189,6 +192,53 @@ export interface RuntimeValidationResult {
   message: string;
   status: RuntimeValidationStatus;
   runtime: RuntimeStatus;
+}
+
+export interface ExecutionProtocolSettings {
+  memoryEnabled: boolean;
+  memoryPolicy: ExecutionProtocolMemoryPolicy;
+  criticalStageMode: ExecutionProtocolCriticalStageMode;
+  allowDirectModelFallbackForCriticalStages: boolean;
+  requireSkillEvidence: boolean;
+  requireCollaborationHandoff: boolean;
+  blockDegradedWrites: boolean;
+}
+
+export interface ExecutionProtocolLocks {
+  memoryEnabled: boolean;
+  memoryPolicy: boolean;
+  criticalStageMode: boolean;
+  allowDirectModelFallbackForCriticalStages: boolean;
+}
+
+export interface ExecutionProtocolSettingsInput {
+  requireSkillEvidence?: boolean;
+  requireCollaborationHandoff?: boolean;
+  blockDegradedWrites?: boolean;
+}
+
+export interface ExecutionProtocolStageRule {
+  stageType: StageType;
+  role: RoleType;
+  mode: ProjectStageExecutionMode;
+  openClawAgentId?: string;
+  preferredModels: string[];
+  requiredSkills: string[];
+  requiredCollaborationFields: string[];
+  memoryEnabled: boolean;
+  memoryPolicy: ExecutionProtocolMemoryPolicy;
+  allowDirectModelFallback: boolean;
+  requireSkillEvidence: boolean;
+  requireCollaborationHandoff: boolean;
+  blockDegradedWrites: boolean;
+}
+
+export interface ExecutionProtocolSnapshot {
+  source: "database" | "default";
+  updatedAt?: string;
+  settings: ExecutionProtocolSettings;
+  locks: ExecutionProtocolLocks;
+  stageMatrix: ExecutionProtocolStageRule[];
 }
 
 export interface AuthStatus {
@@ -531,6 +581,8 @@ export interface OpenClawBatchTaskUpdateInput {
 
 export interface OpenClawAgentMessageInput {
   message: string;
+  preferredModel?: string;
+  fallbackModels?: string[];
 }
 
 export interface OpenClawInstructionPreviewInput {
@@ -573,6 +625,28 @@ export interface OpenClawAgentCommandResult {
   provider?: string;
   durationMs?: number;
   reply: string;
+  attempts?: OpenClawAgentAttemptTrace[];
+}
+
+export type OpenClawAgentAttemptStatus = "success" | "failed" | "skipped";
+
+export interface OpenClawAgentAttemptTrace {
+  attempt: number;
+  route: string;
+  status: OpenClawAgentAttemptStatus;
+  startedAt: string;
+  elapsedMs: number;
+  requestedModel?: string;
+  selectedModel?: string;
+  executedModel?: string;
+  provider?: string;
+  isolatedSession?: boolean;
+  sessionId?: string;
+  localExecution?: boolean;
+  failureKind?: string;
+  recoveryAction?: string;
+  recoveryTargetModel?: string;
+  error?: string;
 }
 
 export interface OpenClawBatchAgentCommandResult {

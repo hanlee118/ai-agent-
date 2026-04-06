@@ -14,6 +14,8 @@ import {
   createProject,
   deleteProject,
   findProject,
+  getDesignInterventionSignal,
+  getProjectExecutionProtocolPrecheck,
   interveneProject,
   listProjectExecutions,
   listProjectTasks,
@@ -729,6 +731,8 @@ type ProjectRequiredAction = {
     | "reconcile_deliverables"
     | "refresh_runtime";
   ctaLabel: string;
+  reasonCode?: "design_ambiguity";
+  prefillContent?: string;
 };
 
 type ProjectRecord = NonNullable<Awaited<ReturnType<typeof findProject>>>;
@@ -785,6 +789,8 @@ interface CreateProjectsRouterOptions {
   projectAdvanceLocks: Set<string>;
   projectAdvanceJobs: Map<string, Promise<void>>;
   projectAdvanceJobErrors: Map<string, { message: string; at: string }>;
+  markProjectAdvanceCancelled: (projectId: string) => void;
+  clearProjectAdvanceCancelled: (projectId: string) => void;
   ensureManualAdvanceJob: (projectId: string) => void;
   buildProjectRequiredActions: (project: any, runtime: any) => ProjectRequiredAction[];
   formatRequiredActionsMessage: (actions: ProjectRequiredAction[]) => string;
@@ -792,7 +798,7 @@ interface CreateProjectsRouterOptions {
   renderAcceptanceReportMarkdown: (report: any) => string;
   getLatestFinalArtifactsJob: (projectId: string) => any;
   startFinalArtifactsGenerationJob: (projectId: string, options?: { force?: boolean }) => any;
-  buildProjectFinalArtifactsReport: (project: any, officialSite?: any) => any;
+  buildProjectFinalArtifactsReport: (project: any, officialSite?: any, executions?: any) => any;
   attachFinalArtifactsGeneration: (report: any, job?: any) => any;
   toFinalArtifactsJobProgress: (job?: any) => any;
   finalArtifactsJobsById: Map<string, any>;
@@ -983,12 +989,15 @@ function tryRecoverStalledAdvanceJob(input: {
 
 function isRecoverableAdvanceFailure(message: string) {
   const normalized = String(message || "").toUpperCase();
+  if (normalized.includes("REAL_MODEL_GATE_FAILED")) {
+    // 门禁失败通常需要人工修复运行时配置或链路，不应进入无限自动重试。
+    return false;
+  }
   return normalized.includes("MODEL_ATTEMPT_TIMEOUT")
     || normalized.includes("REQUEST_TIMEOUT")
     || normalized.includes("ETIMEDOUT")
     || normalized.includes("ECONNRESET")
     || normalized.includes("EAI_AGAIN")
-    || normalized.includes("REAL_MODEL_GATE_FAILED")
     || normalized.includes("STAGE_TEMPLATE_VALIDATION_FAILED");
 }
 
@@ -1004,6 +1013,14 @@ const REAL_MODEL_GATE_ACTION_ORDER: ProjectRequiredAction["action"][] = [
 function hasApprovedDesignReview(content: string) {
   const source = String(content || "");
   return source.includes("## 设计审查卡") && /审查结论:\s*通过/.test(source);
+}
+
+function hasVisualDesignPreview(content: string) {
+  const source = String(content || "");
+  return /```html[\s\S]*?```/i.test(source)
+    || /<!doctype html/i.test(source)
+    || /<html[\s>]/i.test(source)
+    || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
 }
 
 function createFallbackRequiredAction(
@@ -1043,8 +1060,8 @@ function createFallbackRequiredAction(
       return {
         id: "design-review-required",
         severity: "critical",
-        title: "设计阶段缺少通过的设计审查卡",
-        detail: "请补充并通过设计审查卡后，再进行阶段验收。",
+        title: "设计阶段缺少可确认设计审查产物",
+        detail: "请补充并通过设计审查卡，同时提供静态图或单页 HTML 视觉稿后再验收。",
         action: "open_design_review",
         ctaLabel: "提交设计审查卡"
       };
@@ -1087,6 +1104,12 @@ function buildRealModelGateRecoveryActions(input: {
   const missingStageDeliverables = currentStageDeliverables.length === 0;
   const hasDesignReview = input.project.currentStage === "DESIGN"
     && currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")));
+  const hasVisualPreview = input.project.currentStage === "DESIGN"
+    && currentStageDeliverables.some((item) =>
+      /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|preview\.html/i.test(String(item.name || ""))
+      && hasVisualDesignPreview(String(item.content || ""))
+    );
+  const designInterventionRequired = getDesignInterventionSignal(input.project).required;
   const hasBlockedTasks = input.project.tasks.some(
     (task) => task.stageType === input.project.currentStage && task.status === "blocked"
   );
@@ -1102,7 +1125,8 @@ function buildRealModelGateRecoveryActions(input: {
       return requiredByAction.has(action);
     }
     if (action === "open_design_review") {
-      return requiredByAction.has(action) || (input.project.currentStage === "DESIGN" && !hasDesignReview);
+      return requiredByAction.has(action)
+        || (input.project.currentStage === "DESIGN" && designInterventionRequired && (!hasDesignReview || !hasVisualPreview));
     }
     if (action === "resolve_blocked_tasks") {
       return hasBlockedTasks || requiredByAction.has(action);
@@ -1181,6 +1205,8 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
     projectAdvanceLocks,
     projectAdvanceJobs,
     projectAdvanceJobErrors,
+    markProjectAdvanceCancelled,
+    clearProjectAdvanceCancelled,
     ensureManualAdvanceJob,
     buildProjectRequiredActions,
     formatRequiredActionsMessage,
@@ -1343,6 +1369,7 @@ router.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
   if (!dryRun) {
     for (const id of targetIds) {
       try {
+        markProjectAdvanceCancelled(id);
         const removed = await deleteProject(id);
         if (!removed) {
           failed.push({ id, error: "not found" });
@@ -1467,6 +1494,7 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     },
     (await getRuntimeStatus()).mode
   );
+  clearProjectAdvanceCancelled(project.id);
 
   await safeAudit(req, res, {
     actorType: "admin",
@@ -1580,15 +1608,15 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
       ? buildProjectRequiredActions(latestProject, latestRuntime)
       : [];
 
-    if (lastJobError.message.startsWith("DESIGN_REVIEW_REQUIRED:")) {
+    if (lastJobError.message.startsWith("DESIGN_REVIEW_REQUIRED:") || lastJobError.message.startsWith("DESIGN_VISUAL_PREVIEW_REQUIRED:")) {
       resetProjectAdvancePollHint(projectId);
       const actions = latestRequiredActions.length > 0
         ? latestRequiredActions
         : [{
           id: "design-review-required",
           severity: "critical" as const,
-          title: "设计阶段缺少设计审查卡",
-          detail: "请补充设计审查卡后再推进。",
+          title: "设计阶段缺少可确认设计产物",
+          detail: "请补充设计审查卡并提供静态图或单页 HTML 视觉稿后再推进。",
           action: "open_design_review" as const,
           ctaLabel: "提交设计审查卡"
         }];
@@ -1667,6 +1695,16 @@ router.post("/api/projects/:id/reconcile-deliverables", asyncRoute(async (req, r
 router.get("/api/projects/:id/template-gate-precheck", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const precheck = await getProjectTemplateGatePrecheck(projectId);
+  if (!precheck) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  res.json(precheck);
+}));
+
+router.get("/api/projects/:id/execution-protocol-precheck", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const precheck = await getProjectExecutionProtocolPrecheck(projectId);
   if (!precheck) {
     res.status(404).json({ message: "Project not found" });
     return;
@@ -1820,7 +1858,11 @@ router.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
 
   const report = activeJob?.status === "completed" && activeJob.report
     ? activeJob.report
-    : buildProjectFinalArtifactsReport(project, activeJob?.officialSite);
+    : buildProjectFinalArtifactsReport(
+      project,
+      activeJob?.officialSite,
+      await listProjectExecutions(projectId, 80)
+    );
 
   res.json({
     success: true,
@@ -1951,11 +1993,18 @@ router.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
   }
 
   const artifact = await generateOfficialSiteArtifact(project);
+  const publicPath = String(artifact.publicPath || "").trim();
+  const absoluteUrl = /^https?:\/\//i.test(publicPath)
+    ? publicPath
+    : `${req.protocol}://${req.get("host")}${publicPath.startsWith("/") ? publicPath : `/${publicPath}`}`;
   res.json({
     success: true,
     data: {
       projectId,
-      url: artifact.publicPath,
+      kind: artifact.kind,
+      url: absoluteUrl,
+      publicPath,
+      sourceDeliverableName: artifact.sourceDeliverableName,
       files: artifact.filePaths
     }
   });
@@ -2021,6 +2070,10 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
       res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
       return;
     }
+    if (message.startsWith("DESIGN_VISUAL_PREVIEW_REQUIRED:")) {
+      res.status(422).json({ message: message.replace("DESIGN_VISUAL_PREVIEW_REQUIRED:", "").trim() });
+      return;
+    }
     if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {
       const templateGatePrecheck = await getProjectTemplateGatePrecheck(projectId);
       const autoReconcileEnabled = process.env.NODE_ENV !== "test";
@@ -2038,6 +2091,18 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
             ? `${message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim()}（已自动触发交付物补齐，请稍后重试验收）`
             : message.replace("STAGE_TEMPLATE_VALIDATION_FAILED:", "").trim(),
           templateGatePrecheck
+        }
+      });
+      return;
+    }
+    if (message.startsWith("EXECUTION_PROTOCOL_GATE_FAILED:")) {
+      const protocolGatePrecheck = await getProjectExecutionProtocolPrecheck(projectId);
+      res.status(422).json({
+        success: false,
+        error: {
+          code: "EXECUTION_PROTOCOL_GATE_FAILED",
+          message: message.replace("EXECUTION_PROTOCOL_GATE_FAILED:", "").trim(),
+          protocolGatePrecheck
         }
       });
       return;
@@ -2211,9 +2276,11 @@ router.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
 
 router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  markProjectAdvanceCancelled(projectId);
   const deleted = await deleteProject(projectId);
 
   if (!deleted) {
+    clearProjectAdvanceCancelled(projectId);
     res.status(404).json({ message: "Project not found" });
     return;
   }
@@ -2238,6 +2305,10 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as StageSubmissionInput;
   const content = String(payload?.content ?? "").trim();
+  const finalizeApproval =
+    typeof req.body?.finalizeApproval === "boolean"
+      ? req.body.finalizeApproval
+      : !/设计审查卡/i.test(String(payload?.title || ""));
 
   if (!content) {
     res.status(400).json({ message: "content is required" });
@@ -2250,6 +2321,8 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
       title: payload?.title,
       content,
       designReview: payload?.designReview
+    }, {
+      finalizeApproval
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "submit failed";
@@ -2259,6 +2332,10 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
     }
     if (message.startsWith("DESIGN_REVIEW_NOT_APPROVED:")) {
       res.status(422).json({ message: message.replace("DESIGN_REVIEW_NOT_APPROVED:", "").trim() });
+      return;
+    }
+    if (message.startsWith("DESIGN_VISUAL_PREVIEW_REQUIRED:")) {
+      res.status(422).json({ message: message.replace("DESIGN_VISUAL_PREVIEW_REQUIRED:", "").trim() });
       return;
     }
     if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {

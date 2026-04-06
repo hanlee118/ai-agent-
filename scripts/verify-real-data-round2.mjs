@@ -1,15 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { prisma } from "../apps/api/dist/db.js";
+import { generateSessionToken, hashSessionToken } from "../apps/api/dist/security/secret-store.js";
 
 const API_BASE = (process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
 const MAX_ROUNDS = Math.max(60, Number(process.env.MAX_ROUNDS || 220));
 const MAX_IN_PROGRESS_BONUS_ROUNDS = Math.max(30, Number(process.env.MAX_IN_PROGRESS_BONUS_ROUNDS || 240));
 const REQUEST_TIMEOUT_MS = Math.max(180000, Number(process.env.REQUEST_TIMEOUT_MS || 360000));
 const ADVANCE_TIMEOUT_MS = Math.max(240000, Number(process.env.ADVANCE_TIMEOUT_MS || 540000));
-const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || "Admin@123456").trim();
 const SKIP_RUNTIME_PREFLIGHT = String(process.env.SKIP_RUNTIME_PREFLIGHT || "").trim().toLowerCase() === "true";
 const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let SESSION_COOKIE = "";
+let API_STARTED_BY_SCRIPT = false;
 
 const requirement = "帮我搭建一个跨境电商的爆品选品跟品机器人。当某个跨境品在tiktok或者亚马逊等上的流量突然大爆时，帮我做好监控和排名，并且提供链接供我实时跟品。";
 const stageOrder = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
@@ -106,6 +109,93 @@ function writeReport(report) {
   return outPath;
 }
 
+async function ensureApiReady(logs) {
+  const health = await req("GET", "/health", null, 15000);
+  if (health.status === 200) {
+    return;
+  }
+
+  logs.push({
+    at: new Date().toISOString(),
+    type: "api_autostart",
+    status: health.status
+  });
+
+  execFileSync("pnpm", ["daemon:start"], {
+    cwd: process.cwd(),
+    stdio: "inherit"
+  });
+  API_STARTED_BY_SCRIPT = true;
+
+  for (let i = 0; i < 20; i += 1) {
+    const retry = await req("GET", "/health", null, 15000);
+    if (retry.status === 200) {
+      logs.push({
+        at: new Date().toISOString(),
+        type: "api_ready_after_autostart",
+        round: i + 1
+      });
+      return;
+    }
+    await WAIT(1000);
+  }
+
+  throw new Error("health check failed after daemon:start");
+}
+
+function stopStartedApi(logs) {
+  if (!API_STARTED_BY_SCRIPT) {
+    return;
+  }
+  try {
+    execFileSync("pnpm", ["daemon:stop"], {
+      cwd: process.cwd(),
+      stdio: "inherit"
+    });
+    logs.push({
+      at: new Date().toISOString(),
+      type: "api_stopped_after_verification"
+    });
+  } catch (error) {
+    logs.push({
+      at: new Date().toISOString(),
+      type: "api_stop_failed",
+      message: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function createTemporarySession(logs) {
+  const sessionToken = generateSessionToken();
+  await prisma.authSession.create({
+    data: {
+      tokenHash: await hashSessionToken(sessionToken),
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+    }
+  });
+  SESSION_COOKIE = `occ_session=${sessionToken}`;
+  logs.push({
+    at: new Date().toISOString(),
+    type: "auth_session_created"
+  });
+}
+
+async function cleanupTemporarySession(logs) {
+  const rawToken = SESSION_COOKIE.replace(/^occ_session=/, "").trim();
+  if (!rawToken) {
+    return;
+  }
+  await prisma.authSession.deleteMany({
+    where: {
+      tokenHash: await hashSessionToken(rawToken)
+    }
+  });
+  logs.push({
+    at: new Date().toISOString(),
+    type: "auth_session_cleaned"
+  });
+}
+
 async function ensureAuthAndRuntime(logs) {
   const authStatusResp = await req("GET", "/api/auth/status");
   if (authStatusResp.status !== 200) {
@@ -129,27 +219,6 @@ async function ensureAuthAndRuntime(logs) {
     authenticated: Boolean(authStatus.authenticated)
   });
 
-  if (!authStatus.setupComplete) {
-    const setupResp = await req("POST", "/api/auth/setup", { password: ADMIN_PASSWORD });
-    if (setupResp.status !== 201 && setupResp.status !== 409) {
-      throw new Error(`auth setup failed: ${setupResp.status} ${JSON.stringify(setupResp.body).slice(0, 500)}`);
-    }
-  }
-
-  const loginResp = await req("POST", "/api/auth/login", { password: ADMIN_PASSWORD });
-  if (loginResp.status !== 200) {
-    logs.push({
-      at: new Date().toISOString(),
-      type: "auth_login_failed",
-      status: loginResp.status
-    });
-  } else {
-    logs.push({
-      at: new Date().toISOString(),
-      type: "auth_login_ok"
-    });
-  }
-
   const runtimeResp = await req("GET", "/api/system/runtime");
   if (runtimeResp.status !== 200) {
     logs.push({
@@ -158,7 +227,7 @@ async function ensureAuthAndRuntime(logs) {
       status: runtimeResp.status
     });
     return {
-      authenticated: loginResp.status === 200,
+      authenticated: false,
       runtime: null,
       runtimeStatus: runtimeResp.status
     };
@@ -174,7 +243,7 @@ async function ensureAuthAndRuntime(logs) {
   });
 
   return {
-    authenticated: loginResp.status === 200,
+    authenticated: true,
     runtime,
     runtimeStatus: runtimeResp.status
   };
@@ -350,17 +419,15 @@ async function handleRequiredActions(project, actions, logs) {
 async function main() {
   const logs = [];
   const startedAt = new Date().toISOString();
+  try {
+    await ensureApiReady(logs);
+    await createTemporarySession(logs);
 
-  const health = await req("GET", "/health");
-  if (health.status !== 200) {
-    throw new Error(`health check failed: ${health.status}`);
-  }
-
-  const authAndRuntime = await ensureAuthAndRuntime(logs);
-  if (!SKIP_RUNTIME_PREFLIGHT) {
-    const runtime = authAndRuntime.runtime;
-    const runtimeReady = Boolean(
-      runtime
+    const authAndRuntime = await ensureAuthAndRuntime(logs);
+    if (!SKIP_RUNTIME_PREFLIGHT) {
+      const runtime = authAndRuntime.runtime;
+      const runtimeReady = Boolean(
+        runtime
       && runtime.mode === "openai-compatible"
       && runtime.requestedMode === "openai-compatible"
       && runtime.configured
@@ -401,19 +468,19 @@ async function main() {
         outPath
       }, null, 2));
       process.stderr.write(`verify-real-data-round2 blocked by runtime preflight, report: ${outPath}\n`);
-      process.exitCode = 1;
-      return;
+        process.exitCode = 1;
+        return;
+      }
     }
-  }
 
-  const createResp = await req("POST", "/api/projects", {
-    name: `real-data-round2-${Date.now()}`,
-    description: requirement,
-    team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"]
-  }, 240000);
-  if (createResp.status !== 201) {
-    throw new Error(`create project failed: ${createResp.status} ${JSON.stringify(createResp.body).slice(0, 500)}`);
-  }
+    const createResp = await req("POST", "/api/projects", {
+      name: `real-data-round2-${Date.now()}`,
+      description: requirement,
+      team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"]
+    }, 240000);
+    if (createResp.status !== 201) {
+      throw new Error(`create project failed: ${createResp.status} ${JSON.stringify(createResp.body).slice(0, 500)}`);
+    }
 
   let project = unwrap(createResp.body);
   const projectId = String(project?.id || "");
@@ -723,9 +790,14 @@ async function main() {
     quality: report.quality
   }, null, 2));
 
-  if (!report.ok) {
-    process.stderr.write(`verify-real-data-round2 failed, report: ${outPath}\n`);
-    process.exitCode = 1;
+    if (!report.ok) {
+      process.stderr.write(`verify-real-data-round2 failed, report: ${outPath}\n`);
+      process.exitCode = 1;
+    }
+  } finally {
+    await cleanupTemporarySession(logs);
+    await prisma.$disconnect();
+    stopStartedApi(logs);
   }
 }
 

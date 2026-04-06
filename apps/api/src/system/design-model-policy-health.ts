@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { prisma } from "../db.js";
 import { OPENCLAW_CONFIG_PATH } from "../openclaw/paths.js";
 import { getResolvedRuntimeExecutionConfig } from "./runtime-config.js";
+import { getProjectStageExecutionStrategy } from "./project-stage-execution.js";
 import {
   DESIGN_MODEL_FALLBACKS,
   DESIGN_MODEL_PRIMARY
@@ -45,6 +46,12 @@ type OpenClawConfigFile = {
     providers?: Record<string, { baseUrl?: string; apiKey?: string }>;
   };
 };
+
+const DESIGN_EXECUTION_STRATEGY = getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN");
+const DESIGN_AGENT_ID = DESIGN_EXECUTION_STRATEGY.openClawAgentId ?? "ROLE_DESIGN";
+const DESIGN_SELECTED_TARGET = DESIGN_EXECUTION_STRATEGY.preferredModels[0] ?? DESIGN_MODEL_PRIMARY;
+const DESIGN_FALLBACK_TARGET = DESIGN_EXECUTION_STRATEGY.preferredModels[1] ?? DESIGN_MODEL_FALLBACKS[0];
+const DESIGN_POLICY_AGENT_IDS = Array.from(new Set([DESIGN_AGENT_ID, "ROLE_DESIGN"]));
 
 export async function getDesignModelPolicyHealth() {
   const checkedAt = new Date().toISOString();
@@ -114,7 +121,7 @@ export async function getDesignModelPolicyHealth() {
   ];
 
   const designConfig = await prisma.managedAgentConfig.findUnique({
-    where: { agentId: "ROLE_DESIGN" },
+    where: { agentId: DESIGN_AGENT_ID },
     select: {
       selectedModel: true,
       fallbackModel: true,
@@ -140,7 +147,7 @@ export async function getDesignModelPolicyHealth() {
     issues.push("备选模型链全部不可用，降级策略无法执行。");
   }
   if (!selectedAligned || !fallbackAligned) {
-    issues.push("ROLE_DESIGN 配置与策略不一致（selected/fallback 未对齐标准）。");
+    issues.push(`${DESIGN_AGENT_ID} 配置与设计策略不一致（selected/fallback 未对齐标准）。`);
   }
 
   const recommendations: string[] = [];
@@ -151,7 +158,7 @@ export async function getDesignModelPolicyHealth() {
     recommendations.push("至少保证 gpt-5.3-codex 或 kimi-k2.5 可用，以满足故障自动降级。");
   }
   if (!selectedAligned || !fallbackAligned) {
-    recommendations.push("将 ROLE_DESIGN 设置为 selected=gpt-5.4，fallback=gpt-5.3-codex。");
+    recommendations.push(`将 ${DESIGN_AGENT_ID} 设置为 selected=${DESIGN_SELECTED_TARGET}，fallback=${DESIGN_FALLBACK_TARGET}。`);
   }
 
   const overallStatus =
@@ -207,31 +214,33 @@ export async function repairDesignModelPolicy() {
   const beforeSelected = before.designAgentConfig.selectedModel;
   const beforeFallback = before.designAgentConfig.fallbackModel;
 
-  const targetSelected = DESIGN_MODEL_PRIMARY;
-  const targetFallback = DESIGN_MODEL_FALLBACKS[0];
+  const targetSelected = DESIGN_SELECTED_TARGET;
+  const targetFallback = DESIGN_FALLBACK_TARGET;
 
-  await prisma.managedAgentConfig.upsert({
-    where: { agentId: "ROLE_DESIGN" },
-    create: {
-      agentId: "ROLE_DESIGN",
-      displayName: "视觉设计总监",
-      title: "ROLE_DESIGN",
-      selectedModel: targetSelected,
-      defaultModel: targetSelected,
-      fallbackModel: targetFallback,
-      executionMode: "confirm_first",
-      requireConfirmation: true,
-      autoApproveMinorSteps: false,
-      memoryEnabled: true,
-      allowedAgentIds: [],
-      toolAllowlist: []
-    },
-    update: {
-      selectedModel: targetSelected,
-      defaultModel: targetSelected,
-      fallbackModel: targetFallback
-    }
-  });
+  await Promise.all(DESIGN_POLICY_AGENT_IDS.map(async (agentId) => {
+    await prisma.managedAgentConfig.upsert({
+      where: { agentId },
+      create: {
+        agentId,
+        displayName: agentId === DESIGN_AGENT_ID ? "视觉设计总监" : agentId,
+        title: agentId === DESIGN_AGENT_ID ? "视觉设计总监" : agentId,
+        selectedModel: targetSelected,
+        defaultModel: targetSelected,
+        fallbackModel: targetFallback,
+        executionMode: "confirm_first",
+        requireConfirmation: true,
+        autoApproveMinorSteps: false,
+        memoryEnabled: true,
+        allowedAgentIds: [],
+        toolAllowlist: []
+      },
+      update: {
+        selectedModel: targetSelected,
+        defaultModel: targetSelected,
+        fallbackModel: targetFallback
+      }
+    });
+  }));
 
   const after = await getDesignModelPolicyHealth();
   const afterSelected = after.designAgentConfig.selectedModel;

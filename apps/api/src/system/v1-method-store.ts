@@ -4,7 +4,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-export type IssueSourceType = "text" | "meeting_notes" | "journey" | "competitor";
+export type IssueSourceType =
+  | "text"
+  | "meeting_notes"
+  | "journey"
+  | "competitor"
+  | "file_import"
+  | "prd";
 export type IssueStatus = "draft" | "confirmed" | "cancelled";
 export type ConflictSeverity = "critical" | "warning" | "info";
 export type RequirementValidationStatus = "pending" | "matched" | "mismatch";

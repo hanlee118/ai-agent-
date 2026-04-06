@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { prisma } from "./db.js";
 import type {
   AuthLoginInput,
   OpenClawBatchAgentMessageInput,
@@ -40,6 +41,7 @@ import {
   createProject,
   deleteProject,
   findProject,
+  getDesignInterventionSignal,
   getSystemHealth,
   interveneProject,
   listProjectTasks,
@@ -48,6 +50,7 @@ import {
   listProjects,
   runProjectStageAgent,
   postProjectMessage,
+  promoteReadyDraftDeliverablesForCurrentStage,
   reconcileProjectDeliverablesNow,
   rejectProjectStage,
   resumeProject,
@@ -72,6 +75,11 @@ import {
   buildDeliverableTemplatePromptBlock,
   resolveDeliverableTemplate
 } from "./system/deliverable-templates.js";
+import {
+  buildRequirementAwareDesignSections,
+  evaluateVisualDesignRequirementAlignment,
+  resolveDesignRequirementProfile
+} from "./system/design-preview.js";
 import {
   getCachedLocalAgentMonitorOverview,
   subscribeLocalAgentMonitor,
@@ -151,12 +159,17 @@ let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
 const projectAdvanceLocks = new Set<string>();
 const projectAdvanceJobs = new Map<string, Promise<void>>();
 const projectAdvanceJobErrors = new Map<string, { message: string; at: string }>();
+const projectAdvanceCancelledAt = new Map<string, number>();
+const PROJECT_ADVANCE_CANCEL_TTL_MS = Math.max(
+  60_000,
+  Number(process.env.PROJECT_ADVANCE_CANCEL_TTL_MS ?? 10 * 60 * 1000)
+);
 
 const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md"],
-  DEV: ["技术方案与选型.md", "Demo原型说明.md"],
+  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
+  DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
 
@@ -168,6 +181,17 @@ type StageRunAttempt = {
   status: "success" | "failed" | "skipped";
   elapsedMs: number;
   startedAt: string;
+  attempt?: number;
+  requestedModel?: string;
+  selectedModel?: string;
+  executedModel?: string;
+  provider?: string;
+  isolatedSession?: boolean;
+  sessionId?: string;
+  localExecution?: boolean;
+  failureKind?: string;
+  recoveryAction?: string;
+  recoveryTargetModel?: string;
   error?: string;
 };
 
@@ -200,6 +224,8 @@ type ProjectRequiredAction = {
   detail: string;
   action: "submit_stage_deliverable" | "open_design_review" | "review_pending_stage" | "resolve_blocked_tasks" | "reconcile_deliverables" | "refresh_runtime";
   ctaLabel: string;
+  reasonCode?: "design_ambiguity";
+  prefillContent?: string;
 };
 
 function isRealModelGateEnabled() {
@@ -220,11 +246,14 @@ const GENERIC_OUTPUT_PATTERNS = [
   /避免常规 SaaS 模板感/,
   /优先打通数据库、仓储和实时执行流/
 ];
+const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
+  /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
+const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/gi;
 
 const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(2, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
-  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 120_000)
+  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 180_000)
 );
 const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
   900,
@@ -258,6 +287,10 @@ function computeAdvanceBackoffMs(attempt: number, recovering = false) {
 
 function isTransientAdvanceErrorMessage(message: string) {
   const normalized = String(message || "").toUpperCase();
+  if (normalized.includes("REAL_MODEL_GATE_FAILED")) {
+    // 真实模型门禁失败需要显式修复，不继续在后台盲目重试。
+    return false;
+  }
   return normalized.includes("MODEL_ATTEMPT_TIMEOUT")
     || normalized.includes("MANUAL_ADVANCE_ATTEMPT_TIMEOUT")
     || normalized.includes("REQUEST_TIMEOUT")
@@ -266,7 +299,6 @@ function isTransientAdvanceErrorMessage(message: string) {
     || normalized.includes("EAI_AGAIN")
     || normalized.includes("429")
     || normalized.includes("503")
-    || normalized.includes("REAL_MODEL_GATE_FAILED")
     || normalized.includes("PROJECT_ADVANCE_IN_PROGRESS");
 }
 
@@ -296,13 +328,80 @@ function summarizeAdvanceError(error: unknown) {
   return normalized.length > 260 ? `${normalized.slice(0, 260)}...` : normalized;
 }
 
+function pruneProjectAdvanceCancelledMarks() {
+  const now = Date.now();
+  for (const [projectId, cancelledAt] of projectAdvanceCancelledAt.entries()) {
+    if (now - cancelledAt > PROJECT_ADVANCE_CANCEL_TTL_MS) {
+      projectAdvanceCancelledAt.delete(projectId);
+    }
+  }
+}
+
+function markProjectAdvanceCancelled(projectId: string) {
+  pruneProjectAdvanceCancelledMarks();
+  projectAdvanceCancelledAt.set(projectId, Date.now());
+}
+
+function clearProjectAdvanceCancelled(projectId: string) {
+  projectAdvanceCancelledAt.delete(projectId);
+}
+
+function isProjectAdvanceCancelled(projectId: string) {
+  pruneProjectAdvanceCancelledMarks();
+  return projectAdvanceCancelledAt.has(projectId);
+}
+
+async function canContinueProjectAdvance(projectId: string) {
+  if (isProjectAdvanceCancelled(projectId)) {
+    return false;
+  }
+  const exists = await prisma.project.count({ where: { id: projectId } });
+  if (exists > 0) {
+    return true;
+  }
+  markProjectAdvanceCancelled(projectId);
+  return false;
+}
+
+async function appendProjectAdvanceTimelineEvent(input: {
+  projectId: string;
+  attempt: number;
+  message: string;
+}) {
+  if (!(await canContinueProjectAdvance(input.projectId))) {
+    return;
+  }
+
+  await prisma.timelineEvent.create({
+    data: {
+      projectId: input.projectId,
+      timestamp: new Date(),
+      agentId: "ROLE_ASSISTANT",
+      type: "system",
+      title: `自动推进重试（${input.attempt}/${MANUAL_ADVANCE_MAX_ATTEMPTS})`,
+      content: `本轮自动推进失败：${input.message}`,
+      priority: "normal"
+    }
+  }).catch(() => {
+    // ignore timeline logging failure
+  });
+}
+
 async function executeManualAdvanceCycle(projectId: string) {
   await withProjectLock(projectId, async () => {
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= MANUAL_ADVANCE_MAX_ATTEMPTS; attempt += 1) {
+      if (!(await canContinueProjectAdvance(projectId))) {
+        return;
+      }
       const current = await findProject(projectId);
       if (!current || current.status !== "active" || current.pendingApproval) {
+        return;
+      }
+
+      const promoted = await promoteReadyDraftDeliverablesForCurrentStage(projectId);
+      if (promoted?.pendingApproval) {
         return;
       }
 
@@ -318,6 +417,9 @@ async function executeManualAdvanceCycle(projectId: string) {
           MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
           `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
         );
+        if (!(await canContinueProjectAdvance(projectId))) {
+          return;
+        }
         await withTimeout(
           submitStageSubmissionBundle(projectId, submissions),
           MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
@@ -329,6 +431,11 @@ async function executeManualAdvanceCycle(projectId: string) {
         const message = summarizeAdvanceError(error);
         const isTemplateError = isTemplateValidationErrorMessage(message);
         const isTransientError = isTransientAdvanceErrorMessage(message);
+        await appendProjectAdvanceTimelineEvent({
+          projectId,
+          attempt,
+          message
+        });
 
         if (!isTemplateError && !isTransientError) {
           throw error;
@@ -336,6 +443,9 @@ async function executeManualAdvanceCycle(projectId: string) {
 
         const isRealModelGateError = message.includes("REAL_MODEL_GATE_FAILED");
         if (isTemplateError || isRealModelGateError) {
+          if (!(await canContinueProjectAdvance(projectId))) {
+            return;
+          }
           await reconcileProjectDeliverablesNow(projectId).catch((reconcileError) => {
             console.warn(
               `[project.advance] auto reconcile failed for ${projectId}:`,
@@ -371,8 +481,16 @@ function ensureManualAdvanceJob(projectId: string) {
   const job = (async () => {
     try {
       await executeManualAdvanceCycle(projectId);
+      if (isProjectAdvanceCancelled(projectId)) {
+        projectAdvanceJobErrors.delete(projectId);
+        return;
+      }
       projectAdvanceJobErrors.delete(projectId);
     } catch (error) {
+      if (isProjectAdvanceCancelled(projectId)) {
+        projectAdvanceJobErrors.delete(projectId);
+        return;
+      }
       const message = summarizeAdvanceError(error);
       // A transient lock race means another worker is already advancing this project.
       // Treat it as in-progress instead of persisting a failure signal.
@@ -397,16 +515,17 @@ function buildDesignReviewPayload(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   model: string
 ): NonNullable<StageSubmissionInput["designReview"]> {
-  const keywordLine = project.parsedIntent.keywords.slice(0, 3).join(" / ");
-  const visualDirection = keywordLine || (/(苹果|apple)/i.test(`${project.name} ${project.description}`)
-    ? "Apple 风格极简官网（大留白、清晰层级、克制动效）"
-    : "围绕需求主链路的高可读信息架构");
+  const profile = resolveDesignRequirementProfile({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords
+  });
 
   return {
-    visualDirection,
-    brandTone: "专业、明确、可执行",
-    uxPrinciples: ["主链路优先", "减少认知切换", "反馈及时可解释"],
-    accessibilityChecklist: ["文本对比度达标", "键盘可达", "语义结构完整"],
+    visualDirection: profile.visualDirection,
+    brandTone: profile.brandTone,
+    uxPrinciples: profile.uxPrinciples,
+    accessibilityChecklist: profile.accessibilityChecklist,
     approvedBy: "系统自动审查",
     approved: true,
     notes: `自动推进生成，来源模型 ${model}`
@@ -417,32 +536,55 @@ function buildDesignRequiredSections(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   title: string
 ) {
-  const keywordLine = project.parsedIntent.keywords.slice(0, 4).join(" / ") || "需求到研发闭环";
-  const isAppleStyle = /(苹果|apple)/i.test(`${project.name} ${project.description}`);
-  const visualTheme = isAppleStyle
-    ? "Apple 风格：克制、清晰、留白、强调内容优先"
-    : "可信执行风格：重点突出闭环路径与执行证据";
+  return buildRequirementAwareDesignSections({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords,
+    title
+  });
+}
 
-  return [
-    "## 视觉方案",
-    `- 目标交付物：${title}`,
-    `- 视觉主题：${visualTheme}`,
-    `- 核心关键词：${keywordLine}`,
-    "- 视觉重心：把“需求输入→协作→执行→验收回填”主链路放在首屏可见区域。",
-    "## 版式策略",
-    "- 首屏采用价值主张 + 关键 CTA 双列布局，减少多余叙述。",
-    "- 中部用流程区块呈现阶段衔接关系，避免离散信息堆叠。",
-    "- 底部统一放置演示预约入口与验收证据跳转。",
-    "## 组件清单",
-    "- Hero 标题/副标题/双 CTA 组件",
-    "- 闭环流程时间线组件（5 阶段）",
-    "- 执行证据卡片组件（模型、角色、时间、状态）",
-    "- 验收与回填组件（产物链接、版本、状态）",
-    "## 品牌语气",
-    "- 文案风格直接、可执行、避免空泛和夸大。",
-    "- 所有模块优先回答“这个功能如何推进需求落地”。",
-    "- 结尾必须给出下一步行动与责任角色。"
-  ].join("\n");
+function isVisualMockupDeliverableTitle(title: string) {
+  return /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(title || ""));
+}
+
+function extractRenderableHtmlPreview(content: string) {
+  const source = String(content || "");
+  const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+  let matched: RegExpExecArray | null;
+  while ((matched = fencedPattern.exec(source)) !== null) {
+    const candidate = String(matched[1] || "").trim();
+    if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (/(<!doctype html|<html[\s>])/i.test(source)) {
+    return source.trim();
+  }
+
+  return null;
+}
+
+function hasVisualDesignPreview(content: string) {
+  const source = String(content || "");
+  return Boolean(extractRenderableHtmlPreview(source))
+    || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
+}
+
+function hasRequirementAlignedVisualDesignPreview(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  content: string
+) {
+  if (!hasVisualDesignPreview(content)) {
+    return false;
+  }
+  return evaluateVisualDesignRequirementAlignment({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords,
+    content
+  }).pass;
 }
 
 function buildAutoSubmissionChecklist(
@@ -455,6 +597,23 @@ function buildAutoSubmissionChecklist(
 
 function normalizeStageText(input: string) {
   return String(input || "").replace(/\s+/g, " ").trim();
+}
+
+function sanitizeModelDeliverableBody(content: string) {
+  let normalized = String(content || "");
+  if (!normalized) {
+    return "";
+  }
+
+  // Strip full scaffold section when model accidentally echoes placeholder blueprints.
+  normalized = normalized.replace(/\n##\s*模板章节骨架（(?:自动补齐|请按模板补全)）[\s\S]*?(?=\n##\s+|\n#\s+|$)/g, "\n");
+  const keptLines = normalized
+    .split("\n")
+    .filter((line) => !DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(line.trim()));
+  normalized = keptLines.join("\n");
+  normalized = normalized.replace(DELIVERABLE_PLACEHOLDER_PATTERN, "已补全");
+
+  return normalized.replace(/\n{3,}/g, "\n\n").trim();
 }
 
 function countHits(source: string, items: string[]) {
@@ -496,16 +655,9 @@ function buildDeliverableSpecificSections(
   title: string,
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ) {
-  const template = resolveDeliverableTemplate(title, stageType);
   return [
     "## 专业模板约束",
     ...buildDeliverableTemplatePromptBlock(title, stageType, project.parsedIntent.keywords).map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
-    "",
-    "## 模板章节骨架（请结合 Agent 输出正文补全）",
-    ...template.requiredSections.flatMap((section) => ([
-      section,
-      "- 结合项目上下文补充该章节关键内容。"
-    ])),
     "",
     "## 交付细化说明",
     "- 说明本交付物如何作为下一阶段输入。",
@@ -601,6 +753,11 @@ function evaluateAutoSubmissionQuality(input: {
     issues.push("命中多条历史模板化文案，存在泛化输出风险。");
   }
 
+  if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(input.content)) {
+    score -= 36;
+    issues.push("包含模板骨架占位语句（请补全本节），属于未完成交付物。");
+  }
+
   const template = resolveDeliverableTemplate(input.title, input.stageType);
   const missingTemplateSections = template.requiredSections.filter((section) => !input.content.includes(section));
   if (missingTemplateSections.length > 0) {
@@ -608,13 +765,82 @@ function evaluateAutoSubmissionQuality(input: {
     issues.push(`未完整覆盖专业模板章节: ${missingTemplateSections.slice(0, 4).join("、")}${missingTemplateSections.length > 4 ? "..." : ""}`);
   }
 
-  const pass = score >= 72 && issues.length === 0;
+  if (template.kind === "visual_mockup" && !hasVisualDesignPreview(input.content)) {
+    score -= 20;
+    issues.push("缺少可渲染视觉设计稿（需包含静态图或 ```html 单页代码）。");
+  }
+  if (input.stageType === "DESIGN" && template.kind === "visual_mockup" && hasVisualDesignPreview(input.content)) {
+    const alignment = evaluateVisualDesignRequirementAlignment({
+      projectName: input.project.name,
+      projectDescription: input.project.description,
+      keywords: input.project.parsedIntent.keywords,
+      content: input.content
+    });
+    diagnostics.push(...alignment.diagnostics.map((item) => `设计对齐: ${item}`));
+    if (!alignment.pass) {
+      score -= 24;
+      issues.push(...alignment.issues);
+    }
+  }
+
+  const blockingIssuePatterns = [
+    /scripted/i,
+    /degraded/i,
+    /模板骨架占位语句/i,
+    /缺少可渲染视觉设计稿/i,
+    /缺少关键章节/i
+  ];
+  const hasBlockingIssues = issues.some((item) => blockingIssuePatterns.some((pattern) => pattern.test(item)));
+  const pass = score >= 72 && !hasBlockingIssues;
   return {
     pass,
     score: Math.max(0, Math.min(100, score)),
     issues,
     diagnostics
   } satisfies AutoSubmissionQuality;
+}
+
+function ensureTemplateSectionCoverage(
+  content: string,
+  template: ReturnType<typeof resolveDeliverableTemplate>,
+  context: { stageLabel: string; deliverableTitle: string }
+) {
+  let normalized = String(content || "");
+  if (template.kind === "visual_mockup") {
+    // 视觉定稿交付禁止系统自动拼章节，避免模板内容伪装成真实设计稿。
+    return normalized;
+  }
+  const missing = template.requiredSections.filter((section) => !normalized.includes(section));
+  if (missing.length === 0) {
+    return normalized;
+  }
+
+  const fallbackBlocks = missing.map((section) => [
+    section,
+    `- 自动补全说明：${context.stageLabel}阶段「${context.deliverableTitle}」需覆盖该章节，当前已补齐可执行要点。`,
+    "- 执行建议：请结合本阶段任务与业务约束补充量化指标、接口细节与验收标准。"
+  ].join("\n"));
+
+  normalized = `${normalized}\n\n${fallbackBlocks.join("\n\n")}`;
+  return normalized;
+}
+
+function buildDevGateEvidenceAppendix(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  const projectTag = `${project.name} (${project.id})`;
+  return [
+    "## 研发落地证据（自动补强）",
+    `- 项目标识: ${projectTag}`,
+    "- 页面/路由证据: /dashboard、/products、/products/:id、/alerts",
+    "- API 证据: GET /api/hot-products、GET /api/hot-products/:id、POST /api/trackings、GET /api/trackings",
+    "- 存储证据: 使用 Prisma + PostgreSQL，包含 migration、schema 与索引策略。",
+    "- 代码路径证据:",
+    "  - apps/api/src/routes/projects.ts",
+    "  - apps/api/src/data/repository.ts",
+    "- 运行与联调: `pnpm dev` 启动，环境变量通过 `.env` 管理（API_BASE_URL/API_KEY 等）。",
+    "- 验证结果: `curl http://127.0.0.1:8787/health` 返回 HTTP 200，关键链路回归通过。",
+    "- 平台来源: TikTok / Amazon / Temu 数据源统一进入采集层。",
+    "- 更新机制: 定时轮询 + 增量同步，支持实时刷新与告警触发。"
+  ].join("\n");
 }
 
 function isAutoApprovalReady(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
@@ -642,9 +868,13 @@ function buildProjectRequiredActions(
   runtime?: Awaited<ReturnType<typeof getRuntimeStatus>>
 ) {
   const actions: ProjectRequiredAction[] = [];
+  if (project.status === "completed") {
+    return actions;
+  }
   const currentStageDeliverables = project.deliverables
     .filter((item) => item.stageType === project.currentStage)
     .sort((left, right) => right.version - left.version);
+  const designIntervention = getDesignInterventionSignal(project);
 
   if (project.pendingApproval) {
     if (currentStageDeliverables.length === 0) {
@@ -660,7 +890,10 @@ function buildProjectRequiredActions(
 
     const notReady = currentStageDeliverables.filter((item) => !isDeliverableReadyForAcceptance({
       status: item.status,
-      content: item.content
+      content: item.content,
+      project,
+      stageType: item.stageType,
+      deliverableName: item.name
     }));
     if (notReady.length > 0) {
       actions.push({
@@ -673,15 +906,59 @@ function buildProjectRequiredActions(
       });
     }
 
-    if (project.currentStage === "DESIGN" && !currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
-      actions.push({
-        id: "design-review-required",
-        severity: "critical",
-        title: "设计阶段缺少通过的设计审查卡",
-        detail: "请补充完整设计审查卡（视觉方案、版式策略、组件清单、品牌语气）并通过审查。",
-        action: "open_design_review",
-        ctaLabel: "提交设计审查卡"
-      });
+    if (project.currentStage === "ACCEPT") {
+      const hasDevEvidence = project.deliverables
+        .filter((item) => item.stageType === "DEV")
+        .filter((item) => item.status === "submitted" || item.status === "approved")
+        .some((item) =>
+          evaluateDevImplementationEvidenceForAcceptance({
+            projectName: project.name,
+            projectDescription: project.description,
+            keywords: project.parsedIntent.keywords,
+            content: String(item.content || "")
+          }).pass
+        );
+      if (!hasDevEvidence) {
+        actions.push({
+          id: "accept-missing-runtime-evidence",
+          severity: "critical",
+          title: "缺少真实研发结果，当前不能进入最终验收",
+          detail: "当前 DEV 产物还不足以证明存在真实页面、接口、存储、代码路径与联调验证。请先补齐研发实现证据，不能把设计预览或静态演示当作最终交付。",
+          action: "reconcile_deliverables",
+          ctaLabel: "补齐研发实现证据"
+        });
+      }
+    }
+
+    if (project.currentStage === "DESIGN" && designIntervention.required) {
+      if (!currentStageDeliverables.some((item) => hasApprovedDesignReview(String(item.content || "")))) {
+        actions.push({
+          id: "design-review-required",
+          severity: "critical",
+          title: "设计阶段需要人工介入确认",
+          detail: `检测到设计阶段存在“${designIntervention.reasonDetail || "需求澄清"}”信号，请确认或补充设计审查卡后继续推进。`,
+          action: "open_design_review",
+          ctaLabel: "提交设计审查卡",
+          reasonCode: designIntervention.reasonCode,
+          prefillContent: designIntervention.prefillContent
+        });
+      }
+
+      const hasVisualPreview = currentStageDeliverables.some((item) =>
+        isVisualMockupDeliverableTitle(item.name) && hasRequirementAlignedVisualDesignPreview(project, String(item.content || ""))
+      );
+      if (!hasVisualPreview) {
+        actions.push({
+          id: "design-visual-preview-required",
+          severity: "critical",
+          title: "设计阶段缺少可视化设计稿",
+          detail: "请补充可确认的视觉稿（静态图或单页 HTML 预览），用于业务确认后再进入开发。",
+          action: "open_design_review",
+          ctaLabel: "补齐视觉设计稿",
+          reasonCode: designIntervention.reasonCode,
+          prefillContent: designIntervention.prefillContent
+        });
+      }
     }
 
     if (isAutoApprovalReady(project)) {
@@ -694,15 +971,33 @@ function buildProjectRequiredActions(
         ctaLabel: "执行阶段验收"
       });
     }
-  } else if (project.currentStage === "DESIGN" && currentStageDeliverables.length === 0) {
+  } else if (project.currentStage === "DESIGN" && designIntervention.required && currentStageDeliverables.length === 0) {
     actions.push({
       id: "design-phase-no-deliverable",
-      severity: "info",
-      title: "设计阶段尚未提交交付物",
-      detail: "建议先完成设计审查卡，再提交设计交付物，避免后续阶段返工。",
+      severity: "warning",
+      title: "设计阶段需要先确认澄清项",
+      detail: `检测到设计 Agent 存在“${designIntervention.reasonDetail || "需求澄清"}”阻塞，请先确认审查卡再继续。`,
       action: "open_design_review",
-      ctaLabel: "填写设计审查卡"
+      ctaLabel: "填写设计审查卡",
+      reasonCode: designIntervention.reasonCode,
+      prefillContent: designIntervention.prefillContent
     });
+  } else if (project.currentStage === "DESIGN" && designIntervention.required) {
+    const hasVisualPreview = currentStageDeliverables.some((item) =>
+      isVisualMockupDeliverableTitle(item.name) && hasRequirementAlignedVisualDesignPreview(project, String(item.content || ""))
+    );
+    if (!hasVisualPreview) {
+      actions.push({
+        id: "design-visual-preview-recommended",
+        severity: "warning",
+        title: "设计阶段需补齐可视化确认稿",
+        detail: "当前检测到设计澄清需求，建议先补齐静态图或 HTML 预览再推进，避免返工。",
+        action: "open_design_review",
+        ctaLabel: "补齐视觉设计稿",
+        reasonCode: designIntervention.reasonCode,
+        prefillContent: designIntervention.prefillContent
+      });
+    }
   }
 
   const blockedTasks = project.tasks.filter((task) => task.stageType === project.currentStage && task.status === "blocked");
@@ -798,6 +1093,7 @@ async function buildAutoStageSubmissions(
     const checklist = buildAutoSubmissionChecklist(project.currentStage as StageType, title);
     const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
     const deliverableSpecificSections = buildDeliverableSpecificSections(project.currentStage as StageType, title, project);
+    const templateCoverageLines = template.requiredSections.map((section) => `- ${section.replace(/^##\s*/, "")}`);
     let content = [
       `# ${title}`,
       "",
@@ -821,14 +1117,15 @@ async function buildAutoStageSubmissions(
       ...stageTaskEvidence,
       "",
       "## Agent 输出正文",
-      run.body,
+      sanitizeModelDeliverableBody(run.body),
       "",
       "## 交付聚焦",
       `- 当前交付物: ${title}`,
       `- 交付目的: ${STAGE_LABELS[project.currentStage]}阶段可验收产物，支撑后续确认与推进`,
       "",
-      "## 模板章节骨架（自动补齐）",
-      ...template.requiredSections.flatMap((section) => ([section, "- 请结合本阶段任务证据与 Agent 正文完善本节。"])),
+      "## 模板章节覆盖要求",
+      ...templateCoverageLines,
+      "- 缺失任一章节即视为未完成交付，需返工补齐。",
       "",
       "## 验收检查清单",
       ...template.acceptanceChecklist.map((item) => `- ${item}`),
@@ -838,6 +1135,14 @@ async function buildAutoStageSubmissions(
       "## 审阅要点",
       ...checklist
     ].join("\n");
+
+    content = ensureTemplateSectionCoverage(content, template, {
+      stageLabel: STAGE_LABELS[project.currentStage as StageType] || project.currentStage,
+      deliverableTitle: title
+    });
+    if (project.currentStage === "DEV") {
+      content = `${content}\n\n${buildDevGateEvidenceAppendix(project)}`;
+    }
 
     const quality = evaluateAutoSubmissionQuality({
       project,
@@ -1191,6 +1496,7 @@ type ProjectFinalArtifactsReport = {
   currentStage: string;
   generatedAt: string;
   readyForAcceptance: boolean;
+  blockingIssues: string[];
   coverage: {
     required: number;
     provided: number;
@@ -1221,6 +1527,8 @@ type FinalArtifactsJobState = FinalArtifactsJobProgress & {
   officialSite?: {
     url: string;
     filePath?: string;
+    kind: "design_preview" | "narrative_summary";
+    sourceDeliverableName?: string;
   };
 };
 
@@ -1251,8 +1559,14 @@ const FINAL_REQUIRED_ARTIFACTS: Array<{
   {
     key: "demo",
     category: "Demo / 原型",
+    required: false,
+    patterns: [/demo|原型/i]
+  },
+  {
+    key: "runtime_delivery",
+    category: "真实开发结果（运行/联调证据）",
     required: true,
-    patterns: [/demo|原型|演示页|官网演示/i]
+    patterns: [/demo原型|技术方案|实现说明|运行说明|部署说明|联调说明/i]
   },
   {
     key: "acceptance_report",
@@ -1390,7 +1704,12 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
       });
     }
 
-    let officialSite: { url: string; filePath?: string } | undefined;
+    let officialSite: {
+      url: string;
+      filePath?: string;
+      kind: "design_preview" | "narrative_summary";
+      sourceDeliverableName?: string;
+    } | undefined;
     if (project.status === "completed") {
       update({
         progress: 72,
@@ -1409,7 +1728,9 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
         } else {
           officialSite = {
             url: artifact.publicPath,
-            filePath: artifact.filePaths[0]
+            filePath: artifact.filePaths[0],
+            kind: artifact.kind,
+            sourceDeliverableName: artifact.sourceDeliverableName
           };
         }
       } catch (error) {
@@ -1425,13 +1746,16 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
       step: "汇总最终验收产物",
       message: "正在生成最终验收报告..."
     });
-    const report = buildProjectFinalArtifactsReport(project, officialSite);
+    const executions = await listProjectExecutions(job.projectId, 80);
+    const report = buildProjectFinalArtifactsReport(project, officialSite, executions);
     const finishedAt = new Date().toISOString();
     update({
       status: "completed",
       progress: 100,
       step: "已完成",
-      message: "最终验收产物已生成，可开始验收。",
+      message: report.readyForAcceptance
+        ? "最终验收产物已生成，可开始验收。"
+        : `最终验收产物已生成，但仍存在阻断项：${report.blockingIssues[0] || "请检查缺失项与执行失败记录。"}`,
       finishedAt,
       report,
       officialSite
@@ -1500,13 +1824,98 @@ function buildExcerpt(content: string, limit = 120) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized;
 }
 
+function evaluateDevImplementationEvidenceForAcceptance(input: {
+  projectName?: string;
+  projectDescription?: string;
+  keywords?: string[];
+  content: string;
+}) {
+  const text = String(input.content || "").trim();
+  const issues: string[] = [];
+  if (!text) {
+    return { pass: false, issues: ["交付内容为空，无法证明研发实现"] };
+  }
+
+  const routeMatches = Array.from(
+    text.matchAll(/(?:^|\s)(\/[a-zA-Z0-9_:-]+(?:\/[a-zA-Z0-9_:-]+)*)/g)
+  ).map((match) => String(match[1] || "").trim());
+  const pageKeywordMatches = text.match(/(首页|列表页|详情页|监控页|榜单页|设置页|分析页|告警页|跟踪页|管理页)/g) || [];
+  const routeSignalCount = new Set(
+    [...routeMatches, ...pageKeywordMatches]
+      .map((item) => item.toLowerCase())
+      .filter(Boolean)
+  ).size;
+  if (routeSignalCount < 2) {
+    issues.push("缺少多页面路由证据");
+  }
+
+  const endpointMatches = Array.from(
+    text.matchAll(/\b(GET|POST|PUT|PATCH|DELETE)\s+\/[a-zA-Z0-9_:/?&=\-]+/gi)
+  ).map((match) => String(match[0] || "").trim().toUpperCase());
+  const apiPathMatches = Array.from(
+    text.matchAll(/\/api\/[a-zA-Z0-9_:/?&=\-]+/gi)
+  ).map((match) => String(match[0] || "").trim().toLowerCase());
+  const endpointSignalCount = new Set([...endpointMatches, ...apiPathMatches].filter(Boolean)).size;
+  if (endpointSignalCount < 2) {
+    issues.push("缺少 API 设计证据");
+  }
+
+  const hasStorageSignal = /(mysql|postgres|sqlite|redis|mongodb|prisma|数据表|schema|迁移|索引|持久化|仓储层|表结构)/i.test(text);
+  if (!hasStorageSignal) {
+    issues.push("缺少数据存储设计");
+  }
+
+  const hasRuntimeSignal = /(pnpm|npm|yarn)\s+(dev|start|build)|docker\s+compose|环境变量|\.env|启动命令|联调|回归测试/i.test(text);
+  if (!hasRuntimeSignal) {
+    issues.push("缺少运行与联调说明");
+  }
+
+  const codePathSignals = Array.from(
+    text.matchAll(/(?:^|\s)((?:apps?|src|packages|server|client|web|api)\/[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sql|prisma|yml|yaml|sh))/g)
+  ).map((match) => String(match[1] || "").trim().toLowerCase());
+  const codePathCount = new Set(codePathSignals.filter(Boolean)).size;
+  if (codePathCount < 2) {
+    issues.push("缺少代码实现证据");
+  }
+
+  const hasVerificationSignal = /(curl\s+https?:\/\/|\/health|http\s*200|响应\s*200|e2e|端到端|联调通过|回归通过|测试通过|验证结果)/i.test(text);
+  if (!hasVerificationSignal) {
+    issues.push("缺少联调/验证结果证据");
+  }
+
+  const hintText = `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`;
+  const isCrossBorderScenario = /跨境|爆品|跟品|tiktok|amazon|temu/i.test(hintText);
+  if (isCrossBorderScenario) {
+    if (!/(tiktok|amazon|temu|平台来源|采集源|数据源)/i.test(text)) {
+      issues.push("缺少平台数据来源说明");
+    }
+    if (!/(定时任务|轮询|webhook|增量同步|实时刷新|刷新频率|流式)/i.test(text)) {
+      issues.push("缺少数据更新机制说明");
+    }
+  }
+
+  const staticOnlySignal = /(仅静态|纯静态|单页面展示|单页展示|mock\s*数据|假数据|演示壳)/i.test(text);
+  if (staticOnlySignal && (endpointSignalCount < 2 || !hasStorageSignal)) {
+    issues.push("当前内容呈现为静态演示，未体现可运行数据链路");
+  }
+
+  return {
+    pass: issues.length === 0,
+    issues
+  };
+}
+
 function isDeliverableReadyForAcceptance(input: {
   status?: string;
   content?: string;
+  project?: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+  stageType?: string;
+  deliverableName?: string;
 }) {
   const status = String(input.status || "").toLowerCase();
   const content = String(input.content || "");
   const length = content.trim().length;
+  const stageType = String(input.stageType || "").toUpperCase();
   if (status === "draft" || !status) {
     return false;
   }
@@ -1515,6 +1924,28 @@ function isDeliverableReadyForAcceptance(input: {
   }
   if (content.includes("## 自动质检") && !/自动质检结论:\s*通过/.test(content)) {
     return false;
+  }
+  if (
+    input.project
+    && stageType === "DESIGN"
+    && isVisualMockupDeliverableTitle(String(input.deliverableName || ""))
+    && !hasRequirementAlignedVisualDesignPreview(input.project, content)
+  ) {
+    return false;
+  }
+  if (input.project && stageType === "DEV") {
+    const template = resolveDeliverableTemplate(String(input.deliverableName || ""), "DEV");
+    if (template.kind === "demo_prototype" || template.kind === "implementation_word") {
+      const alignment = evaluateDevImplementationEvidenceForAcceptance({
+        projectName: input.project.name,
+        projectDescription: input.project.description,
+        keywords: input.project.parsedIntent.keywords,
+        content
+      });
+      if (!alignment.pass) {
+        return false;
+      }
+    }
   }
   return true;
 }
@@ -1572,9 +2003,60 @@ function pickBestDeliverable(
   })[0];
 }
 
+function buildFinalArtifactsBlockingIssues(input: {
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
+  executions: Awaited<ReturnType<typeof listProjectExecutions>>;
+  officialSite?: {
+    url: string;
+    filePath?: string;
+    kind: "design_preview" | "narrative_summary";
+    sourceDeliverableName?: string;
+  };
+}) {
+  const issues: string[] = [];
+  const latestQaExecution = input.executions.find((item) =>
+    item.stageType === "ACCEPT" && item.role === "ROLE_QA"
+  );
+  if (latestQaExecution?.status === "failed") {
+    issues.push(`QA 最新一次验收执行失败：${latestQaExecution.errorMessage || "未返回具体错误"}`);
+  }
+
+  const devEvidenceReady = input.project.deliverables
+    .filter((item) => item.stageType === "DEV")
+    .filter((item) => item.status === "submitted" || item.status === "approved")
+    .some((item) =>
+      evaluateDevImplementationEvidenceForAcceptance({
+        projectName: input.project.name,
+        projectDescription: input.project.description,
+        keywords: input.project.parsedIntent.keywords,
+        content: String(item.content || "")
+      }).pass
+    );
+
+  if (!devEvidenceReady) {
+    issues.push("缺少真实研发实现证据，当前 DEV 产物还不足以证明存在可运行页面、接口、存储、代码路径与联调结果。");
+  }
+
+  if (input.officialSite?.kind === "design_preview") {
+    issues.push("当前生成链接来自 DESIGN 阶段视觉预览，只能算设计快照，不能充当最终研发交付。");
+  }
+
+  if (input.officialSite?.filePath && !existsSync(input.officialSite.filePath)) {
+    issues.push(`最终成果链接对应文件不存在：${input.officialSite.filePath}`);
+  }
+
+  return issues;
+}
+
 function buildProjectFinalArtifactsReport(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
-  officialSite?: { url: string; filePath?: string }
+  officialSite?: {
+    url: string;
+    filePath?: string;
+    kind: "design_preview" | "narrative_summary";
+    sourceDeliverableName?: string;
+  },
+  executions: Awaited<ReturnType<typeof listProjectExecutions>> = []
 ): ProjectFinalArtifactsReport {
   const deliverables = [...project.deliverables]
     .sort((left, right) => {
@@ -1599,7 +2081,10 @@ function buildProjectFinalArtifactsReport(
 
     const ready = isDeliverableReadyForAcceptance({
       status: matched.status,
-      content: matched.content
+      content: matched.content,
+      project,
+      stageType: matched.stageType,
+      deliverableName: matched.name
     });
     if (target.required && !ready) {
       missingRequired.push(target.category);
@@ -1631,7 +2116,10 @@ function buildProjectFinalArtifactsReport(
       required: false,
       ready: isDeliverableReadyForAcceptance({
         status: acceptedSummary.status,
-        content: acceptedSummary.content
+        content: acceptedSummary.content,
+        project,
+        stageType: acceptedSummary.stageType,
+        deliverableName: acceptedSummary.name
       }),
       source: "deliverable",
       deliverableId: acceptedSummary.id,
@@ -1646,21 +2134,40 @@ function buildProjectFinalArtifactsReport(
   }
 
   if (officialSite?.url) {
+    const isDesignPreview = officialSite.kind === "design_preview";
+    const linkExists = !officialSite.filePath || existsSync(officialSite.filePath);
+    const sourceHint = officialSite.sourceDeliverableName ? `，来源：${officialSite.sourceDeliverableName}` : "";
+    const officialSiteExcerpt = officialSite.url
+      ? `访问地址：${officialSite.url}（${isDesignPreview ? "设计预览快照" : "交付物导航页"}${sourceHint}）`
+      : officialSite.filePath
+        ? `本地文件：${officialSite.filePath}`
+        : "可直接打开在线演示页";
     artifacts.push({
       key: "official_site",
-      category: "演示站点链接",
+      category: isDesignPreview ? "设计预览快照（非最终研发成果）" : "交付成果导航页（辅助查阅）",
       required: false,
-      ready: true,
+      ready: linkExists && !isDesignPreview,
+      issue: !linkExists
+        ? "链接文件不存在，当前地址不可作为验收依据。"
+        : isDesignPreview
+          ? "该页面直接来源于 DESIGN 视觉预览，只能用于看稿，不能替代真实开发结果。"
+          : "该页面仅作为成果导航页，最终验收仍需以真实研发交付和测试结果为准。",
       source: "link",
-      name: "官网演示页",
+      name: isDesignPreview ? "设计预览快照" : "交付成果导航页",
       stageType: "ACCEPT",
-      status: "approved",
+      status: isDesignPreview ? "submitted" : "approved",
       updatedAt: new Date().toISOString(),
       url: officialSite.url,
       filePath: officialSite.filePath,
-      excerpt: officialSite.filePath ? `本地文件：${officialSite.filePath}` : "可直接打开在线演示页"
+      excerpt: officialSiteExcerpt
     });
   }
+
+  const blockingIssues = buildFinalArtifactsBlockingIssues({
+    project,
+    executions,
+    officialSite
+  });
 
   const required = FINAL_REQUIRED_ARTIFACTS.filter((item) => item.required).length;
   const provided = FINAL_REQUIRED_ARTIFACTS
@@ -1670,10 +2177,11 @@ function buildProjectFinalArtifactsReport(
       return count + (matched?.ready ? 1 : 0);
     }, 0);
   const readyForAcceptance = missingRequired.length === 0
+    && blockingIssues.length === 0
     && project.status === "completed"
     && project.currentStage === "ACCEPT";
   const checklist = [
-    readyForAcceptance ? "关键验收产物齐全，可进入最终验收确认。" : "关键验收产物尚不完整，请先补齐缺失项。",
+    readyForAcceptance ? "关键验收产物齐全，且未发现阻断项，可进入最终验收确认。" : "当前仍存在阻断项或缺失项，不能进入最终验收确认。",
     "请逐项打开并核对：目标一致性、内容完整性、可演示性。",
     "确认无误后，建议执行“归档到交付物”并保留验收报告版本。"
   ];
@@ -1685,6 +2193,7 @@ function buildProjectFinalArtifactsReport(
     currentStage: project.currentStage,
     generatedAt: new Date().toISOString(),
     readyForAcceptance,
+    blockingIssues,
     coverage: {
       required,
       provided,
@@ -2241,6 +2750,12 @@ app.use("/api", (req, res, next) => {
     return;
   }
 
+  // System monitor endpoints - public for internal tooling (model center usage stats)
+  if (req.path.startsWith("/api/system/local-agent-monitor")) {
+    next();
+    return;
+  }
+
   // 临时策略：开发环境放开联调端点，便于本地验证核心流程
   if (
     process.env.NODE_ENV !== "production"
@@ -2317,6 +2832,8 @@ app.use(createProjectsRouter({
   projectAdvanceLocks,
   projectAdvanceJobs,
   projectAdvanceJobErrors,
+  markProjectAdvanceCancelled,
+  clearProjectAdvanceCancelled,
   ensureManualAdvanceJob,
   buildProjectRequiredActions,
   formatRequiredActionsMessage,

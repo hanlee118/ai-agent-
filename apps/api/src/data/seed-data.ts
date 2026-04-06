@@ -355,6 +355,32 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
       createdBy: "ROLE_DESIGN",
       updatedAt: baseDate.toISOString()
     });
+    all.push({
+      id: randomUUID(),
+      name: "视觉定稿单页.preview.html.md",
+      type: "markdown",
+      content: [
+        "# 视觉定稿单页.preview.html.md",
+        "",
+        "## 视觉目标与范围",
+        "- 用于业务确认设计结果，避免纯文字沟通误差。",
+        "",
+        "## 单页预览代码（HTML）",
+        "```html",
+        "<!doctype html><html><head><meta charset=\"UTF-8\"/><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"/><title>视觉定稿预览</title><style>body{font-family:Segoe UI,PingFang SC,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}.card{border:1px solid #334155;border-radius:16px;padding:20px;max-width:980px;margin:0 auto;background:#111827}h1{margin:0 0 10px}p{color:#94a3b8}</style></head><body><section class=\"card\"><h1>设计阶段视觉预览</h1><p>用于确认视觉方向与主链路布局，确认后进入开发实现。</p></section></body></html>",
+        "```",
+        "",
+        "## 验收检查清单",
+        "- 包含可渲染的单页 HTML 预览代码块（```html）。",
+        "- 页面具备首屏价值主张、核心能力区块与主 CTA。",
+        "- 视觉规范与交互说明可支撑开发阶段实现。"
+      ].join("\n"),
+      version: 1,
+      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
+      stageType: "DESIGN",
+      createdBy: "ROLE_DESIGN",
+      updatedAt: baseDate.toISOString()
+    });
   }
 
   if (hasReached("DEV")) {
@@ -449,6 +475,7 @@ export function buildTasks(
     DESIGN: [
       { title: "定义页面与结构", description: "固定核心页面、布局与交互顺序。" },
       { title: "完成设计审查卡", description: "确认视觉方向、品牌语气、可访问性与审查结论。" },
+      { title: "输出视觉定稿单页", description: "生成可视化确认稿（静态图或单页 HTML），供业务确认后再开发。" },
       { title: "输出客户汇报PPT", description: "整理客户沟通所需的背景、目标、范围与成果。" },
       { title: "输出实施方案Word", description: "沉淀结构化方案、约束与验收标准。" },
       { title: "输出组件与接口草案", description: "为开发阶段准备结构化输入。" }

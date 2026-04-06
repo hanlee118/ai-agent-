@@ -20,6 +20,9 @@ export interface Model {
   currentTask: string;
   latency: string;
   throughput: string;
+  tokenSource?: 'usage_logs' | 'model_counter' | 'runtime_inferred' | 'unknown';
+  telemetryQuality?: 'measured' | 'estimated' | 'unknown';
+  costMode?: 'estimated' | 'unknown';
   logs: ModelLog[];
 }
 

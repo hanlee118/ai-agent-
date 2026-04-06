@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { X } from 'lucide-react';
+import { Trash2, X } from 'lucide-react';
 import type { Agent, Model } from '../../types';
 import { useAgentConfig } from './useAgentConfig';
 
@@ -69,6 +69,8 @@ export default function AgentConfigModal({
 }: AgentConfigModalProps) {
   const {
     fallbackAgent,
+    configSource,
+    canDelete,
     agentName,
     setAgentName,
     agentRole,
@@ -82,6 +84,7 @@ export default function AgentConfigModal({
     isLoadingDetail,
     isSaving,
     saveConfig,
+    deleteAgent,
   } = useAgentConfig({
     isOpen,
     agentId,
@@ -121,6 +124,7 @@ export default function AgentConfigModal({
           </div>
         </div>
         <p className="text-[10px] text-slate-500 -mt-3">名称与角色当前为只读，支持在线修改 SOUL、SOP 和模型。</p>
+        <p className="text-[10px] text-slate-500 -mt-3">配置源：{configSource === 'openclaw' ? 'OpenClaw 工作区 Agent' : '本地管理 Agent'}</p>
         <div className="space-y-2">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">运行模型</label>
           <select
@@ -161,6 +165,22 @@ export default function AgentConfigModal({
         >
           {isSaving ? '保存中...' : '保存配置'}
         </button>
+        {canDelete && (
+          <button
+            onClick={() => {
+              const confirmed = window.confirm(`确认删除 Agent「${agentName || fallbackAgent.name}」？此操作不可撤销。`);
+              if (!confirmed) {
+                return;
+              }
+              void deleteAgent(onUpdated, onClose);
+            }}
+            disabled={isSaving || isLoadingDetail}
+            className="w-full py-3 bg-danger/10 border border-danger/40 text-danger rounded-xl text-sm font-bold hover:bg-danger/20 transition-all disabled:opacity-60 flex items-center justify-center gap-2"
+          >
+            <Trash2 size={16} />
+            删除 Agent
+          </button>
+        )}
       </div>
     </Modal>
   );

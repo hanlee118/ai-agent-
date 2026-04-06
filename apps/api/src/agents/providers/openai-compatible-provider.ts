@@ -320,31 +320,170 @@ function buildSystemPrompt(context: AgentRunContext) {
     "你是 AI 协作工作台里的专业 Agent。",
     "你必须输出清晰、结构化、可执行的中文内容。",
     "不要自我介绍，不要写多余寒暄。",
-    "请严格使用 Markdown。"
+    "请严格使用 Markdown。",
+    "仅可使用当前项目事实与高度相关经验，不得混入低相关长期记忆、旧项目默认视觉、官网演示页或历史模板。"
   ];
 
+  if (context.stageType === "ANALYSIS" || context.role === "ROLE_ANALYST") {
+    base.push("你是需求分析师，必须先做边界澄清，再做方案拆解。不要把模糊假设直接写成既定事实。");
+  }
+
+  if (context.role === "ROLE_PRODUCT") {
+    base.push("你是产品负责人，必须明确用户价值、MVP边界、非目标和决策取舍，避免把分析文档写成空泛模板。");
+  }
+
+  if (context.role === "ROLE_PM" || context.stageType === "INIT") {
+    base.push("你是项目经理，必须输出真实的项目章程、阶段边界、协作方式和风险闸门，不要把立项写成一句话通知。");
+    base.push("禁止输出“待补充 / TODO / TBD / xxx / 占位”等占位词。");
+  }
+
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
-    base.push("你是视觉设计总监，避免模板化页面，优先保证品牌辨识度、信息层级和可访问性。");
-    base.push("输出必须包含视觉方向、版式策略、组件规范、CTA策略和无障碍检查项。");
+    base.push("你是视觉设计总监，围绕真实业务场景展开设计，而非套用固定模板。");
+    base.push("重点关注：用户进来后能看到什么、做什么、感受如何。");
+    base.push("禁止把页面设计成【需求输入 / 多 Agent 协作 / 执行证据回写 / 阶段验收回填】这类平台运转页面。");
+    base.push("必须直接呈现用户真实业务对象、关键数据列表、分析信息和主动作。");
+    // 把项目原始需求作为设计的核心输入，避免模板化
+    if (context.summary) {
+      base.push(`\n项目原始需求：\n${context.summary}`);
+    }
+  }
+
+  if (context.role === "ROLE_ARCH" || context.stageType === "DEV") {
+    base.push("你必须给出真实的技术边界、架构取舍、接口约束和验证路径，不能只写原则性建议。");
   }
 
   return base.join("\n");
 }
 
+/**
+ * Fix 3: 根据项目领域特征，动态注入相关设计要点，避免千篇一律
+ * 不再强制所有项目都加"爆品榜单"，而是按项目特性自然融入
+ */
+function inferDesignDomainContext(context: AgentRunContext) {
+  const combined = [
+    context.projectName,
+    context.projectDescription,
+    context.summary ?? "",
+    ...(context.parsedIntent?.keywords ?? [])
+  ].join(" ").toLowerCase();
+
+  // 电商 / 商品场景
+  if (/商品|电商|shop|店铺|mercad|temu|amazon|ebay|shopify/i.test(combined)) {
+    return {
+      section: "## 电商特有设计要点\n- 商品陈列逻辑（搜索/分类/推荐）、促销模块、购物流程、评价体系",
+      hint: "电商场景"
+    };
+  }
+  // 社交 / 内容平台
+  if (/社交|内容|tiktok|抖音|小红书|instagram|twitter|社群|feed/i.test(combined)) {
+    return {
+      section: "## 内容平台特有设计要点\n- 内容流展示、互动机制（点赞/评论/分享）、创作者工具、推荐逻辑",
+      hint: "内容平台场景"
+    };
+  }
+  // 数据 / 监控场景
+  if (/监控|dashboard|数据|指标|统计|BI|analytics|报表|仪表盘/i.test(combined)) {
+    return {
+      section: "## 数据产品特有设计要点\n- 核心指标选择、时间范围筛选、图表类型选择、数据导出",
+      hint: "数据监控场景"
+    };
+  }
+  // 企业 / SaaS / 内部工具
+  if (/企业|SaaS|内部|审批|工作流| OA | ERP | CRM |管理系统/i.test(combined)) {
+    return {
+      section: "## 企业应用特有设计要点\n- 权限层级、表单流程、审批状态、批量操作",
+      hint: "企业应用场景"
+    };
+  }
+  // AI / 工具类产品
+  if (/AI |chat|GPT|对话|助手|工具|生成|创作/i.test(combined)) {
+    return {
+      section: "## AI 产品特有设计要点\n- 对话界面、上下文管理、生成结果展示、多轮交互",
+      hint: "AI 产品场景"
+    };
+  }
+  // 默认：无特殊场景约束，让模型自由发挥
+  return {
+    section: "",
+    hint: "通用场景"
+  };
+}
+
 function buildOutputGuidance(context: AgentRunContext) {
-  if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
+  if (context.stageType === "INIT") {
     return [
       "请输出以下结构：",
-      "## 视觉策略",
-      "- 视觉主题、品牌语气、主色与字体策略",
-      "## 页面信息架构",
-      "- 首屏/能力/流程/案例/CTA 的层级说明",
-      "## 组件规范",
-      "- 关键组件、状态与交互反馈",
-      "## 设计审查卡",
-      "- UX 原则（3条）",
-      "- 可访问性检查清单（至少3条）",
-      "- 审查结论（通过/不通过）",
+      "## 项目背景与目标",
+      "- 原始需求、业务目标、成功判断口径",
+      "## 范围定义（In Scope / Out of Scope）",
+      "- 首期必须做 / 暂不纳入 / 明确边界",
+      "## 角色分工与责任",
+      "- 各角色 owner、输入、输出、升级路径",
+      "## 治理机制与决策规则",
+      "- 何时需要确认、何时可自动推进、关键门禁是什么",
+      "## 风险与应急预案",
+      "- 至少 3 条风险与对应处理策略",
+      "## 验收检查清单",
+      "- 目标、范围、角色、风险四类信息完整且无冲突。",
+      "- 关键决策规则清晰，出现阻塞时可直接执行。",
+      "- 章程可作为分析阶段输入，不依赖口头补充。",
+      "- 上述三条验收检查清单必须逐字保留，不可改写。",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.stageType === "ANALYSIS" && context.role === "ROLE_PRODUCT") {
+    return [
+      "请输出以下结构：",
+      "## 产品目标与成功指标",
+      "- 目标用户、核心价值、成功判断口径",
+      "## MVP 边界与非目标",
+      "- 首期必须做 / 明确不做 / 延后观察项",
+      "## 关键用户决策路径",
+      "- 至少 3 条关键链路，说明每一步的输入、动作、反馈",
+      "## 功能优先级与取舍理由",
+      "- P0 / P1 / P2，并说明为什么",
+      "## 需要确认的关键假设",
+      "- 至少 3 条，避免后续研发建立在幻觉前提上",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
+    // Fix 1: 软化结构约束，允许模型根据项目特性自由发挥
+    // Fix 2: 移除粗暴的"额外要求"，按需自然融入场景元素
+    const domainContext = inferDesignDomainContext(context);
+    return [
+      "围绕上述项目需求，提供设计输出（可自由组织结构，重点覆盖以下方面）：",
+      "## 视觉方向建议",
+      "- 主题语气、色板、字体体系",
+      "## 页面架构与信息层级",
+      "- 首屏布局、核心业务区块、CTA 区域",
+      `${domainContext.section}`,
+      "## 关键交互与状态",
+      "- 主要操作路径、异常状态、数据为空时表现",
+      "## 可访问性注意事项",
+      "- 对比度、键盘导航、屏幕阅读器兼容",
+      "## 下一步可执行动作",
+      "- 2 到 3 条设计落地建议"
+    ];
+  }
+
+  if (context.stageType === "DEV" && context.role === "ROLE_ARCH") {
+    return [
+      "请输出以下结构：",
+      "## 架构目标与约束",
+      "- 系统边界、性能目标、稳定性与安全要求",
+      "## 模块划分与依赖关系",
+      "- 上下游、接口边界、失败处理",
+      "## 数据模型与存储策略",
+      "- 核心实体、索引、缓存、持久化约束",
+      "## 技术选型与取舍",
+      "- 方案A/B比较、为什么选、为什么不选",
+      "## 实施顺序与风险闸门",
+      "- 阶段拆解、依赖、回滚点、验收前置条件",
       "## 下一步",
       "- 2 到 3 条可执行动作"
     ];

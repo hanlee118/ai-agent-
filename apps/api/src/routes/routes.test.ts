@@ -469,6 +469,525 @@ describe("Error Matrix: auth + projects", () => {
     assert.equal(interveneSuccess.body.id, projectId);
     });
   });
+
+  describe("200 PROJECT_STAGE_SUBMIT", () => {
+    it("[200][PROJECT_STAGE_SUBMIT] DESIGN 设计审查卡默认不触发 finalizeApproval", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-设计审查卡默认不自动完结",
+          description: "验证未显式传 finalizeApproval 时，设计审查卡提交不会自动进入待审批。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 36
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 36 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 首屏突出爆品榜单、平台来源与跟品动作。",
+            "## 版式策略",
+            "- 总览 + 榜单 + 详情抽屉布局。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、来源标签、跟踪按钮。",
+            "## 品牌语气",
+            "- 专业、直接、证据导向。",
+            "## UX 原则",
+            "- 主链路优先、反馈即时、状态可解释。",
+            "## 可访问性检查",
+            "- 键盘可达、文本对比达标、图表文字摘要。",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。",
+            "## 设计审查卡",
+            "- 审查结论: 通过"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "跨境爆品监控控制台",
+            brandTone: "专业、可执行、证据优先",
+            uxPrinciples: ["主链路优先", "关键动作可达", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for default finalizeApproval on design review"
+          }
+        });
+      assert.equal(submitRes.status, 200);
+      assert.equal(submitRes.body.pendingApproval, false);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      assert.equal(detailRes.body.currentStage, "DESIGN");
+      assert.equal(detailRes.body.pendingApproval, false);
+    });
+
+    it("[200][PROJECT_STAGE_SUBMIT] finalizeApproval=false should not auto-complete DESIGN tasks", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-设计审查卡提交不自动完结",
+          description: "覆盖设计阶段提交审查卡后不应自动完成全部设计任务的行为。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 34
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 34 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          finalizeApproval: false,
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 面向跨境电商爆品监控，首屏展示爆量告警与跟品主入口。",
+            "## 版式策略",
+            "- 采用摘要区 + 榜单区 + 详情区三段布局，减少认知切换。",
+            "## 组件清单",
+            "- 爆品榜单卡片、趋势图、平台来源标签、跟品按钮、风险提示。",
+            "## 品牌语气",
+            "- 快速、专业、行动导向。",
+            "## UX 原则",
+            "- 主链路优先、状态可解释、反馈即时可感知。",
+            "## 可访问性检查",
+            "- 键盘可达、对比度达标、图表附加文字摘要。",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "- 改进建议: 下一版补充多平台筛选交互动效。"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "TikTok 风格的数据运营看板",
+            brandTone: "快速、可执行、专业",
+            uxPrinciples: ["主链路优先", "关键指标高可读", "操作反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比度达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for finalizeApproval=false"
+          }
+        });
+      assert.equal(submitRes.status, 200);
+      assert.equal(submitRes.body.pendingApproval, false);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      assert.equal(detailRes.body.currentStage, "DESIGN");
+      assert.equal(detailRes.body.pendingApproval, false);
+
+      const designStage = (detailRes.body.stages as Array<{ type: string; progress: number }>).find((stage) => stage.type === "DESIGN");
+      assert.ok(designStage);
+      assert.equal(Number(designStage?.progress ?? 0), 34);
+
+      const designTasks = (detailRes.body.tasks as Array<{ stageType: string; status: string }>).filter((task) => task.stageType === "DESIGN");
+      assert.ok(designTasks.length > 0);
+      assert.equal(designTasks.every((task) => task.status === "done"), false);
+    });
+
+    it("[200][PROJECT_STAGE_SUBMIT] finalizeApproval=true should stay in补充中 when DESIGN 核心交付物不齐", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-设计单项提交不触发审批",
+          description: "验证只提交设计审查卡时，不应直接进入待审批。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 40
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 40 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 首屏优先呈现爆品流量突增与跟品入口，支持平台来源筛选。",
+            "## 版式策略",
+            "- 采用流量总览 + 爆品榜单 + 商品详情抽屉结构。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、来源标签、跟踪按钮、告警条。",
+            "## 品牌语气",
+            "- 快节奏、偏实战、强调执行。",
+            "## UX 原则",
+            "- 关键动作显性、状态可解释、异常可追踪。",
+            "## 可访问性检查",
+            "- 键盘导航、语义标签、图表文字备份。",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "- 改进建议: 下一轮补充详情页交互动效。"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "TikTok 风格的数据运营控制台",
+            brandTone: "直接、快速、数据导向",
+            uxPrinciples: ["主链路可达", "信息层级清晰", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比可读", "图表有文字说明"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for finalizeApproval=true with incomplete design deliverables"
+          }
+        });
+      assert.equal(submitRes.status, 200);
+      assert.equal(submitRes.body.pendingApproval, false);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      assert.equal(detailRes.body.currentStage, "DESIGN");
+      assert.equal(detailRes.body.pendingApproval, false);
+
+      const designStage = (detailRes.body.stages as Array<{ type: string; progress: number }>).find((stage) => stage.type === "DESIGN");
+      assert.ok(designStage);
+      assert.equal(Number(designStage?.progress ?? 0), 40);
+
+      const designTasks = (detailRes.body.tasks as Array<{ stageType: string; status: string }>).filter((task) => task.stageType === "DESIGN");
+      assert.ok(designTasks.length > 0);
+      assert.equal(designTasks.every((task) => task.status === "done"), false);
+    });
+
+    it("[422][PROJECT_STAGE_SUBMIT] should reject DESIGN review card with auto-template-level sparse content", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-禁止空设计审查卡通过",
+          description: "验证设计审查卡提交不能依赖系统自动补齐章节和视觉稿。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 42
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 42 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          content: [
+            "# 设计审查卡.md",
+            "## 设计审查卡",
+            "- 审查结论: 通过"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "跨境爆品监控台",
+            brandTone: "直接、可执行",
+            uxPrinciples: ["主链路优先", "关键动作可达", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression: sparse content should be rejected"
+          }
+        });
+
+      assert.equal(submitRes.status, 422);
+      const message = String(submitRes.body?.error?.message || submitRes.body?.message || "");
+      assert.match(message, /未通过模板校验|缺少模板章节/);
+    });
+
+    it("[200][PROJECT_RECONCILE] should not auto-create missing core deliverables for current active stage", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-禁止当前阶段自动造交付物",
+          description: "验证 reconcile 不会为当前进行中的 DESIGN 阶段自动补齐核心交付物。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.project.update({
+        where: { id: projectId },
+        data: {
+          currentStage: "DESIGN",
+          currentRole: "ROLE_DESIGN",
+          pendingApproval: false,
+          progress: 44
+        }
+      });
+      await prismaClient.stage.update({
+        where: { projectId_type: { projectId, type: "DESIGN" } },
+        data: { status: "active", progress: 44 }
+      });
+      await prismaClient.deliverable.deleteMany({
+        where: { projectId, stageType: "DESIGN" }
+      });
+      await prismaClient.deliverable.create({
+        data: {
+          projectId,
+          stageType: "DESIGN",
+          name: "设计审查卡.md",
+          type: "markdown",
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 首屏聚焦跨境爆品榜单与平台来源。",
+            "## 版式策略",
+            "- 总览 + 榜单 + 详情抽屉。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、告警条、跟品按钮。",
+            "## 品牌语气",
+            "- 数据导向、快速决策。",
+            "## UX 原则",
+            "- 主链路优先、动作低摩擦、反馈即时。",
+            "## 可访问性检查",
+            "- 键盘可达、对比达标、图表文字摘要。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "## 验收检查清单",
+            "- 设计说明可支撑开发实施，不依赖口头解释。",
+            "- 无障碍检查项至少 3 条并可验证。",
+            "- 审查结论明确（通过/驳回）且有理由。"
+          ].join("\n"),
+          version: 1,
+          status: "submitted",
+          createdBy: "ROLE_DESIGN",
+          updatedAt: new Date()
+        }
+      });
+
+      const reconcileRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/reconcile-deliverables`)
+        .send({});
+      assert.equal(reconcileRes.status, 200);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+
+      const designDeliverables = (detailRes.body.deliverables as Array<{ stageType: string; name: string }>)
+        .filter((item) => item.stageType === "DESIGN");
+      assert.equal(designDeliverables.length, 1);
+      assert.equal(designDeliverables[0]?.name, "设计审查卡.md");
+    });
+
+    it("[422][PROJECT_STAGE_SUBMIT] should reject template scaffold placeholder content", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-禁止模板骨架占位通过",
+          description: "覆盖提交内容包含模板骨架占位语句时的拦截逻辑。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DESIGN",
+            currentRole: "ROLE_DESIGN",
+            pendingApproval: false,
+            progress: 38
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DESIGN" } },
+          data: { status: "active", progress: 38 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DESIGN" },
+          data: { status: "todo" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "设计审查卡.md",
+          finalizeApproval: false,
+          content: [
+            "# 设计审查卡.md",
+            "## 视觉方案",
+            "- 以跨境爆品榜单作为首屏主对象。",
+            "## 版式策略",
+            "- 榜单、详情、告警三列布局。",
+            "## 组件清单",
+            "- 榜单卡片、趋势图、来源标签、跟踪按钮。",
+            "## 品牌语气",
+            "- 专业、直接、证据导向。",
+            "## UX 原则",
+            "- 主链路优先、反馈即时、决策可追溯。",
+            "## 可访问性检查",
+            "- 键盘可达、对比达标、图表文字摘要。",
+            "## 设计审查卡",
+            "- 审查结论: 通过",
+            "## 模板章节骨架（请按模板补全）",
+            "## 视觉方案",
+            "- 请结合 Agent 输出正文与任务证据补全本节。"
+          ].join("\n"),
+          designReview: {
+            visualDirection: "跨境爆品监控控制台",
+            brandTone: "专业、可执行、证据优先",
+            uxPrinciples: ["主链路优先", "证据可追溯", "反馈即时"],
+            accessibilityChecklist: ["键盘可达", "文本对比达标", "图表文字摘要"],
+            approvedBy: "test-reviewer",
+            approved: true,
+            notes: "regression test for scaffold placeholders"
+          }
+        });
+
+      assert.equal(submitRes.status, 422);
+      const message = String(submitRes.body?.error?.message || submitRes.body?.message || "");
+      assert.match(message, /模板骨架占位语句|未通过模板校验/);
+    });
+
+    it("[422][PROJECT_STAGE_SUBMIT] should reject DEV deliverable without code evidence", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-DEV 必须有代码证据",
+          description: "跨境电商爆品监控与跟品平台，要求真实研发与可运行数据链路。",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      await prismaClient.$transaction([
+        prismaClient.project.update({
+          where: { id: projectId },
+          data: {
+            currentStage: "DEV",
+            currentRole: "ROLE_DEV",
+            pendingApproval: false,
+            progress: 55
+          }
+        }),
+        prismaClient.stage.update({
+          where: { projectId_type: { projectId, type: "DEV" } },
+          data: { status: "active", progress: 55 }
+        }),
+        prismaClient.task.updateMany({
+          where: { projectId, stageType: "DEV" },
+          data: { status: "in_progress" }
+        })
+      ]);
+
+      const submitRes = await request(fullApp)
+        .post(`/api/projects/${projectId}/stages/submit`)
+        .send({
+          title: "Demo原型说明.md",
+          finalizeApproval: false,
+          content: [
+            "# Demo原型说明.md",
+            "## Demo 访问入口与环境",
+            "- 入口地址: http://127.0.0.1:5173",
+            "- API: http://127.0.0.1:8787",
+            "## 页面清单与关键交互",
+            "- 爆品榜单页、商品详情页、告警管理页。",
+            "## 页面路由与核心流程（至少 3 页）",
+            "- /products -> /products/:id -> /alerts",
+            "## 真实数据链路（接口 / 数据源 / 存储）",
+            "- GET /api/products/top、GET /api/products/:id、POST /api/products/:id/follow",
+            "- 使用 TikTok 与 Amazon 数据源，存储在 PostgreSQL。",
+            "## 运行与联调说明（启动命令 / 环境变量）",
+            "- pnpm dev",
+            "## 演示脚本（逐步）",
+            "- 进入榜单查看实时增长商品，打开详情并点击跟踪。",
+            "## 已实现能力与已知限制",
+            "- 已有榜单展示与详情交互。",
+            "## 下一轮迭代建议",
+            "- 增加多语言与多时区。",
+            "## 验收检查清单",
+            "- 第三方可按文档独立复测主流程。",
+            "- 至少提供 2 个可执行 API 接口与对应数据来源说明。",
+            "- 至少提供 1 套持久化存储方案（表结构/Schema/迁移策略）。",
+            "- 桌面/移动基础体验与关键 CTA 可达。",
+            "- 限制与下一步计划清晰。"
+          ].join("\n")
+        });
+
+      assert.equal(submitRes.status, 422);
+      const message = String(submitRes.body?.error?.message || submitRes.body?.message || "");
+      assert.match(message, /缺少代码实现证据|缺少联调\/验证结果证据|未通过模板校验/);
+    });
+  });
 });
 
 describe("Error Matrix: issues + role-sets", () => {
@@ -509,6 +1028,8 @@ describe("Error Matrix: issues + role-sets", () => {
     assert.equal(previewRes.body.success, true);
     assert.ok(previewRes.body.data.issueId);
     assert.ok(Array.isArray(previewRes.body.data.questions));
+    assert.ok((previewRes.body.data.contextAlignment?.matchedGoals || []).length > 0);
+    assert.ok((previewRes.body.data.contextAlignment?.matchedPrinciples || []).length > 0);
 
     const issueId = String(previewRes.body.data.issueId);
     const missingRequiredConfirm = await request(app)

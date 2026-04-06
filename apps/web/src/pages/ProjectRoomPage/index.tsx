@@ -21,8 +21,10 @@ import {
   type IssueListItem,
   type ProjectAcceptanceReport,
   type ProjectExecutionRecord,
+  type ProjectExecutionProtocolPrecheck,
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
+  type SystemExecutionProtocolSnapshot,
   type ProjectTemplateGatePrecheck,
 } from '../../lib/api';
 import { agents, projects, tasks } from '../../lib/runtimeCollections';
@@ -39,6 +41,7 @@ import DesignReviewHistoryPanel, { type ProjectRoomDesignReviewHistoryItem } fro
 import ProjectAgentsPanel from './ProjectAgentsPanel';
 import AcceptanceReportModal from './AcceptanceReportModal';
 import DesignReviewModal, { type ProjectRoomDesignReviewForm } from './DesignReviewModal';
+import StageExecutionTemplateCard from './StageExecutionTemplateCard';
 import { useProjectRoomSseLogs } from './hooks/useProjectRoomSseLogs';
 import { useProjectRoomUrlState } from './hooks/useProjectRoomUrlState';
 import { useProjectRoomFinalArtifacts } from './hooks/useProjectRoomFinalArtifacts';
@@ -81,6 +84,7 @@ type ProjectDetailResponse = {
   pendingApproval: boolean;
   progress: number;
   summary?: string;
+  team?: string[];
   stages?: Array<{
     type: string;
     label: string;
@@ -172,6 +176,8 @@ const ProjectRoom = ({
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
   const [templateGatePrecheck, setTemplateGatePrecheck] = useState<ProjectTemplateGatePrecheck | null>(null);
+  const [executionProtocolPrecheck, setExecutionProtocolPrecheck] = useState<ProjectExecutionProtocolPrecheck | null>(null);
+  const [executionProtocol, setExecutionProtocol] = useState<SystemExecutionProtocolSnapshot | null>(null);
   const [isLoadingTemplateGatePrecheck, setIsLoadingTemplateGatePrecheck] = useState(false);
   const [isRegeneratingTemplateGate, setIsRegeneratingTemplateGate] = useState(false);
   const [designReviewHistory, setDesignReviewHistory] = useState<ProjectRoomDesignReviewHistoryItem[]>([]);
@@ -221,7 +227,26 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectId = projectId || project.id;
-  const { sseLogs, appendSseLog } = useProjectRoomSseLogs(effectiveProjectId);
+  const snapshotFallbackMetrics = useMemo(() => {
+    const taskItems = Array.isArray(detail?.tasks) ? detail.tasks : [];
+    const activeAssignees = new Set(
+      taskItems
+        .filter((item) => item.status !== 'done')
+        .map((item) => String(item.assignee || '').trim())
+        .filter(Boolean),
+    );
+    const inferredActiveAgents = activeAssignees.size > 0
+      ? activeAssignees.size
+      : (Array.isArray(detail?.team) ? detail.team.length : undefined);
+
+    return {
+      activeAgents: inferredActiveAgents,
+      totalProjects: projects.length > 0 ? projects.length : undefined,
+      inProgressTasks: taskItems.filter((item) => item.status === 'in_progress').length,
+      blockedTasks: taskItems.filter((item) => item.status === 'blocked').length,
+    };
+  }, [detail?.tasks, detail?.team]);
+  const { sseLogs, appendSseLog } = useProjectRoomSseLogs(effectiveProjectId, snapshotFallbackMetrics);
   const {
     readSignoffFiltersFromUrl,
     consumeAutoOpenAcceptanceReportSignal,
@@ -289,7 +314,7 @@ const ProjectRoom = ({
   }, [effectiveProjectId]);
 
   const loadTemplateGatePrecheck = useCallback(async (options?: { silent?: boolean }) => {
-    if (!effectiveProjectId || !detail?.pendingApproval) {
+    if (!effectiveProjectId || !detail?.currentStage) {
       setTemplateGatePrecheck(null);
       return;
     }
@@ -305,7 +330,23 @@ const ProjectRoom = ({
     } finally {
       setIsLoadingTemplateGatePrecheck(false);
     }
-  }, [addToast, detail?.pendingApproval, effectiveProjectId]);
+  }, [addToast, detail?.currentStage, effectiveProjectId]);
+
+  const loadExecutionProtocolPrecheck = useCallback(async (options?: { silent?: boolean }) => {
+    if (!effectiveProjectId || !detail?.currentStage) {
+      setExecutionProtocolPrecheck(null);
+      return;
+    }
+    try {
+      const next = await projectsApi.getExecutionProtocolPrecheck(effectiveProjectId);
+      setExecutionProtocolPrecheck(next);
+    } catch (error) {
+      setExecutionProtocolPrecheck(null);
+      if (!options?.silent && !isProjectNotFoundError(error)) {
+        addToast(`加载执行协议预检失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    }
+  }, [addToast, detail?.currentStage, effectiveProjectId]);
 
   useEffect(() => {
     void loadProjectDetail();
@@ -314,6 +355,32 @@ const ProjectRoom = ({
   useEffect(() => {
     void loadTemplateGatePrecheck({ silent: true });
   }, [detail?.pendingApproval, detail?.currentStage, loadTemplateGatePrecheck]);
+
+  useEffect(() => {
+    void loadExecutionProtocolPrecheck({ silent: true });
+  }, [detail?.currentStage, loadExecutionProtocolPrecheck]);
+
+  useEffect(() => {
+    let canceled = false;
+
+    const loadExecutionProtocol = async () => {
+      try {
+        const snapshot = await systemApi.getExecutionProtocol();
+        if (!canceled) {
+          setExecutionProtocol(snapshot);
+        }
+      } catch {
+        if (!canceled) {
+          setExecutionProtocol(null);
+        }
+      }
+    };
+
+    void loadExecutionProtocol();
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!project.id) {
@@ -375,6 +442,7 @@ const ProjectRoom = ({
             agent: roleLabel(item.assignee),
             status: toTaskStatus(item.status),
             progress: toTaskProgress(item.status),
+            stageType: item.stageType,
             projectId: item.projectId,
             createdAt: item.updatedAt,
             updatedAt: item.updatedAt,
@@ -598,12 +666,62 @@ const ProjectRoom = ({
   };
 
   const projectAgents = useMemo(() => {
-    if (project.agents.length > 0) {
-      return agents.filter((agent) => project.agents.includes(agent.id));
+    const selected = new Map<string, { id: string; name: string; role: string }>();
+
+    const registerById = (rawId?: string) => {
+      const memberId = String(rawId || '').trim();
+      if (!memberId || selected.has(memberId)) {
+        return;
+      }
+
+      const byExactId = agents.find((agent) => String(agent.id || '').trim() === memberId);
+      if (byExactId) {
+        selected.set(memberId, {
+          id: memberId,
+          name: byExactId.name || roleLabel(memberId),
+          role: byExactId.role || roleLabel(memberId),
+        });
+        return;
+      }
+
+      const byRoleId = agents.find((agent) => String(agent.role || '').trim() === memberId);
+      if (byRoleId) {
+        selected.set(memberId, {
+          id: memberId,
+          name: byRoleId.name || roleLabel(memberId),
+          role: roleLabel(memberId),
+        });
+        return;
+      }
+
+      selected.set(memberId, {
+        id: memberId,
+        name: roleLabel(memberId),
+        role: roleLabel(memberId),
+      });
+    };
+
+    detail?.team?.forEach((memberId) => registerById(memberId));
+    detail?.stages?.forEach((stage) => registerById(stage.assignee));
+    detail?.tasks?.forEach((task) => registerById(task.assignee));
+
+    if (selected.size === 0) {
+      project.agents.forEach((memberId) => registerById(memberId));
     }
-    const linkedAgentNames = new Set(effectiveProjectTasks.map((task) => task.agent));
-    return agents.filter((agent) => linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name));
-  }, [project.agents, effectiveProjectTasks]);
+
+    if (selected.size === 0) {
+      const linkedAgentNames = new Set(
+        effectiveProjectTasks.map((task) => String(task.agent || '').trim()).filter(Boolean),
+      );
+      agents.forEach((agent) => {
+        if (linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name) || linkedAgentNames.has(agent.role)) {
+          registerById(agent.id);
+        }
+      });
+    }
+
+    return [...selected.values()];
+  }, [detail?.stages, detail?.tasks, detail?.team, effectiveProjectTasks, project.agents]);
 
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
 
@@ -631,11 +749,9 @@ const ProjectRoom = ({
   );
 
   const isDesignPhase = useMemo(() => {
-    const text = [project.phase, project.description, ...effectiveProjectTasks.map((task) => `${task.title} ${task.agent}`)]
-      .join(' ')
-      .toLowerCase();
-    return /(design|设计|视觉|交互|页面|官网)/i.test(text);
-  }, [project.phase, project.description, effectiveProjectTasks]);
+    const stageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+    return stageType === 'DESIGN' && project.status === 'Development';
+  }, [detail?.currentStage, stageItems, project.status]);
 
   const recentLogs = useMemo(() => {
     const logs: ProjectRoomLogItem[] = [];
@@ -721,6 +837,10 @@ const ProjectRoom = ({
 
   const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
+  const currentStageProtocolRules = useMemo(
+    () => (executionProtocol?.stageMatrix || []).filter((item) => item.stageType === currentStageType),
+    [currentStageType, executionProtocol?.stageMatrix],
+  );
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const currentStageExecution = currentStageType ? (latestExecutionByStage.get(currentStageType) || null) : null;
   const stageApprovalBlockedReason = useMemo(() => {
@@ -731,6 +851,49 @@ const ProjectRoom = ({
   }, [detail?.pendingApproval, currentStageExecution]);
   const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
   const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
+  const isVisualPreviewDeliverable = (item: Pick<ProjectDeliverable, 'name' | 'stageType'>) =>
+    item.stageType === 'DESIGN'
+    && /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(item.name || ''));
+  const extractDeliverableHtmlPreview = (content?: string) => {
+    const source = String(content || '');
+    const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+    let matched: RegExpExecArray | null;
+    while ((matched = fencedPattern.exec(source)) !== null) {
+      const candidate = String(matched[1] || '').trim();
+      if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+        return candidate;
+      }
+    }
+    if (/(<!doctype html|<html[\s>])/i.test(source)) {
+      return source.trim();
+    }
+    return null;
+  };
+  const extractDeliverableImagePreview = (content?: string) => {
+    const source = String(content || '');
+    const markdownImage = source.match(/!\[[^\]]*\]\((https?:\/\/[^\s)]+|data:image\/[^\s)]+)\)/i);
+    if (markdownImage && markdownImage[1]) {
+      return markdownImage[1];
+    }
+    const rawImage = source.match(/(https?:\/\/[^\s"'()]+\.(?:png|jpg|jpeg|webp|gif|svg))/i);
+    if (rawImage && rawImage[1]) {
+      return rawImage[1];
+    }
+    return null;
+  };
+  const previewDeliverableHtml = useMemo(
+    () => (previewDeliverable ? extractDeliverableHtmlPreview(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const previewDeliverableImage = useMemo(
+    () => (previewDeliverable ? extractDeliverableImagePreview(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const canRenderVisualPreview = Boolean(
+    previewDeliverable
+    && isVisualPreviewDeliverable(previewDeliverable)
+    && (previewDeliverableHtml || previewDeliverableImage),
+  );
 
   const getStageAcceptance = (stageType: string) => {
     const items = deliverablesByStage.get(stageType) || [];
@@ -848,8 +1011,9 @@ const ProjectRoom = ({
       loadFinalArtifacts(),
       loadExecutions({ silent: true }),
       loadTemplateGatePrecheck({ silent: true }),
+      loadExecutionProtocolPrecheck({ silent: true }),
     ]);
-  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadTemplateGatePrecheck]);
+  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadTemplateGatePrecheck, loadExecutionProtocolPrecheck]);
 
   useEffect(() => {
     void loadExecutions({ silent: true });
@@ -940,9 +1104,28 @@ const ProjectRoom = ({
     window.URL.revokeObjectURL(url);
   };
 
+  const resolveArtifactUrl = (rawUrl?: string) => {
+    const url = String(rawUrl || '').trim();
+    if (!url) {
+      return '';
+    }
+    if (/^https?:\/\//i.test(url) || /^file:\/\//i.test(url)) {
+      return url;
+    }
+    if (url.startsWith('/')) {
+      return `${window.location.origin}${url}`;
+    }
+    return `${window.location.origin}/${url.replace(/^\.?\//, '')}`;
+  };
+
   const handleOpenFinalArtifact = (artifact: FinalArtifactItem) => {
     if (artifact.source === 'link' && artifact.url) {
-      window.open(artifact.url, '_blank', 'noopener,noreferrer');
+      const resolvedUrl = resolveArtifactUrl(artifact.url);
+      if (!resolvedUrl) {
+        addToast('该成果链接无效，无法打开', 'error');
+        return;
+      }
+      window.open(resolvedUrl, '_blank', 'noopener,noreferrer');
       return;
     }
 
@@ -1033,17 +1216,37 @@ const ProjectRoom = ({
     }
   };
 
+  const handleCopyStageAgentPrompt = async (content: string) => {
+    const normalized = String(content || '').trim();
+    if (!normalized) {
+      addToast('当前阶段暂无可复制的 Agent 指令模板', 'info');
+      return;
+    }
+
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(normalized);
+      } else {
+        window.prompt('复制以下 Agent 指令模板', normalized);
+      }
+      addToast('阶段 Agent 指令模板已复制', 'success');
+    } catch (error) {
+      addToast(`复制失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    }
+  };
+
   const handleCopyFinalArtifactLink = async (artifact: FinalArtifactItem) => {
-    if (!artifact.url) {
+    const resolvedUrl = resolveArtifactUrl(artifact.url);
+    if (!resolvedUrl) {
       addToast('该成果没有可复制链接', 'info');
       return;
     }
 
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(artifact.url);
+        await navigator.clipboard.writeText(resolvedUrl);
       } else {
-        window.prompt('复制以下链接', artifact.url);
+        window.prompt('复制以下链接', resolvedUrl);
       }
       addToast('成果链接已复制', 'success');
     } catch (error) {
@@ -1353,10 +1556,18 @@ const ProjectRoom = ({
     }
   };
 
+  const sanitizeChecklistEntry = (input: string) =>
+    String(input || '')
+      .trim()
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/^[-*]\s*/, '')
+      .replace(/^【[^】]+】/, '')
+      .trim();
+
   const splitChecklist = (input: string) =>
     input
       .split(/\n|；|;|,|，/)
-      .map((item) => item.trim())
+      .map((item) => sanitizeChecklistEntry(item))
       .filter(Boolean);
 
   const handleSubmitDesignReview = async () => {
@@ -1386,8 +1597,14 @@ const ProjectRoom = ({
 
     setIsSubmittingDesignReview(true);
     try {
+      const reviewChecklist = [
+        '设计说明可支撑开发实施，不依赖口头解释。',
+        '无障碍检查项至少 3 条并可验证。',
+        '审查结论明确（通过/驳回）且有理由。',
+      ];
       await projectsApi.submitStage(project.id, {
         title: `设计审查卡 ${new Date().toLocaleDateString('zh-CN')}`,
+        finalizeApproval: false,
         content: [
           '# 设计阶段交付',
           '',
@@ -1402,6 +1619,15 @@ const ProjectRoom = ({
           '',
           '## 品牌语气',
           `- ${designReviewForm.brandTone.trim()}`,
+          '',
+          '## UX 原则',
+          ...uxPrinciples.map((item) => `- ${item}`),
+          '',
+          '## 可访问性检查',
+          ...accessibilityChecklist.map((item) => `- ${item}`),
+          '',
+          '## 验收检查清单',
+          ...reviewChecklist.map((item) => `- ${item}`),
         ].join('\n'),
         designReview: {
           visualDirection: designReviewForm.visualDirection.trim(),
@@ -1482,6 +1708,12 @@ const ProjectRoom = ({
       addToast(error.message || '交付物未通过模板门禁，请先补齐后再验收', 'error');
       return true;
     }
+    if (error.code === 'EXECUTION_PROTOCOL_GATE_FAILED') {
+      setActiveTab('交付物');
+      addToast(error.message || '当前阶段未通过执行协议门禁，请先修复阻断项', 'error');
+      void loadProjectDetail();
+      return true;
+    }
     const required = Array.isArray(error.details?.requiredActions)
       ? (error.details.requiredActions as ProjectRequiredAction[])
       : [];
@@ -1497,10 +1729,10 @@ const ProjectRoom = ({
   const openRuntimeConfigHint = () => {
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href);
-      url.searchParams.set('app_tab', 'settings');
+      url.searchParams.set('app_tab', 'model-nexus');
       window.history.replaceState(window.history.state, '', `${url.pathname}${url.search ? url.search : ''}${url.hash}`);
     }
-    addToast('请前往设置页补全模型运行时配置（API Base URL / API Key / Model）', 'info');
+    addToast('请前往模型中心执行“设为运行默认并校验”，必要时再到设置页补充高级参数。', 'info');
   };
 
   const handleRequiredAction = async (action: ProjectRequiredAction) => {
@@ -1763,30 +1995,45 @@ const ProjectRoom = ({
           ) : null}
 
           {activeTab === '阶段' ? (
-            <StageNavigator
-              currentStageLabel={currentStageLabel}
-              pendingApproval={Boolean(detail?.pendingApproval)}
-              currentStageDeliverables={currentStageDeliverables}
-              stageItems={stageItems}
-              deliverablesByStage={deliverablesByStage}
-              stageReviewAction={stageReviewAction}
-              isReviewingStage={isReviewingStage}
-              DELIVERABLE_STATUS_LABELS={DELIVERABLE_STATUS_LABELS}
-              CORE_STAGE_STATUS_LABELS={CORE_STAGE_STATUS_LABELS}
-              onPreviewDeliverable={(item) => setPreviewDeliverable(item)}
-              onApproveStage={() => { void handleApproveStage(); }}
-              onRejectStage={() => { void handleRejectStage(); }}
-              isDeliverableReadable={isDeliverableReadable}
-              roleLabel={roleLabel}
-              statusVariantByDeliverable={statusVariantByDeliverable}
-              statusVariantByStage={statusVariantByStage}
-              getStageModelLabel={getStageModelLabel}
-              getStageAcceptance={getStageAcceptance}
-              getStageDeliverableStats={getStageDeliverableStats}
-              stageLabelMap={STAGE_LABELS}
-              stageApprovalBlockedReason={stageApprovalBlockedReason}
-              onOpenRuntimeConfig={openRuntimeConfigHint}
-            />
+            <>
+              <StageExecutionTemplateCard
+                projectName={detail?.name || project.name}
+                stageType={currentStageType}
+                stageLabel={currentStageLabel}
+                stageRules={currentStageProtocolRules}
+                stageDeliverables={currentStageDeliverables}
+                stageExecutionRecords={executionRecords.filter((item) => item.stageType === currentStageType)}
+                templateGatePrecheck={templateGatePrecheck}
+                executionProtocolPrecheck={executionProtocolPrecheck}
+                requiredActions={requiredActions}
+                finalArtifacts={currentStageType === 'ACCEPT' ? finalArtifacts : null}
+                onCopyAgentPrompt={(content) => { void handleCopyStageAgentPrompt(content); }}
+              />
+              <StageNavigator
+                currentStageLabel={currentStageLabel}
+                pendingApproval={Boolean(detail?.pendingApproval)}
+                currentStageDeliverables={currentStageDeliverables}
+                stageItems={stageItems}
+                deliverablesByStage={deliverablesByStage}
+                stageReviewAction={stageReviewAction}
+                isReviewingStage={isReviewingStage}
+                DELIVERABLE_STATUS_LABELS={DELIVERABLE_STATUS_LABELS}
+                CORE_STAGE_STATUS_LABELS={CORE_STAGE_STATUS_LABELS}
+                onPreviewDeliverable={(item) => setPreviewDeliverable(item)}
+                onApproveStage={() => { void handleApproveStage(); }}
+                onRejectStage={() => { void handleRejectStage(); }}
+                isDeliverableReadable={isDeliverableReadable}
+                roleLabel={roleLabel}
+                statusVariantByDeliverable={statusVariantByDeliverable}
+                statusVariantByStage={statusVariantByStage}
+                getStageModelLabel={getStageModelLabel}
+                getStageAcceptance={getStageAcceptance}
+                getStageDeliverableStats={getStageDeliverableStats}
+                stageLabelMap={STAGE_LABELS}
+                stageApprovalBlockedReason={stageApprovalBlockedReason}
+                onOpenRuntimeConfig={openRuntimeConfigHint}
+              />
+            </>
           ) : null}
 
           {activeTab === '时间线' ? (
@@ -1993,6 +2240,31 @@ const ProjectRoom = ({
                   复制正文
                 </button>
               </div>
+              {canRenderVisualPreview ? (
+                <div className="rounded-xl border border-border-subtle bg-surface-soft/40 p-3 space-y-2">
+                  <p className="text-xs text-slate-300">视觉设计预览（确认后再进入开发）</p>
+                  {previewDeliverableHtml ? (
+                    <iframe
+                      title="视觉设计预览"
+                      sandbox=""
+                      srcDoc={previewDeliverableHtml}
+                      className="w-full h-[58vh] rounded-lg border border-border-subtle bg-white"
+                    />
+                  ) : null}
+                  {!previewDeliverableHtml && previewDeliverableImage ? (
+                    <img
+                      src={previewDeliverableImage}
+                      alt="视觉设计稿预览"
+                      className="w-full max-h-[58vh] object-contain rounded-lg border border-border-subtle bg-slate-950"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              {previewDeliverable && isVisualPreviewDeliverable(previewDeliverable) && !canRenderVisualPreview ? (
+                <p className="text-xs text-warning">
+                  当前未检测到可渲染的视觉预览，请在交付物中补充静态图链接或 ```html 单页代码。
+                </p>
+              ) : null}
               <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border-subtle bg-surface-muted p-4">
                 <pre className="text-xs leading-6 text-slate-200 whitespace-pre-wrap break-words">{previewDeliverable.content || '该交付物暂无正文内容。'}</pre>
               </div>

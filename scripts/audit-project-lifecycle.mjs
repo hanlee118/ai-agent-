@@ -1,4 +1,7 @@
 import http from "node:http";
+import { execFileSync } from "node:child_process";
+import { prisma } from "../apps/api/dist/db.js";
+import { generateSessionToken, hashSessionToken } from "../apps/api/dist/security/secret-store.js";
 
 const BASE = String(process.env.API_BASE || "http://127.0.0.1:8787").replace(/\/$/, "");
 const REQUEST_TIMEOUT_MS = Math.max(15000, Number(process.env.REQUEST_TIMEOUT_MS || 240000));
@@ -23,6 +26,8 @@ const report = {
   checks: [],
   warnings: [],
 };
+let SESSION_COOKIE = "";
+let API_STARTED_BY_SCRIPT = false;
 
 function addStep(step, payload) {
   report.steps.push({
@@ -77,8 +82,9 @@ function req(method, path, body, options = {}) {
           ? {
               "Content-Type": "application/json",
               "Content-Length": Buffer.byteLength(payload),
+              ...(SESSION_COOKIE ? { Cookie: SESSION_COOKIE } : {}),
             }
-          : undefined,
+          : (SESSION_COOKIE ? { Cookie: SESSION_COOKIE } : undefined),
       },
       (res) => {
         let raw = "";
@@ -86,6 +92,15 @@ function req(method, path, body, options = {}) {
           raw += chunk;
         });
         res.on("end", () => {
+          const setCookie = res.headers["set-cookie"];
+          if (Array.isArray(setCookie)) {
+            const cookiePair = setCookie
+              .map((item) => String(item).trim())
+              .find((item) => item.startsWith("occ_session="));
+            if (cookiePair) {
+              SESSION_COOKIE = cookiePair.split(";")[0] || SESSION_COOKIE;
+            }
+          }
           let parsed = raw;
           try {
             parsed = raw ? JSON.parse(raw) : null;
@@ -119,6 +134,75 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, Math.max(0, Math.round(ms)));
   });
+}
+
+async function ensureApiReady() {
+  const health = await req("GET", "/health", null, { timeoutMs: 15000 });
+  if (health.status === 200) {
+    return;
+  }
+
+  addStep("api_autostart", { status: health.status });
+  execFileSync("pnpm", ["daemon:start"], {
+    cwd: process.cwd(),
+    stdio: "inherit",
+  });
+  API_STARTED_BY_SCRIPT = true;
+
+  for (let i = 0; i < 20; i += 1) {
+    const retry = await req("GET", "/health", null, { timeoutMs: 15000 });
+    if (retry.status === 200) {
+      return;
+    }
+    await wait(1000);
+  }
+
+  throw new Error("API_NOT_READY_AFTER_DAEMON_START");
+}
+
+async function ensureAuth() {
+  const status = await req("GET", "/api/auth/status");
+  addCheck("认证状态接口可用", status.status === 200, JSON.stringify(status.body).slice(0, 300));
+  const payload = unwrap(status.body) || {};
+  if (!payload.setupComplete) {
+    throw new Error("AUTH_SETUP_INCOMPLETE");
+  }
+
+  const sessionToken = generateSessionToken();
+  await prisma.authSession.create({
+    data: {
+      tokenHash: await hashSessionToken(sessionToken),
+      expiresAt: new Date(Date.now() + 15 * 60 * 1000)
+    }
+  });
+  SESSION_COOKIE = `occ_session=${sessionToken}`;
+  addCheck("管理员临时会话创建成功", true);
+}
+
+async function cleanupAuth() {
+  const rawToken = SESSION_COOKIE.replace(/^occ_session=/, "").trim();
+  if (!rawToken) {
+    return;
+  }
+  await prisma.authSession.deleteMany({
+    where: {
+      tokenHash: await hashSessionToken(rawToken)
+    }
+  });
+}
+
+function stopStartedApi() {
+  if (!API_STARTED_BY_SCRIPT) {
+    return;
+  }
+  try {
+    execFileSync("pnpm", ["daemon:stop"], {
+      cwd: process.cwd(),
+      stdio: "inherit",
+    });
+  } catch (error) {
+    addWarning(`停止自动启动的 API 失败: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 function stageIndex(stageType) {
@@ -292,6 +376,9 @@ async function main() {
   let createdProjectId = "";
 
   try {
+    await ensureApiReady();
+    await ensureAuth();
+
     const list = await req("GET", "/api/projects");
     addStep("project_list", {
       status: list.status,
@@ -430,6 +517,9 @@ async function main() {
       const deleted = await req("DELETE", `/api/projects/${encodeURIComponent(createdProjectId)}`);
       addStep("cleanup_project", { status: deleted.status, durationMs: deleted.durationMs, projectId: createdProjectId });
     }
+    await cleanupAuth();
+    await prisma.$disconnect();
+    stopStartedApi();
   }
 }
 

@@ -6,7 +6,10 @@ export type DeliverableTemplateKind =
   | "schedule"
   | "presentation_ppt"
   | "implementation_word"
+  | "implementation_result"
+  | "runtime_delivery"
   | "design_review"
+  | "visual_mockup"
   | "demo_prototype"
   | "test_report"
   | "product_backfill"
@@ -149,6 +152,59 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
       "对复杂模块补充输入/输出/失败处理。"
     ]
   },
+  implementation_result: {
+    kind: "implementation_result",
+    label: "实现结果说明模板",
+    requiredSections: [
+      "## 本轮实现范围",
+      "## 页面 / 路由结果",
+      "## 接口与数据链路",
+      "## 代码改动清单",
+      "## 验证结果与截图 / 日志",
+      "## 已知问题与未完成项"
+    ],
+    sectionBlueprint: [
+      "- 页面 / 路由至少列出 2 个真实访问路径或页面职责。",
+      "- 接口与数据链路必须写清 API、数据源、存储或状态流转。",
+      "- 代码改动清单至少包含 2 个真实文件路径。",
+      "- 验证结果必须包含命令、日志、HTTP 结果或人工回归结论。"
+    ],
+    acceptanceChecklist: [
+      "可证明存在真实实现，而不是只停留在设计或演示壳。",
+      "页面、接口、代码路径、验证结果四类证据齐全。",
+      "未完成项与风险边界清晰。"
+    ],
+    authoringRules: [
+      "不要只写“已完成”，必须写清实现证据。",
+      "优先给真实路径、接口、文件和验证结果。"
+    ]
+  },
+  runtime_delivery: {
+    kind: "runtime_delivery",
+    label: "运行地址与部署说明模板",
+    requiredSections: [
+      "## 运行地址清单",
+      "## 启动方式与环境变量",
+      "## 部署拓扑与依赖",
+      "## 联调 / 验证步骤",
+      "## 监控与回滚方案"
+    ],
+    sectionBlueprint: [
+      "- 地址清单需区分前端、后端、管理端或预发环境。",
+      "- 环境变量说明必须包含关键配置项和来源。",
+      "- 验证步骤至少给出 3 步可复现场景。",
+      "- 回滚方案必须给触发条件。"
+    ],
+    acceptanceChecklist: [
+      "第三方可按文档启动、访问和验证系统。",
+      "关键地址、启动命令、环境变量、验证步骤齐全。",
+      "部署依赖和回滚策略明确。"
+    ],
+    authoringRules: [
+      "优先写可复现步骤，不写抽象部署概念。",
+      "地址与命令必须可直接执行或核对。"
+    ]
+  },
   design_review: {
     kind: "design_review",
     label: "设计审查模板",
@@ -176,23 +232,55 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
       "所有重点页面需给交互反馈策略。"
     ]
   },
+  visual_mockup: {
+    kind: "visual_mockup",
+    label: "视觉定稿单页模板",
+    requiredSections: [
+      "## 视觉目标与范围",
+      "## 布局与信息架构",
+      "## 视觉规范（色彩 / 字体 / 间距）",
+      "## 单页预览代码（HTML）",
+      "## 交互与状态说明"
+    ],
+    sectionBlueprint: [
+      "- 用页面结构解释业务主链路，不允许只写概念描述。",
+      "- HTML 预览需可直接在浏览器打开并看到完整页面。",
+      "- 交互说明至少覆盖主 CTA、悬停态与反馈态。"
+    ],
+    acceptanceChecklist: [
+      "包含可渲染的单页 HTML 预览代码块（```html）。",
+      "页面具备首屏价值主张、核心能力区块与主 CTA。",
+      "视觉规范与交互说明可支撑开发阶段实现。"
+    ],
+    authoringRules: [
+      "优先输出可确认视觉结果，再补充文档解释。",
+      "禁止只给文字描述而没有可视化预览。"
+    ]
+  },
   demo_prototype: {
     kind: "demo_prototype",
     label: "Demo / 原型说明模板",
     requiredSections: [
       "## Demo 访问入口与环境",
       "## 页面清单与关键交互",
+      "## 页面路由与核心流程（至少 3 页）",
+      "## 真实数据链路（接口 / 数据源 / 存储）",
+      "## 运行与联调说明（启动命令 / 环境变量）",
       "## 演示脚本（逐步）",
       "## 已实现能力与已知限制",
       "## 下一轮迭代建议"
     ],
     sectionBlueprint: [
       "- 给出访问地址、账号、启动方式或构建方式。",
+      "- 页面路由至少覆盖列表页、详情页、监控或配置页等三类页面。",
+      "- 明确接口契约、数据来源和持久化存储，不可只写静态页面说明。",
       "- 演示脚本至少 5 步，覆盖主链路。",
       "- 明确限制项与风险，避免“看起来可用”。"
     ],
     acceptanceChecklist: [
       "第三方可按文档独立复测主流程。",
+      "至少提供 2 个可执行 API 接口与对应数据来源说明。",
+      "至少提供 1 套持久化存储方案（表结构/Schema/迁移策略）。",
       "桌面/移动基础体验与关键 CTA 可达。",
       "限制与下一步计划清晰。"
     ],
@@ -292,11 +380,20 @@ export function resolveDeliverableTemplate(title: string, stageType: StageType):
   if (/ppt|汇报|路演|演示文稿|slides/.test(normalized)) {
     return TEMPLATE_LIBRARY.presentation_ppt;
   }
+  if (/实现结果|implementation result|开发结果|研发结果/.test(normalized)) {
+    return TEMPLATE_LIBRARY.implementation_result;
+  }
+  if (/运行地址|部署说明|deployment|runtime delivery|运行说明/.test(normalized)) {
+    return TEMPLATE_LIBRARY.runtime_delivery;
+  }
   if (/word|实施方案|技术方案|solution|architecture/.test(normalized)) {
     return TEMPLATE_LIBRARY.implementation_word;
   }
   if (/审查卡|design review|设计审查/.test(normalized)) {
     return TEMPLATE_LIBRARY.design_review;
+  }
+  if (/视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/.test(normalized)) {
+    return TEMPLATE_LIBRARY.visual_mockup;
   }
   if (/demo|原型|演示页|官网/.test(normalized)) {
     return TEMPLATE_LIBRARY.demo_prototype;
@@ -318,7 +415,7 @@ export function resolveDeliverableTemplate(title: string, stageType: StageType):
     return TEMPLATE_LIBRARY.design_review;
   }
   if (stageType === "DEV") {
-    return TEMPLATE_LIBRARY.demo_prototype;
+    return TEMPLATE_LIBRARY.implementation_result;
   }
   if (stageType === "ACCEPT") {
     return TEMPLATE_LIBRARY.product_backfill;

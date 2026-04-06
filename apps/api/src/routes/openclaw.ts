@@ -3,6 +3,7 @@ import {
   addOpenClawAgentMemory,
   buildOpenClawProjectReport,
   createOpenClawAgent,
+  deleteOpenClawAgent,
   findOpenClawAgent,
   findOpenClawProject,
   getOpenClawStatusSummary,
@@ -43,6 +44,51 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
   const router = express.Router();
   const { asyncRoute, safeAudit } = options;
 
+  function normalizeBatchTaskUpdatesPayload(input: unknown) {
+    const queue = [input];
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (Array.isArray(current)) {
+        return { updates: current };
+      }
+      if (typeof current === "string") {
+        try {
+          queue.push(JSON.parse(current));
+        } catch {
+          // ignore invalid JSON text and continue probing other shapes
+        }
+        continue;
+      }
+      if (Buffer.isBuffer(current)) {
+        queue.push(current.toString("utf8"));
+        continue;
+      }
+      if (!current || typeof current !== "object") {
+        continue;
+      }
+
+      const candidate = current as {
+        updates?: unknown;
+        body?: unknown;
+        payload?: unknown;
+      };
+
+      if (Array.isArray(candidate.updates)) {
+        return { updates: candidate.updates };
+      }
+
+      if (candidate.body !== undefined) {
+        queue.push(candidate.body);
+      }
+      if (candidate.payload !== undefined) {
+        queue.push(candidate.payload);
+      }
+    }
+
+    return { updates: [] as unknown[] };
+  }
+
   router.get("/status", asyncRoute(async (_req, res) => {
     res.json(await getOpenClawStatusSummary());
   }));
@@ -77,8 +123,16 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
 
   router.patch("/projects/:projectId/tasks", asyncRoute(async (req, res) => {
     const projectId = String(req.params.projectId ?? "").trim();
-    const updates = Array.isArray(req.body?.updates) ? req.body.updates : [];
-    const updated = await updateOpenClawProjectTasks(projectId, updates);
+    const { updates } = normalizeBatchTaskUpdatesPayload(req.body);
+    if (updates.length === 0) {
+      res.status(400).json({ message: "updates is required" });
+      return;
+    }
+    const updated = await updateOpenClawProjectTasks(projectId, { updates });
+    if (!updated) {
+      res.status(404).json({ message: "Project or tasks not found" });
+      return;
+    }
     res.json(updated);
   }));
 
@@ -126,6 +180,35 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
       summary: `已创建 Agent ${created.agentId}`
     });
     res.status(201).json(created);
+  }));
+
+  router.delete("/agents/:agentId", asyncRoute(async (req, res) => {
+    const agentId = String(req.params.agentId ?? "").trim();
+    const result = await deleteOpenClawAgent(agentId);
+    if (result.status === "not_found") {
+      res.status(404).json({ message: "Agent not found" });
+      return;
+    }
+    if (result.status === "protected") {
+      res.status(400).json({ message: "Core agent cannot be deleted" });
+      return;
+    }
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "openclaw.agent_deleted",
+      resourceType: "agent",
+      resourceId: agentId,
+      summary: `已删除 Agent ${agentId}`,
+      detail: result.removedWorkspace ? "Agent workspace removed." : "Agent workspace retained."
+    });
+
+    res.json({
+      success: true,
+      agentId,
+      removedWorkspace: result.removedWorkspace
+    });
   }));
 
   router.patch("/agents/:agentId/settings", asyncRoute(async (req, res) => {

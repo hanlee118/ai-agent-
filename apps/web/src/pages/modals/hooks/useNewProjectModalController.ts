@@ -62,6 +62,8 @@ export function useNewProjectModalController({
   const [isImporting, setIsImporting] = useState(false);
   const [step, setStep] = useState<ModalStep>('input');
   const [rawInput, setRawInput] = useState('');
+  const [prdInput, setPrdInput] = useState('');
+  const [importedFileName, setImportedFileName] = useState('');
   const [industryRoleSets, setIndustryRoleSets] = useState<IndustryRoleSetSummary[]>([]);
   const [selectedIndustryCode, setSelectedIndustryCode] = useState('');
   const [issueSourceType, setIssueSourceType] = useState<IssueSourceType>('text');
@@ -76,10 +78,12 @@ export function useNewProjectModalController({
   const [conflictAcknowledged, setConflictAcknowledged] = useState(false);
   const [conflictResolution, setConflictResolution] = useState('');
   const [discussionAcknowledged, setDiscussionAcknowledged] = useState(false);
+  const [discussionOverride, setDiscussionOverride] = useState('');
   const [debateTaskId, setDebateTaskId] = useState<string | null>(null);
   const [debateTaskStatus, setDebateTaskStatus] = useState<IssueDebateTaskStatus | null>(null);
   const [debatePollingError, setDebatePollingError] = useState('');
   const [isPollingDebate, setIsPollingDebate] = useState(false);
+  const [isRefreshingDebate, setIsRefreshingDebate] = useState(false);
   const [analysisRecommendations, setAnalysisRecommendations] = useState<AgentRecommendation[]>([]);
   const [detectedDomains, setDetectedDomains] = useState<string[]>([]);
   const [clarification, setClarification] = useState<ClarificationAnswers>(INITIAL_CLARIFICATION);
@@ -117,12 +121,19 @@ export function useNewProjectModalController({
     [selectedIndustryConfig],
   );
 
+  const sourceInput = useMemo(
+    () => (issueSourceType === 'prd' ? prdInput : rawInput),
+    [issueSourceType, prdInput, rawInput],
+  );
+
   const industryAgents = useMemo(() => {
+    const pool = agents || [];
     if (allowedRoleIds.length === 0) {
-      return agents;
+      return pool;
     }
     const allowed = new Set(allowedRoleIds.map((role) => normalizeRoleId(role)));
-    return agents.filter((agent) => allowed.has(getAgentRoleId(agent)));
+    const filtered = pool.filter((agent) => allowed.has(getAgentRoleId(agent)));
+    return filtered.length > 0 ? filtered : pool;
   }, [allowedRoleIds]);
 
   useEffect(() => {
@@ -269,6 +280,8 @@ export function useNewProjectModalController({
     setIsImporting(false);
     setStep('input');
     setRawInput('');
+    setPrdInput('');
+    setImportedFileName('');
     setIssueSourceType('text');
     setParsedProject(null);
     setIssuePreview(null);
@@ -278,10 +291,12 @@ export function useNewProjectModalController({
     setConflictAcknowledged(false);
     setConflictResolution('');
     setDiscussionAcknowledged(false);
+    setDiscussionOverride('');
     setDebateTaskId(null);
     setDebateTaskStatus(null);
     setDebatePollingError('');
     setIsPollingDebate(false);
+    setIsRefreshingDebate(false);
     setAnalysisRecommendations([]);
     setDetectedDomains([]);
     setClarification(INITIAL_CLARIFICATION);
@@ -311,6 +326,8 @@ export function useNewProjectModalController({
       }
       const nextInput = normalized.slice(0, 6000);
       setRawInput(nextInput);
+      setIssueSourceType('file_import');
+      setImportedFileName(file.name);
       setIsImporting(false);
       setStep('input');
       addToast(`已导入文件: ${file.name}`, 'success');
@@ -330,8 +347,99 @@ export function useNewProjectModalController({
     }));
   };
 
+  const buildManualRecommendation = (agentId: string): AgentRecommendation | null => {
+    const matched = agents.find((item) => item.id === agentId);
+    if (!matched) {
+      return null;
+    }
+    return {
+      agentId: matched.id,
+      roleId: getAgentRoleId(matched),
+      name: matched.name,
+      role: matched.role,
+      score: 1,
+      reason: '手动补充参与该项目',
+    };
+  };
+
+  const handleToggleAnalysisAgent = (agentId: string) => {
+    setAnalysisRecommendations((prev) => {
+      const exists = prev.some((item) => item.agentId === agentId);
+      if (exists) {
+        return prev.filter((item) => item.agentId !== agentId);
+      }
+      const manual = buildManualRecommendation(agentId);
+      return manual ? [...prev, manual] : prev;
+    });
+  };
+
+  const handleRefreshDebate = async () => {
+    const input = sourceInput.trim() || parsedProject?.description.trim() || issuePreview?.summary.trim() || '';
+    if (!input) {
+      addToast('请先补充需求描述后再重新生成讨论', 'error');
+      return;
+    }
+
+    setIsRefreshingDebate(true);
+    try {
+      const refreshed = await issuesApi.preview({
+        input,
+        industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
+        sourceType: issueSourceType,
+        debateMode: 'model',
+      });
+
+      const refreshedRoleIds = (refreshed.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
+      const constrainedRoleIds = allowedRoleIds.length > 0
+        ? refreshedRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
+        : refreshedRoleIds;
+      const refreshedRecommendations = buildAgentRecommendations(input, constrainedRoleIds, {
+        allowedRoleIds,
+        mustHaveSoulRole: requiresSoulRole,
+        soulRoleId,
+      });
+
+      setIssuePreview(refreshed);
+      setEditableDraft(buildEditableDraftFromPreview(refreshed));
+      setIssueAnswers(applySuggestedAnswers(refreshed.questions || [], refreshed.suggestedAnswers || []));
+      setConflictAcknowledged((refreshed.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
+      setConflictResolution('');
+      setDiscussionAcknowledged((refreshed.discussion || []).length === 0);
+      setDiscussionOverride('');
+      setDebateTaskId(refreshed.debateTask?.taskId ?? null);
+      setDebateTaskStatus(
+        refreshed.debateTask?.status
+          ?? (refreshed.debate ? 'completed' : null),
+      );
+      setDebatePollingError('');
+      setIsPollingDebate(Boolean(
+        refreshed.debateTask
+          && (refreshed.debateTask.status === 'queued' || refreshed.debateTask.status === 'running'),
+      ));
+      setAnalysisRecommendations(refreshedRecommendations);
+
+      const refreshedNames = refreshedRecommendations.map((item) => item.name);
+      const refreshedTeamRoleIds = Array.from(
+        new Set(refreshedRecommendations.map((item) => normalizeRoleId(item.roleId))),
+      );
+      setParsedProject((prev) => (prev
+        ? {
+            ...prev,
+            agents: refreshedNames.length > 0 ? refreshedNames : prev.agents,
+            team: refreshedTeamRoleIds.length > 0 ? refreshedTeamRoleIds : prev.team,
+          }
+        : prev));
+
+      addToast('已重新生成多角色讨论结论，请确认后继续', 'success');
+    } catch (error) {
+      addToast(`重新生成讨论失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsRefreshingDebate(false);
+    }
+  };
+
   const handleParseInput = async () => {
-    const input = rawInput.trim();
+    const input = sourceInput.trim();
     if (!input) {
       addToast('请先输入项目需求', 'error');
       return;
@@ -395,6 +503,7 @@ export function useNewProjectModalController({
       setIssueAnswers(applySuggestedAnswers(resolvedPreview.questions || [], resolvedPreview.suggestedAnswers || []));
       setConflictAcknowledged((resolvedPreview.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
       setDiscussionAcknowledged((resolvedPreview.discussion || []).length === 0);
+      setDiscussionOverride('');
       setDetectedDomains(domains);
       setAnalysisRecommendations(recommendations);
       setClarification(INITIAL_CLARIFICATION);
@@ -452,26 +561,36 @@ export function useNewProjectModalController({
         return;
       }
 
-      if ((issuePreview.discussion || []).length > 0 && !discussionAcknowledged) {
-        addToast('请先确认多角色讨论结论，再进入创建确认卡', 'error');
+      if ((issuePreview.discussion || []).length > 0 && !discussionAcknowledged && !discussionOverride.trim()) {
+        addToast('请先确认讨论结论，或填写“不同意时的修正意见”后再继续', 'error');
         return;
       }
     }
 
-    const currentRoleIds = parsedProject.team.map((role) => normalizeRoleId(role));
-    if (requiresSoulRole && soulRoleId && !currentRoleIds.includes(normalizeRoleId(soulRoleId))) {
+    setStep('team');
+    addToast('分析完成，请确认团队分配与可选扩展信息', 'success');
+  };
+
+  const handleContinueFromTeam = () => {
+    if (!parsedProject) {
+      return;
+    }
+
+    const roleIds = Array.from(new Set(analysisRecommendations.map((item) => normalizeRoleId(item.roleId))));
+    const names = analysisRecommendations.map((item) => item.name);
+    const nextRoleIds = roleIds.length > 0 ? roleIds : parsedProject.team.map((role) => normalizeRoleId(role));
+
+    if (requiresSoulRole && soulRoleId && !nextRoleIds.includes(normalizeRoleId(soulRoleId))) {
       addToast(`当前行业团队必须包含灵魂角色 ${roleLabel(soulRoleId)}，请先补充后再继续`, 'error');
       return;
     }
 
     const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
-    if (minRoles > 0 && currentRoleIds.length < minRoles) {
-      addToast(`当前行业最少需要 ${minRoles} 个角色，请补充团队后再继续`, 'error');
+    if (minRoles > 0 && nextRoleIds.length < minRoles) {
+      addToast(`当前行业最少需要 ${minRoles} 个角色，请继续补充团队`, 'error');
       return;
     }
 
-    const names = analysisRecommendations.map((item) => item.name);
-    const roleIds = Array.from(new Set(analysisRecommendations.map((item) => normalizeRoleId(item.roleId))));
     setParsedProject((prev) => {
       if (!prev) {
         return prev;
@@ -479,11 +598,11 @@ export function useNewProjectModalController({
       return {
         ...prev,
         agents: names.length > 0 ? names : prev.agents,
-        team: roleIds.length > 0 ? roleIds : prev.team,
+        team: nextRoleIds.length > 0 ? nextRoleIds : prev.team,
       };
     });
     setStep('confirm');
-    addToast('澄清完成，请确认创建并启动执行', 'success');
+    addToast('团队分配完成，请确认创建并启动执行', 'success');
   };
 
   const handleCreateFromParsed = async () => {
@@ -547,6 +666,9 @@ export function useNewProjectModalController({
     ]
       .filter(Boolean)
       .join('\n');
+    const discussionBlock = discussionOverride.trim()
+      ? `讨论分歧处理: ${discussionOverride.trim()}`
+      : '';
 
     const artifactsBlock = (issuePreview?.expectedArtifacts || [])
       .map((artifact) => `- ${artifact.name}（${roleLabel(artifact.ownerRoleId)} / ${artifact.stageType}）`)
@@ -611,9 +733,10 @@ export function useNewProjectModalController({
       issuePreview ? `Issue: ${issuePreview.title}` : null,
       '',
       issueAnswersBlock ? `需求固定结果:\n${issueAnswersBlock}` : null,
+      discussionBlock ? `\n讨论结论补充:\n${discussionBlock}` : null,
       alignmentBlock ? `\n文档对齐结论:\n${alignmentBlock}` : null,
       blueprintBlock ? `\n产品设计草案:\n${blueprintBlock}` : null,
-      requirementContractBlock ? `\n需求合同:\n${requirementContractBlock}` : null,
+      requirementContractBlock ? `\n需求确认单:\n${requirementContractBlock}` : null,
       historyReferenceBlock ? `\n可复用历史经验:\n${historyReferenceBlock}` : null,
       artifactsBlock ? `\n目标产出物:\n${artifactsBlock}` : null,
       optionalBlock ? `\n可选扩展信息:\n${optionalBlock}` : null,
@@ -652,7 +775,7 @@ export function useNewProjectModalController({
         created = await projectsApi.create({
           name: parsedProject.name,
           description: finalDescription,
-          requirements: rawInput.trim() || parsedProject.description,
+          requirements: sourceInput.trim() || parsedProject.description,
           team: parsedProject.team,
         });
       }
@@ -669,7 +792,7 @@ export function useNewProjectModalController({
           '需求固定结论：',
           issueAnswersBlock || clarificationBlock,
           '',
-          '需求合同：',
+          '需求确认单：',
           requirementContractBlock || '按确认卡中的目标、范围、验收执行',
           historyReferenceBlock ? `\n历史参考:\n${historyReferenceBlock}` : '',
           '',
@@ -755,8 +878,9 @@ export function useNewProjectModalController({
       priority: formData.priority,
       team: manualRoleIds,
     });
-    setStep('confirm');
-    addToast('已生成确认卡（手动模式）', 'success');
+    setDiscussionOverride('');
+    setStep('team');
+    addToast('已生成项目草案，请确认团队分配后继续', 'success');
   };
 
   const handleUseManualFromParsed = () => {
@@ -918,6 +1042,10 @@ export function useNewProjectModalController({
     setStep,
     rawInput,
     setRawInput,
+    prdInput,
+    setPrdInput,
+    sourceInput,
+    importedFileName,
     industryRoleSets,
     selectedIndustryCode,
     setSelectedIndustryCode,
@@ -941,10 +1069,13 @@ export function useNewProjectModalController({
     setConflictResolution,
     discussionAcknowledged,
     setDiscussionAcknowledged,
+    discussionOverride,
+    setDiscussionOverride,
     debateTaskId,
     debateTaskStatus,
     debatePollingError,
     isPollingDebate,
+    isRefreshingDebate,
     analysisRecommendations,
     detectedDomains,
     clarification,
@@ -965,8 +1096,11 @@ export function useNewProjectModalController({
     handleClose,
     handleImportProjectFile,
     handleToggleManualAgent,
+    handleToggleAnalysisAgent,
     handleParseInput,
+    handleRefreshDebate,
     handleContinueFromAnalysis,
+    handleContinueFromTeam,
     handleCreateFromParsed,
     handleManualSubmit,
     handleUseManualFromParsed,

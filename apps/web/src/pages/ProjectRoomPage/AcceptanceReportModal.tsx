@@ -184,7 +184,11 @@ export default function AcceptanceReportModal({
                 <div className="flex items-center gap-2">
                   {finalArtifacts ? (
                     <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
-                      {finalArtifacts.readyForAcceptance ? '可验收确认' : `缺失 ${finalArtifacts.coverage.missing} 项`}
+                      {finalArtifacts.readyForAcceptance
+                        ? '可验收确认'
+                        : finalArtifacts.blockingIssues.length > 0
+                          ? `阻断 ${finalArtifacts.blockingIssues.length} 项`
+                          : `缺失 ${finalArtifacts.coverage.missing} 项`}
                     </Badge>
                   ) : (
                     <Badge variant="default">同步中</Badge>
@@ -218,6 +222,14 @@ export default function AcceptanceReportModal({
                   {finalArtifacts.missingRequired.length > 0 ? (
                     <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning">
                       缺失必需产物：{finalArtifacts.missingRequired.join('、')}
+                    </div>
+                  ) : null}
+                  {finalArtifacts.blockingIssues.length > 0 ? (
+                    <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-xs text-danger space-y-1">
+                      <p className="font-semibold">当前存在阻断项，不能进入最终验收确认：</p>
+                      {finalArtifacts.blockingIssues.map((item) => (
+                        <p key={item}>- {item}</p>
+                      ))}
                     </div>
                   ) : null}
 

@@ -63,7 +63,13 @@ const ROLE_IDS: RoleType[] = [
 
 function normalizeSourceType(input: unknown): IssueSourceType {
   const value = String(input ?? "").trim().toLowerCase();
-  if (value === "meeting_notes" || value === "journey" || value === "competitor") {
+  if (
+    value === "meeting_notes"
+    || value === "journey"
+    || value === "competitor"
+    || value === "file_import"
+    || value === "prd"
+  ) {
     return value;
   }
   return "text";
@@ -515,7 +521,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       valueNarrative: issue.requirementContract?.valueNarrative
     };
     const requirementContractBlock = [
-      "需求合同:",
+      "需求确认单:",
       `- 目标: ${confirmedContract.objective || "信息未提供"}`,
       `- In Scope: ${(confirmedContract.inScope || []).slice(0, 3).join("；") || "信息未提供"}`,
       `- Out of Scope: ${(confirmedContract.outOfScope || []).slice(0, 3).join("；") || "信息未提供"}`,

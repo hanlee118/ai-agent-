@@ -211,18 +211,77 @@ function buildSystemPrompt(context: AgentRunContext) {
     "你是 AI 协作工作台里的专业 Agent。",
     "你必须输出清晰、结构化、可执行的中文内容。",
     "不要自我介绍，不要写多余寒暄。",
-    "请严格使用 Markdown。"
+    "请严格使用 Markdown。",
+    "仅可使用当前项目事实与高度相关经验，不得混入低相关长期记忆、旧项目默认视觉、官网演示页或历史模板。"
   ];
+
+  if (context.stageType === "ANALYSIS" || context.role === "ROLE_ANALYST") {
+    base.push("你是需求分析师，必须先做边界澄清，再做方案拆解。不要把模糊假设直接写成既定事实。");
+  }
+
+  if (context.role === "ROLE_PRODUCT") {
+    base.push("你是产品负责人，必须明确用户价值、MVP边界、非目标和决策取舍，避免把分析文档写成空泛模板。");
+  }
+
+  if (context.role === "ROLE_PM" || context.stageType === "INIT") {
+    base.push("你是项目经理，必须输出真实的项目章程、阶段边界、协作方式和风险闸门，不要把立项写成一句话通知。");
+    base.push("禁止输出“待补充 / TODO / TBD / xxx / 占位”等占位词。");
+  }
 
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
     base.push("你是视觉设计总监，避免模板化页面，优先保证品牌辨识度、信息层级和可访问性。");
     base.push("输出必须包含视觉方向、版式策略、组件规范、CTA策略和无障碍检查项。");
   }
 
+  if (context.role === "ROLE_ARCH" || context.stageType === "DEV") {
+    base.push("你必须给出真实的技术边界、架构取舍、接口约束和验证路径，不能只写原则性建议。");
+  }
+
   return base.join("\n");
 }
 
 function buildOutputGuidance(context: AgentRunContext) {
+  if (context.stageType === "INIT") {
+    return [
+      "请输出以下结构：",
+      "## 项目背景与目标",
+      "- 原始需求、业务目标、成功判断口径",
+      "## 范围定义（In Scope / Out of Scope）",
+      "- 首期必须做 / 暂不纳入 / 明确边界",
+      "## 角色分工与责任",
+      "- 各角色 owner、输入、输出、升级路径",
+      "## 治理机制与决策规则",
+      "- 何时需要确认、何时可自动推进、关键门禁是什么",
+      "## 风险与应急预案",
+      "- 至少 3 条风险与对应处理策略",
+      "## 验收检查清单",
+      "- 目标、范围、角色、风险四类信息完整且无冲突。",
+      "- 关键决策规则清晰，出现阻塞时可直接执行。",
+      "- 章程可作为分析阶段输入，不依赖口头补充。",
+      "- 上述三条验收检查清单必须逐字保留，不可改写。",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.stageType === "ANALYSIS" && context.role === "ROLE_PRODUCT") {
+    return [
+      "请输出以下结构：",
+      "## 产品目标与成功指标",
+      "- 目标用户、核心价值、成功判断口径",
+      "## MVP 边界与非目标",
+      "- 首期必须做 / 明确不做 / 延后观察项",
+      "## 关键用户决策路径",
+      "- 至少 3 条关键链路，说明每一步的输入、动作、反馈",
+      "## 功能优先级与取舍理由",
+      "- P0 / P1 / P2，并说明为什么",
+      "## 需要确认的关键假设",
+      "- 至少 3 条，避免后续研发建立在幻觉前提上",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
   if (context.role === "ROLE_DESIGN" || context.stageType === "DESIGN") {
     return [
       "请输出以下结构：",
@@ -236,6 +295,24 @@ function buildOutputGuidance(context: AgentRunContext) {
       "- UX 原则（3条）",
       "- 可访问性检查清单（至少3条）",
       "- 审查结论（通过/不通过）",
+      "## 下一步",
+      "- 2 到 3 条可执行动作"
+    ];
+  }
+
+  if (context.stageType === "DEV" && context.role === "ROLE_ARCH") {
+    return [
+      "请输出以下结构：",
+      "## 架构目标与约束",
+      "- 系统边界、性能目标、稳定性与安全要求",
+      "## 模块划分与依赖关系",
+      "- 上下游、接口边界、失败处理",
+      "## 数据模型与存储策略",
+      "- 核心实体、索引、缓存、持久化约束",
+      "## 技术选型与取舍",
+      "- 方案A/B比较、为什么选、为什么不选",
+      "## 实施顺序与风险闸门",
+      "- 阶段拆解、依赖、回滚点、验收前置条件",
       "## 下一步",
       "- 2 到 3 条可执行动作"
     ];

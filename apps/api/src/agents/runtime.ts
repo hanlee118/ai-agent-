@@ -13,13 +13,14 @@ import {
   getRuntimeStatus as readRuntimeStatus
 } from "../system/runtime-config.js";
 import { OPENCLAW_CONFIG_PATH } from "../openclaw/paths.js";
+import { normalizeOpenClawProviderApis } from "../openclaw/workspace.js";
 
 const STAGE_AGENT_MAX_MODELS = Math.max(1, Number(process.env.STAGE_AGENT_MAX_MODELS ?? 3));
-const STAGE_AGENT_TOTAL_TIMEOUT_MS = Math.max(12000, Number(process.env.STAGE_AGENT_TOTAL_TIMEOUT_MS ?? 35000));
+const STAGE_AGENT_TOTAL_TIMEOUT_MS = Math.max(12000, Number(process.env.STAGE_AGENT_TOTAL_TIMEOUT_MS ?? 90000));
 const MIN_ATTEMPT_BUDGET_MS = 8000;
 const MAX_SINGLE_ATTEMPT_TIMEOUT_MS = Math.max(
   MIN_ATTEMPT_BUDGET_MS,
-  Number(process.env.STAGE_AGENT_SINGLE_ATTEMPT_TIMEOUT_MS ?? 12000)
+  Number(process.env.STAGE_AGENT_SINGLE_ATTEMPT_TIMEOUT_MS ?? 45000)
 );
 const STAGE_TIMEOUT_BASELINE_MS: Record<StageType, number> = {
   INIT: 30000,
@@ -44,7 +45,9 @@ const routePrewarmCache = new Map<string, { reason: string | null; expiresAt: nu
 
 const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_PM: 120000,
-  ROLE_DESIGN: 180000,
+  ROLE_ANALYST: 120000,
+  ROLE_PRODUCT: 120000,
+  ROLE_DESIGN: 360000, // 设计任务内容重，3分钟
   ROLE_ARCH: 160000,
   ROLE_DEV: 180000,
   ROLE_QA: 120000
@@ -52,40 +55,42 @@ const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
 
 const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_PM: 90000,
-  ROLE_DESIGN: 120000,
+  ROLE_ANALYST: 90000,
+  ROLE_PRODUCT: 90000,
+  ROLE_DESIGN: 300000, // 设计任务需要更长单次生成时间，5分钟
   ROLE_ARCH: 100000,
   ROLE_DEV: 120000,
   ROLE_QA: 90000
 };
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
-  INIT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "minima/MiniMax-M2.7-highspeed"],
-  ANALYSIS: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "kimi-k2.5", "minima/MiniMax-M2.7-highspeed"],
-  DESIGN: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "kimi-k2.5", "qwen3-coder-plus"],
-  DEV: ["openai/gpt-5.3-codex", "qwen3-coder-plus", "openai/gpt-5.4", "minima/MiniMax-M2.7-highspeed"],
-  ACCEPT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "minima/MiniMax-M2.7-highspeed", "kimi-k2.5"]
+  INIT: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex"],
+  ANALYSIS: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex", "kimi-k2.5"],
+  DESIGN: ["anthropic/claude-opus-4-20250514", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
+  DEV: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "anthropic/claude-sonnet-4-20250514", "qwen3-coder-plus"],
+  ACCEPT: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex"]
 };
 
 const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: string }> = {
   INIT: {
     objective: "快速理解需求与项目初始化。",
-    bestFit: "openai/gpt-5.4（高质量理解） -> openai/gpt-5.3-codex（稳定补位）"
+    bestFit: "openai/gpt-5.4（首选） -> anthropic/claude-sonnet-4-20250514（复杂语义补位）"
   },
   ANALYSIS: {
     objective: "抽取约束/风险/验收标准，形成可执行分析。",
-    bestFit: "openai/gpt-5.4（复杂分析） -> openai/gpt-5.3-codex/kimi-k2.5（补位）"
+    bestFit: "openai/gpt-5.4（复杂分析） -> anthropic/claude-sonnet-4-20250514（深度补位）"
   },
   DESIGN: {
     objective: "输出高质量视觉与交互策略，避免模板化设计。",
-    bestFit: "openai/gpt-5.4（首选设计质量） -> openai/gpt-5.3-codex -> kimi-k2.5"
+    bestFit: "anthropic/claude-opus-4-20250514（设计首选） -> anthropic/claude-sonnet-4-20250514 -> openai/gpt-5.4"
   },
   DEV: {
     objective: "面向实现落地，强调代码可执行性和稳定性。",
-    bestFit: "openai/gpt-5.3-codex（代码导向） -> qwen3-coder-plus -> openai/gpt-5.4"
+    bestFit: "openai/gpt-5.4（实现质量首选） -> openai/gpt-5.3-codex（编码补位） -> anthropic/claude-sonnet-4-20250514"
   },
   ACCEPT: {
     objective: "验收复盘与质量关口确认。",
-    bestFit: "openai/gpt-5.4（总结评审） -> openai/gpt-5.3-codex（补位）"
+    bestFit: "openai/gpt-5.4（总结评审） -> anthropic/claude-sonnet-4-20250514（质量复核）"
   }
 };
 
@@ -99,12 +104,25 @@ export type StageModelAttemptTrace = {
   status: StageModelAttemptStatus;
   elapsedMs: number;
   startedAt: string;
+  attempt?: number;
+  requestedModel?: string;
+  selectedModel?: string;
+  executedModel?: string;
+  provider?: string;
+  isolatedSession?: boolean;
+  sessionId?: string;
+  localExecution?: boolean;
+  failureKind?: string;
+  recoveryAction?: string;
+  recoveryTargetModel?: string;
   error?: string;
 };
 
 export type StageAgentRunResult = AgentRunResult & {
   attempts: StageModelAttemptTrace[];
   degraded?: boolean;
+  skillEvidence?: Record<string, unknown> | null;
+  collaborationEvidence?: Record<string, unknown> | null;
 };
 
 type ExecutionRoute = {
@@ -1015,7 +1033,8 @@ async function resolveKimiExecutionConfigs(input: KimiExecutionConfigInput): Pro
 async function readOpenClawRuntimeConfig(): Promise<OpenClawRuntimeConfig> {
   try {
     const configRaw = await readFile(OPENCLAW_CONFIG_PATH, "utf8");
-    return JSON.parse(configRaw) as OpenClawRuntimeConfig;
+    const parsed = JSON.parse(configRaw) as OpenClawRuntimeConfig;
+    return normalizeOpenClawProviderApis(parsed).config as OpenClawRuntimeConfig;
   } catch {
     return {};
   }

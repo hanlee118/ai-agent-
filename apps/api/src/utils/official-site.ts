@@ -7,6 +7,8 @@ import { ROLE_LABELS, STAGE_LABELS, type ProjectDetail } from "@occ/shared";
 export interface OfficialSiteArtifact {
   publicPath: string;
   filePaths: string[];
+  kind: "design_preview" | "narrative_summary";
+  sourceDeliverableName?: string;
 }
 
 function findWorkspaceRoot(startDir: string) {
@@ -31,20 +33,6 @@ function latestStageContent(project: ProjectDetail, stageType: "ANALYSIS" | "DES
   return candidate[0]?.content ?? "";
 }
 
-function extractBullets(content: string, fallback: string[]) {
-  const lines = content
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- "))
-    .map((line) => line.slice(2).trim())
-    .filter(Boolean);
-
-  if (lines.length === 0) {
-    return fallback;
-  }
-  return Array.from(new Set(lines)).slice(0, 6);
-}
-
 function escapeHtml(input: string) {
   return input
     .replaceAll("&", "&amp;")
@@ -55,6 +43,308 @@ function escapeHtml(input: string) {
 
 function listToHtml(items: string[]) {
   return items.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+}
+
+function extractRenderableHtmlPreview(content: string) {
+  const source = String(content || "");
+  const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+  let matched: RegExpExecArray | null;
+  while ((matched = fencedPattern.exec(source)) !== null) {
+    const candidate = String(matched[1] || "").trim();
+    if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  if (/(<!doctype html|<html[\s>])/i.test(source)) {
+    return source.trim();
+  }
+
+  return null;
+}
+
+function wrapPreviewSnippetAsHtml(snippet: string, projectName: string) {
+  const normalized = String(snippet || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (/(<!doctype html|<html[\s>])/i.test(normalized)) {
+    return normalized;
+  }
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${escapeHtml(projectName)} · 视觉定稿预览</title>
+  <style>
+    body { margin: 0; font-family: "SF Pro Display","PingFang SC","Segoe UI",sans-serif; background: #0b0f17; color: #eef2ff; }
+    .preview-shell { padding: 16px 20px; border-bottom: 1px solid rgba(255,255,255,.12); background: rgba(6,10,18,.85); }
+    .preview-shell strong { display: block; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; color: #8ea3ff; }
+    .preview-shell p { margin: 6px 0 0; font-size: 12px; color: #b7c4e8; }
+  </style>
+</head>
+<body>
+  <section class="preview-shell">
+    <strong>Design Preview Source</strong>
+    <p>当前官网演示页直接渲染“视觉定稿单页”交付物中的 HTML 片段。</p>
+  </section>
+  ${normalized}
+</body>
+</html>`;
+}
+
+type NarrativeStage = "ANALYSIS" | "DESIGN" | "DEV" | "ACCEPT";
+
+const GENERIC_BULLET_PATTERNS: RegExp[] = [
+  /^项目[:：]/i,
+  /^阶段[:：]/i,
+  /^当前状态[:：]/i,
+  /^产出角色[:：]/i,
+  /^执行角色[:：]/i,
+  /^执行引擎[:：]/i,
+  /^生成时间[:：]/i,
+  /^更新时间[:：]/i,
+  /^模型[:：]/i,
+  /^任务[:：]/i,
+  /^角色[:：]/i,
+  /^\d+\.\s*(openai|gpt-|claude|qwen|deepseek|gemini)/i
+];
+
+const NOISY_TEXT_PATTERNS: RegExp[] = [
+  /runtime-selected/i,
+  /MODEL_ATTEMPT_TIMEOUT|ETIMEDOUT|ECONNRESET|EAI_AGAIN/i,
+  /scripted-agent/i,
+  /\b\d{4}-\d{2}-\d{2}t\d{2}:\d{2}:\d{2}/i,
+  /https?:\/\//i
+];
+
+const STAGE_SECTION_HINTS: Record<NarrativeStage, RegExp[]> = {
+  ANALYSIS: [/需求|目标|范围|约束|风险|验收|里程碑|场景|用户/i],
+  DESIGN: [/视觉|版式|布局|组件|品牌|交互|无障碍|可访问|审查|信息架构/i],
+  DEV: [/技术|架构|实现|接口|数据|开发|联调|部署|测试|工程/i],
+  ACCEPT: [/验收|回填|发布|上线|复盘|结论|指标|质量|交付/i]
+};
+
+const STAGE_IGNORED_SECTION_HINTS = /交付物元信息|专业模板约束|当前任务清单|模板章节骨架|关键词上下文|关键约束|主要风险|下一阶段输入|自动推进元信息|模型尝试轨迹/i;
+const GENERIC_KEYWORD_STOPWORDS = new Set([
+  "系统",
+  "平台",
+  "项目",
+  "分析",
+  "设计",
+  "开发",
+  "研发",
+  "观测",
+  "验收"
+]);
+
+function dedupeList(items: string[]) {
+  return Array.from(new Set(items.map((item) => item.trim()).filter(Boolean)));
+}
+
+function summarizeText(input: string, maxLength = 86) {
+  const normalized = String(input || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxLength)}...`;
+}
+
+function isMeaningfulNarrativeLine(line: string) {
+  const normalized = String(line || "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return false;
+  }
+  if (normalized.length < 6 || normalized.length > 120) {
+    return false;
+  }
+  if (GENERIC_BULLET_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+  if (NOISY_TEXT_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+  if (/交付模板类型|模板章节骨架|请结合(?:\s*Agent\s*输出正文)?与任务证据补全本节|关键词上下文|专业模板约束|当前任务清单|交付物元信息/i.test(normalized)) {
+    return false;
+  }
+  return true;
+}
+
+function stripMarkdownNoise(content: string) {
+  return String(content || "")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/\r\n/g, "\n");
+}
+
+function parseMarkdownSections(content: string) {
+  const sections: Array<{ title: string; lines: string[] }> = [];
+  let current = { title: "__root__", lines: [] as string[] };
+  for (const rawLine of stripMarkdownNoise(content).split("\n")) {
+    const line = rawLine.trim();
+    const heading = line.match(/^##\s+(.+)$/);
+    if (heading) {
+      sections.push(current);
+      current = { title: heading[1].trim(), lines: [] };
+      continue;
+    }
+    if (line) {
+      current.lines.push(line);
+    }
+  }
+  sections.push(current);
+  return sections;
+}
+
+function extractListItems(lines: string[]) {
+  const bullets = lines
+    .map((line) => {
+      const listMatch = line.match(/^[-*+]\s+(.+)$/);
+      if (listMatch?.[1]) {
+        return listMatch[1].trim();
+      }
+      const orderMatch = line.match(/^\d+\.\s+(.+)$/);
+      if (orderMatch?.[1]) {
+        return orderMatch[1].trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
+  return dedupeList(bullets);
+}
+
+function normalizeDeliverableName(name: string) {
+  return String(name || "")
+    .replace(/\.(md|markdown|txt|html)$/i, "")
+    .replace(/[-_]/g, " ")
+    .trim();
+}
+
+function buildIntentDrivenFallbacks(project: ProjectDetail, stage: NarrativeStage) {
+  const keywords = dedupeList((project.parsedIntent?.keywords || []).map((item) => summarizeText(item, 24)));
+  const constraints = dedupeList((project.parsedIntent?.constraints || []).map((item) => summarizeText(item, 30)));
+  const risks = dedupeList((project.parsedIntent?.risks || []).map((item) => summarizeText(item, 30)));
+  const summary = summarizeText(project.parsedIntent?.summary || project.description || "", 72);
+
+  if (stage === "ANALYSIS") {
+    return dedupeList([
+      summary ? `核心目标：${summary}` : "",
+      keywords.length > 0 ? `关键业务词：${keywords.slice(0, 3).join(" / ")}` : "",
+      constraints.length > 0 ? `约束条件：${constraints.slice(0, 2).join("；")}` : "",
+      risks.length > 0 ? `主要风险：${risks.slice(0, 2).join("；")}` : ""
+    ]);
+  }
+
+  if (stage === "DESIGN") {
+    return dedupeList([
+      keywords.length > 0 ? `视觉与交互需服务于：${keywords.slice(0, 3).join(" / ")}` : "",
+      constraints.length > 0 ? `设计约束需覆盖：${constraints.slice(0, 2).join("；")}` : "",
+      "通过设计审查卡确认信息架构、组件与可访问性清单",
+      "提供可确认静态稿或 HTML 单页后再进入开发"
+    ]);
+  }
+
+  if (stage === "DEV") {
+    return dedupeList([
+      keywords.length > 0 ? `研发实现优先打通：${keywords.slice(0, 3).join(" / ")}` : "",
+      "按阶段任务拆解关键路径并保留执行证据",
+      constraints.length > 0 ? `实现需满足：${constraints.slice(0, 2).join("；")}` : "",
+      risks.length > 0 ? `重点规避：${risks.slice(0, 2).join("；")}` : ""
+    ]);
+  }
+
+  return dedupeList([
+    "按验收口径核对主流程、证据链与关键指标",
+    "将最终结果回填产品说明文档并沉淀版本记录",
+    risks.length > 0 ? `验收阶段重点关注：${risks.slice(0, 2).join("；")}` : "",
+    constraints.length > 0 ? `交付遵循约束：${constraints.slice(0, 2).join("；")}` : ""
+  ]);
+}
+
+function extractStageHighlights(
+  project: ProjectDetail,
+  stage: NarrativeStage,
+  content: string,
+  fallback: string[]
+) {
+  const sections = parseMarkdownSections(content);
+  const stageSections = sections.filter((section) => !STAGE_IGNORED_SECTION_HINTS.test(section.title));
+  const sectionHints = STAGE_SECTION_HINTS[stage];
+  const preferredSections = stageSections.filter((section) => sectionHints.some((hint) => hint.test(section.title)));
+  const selectedSections = preferredSections.length > 0 ? preferredSections : stageSections;
+
+  const candidates = dedupeList(
+    selectedSections.flatMap((section) => extractListItems(section.lines))
+  ).filter((line) => isMeaningfulNarrativeLine(line));
+
+  if (candidates.length > 0) {
+    return candidates.slice(0, 6);
+  }
+
+  const intentFallback = buildIntentDrivenFallbacks(project, stage);
+  const mergedFallback = dedupeList([...fallback, ...intentFallback]).filter((line) => isMeaningfulNarrativeLine(line) || line.startsWith("核心目标："));
+  return mergedFallback.slice(0, 6);
+}
+
+function buildHeroKeywordLine(project: ProjectDetail) {
+  const keywords = dedupeList(project.parsedIntent?.keywords || []);
+  const filtered = keywords.filter((item) => {
+    const normalized = String(item || "").trim();
+    if (!normalized) {
+      return false;
+    }
+    if (GENERIC_KEYWORD_STOPWORDS.has(normalized)) {
+      return false;
+    }
+    return true;
+  });
+  if (filtered.length > 0) {
+    return filtered.slice(0, 3).join(" / ");
+  }
+
+  const source = `${project.name} ${project.description} ${project.parsedIntent?.summary || ""}`;
+  const inferred: string[] = [];
+  if (/tiktok/i.test(source)) inferred.push("TikTok");
+  if (/amazon/i.test(source)) inferred.push("Amazon");
+  if (/temu/i.test(source)) inferred.push("Temu");
+  if (/跨境/i.test(source)) inferred.push("跨境");
+  if (/爆品/i.test(source)) inferred.push("爆品监控");
+  if (/跟品/i.test(source)) inferred.push("跟品跟踪");
+  return dedupeList(inferred).slice(0, 3).join(" / ");
+}
+
+function buildTopSignals(project: ProjectDetail, stageBullets: string[][]) {
+  const keywords = dedupeList((project.parsedIntent?.keywords || []).map((item) => summarizeText(item, 24)));
+  const constraints = dedupeList((project.parsedIntent?.constraints || []).map((item) => summarizeText(item, 24)));
+  const risks = dedupeList((project.parsedIntent?.risks || []).map((item) => summarizeText(item, 24)));
+
+  const intentSignals = [
+    ...keywords.slice(0, 2).map((item) => `业务关键词：${item}`),
+    ...constraints.slice(0, 2).map((item) => `约束条件：${item}`),
+    ...risks.slice(0, 2).map((item) => `风险关注：${item}`)
+  ];
+
+  const stageSignals = stageBullets.flat().filter((line) => isMeaningfulNarrativeLine(line)).slice(0, 6);
+  return dedupeList([...intentSignals, ...stageSignals]).slice(0, 6);
+}
+
+function buildQuickWins(project: ProjectDetail, acceptBullets: string[]) {
+  const approvedDeliverables = project.deliverables
+    .filter((item) => item.status === "approved")
+    .slice()
+    .sort((left, right) => right.version - left.version)
+    .slice(0, 2)
+    .map((item) => `已完成交付：${normalizeDeliverableName(item.name)}`);
+  const completedTasks = project.tasks.filter((item) => item.status === "done").length;
+  const primary = dedupeList([
+    ...approvedDeliverables,
+    completedTasks > 0 ? `已落地任务：${completedTasks} 项` : ""
+  ]);
+  const supplemental = acceptBullets.filter((item) => !primary.includes(item));
+  return dedupeList([...primary, ...supplemental]).slice(0, 3);
 }
 
 type VisualPreset = "apple" | "default";
@@ -78,6 +368,8 @@ function detectVisualPreset(project: ProjectDetail, designContent: string): Visu
 
 function renderAppleOfficialSiteHtml(input: {
   project: ProjectDetail;
+  heroTitle: string;
+  heroLead: string;
   stageCompletionPercent: number;
   completedStages: number;
   analysisBullets: string[];
@@ -91,6 +383,8 @@ function renderAppleOfficialSiteHtml(input: {
 }) {
   const {
     project,
+    heroTitle,
+    heroLead,
     stageCompletionPercent,
     completedStages,
     analysisBullets,
@@ -138,6 +432,25 @@ function renderAppleOfficialSiteHtml(input: {
       width: min(1180px, 92vw);
       margin: 0 auto;
       padding: 48px 0 88px;
+    }
+    .preview-notice {
+      margin-bottom: 18px;
+      border: 1px solid rgba(0,113,227,0.18);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(255,255,255,0.76);
+      color: #334155;
+      box-shadow: 0 12px 30px rgba(15, 23, 42, 0.06);
+    }
+    .preview-notice strong {
+      display: block;
+      font-size: 13px;
+      color: #0f172a;
+    }
+    .preview-notice p {
+      margin: 6px 0 0;
+      font-size: 12px;
+      line-height: 1.7;
     }
     .hero {
       border: 1px solid var(--line);
@@ -386,12 +699,16 @@ function renderAppleOfficialSiteHtml(input: {
 </head>
 <body>
   <main class="wrap">
+    <section class="preview-notice">
+      <strong>交付物快照页</strong>
+      <p>此页面用于呈现当前项目交付物生成结果快照；审批状态与项目房间实时信息以平台主界面为准。</p>
+    </section>
     <section class="hero">
       <article>
         <span class="badge">Apple Style · ${escapeHtml(project.id)}</span>
-        <h1>AI 协作平台<br/>让需求到研发闭环可追踪</h1>
+        <h1>${escapeHtml(heroTitle)}</h1>
         <p class="lead">
-          面向真实项目执行的协作系统，从需求输入、角色协作、阶段验收到结果回填全链路可查证。
+          ${escapeHtml(heroLead)}
           项目状态：<span class="ok">${escapeHtml(project.status)}（${project.progress}%）</span>。
         </p>
       </article>
@@ -448,37 +765,92 @@ function renderAppleOfficialSiteHtml(input: {
 </html>`;
 }
 
-function renderOfficialSiteHtml(project: ProjectDetail) {
+function renderOfficialSiteHtml(project: ProjectDetail): {
+  html: string;
+  kind: "design_preview" | "narrative_summary";
+  sourceDeliverableName?: string;
+} {
+  const visualPreviewCandidate = project.deliverables
+    .filter((item) => item.stageType === "DESIGN")
+    .sort((left, right) => {
+      const byVersion = right.version - left.version;
+      if (byVersion !== 0) {
+        return byVersion;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })
+    .find((item) => /视觉定稿|preview\.html|单页预览|mockup|wireframe|design preview/i.test(String(item.name || "")));
+  const previewHtml = extractRenderableHtmlPreview(String(visualPreviewCandidate?.content || ""));
+  if (previewHtml && project.status !== "completed") {
+    return {
+      html: wrapPreviewSnippetAsHtml(previewHtml, project.name),
+      kind: "design_preview",
+      sourceDeliverableName: String(visualPreviewCandidate?.name || "").trim() || undefined
+    };
+  }
+
   const latestDesign = latestStageContent(project, "DESIGN");
   const visualPreset = detectVisualPreset(project, latestDesign);
-  const analysisBullets = extractBullets(latestStageContent(project, "ANALYSIS"), [
-    "明确目标、范围、验收标准",
-    "确定主路径与里程碑",
-    "形成风险清单与边界约束"
-  ]);
-  const designBullets = extractBullets(latestDesign, [
-    "完成视觉方向与品牌语气定义",
-    "完成关键页面版式与组件清单",
-    "通过可访问性检查并完成设计审查"
-  ]);
-  const devBullets = extractBullets(latestStageContent(project, "DEV"), [
-    "完成官网核心页面与 CTA 路径实现",
-    "完成响应式布局与关键交互联动",
-    "保留可扩展数据位与后续接入能力"
-  ]);
-  const acceptBullets = extractBullets(latestStageContent(project, "ACCEPT"), [
-    "主流程可访问并可演示",
-    "设计审查卡通过并进入验收",
-    "实施结果可回填产品说明文档"
-  ]);
+  const analysisBullets = extractStageHighlights(
+    project,
+    "ANALYSIS",
+    latestStageContent(project, "ANALYSIS"),
+    [
+      "明确目标、范围、验收标准",
+      "确定主路径与里程碑",
+      "形成风险清单与边界约束"
+    ]
+  );
+  const designBullets = extractStageHighlights(
+    project,
+    "DESIGN",
+    latestDesign,
+    [
+      "完成视觉方向与品牌语气定义",
+      "完成关键页面版式与组件清单",
+      "通过可访问性检查并完成设计审查"
+    ]
+  );
+  const devBullets = extractStageHighlights(
+    project,
+    "DEV",
+    latestStageContent(project, "DEV"),
+    [
+      "完成核心流程实现与关键路径联调",
+      "补齐任务证据与工程可追踪记录",
+      "保留可扩展数据位与后续接入能力"
+    ]
+  );
+  const acceptBullets = extractStageHighlights(
+    project,
+    "ACCEPT",
+    latestStageContent(project, "ACCEPT"),
+    [
+      "主流程可访问并可演示",
+      "设计审查卡通过并进入验收",
+      "实施结果可回填产品说明文档"
+    ]
+  );
 
   const teamLabels = project.team.map((role) => ROLE_LABELS[role] ?? role).slice(0, 8);
+  const intentSummary = summarizeText(project.parsedIntent?.summary || project.description || "", 120);
+  const keywordLine = buildHeroKeywordLine(project);
+  const constraintLine = dedupeList(project.parsedIntent?.constraints || []).slice(0, 2).join("；");
+  const heroTitle = keywordLine
+    ? `${project.name} · ${keywordLine}`
+    : `${project.name} · 需求到研发闭环`;
+  const heroLeadParts = [
+    intentSummary || "该项目关注真实业务链路落地，强调可执行与可验收。",
+    constraintLine ? `关键约束：${constraintLine}` : ""
+  ].filter(Boolean);
+  const heroLead = `${heroLeadParts.join(" ")} `;
+
   const completedStages = project.stages.filter((stage) => stage.status === "completed").length;
   const stageCompletionPercent = project.stages.length > 0
     ? Math.round((completedStages / project.stages.length) * 100)
     : 0;
-  const topSignals = Array.from(new Set([...analysisBullets, ...designBullets, ...devBullets])).slice(0, 6);
-  const quickWins = acceptBullets.slice(0, 3);
+  const topSignals = buildTopSignals(project, [analysisBullets, designBullets, devBullets, acceptBullets]);
+  const quickWins = buildQuickWins(project, acceptBullets);
   const stageCards = project.stages
     .map((stage) => {
       const value = stage.status === "completed" ? "完成" : stage.status;
@@ -509,22 +881,29 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
   const teamChips = teamLabels.map((label) => `<span class="chip">${escapeHtml(label)}</span>`).join("");
 
   if (visualPreset === "apple") {
-    return renderAppleOfficialSiteHtml({
-      project,
-      stageCompletionPercent,
-      completedStages,
-      analysisBullets,
-      designBullets,
-      devBullets,
-      acceptBullets,
-      signalCards,
-      stageTrack,
-      stageCards,
-      teamChips
-    });
+    return {
+      html: renderAppleOfficialSiteHtml({
+        project,
+        heroTitle,
+        heroLead,
+        stageCompletionPercent,
+        completedStages,
+        analysisBullets,
+        designBullets,
+        devBullets,
+        acceptBullets,
+        signalCards,
+        stageTrack,
+        stageCards,
+        teamChips
+      }),
+      kind: "narrative_summary"
+    };
   }
 
-  return `<!doctype html>
+  return {
+    kind: "narrative_summary",
+    html: `<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
@@ -575,6 +954,25 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
       filter: blur(1px);
     }
     .wrap { width: min(1160px, 92vw); margin: 0 auto; padding: 58px 0 88px; position: relative; }
+    .preview-notice {
+      margin-bottom: 18px;
+      border: 1px solid rgba(136, 177, 255, 0.24);
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(4, 10, 22, 0.48);
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.28);
+    }
+    .preview-notice strong {
+      display: block;
+      font-size: 13px;
+      color: #eff5ff;
+    }
+    .preview-notice p {
+      margin: 6px 0 0;
+      font-size: 12px;
+      line-height: 1.7;
+      color: #b7c7e6;
+    }
     .hero {
       display: grid;
       grid-template-columns: 1.2fr 0.8fr;
@@ -873,12 +1271,16 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
   <div class="mesh"></div>
   <div class="mesh-2"></div>
   <main class="wrap">
+    <section class="preview-notice">
+      <strong>交付物快照页</strong>
+      <p>此页面用于呈现当前项目交付物生成结果快照；审批状态与项目房间实时信息以平台主界面为准。</p>
+    </section>
     <section class="hero">
       <article class="hero-main">
         <span class="badge">Official Demo · ${escapeHtml(project.id)}</span>
-        <h1>AI 协作平台<br/>让需求到研发闭环可视化、可审计、可交付</h1>
+        <h1>${escapeHtml(heroTitle)}</h1>
         <p class="lead">
-          当前官网产物由项目交付物自动生成，覆盖需求澄清、角色协作、实时监控、阶段审批与结果回填。
+          ${escapeHtml(heroLead)}
           项目状态：<span class="ok">${escapeHtml(project.status)}（${project.progress}%）</span>。
         </p>
       </article>
@@ -934,7 +1336,8 @@ function renderOfficialSiteHtml(project: ProjectDetail) {
     </section>
   </main>
 </body>
-</html>`;
+</html>`
+  };
 }
 
 export async function generateOfficialSiteArtifact(project: ProjectDetail): Promise<OfficialSiteArtifact> {
@@ -942,7 +1345,8 @@ export async function generateOfficialSiteArtifact(project: ProjectDetail): Prom
   const workspaceRoot = findWorkspaceRoot(moduleDir);
   const fileName = `ai-collab-official-${project.id}.html`;
   const relativePath = path.join("generated", fileName);
-  const html = renderOfficialSiteHtml(project);
+  const rendered = renderOfficialSiteHtml(project);
+  const html = rendered.html;
 
   const targets = [
     path.join(workspaceRoot, "apps", "web", "public", relativePath),
@@ -957,6 +1361,8 @@ export async function generateOfficialSiteArtifact(project: ProjectDetail): Prom
 
   return {
     publicPath: `/${relativePath.replaceAll("\\", "/")}`,
-    filePaths: targets
+    filePaths: targets,
+    kind: rendered.kind,
+    sourceDeliverableName: rendered.sourceDeliverableName
   };
 }

@@ -23,11 +23,17 @@ import {
   updateRuntimeSettings,
   validateRuntimeSettings
 } from "../system/runtime-config.js";
+import {
+  getExecutionProtocolSnapshot,
+  updateExecutionProtocolSettings
+} from "../system/execution-protocol.js";
 import { getSystemReadiness } from "../system/readiness.js";
 import { listAuditLogs } from "../system/audit-log.js";
 import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/design-model-policy-health.js";
 import { getIssue } from "../system/v1-method-store.js";
 import { getCachedLocalAgentMonitorOverview, subscribeLocalAgentMonitor } from "../system/local-agent-monitor.js";
+import { inspectOpenClawModelRouting } from "../openclaw/workspace.js";
+import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
 
 interface CreateSystemRouterOptions {
   asyncRoute: (
@@ -127,8 +133,93 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.status(result.ok ? 200 : 422).json(result);
   }));
 
+  router.get("/execution-protocol", asyncRoute(async (_req, res) => {
+    res.json(await getExecutionProtocolSnapshot());
+  }));
+
+  router.put("/execution-protocol", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as {
+      requireSkillEvidence?: unknown;
+      requireCollaborationHandoff?: unknown;
+      blockDegradedWrites?: unknown;
+    };
+
+    const updated = await updateExecutionProtocolSettings({
+      requireSkillEvidence: payload.requireSkillEvidence === undefined ? undefined : Boolean(payload.requireSkillEvidence),
+      requireCollaborationHandoff: payload.requireCollaborationHandoff === undefined ? undefined : Boolean(payload.requireCollaborationHandoff),
+      blockDegradedWrites: payload.blockDegradedWrites === undefined ? undefined : Boolean(payload.blockDegradedWrites)
+    });
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "system.execution_protocol_updated",
+      resourceType: "system",
+      summary: "已更新 Agent Team 执行协议治理规则",
+      detail: JSON.stringify(updated.settings)
+    });
+
+    res.json(updated);
+  }));
+
+  router.get("/model-routing/self-check", asyncRoute(async (_req, res) => {
+    res.json(await inspectOpenClawModelRouting({ repair: false }));
+  }));
+
+  router.post("/model-routing/self-heal", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as { apply?: unknown };
+    const apply = payload.apply === undefined ? true : Boolean(payload.apply);
+    const result = await inspectOpenClawModelRouting({ repair: apply });
+
+    if (apply) {
+      await safeAudit(req, res, {
+        actorType: "admin",
+        actorLabel: "管理员",
+        action: "system.model_routing_self_heal",
+        resourceType: "system",
+        summary: `模型路由占位值修复完成（fixed=${result.fixed}, pending=${result.pending}）`,
+        detail: JSON.stringify({
+          fixed: result.fixed,
+          pending: result.pending,
+          issues: result.issues
+        })
+      });
+    }
+
+    res.json(result);
+  }));
+
   router.get("/readiness", asyncRoute(async (_req, res) => {
     res.json(await getSystemReadiness());
+  }));
+
+  router.get("/context-hygiene", asyncRoute(async (_req, res) => {
+    res.json(await getContextHygieneReport());
+  }));
+
+  router.post("/context-hygiene/cleanup", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as { apply?: unknown; maxDelete?: unknown };
+    const apply = payload.apply === undefined ? true : Boolean(payload.apply);
+    const maxDeleteRaw = Number(payload.maxDelete ?? 200);
+    const maxDelete = Number.isFinite(maxDeleteRaw) ? maxDeleteRaw : 200;
+    const result = await cleanupContextHygiene({ apply, maxDelete });
+
+    if (apply) {
+      await safeAudit(req, res, {
+        actorType: "admin",
+        actorLabel: "管理员",
+        action: "system.context_hygiene_cleanup",
+        resourceType: "system",
+        summary: `已清理上下文垃圾数据（memory=${result.deleted.agentMemoryEntries}, templates=${result.deleted.promptTemplates}）`,
+        detail: JSON.stringify({
+          scanned: result.scanned,
+          deleted: result.deleted,
+          counts: result.counts
+        })
+      });
+    }
+
+    res.json(result);
   }));
 
   router.get("/audit-logs", asyncRoute(async (req, res) => {

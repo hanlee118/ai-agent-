@@ -45,6 +45,7 @@ type ProjectDetailResponse = {
   pendingApproval: boolean;
   progress: number;
   summary?: string;
+  team?: string[];
   stages?: Array<{
     type: string;
     label: string;
@@ -104,6 +105,178 @@ type ProjectRoomLogItem = {
   message: string;
   type: 'danger' | 'accent' | 'primary';
   timestamp: number;
+};
+
+type ProjectRoomDesignReviewForm = {
+  visualDirection: string;
+  brandTone: string;
+  layoutStrategy: string;
+  componentSpecs: string;
+  uxPrinciples: string;
+  accessibilityChecklist: string;
+  approvedBy: string;
+  notes: string;
+  approved: boolean;
+};
+
+const DEFAULT_REVIEWER = '视觉设计总监';
+const DEFAULT_UX_ITEMS = ['主路径优先', '关键反馈及时', '降低认知负担'];
+const DEFAULT_A11Y_ITEMS = ['文本对比度达标', '键盘可达', '语义结构完整'];
+
+const createDefaultDesignReviewForm = (): ProjectRoomDesignReviewForm => ({
+  visualDirection: '',
+  brandTone: '',
+  layoutStrategy: '',
+  componentSpecs: '',
+  uxPrinciples: '',
+  accessibilityChecklist: '',
+  approvedBy: DEFAULT_REVIEWER,
+  notes: '',
+  approved: true,
+});
+
+const isDesignReviewFormBlank = (form: ProjectRoomDesignReviewForm) => {
+  return ![
+    form.visualDirection,
+    form.brandTone,
+    form.layoutStrategy,
+    form.componentSpecs,
+    form.uxPrinciples,
+    form.accessibilityChecklist,
+    form.notes,
+  ].some((item) => String(item || '').trim().length > 0);
+};
+
+const DESIGN_REVIEW_NOISE_TITLES = new Set([
+  '视觉方案',
+  '版式策略',
+  '组件清单',
+  '品牌语气',
+  'ux 原则',
+  '可访问性检查',
+  '设计审查卡',
+  '验收检查清单',
+  'agent 介入说明',
+  'agent 输出摘录',
+]);
+
+const normalizePrefillLine = (value: string) =>
+  value
+    .trim()
+    .replace(/^#{1,6}\s*/, '')
+    .replace(/^[-*]\s*/, '')
+    .replace(/^【[^】]+】/, '')
+    .trim();
+
+const isNoiseLine = (value: string) => {
+  const normalized = value.trim().toLowerCase().replace(/[：:]/g, '');
+  return !normalized || DESIGN_REVIEW_NOISE_TITLES.has(normalized);
+};
+
+const sanitizePrefillText = (value: string) =>
+  String(value || '')
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map(normalizePrefillLine)
+    .filter((line) => !isNoiseLine(line))
+    .join(' ')
+    .trim();
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const extractSectionBullets = (source: string, title: string) => {
+  const sectionPattern = new RegExp(`##\\s*${escapeRegExp(title)}\\s*([\\s\\S]*?)(?=\\n##\\s|$)`, 'i');
+  const section = source.match(sectionPattern)?.[1] || '';
+  return section
+    .split('\n')
+    .map((line) => normalizePrefillLine(line))
+    .filter((line) => !isNoiseLine(line));
+};
+
+const pickLine = (source: string, patterns: RegExp[]) => {
+  for (const pattern of patterns) {
+    const matched = source.match(pattern);
+    if (matched?.[1]) {
+      const value = sanitizePrefillText(matched[1]);
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return '';
+};
+
+const ensureAtLeastThree = (items: string[], fallback: string[]) => {
+  const deduped = Array.from(new Set(items.map((item) => sanitizePrefillText(item)).filter(Boolean)));
+  const merged = [...deduped];
+  for (const candidate of fallback) {
+    if (merged.length >= 3) {
+      break;
+    }
+    if (!merged.includes(candidate)) {
+      merged.push(candidate);
+    }
+  }
+  return merged.slice(0, 6);
+};
+
+const buildDesignReviewPrefill = (input: {
+  source: string;
+  actionDetail?: string;
+}): ProjectRoomDesignReviewForm | null => {
+  const source = String(input.source || '').replace(/\r\n/g, '\n').trim();
+  if (!source) {
+    return null;
+  }
+
+  const visualDirection = pickLine(source, [
+    /(?:视觉方向|视觉风格|视觉主题)[:：]\s*([^\n]+)/i,
+    /##\s*视觉方案[\s\S]*?-\s*([^\n]+)/i,
+  ]) || '请围绕业务主链路确认视觉方向';
+
+  const brandTone = pickLine(source, [
+    /(?:品牌语气|语气|品牌调性)[:：]\s*([^\n]+)/i,
+    /##\s*品牌语气[\s\S]*?-\s*([^\n]+)/i,
+  ]) || '专业、直接、可执行';
+
+  const layoutStrategy = pickLine(source, [
+    /(?:版式策略|布局策略|信息架构)[:：]\s*([^\n]+)/i,
+  ]) || extractSectionBullets(source, '版式策略').slice(0, 4).join('；') || '首屏价值主张 -> 核心流程 -> 执行证据 -> CTA';
+
+  const componentSpecs = pickLine(source, [
+    /(?:组件规范|组件清单|模块清单)[:：]\s*([^\n]+)/i,
+  ]) || extractSectionBullets(source, '组件清单').slice(0, 6).join('；') || 'Hero、能力卡、流程步骤、证据卡、CTA';
+
+  const uxLine = pickLine(source, [/(?:UX\s*原则|交互原则|体验原则)[:：]\s*([^\n]+)/i]);
+  const uxSection = extractSectionBullets(source, 'UX 原则');
+  const uxPrinciples = ensureAtLeastThree([
+    ...uxSection,
+    ...uxLine.split(/[；;，,\n]/),
+  ], DEFAULT_UX_ITEMS);
+
+  const a11yLine = pickLine(source, [/(?:可访问性检查|无障碍清单|可访问性清单)[:：]\s*([^\n]+)/i]);
+  const a11ySection = extractSectionBullets(source, '可访问性检查');
+  const accessibilityChecklist = ensureAtLeastThree([
+    ...a11ySection,
+    ...a11yLine.split(/[；;，,\n]/),
+  ], DEFAULT_A11Y_ITEMS);
+
+  const compact = sanitizePrefillText(source).replace(/\s+/g, ' ').trim();
+  const summary = compact.length > 220 ? `${compact.slice(0, 220)}...` : compact;
+  const noteHead = input.actionDetail ? `触发原因: ${input.actionDetail}` : '触发原因: 设计 Agent 需要人工补充或确认';
+  const notes = `${noteHead}\n\nAgent 思考摘录:\n${summary}`;
+
+  return {
+    visualDirection,
+    brandTone,
+    layoutStrategy,
+    componentSpecs,
+    uxPrinciples: uxPrinciples.join('\n'),
+    accessibilityChecklist: accessibilityChecklist.join('\n'),
+    approvedBy: DEFAULT_REVIEWER,
+    notes,
+    approved: true,
+  };
 };
 
 const ROLE_LABELS: Record<string, string> = {
@@ -290,17 +463,7 @@ const ProjectRoom = ({
     approved: boolean;
     visualDirection: string;
   }>>([]);
-  const [designReviewForm, setDesignReviewForm] = useState({
-    visualDirection: '',
-    brandTone: '',
-    layoutStrategy: '',
-    componentSpecs: '',
-    uxPrinciples: '',
-    accessibilityChecklist: '',
-    approvedBy: '视觉设计总监',
-    notes: '',
-    approved: true,
-  });
+  const [designReviewForm, setDesignReviewForm] = useState<ProjectRoomDesignReviewForm>(createDefaultDesignReviewForm());
   const missingProjectHandledRef = useRef<string | null>(null);
   const addToastRef = useRef(addToast);
   const onProjectMissingRef = useRef(onProjectMissing);
@@ -331,6 +494,11 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectId = projectId || project.id;
+
+  useEffect(() => {
+    setDesignReviewForm(createDefaultDesignReviewForm());
+    setIsDesignReviewOpen(false);
+  }, [effectiveProjectId]);
 
   const loadProjectDetail = useCallback(async () => {
     if (!effectiveProjectId) {
@@ -394,6 +562,7 @@ const ProjectRoom = ({
             agent: roleLabel(item.assignee),
             status: toTaskStatus(item.status),
             progress: toTaskProgress(item.status),
+            stageType: item.stageType,
             projectId: item.projectId,
             createdAt: item.updatedAt,
             updatedAt: item.updatedAt,
@@ -403,6 +572,26 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectTasks = detailTasks.length > 0 ? detailTasks : fallbackTasks;
+
+  const groupedProjectTasks = useMemo(() => {
+    const grouped = new Map<string, typeof effectiveProjectTasks>();
+    for (const task of effectiveProjectTasks) {
+      const stageType = String((task as Task & { stageType?: string }).stageType || 'UNKNOWN').trim().toUpperCase() || 'UNKNOWN';
+      const list = grouped.get(stageType) || [];
+      list.push(task);
+      grouped.set(stageType, list);
+    }
+
+    const orderedStageTypes = [
+      ...STAGE_ORDER.filter((stage) => grouped.has(stage)),
+      ...Array.from(grouped.keys()).filter((stage) => !STAGE_ORDER.includes(stage)),
+    ];
+
+    return orderedStageTypes.map((stageType) => ({
+      stageType,
+      tasks: grouped.get(stageType) || [],
+    }));
+  }, [effectiveProjectTasks]);
 
   const stageItems = useMemo(() => {
     if (Array.isArray(detail?.stages) && detail.stages.length > 0) {
@@ -649,12 +838,62 @@ const ProjectRoom = ({
   };
 
   const projectAgents = useMemo(() => {
-    if (project.agents.length > 0) {
-      return agents.filter((agent) => project.agents.includes(agent.id));
+    const selected = new Map<string, { id: string; name: string; role: string }>();
+
+    const registerById = (rawId?: string) => {
+      const memberId = String(rawId || '').trim();
+      if (!memberId || selected.has(memberId)) {
+        return;
+      }
+
+      const byExactId = agents.find((agent) => String(agent.id || '').trim() === memberId);
+      if (byExactId) {
+        selected.set(memberId, {
+          id: memberId,
+          name: byExactId.name || roleLabel(memberId),
+          role: byExactId.role || roleLabel(memberId),
+        });
+        return;
+      }
+
+      const byRoleId = agents.find((agent) => String(agent.role || '').trim() === memberId);
+      if (byRoleId) {
+        selected.set(memberId, {
+          id: memberId,
+          name: byRoleId.name || roleLabel(memberId),
+          role: roleLabel(memberId),
+        });
+        return;
+      }
+
+      selected.set(memberId, {
+        id: memberId,
+        name: roleLabel(memberId),
+        role: roleLabel(memberId),
+      });
+    };
+
+    detail?.team?.forEach((memberId) => registerById(memberId));
+    detail?.stages?.forEach((stage) => registerById(stage.assignee));
+    detail?.tasks?.forEach((task) => registerById(task.assignee));
+
+    if (selected.size === 0) {
+      project.agents.forEach((memberId) => registerById(memberId));
     }
-    const linkedAgentNames = new Set(effectiveProjectTasks.map((task) => task.agent));
-    return agents.filter((agent) => linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name));
-  }, [project.agents, effectiveProjectTasks]);
+
+    if (selected.size === 0) {
+      const linkedAgentNames = new Set(
+        effectiveProjectTasks.map((task) => String(task.agent || '').trim()).filter(Boolean),
+      );
+      agents.forEach((agent) => {
+        if (linkedAgentNames.has(agent.id) || linkedAgentNames.has(agent.name) || linkedAgentNames.has(agent.role)) {
+          registerById(agent.id);
+        }
+      });
+    }
+
+    return [...selected.values()];
+  }, [detail?.stages, detail?.tasks, detail?.team, effectiveProjectTasks, project.agents]);
 
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
 
@@ -670,12 +909,27 @@ const ProjectRoom = ({
     [detail?.requiredActions],
   );
 
+  const designReviewRequiredAction = useMemo(
+    () => requiredActions.find((action) => action.action === 'open_design_review') || null,
+    [requiredActions],
+  );
+
+  const latestDesignExecution = useMemo(() => {
+    const designRuns = executionRecords
+      .filter((record) => String(record.stageType || '').toUpperCase() === 'DESIGN')
+      .slice()
+      .sort((left, right) => {
+        const leftTime = new Date(left.updatedAt || left.createdAt).getTime();
+        const rightTime = new Date(right.updatedAt || right.createdAt).getTime();
+        return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+      });
+    return designRuns[0] || null;
+  }, [executionRecords]);
+
   const isDesignPhase = useMemo(() => {
-    const text = [project.phase, project.description, ...effectiveProjectTasks.map((task) => `${task.title} ${task.agent}`)]
-      .join(' ')
-      .toLowerCase();
-    return /(design|设计|视觉|交互|页面|官网)/i.test(text);
-  }, [project.phase, project.description, effectiveProjectTasks]);
+    const stageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+    return stageType === 'DESIGN' && String(detail?.status || '').toLowerCase() === 'active';
+  }, [detail?.currentStage, detail?.status, stageItems]);
 
   const getTaskTimestamp = (task: Task) => {
     const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
@@ -710,6 +964,31 @@ const ProjectRoom = ({
     }
     return `${normalized.slice(0, max)}...`;
   };
+
+  const toNumber = (value: unknown) => {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const pickMetric = (...values: Array<unknown>) => {
+    for (const value of values) {
+      const parsed = toNumber(value);
+      if (parsed !== undefined) {
+        return parsed;
+      }
+    }
+    return undefined;
+  };
+
+  const formatMetric = (value: number | undefined) => (value === undefined ? '-' : String(value));
 
   useEffect(() => {
     setSseLogs([]);
@@ -753,19 +1032,59 @@ const ProjectRoom = ({
       timestamp = now;
       message = '实时通道已连接（SSE）';
     } else if (eventType === 'snapshot') {
+      const taskItems = Array.isArray(detail?.tasks) ? detail.tasks : [];
+      const activeAssignees = new Set(
+        taskItems
+          .filter((item) => item.status !== 'done')
+          .map((item) => String(item.assignee || '').trim())
+          .filter(Boolean),
+      );
+      const sessions = Array.isArray(payload.sessions)
+        ? payload.sessions as Array<{ status?: unknown }>
+        : [];
+      const tools = Array.isArray(payload.tools)
+        ? payload.tools as Array<{ activeCount?: unknown }>
+        : [];
+      const activeCountFromTools = tools.reduce((sum, item) => sum + (toNumber(item.activeCount) ?? 0), 0);
+      const activeSessions = sessions.filter((item) => item.status === 'active').length;
+      const staleSessions = sessions.filter((item) => item.status === 'stale').length;
+      const activeAgents = pickMetric(
+        payload.activeAgents,
+        activeCountFromTools > 0 ? activeCountFromTools : undefined,
+        activeAssignees.size > 0 ? activeAssignees.size : undefined,
+        Array.isArray(detail?.team) ? detail.team.length : undefined,
+      );
+      const totalProjects = pickMetric(payload.totalProjects, projects.length > 0 ? projects.length : undefined);
+      const inProgressTasks = pickMetric(
+        payload.inProgressTasks,
+        taskItems.filter((item) => item.status === 'in_progress').length,
+      );
+      const blockedTasks = pickMetric(
+        payload.blockedTasks,
+        taskItems.filter((item) => item.status === 'blocked').length,
+      );
       const digest = [
-        String(payload.activeAgents ?? ''),
-        String(payload.totalProjects ?? ''),
-        String(payload.blockedTasks ?? ''),
-        String(payload.inProgressTasks ?? ''),
+        formatMetric(activeAgents),
+        formatMetric(totalProjects),
+        formatMetric(inProgressTasks),
+        formatMetric(blockedTasks),
+        formatMetric(sessions.length > 0 ? activeSessions : undefined),
+        formatMetric(sessions.length > 0 ? sessions.length : undefined),
+        formatMetric(sessions.length > 0 ? staleSessions : undefined),
       ].join(':');
       if (digest && digest === lastSnapshotDigestRef.current) {
         return;
       }
       lastSnapshotDigestRef.current = digest;
-      timestamp = toLogTimestamp(payload.timestamp as string | undefined);
-      message = `系统快照: 活跃Agent ${payload.activeAgents ?? 0} / 项目 ${payload.totalProjects ?? 0} / 进行中任务 ${payload.inProgressTasks ?? 0} / 阻塞任务 ${payload.blockedTasks ?? 0}`;
-      type = Number(payload.blockedTasks ?? 0) > 0 ? 'danger' : 'primary';
+      timestamp = toLogTimestamp(
+        (payload.timestamp as string | undefined)
+        || (payload.scannedAt as string | undefined),
+      );
+      const sessionSummary = sessions.length > 0
+        ? ` / 活跃会话 ${activeSessions}/${sessions.length}`
+        : '';
+      message = `系统快照: 活跃Agent ${formatMetric(activeAgents)} / 项目 ${formatMetric(totalProjects)} / 进行中任务 ${formatMetric(inProgressTasks)} / 阻塞任务 ${formatMetric(blockedTasks)}${sessionSummary}`;
+      type = (blockedTasks ?? 0) > 0 || staleSessions > 0 ? 'danger' : 'primary';
     } else if (eventType === 'task_update') {
       timestamp = toLogTimestamp(payload.timestamp as string | undefined);
       const blocked = Number(payload.blockedTasks ?? 0);
@@ -818,7 +1137,7 @@ const ProjectRoom = ({
       type,
       timestamp,
     });
-  }, [appendSseLog, effectiveProjectId]);
+  }, [appendSseLog, detail?.tasks, detail?.team, effectiveProjectId, projects.length]);
 
   const sseEvents = useMemo(
     () => ['connected', 'snapshot', 'task_update', 'project_progress', 'agent_status', 'system', 'heartbeat'],
@@ -918,6 +1237,49 @@ const ProjectRoom = ({
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
   const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
+  const isVisualPreviewDeliverable = (item: Pick<ProjectDeliverable, 'name' | 'stageType'>) =>
+    item.stageType === 'DESIGN'
+    && /视觉定稿|视觉设计稿|单页预览|mockup|wireframe|design preview|preview\.html/i.test(String(item.name || ''));
+  const extractDeliverableHtmlPreview = (content?: string) => {
+    const source = String(content || '');
+    const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
+    let matched: RegExpExecArray | null;
+    while ((matched = fencedPattern.exec(source)) !== null) {
+      const candidate = String(matched[1] || '').trim();
+      if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
+        return candidate;
+      }
+    }
+    if (/(<!doctype html|<html[\s>])/i.test(source)) {
+      return source.trim();
+    }
+    return null;
+  };
+  const extractDeliverableImagePreview = (content?: string) => {
+    const source = String(content || '');
+    const markdownImage = source.match(/!\[[^\]]*\]\((https?:\/\/[^\s)]+|data:image\/[^\s)]+)\)/i);
+    if (markdownImage && markdownImage[1]) {
+      return markdownImage[1];
+    }
+    const rawImage = source.match(/(https?:\/\/[^\s"'()]+\.(?:png|jpg|jpeg|webp|gif|svg))/i);
+    if (rawImage && rawImage[1]) {
+      return rawImage[1];
+    }
+    return null;
+  };
+  const previewDeliverableHtml = useMemo(
+    () => (previewDeliverable ? extractDeliverableHtmlPreview(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const previewDeliverableImage = useMemo(
+    () => (previewDeliverable ? extractDeliverableImagePreview(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const canRenderVisualPreview = Boolean(
+    previewDeliverable
+    && isVisualPreviewDeliverable(previewDeliverable)
+    && (previewDeliverableHtml || previewDeliverableImage),
+  );
 
   const getStageAcceptance = (stageType: string) => {
     const items = deliverablesByStage.get(stageType) || [];
@@ -1368,9 +1730,28 @@ const ProjectRoom = ({
     window.URL.revokeObjectURL(url);
   };
 
+  const resolveArtifactUrl = (rawUrl?: string) => {
+    const url = String(rawUrl || '').trim();
+    if (!url) {
+      return '';
+    }
+    if (/^https?:\/\//i.test(url) || /^file:\/\//i.test(url)) {
+      return url;
+    }
+    if (url.startsWith('/')) {
+      return `${window.location.origin}${url}`;
+    }
+    return `${window.location.origin}/${url.replace(/^\.?\//, '')}`;
+  };
+
   const handleOpenFinalArtifact = (artifact: FinalArtifactItem) => {
     if (artifact.source === 'link' && artifact.url) {
-      window.open(artifact.url, '_blank', 'noopener,noreferrer');
+      const resolvedUrl = resolveArtifactUrl(artifact.url);
+      if (!resolvedUrl) {
+        addToast('该成果链接无效，无法打开', 'error');
+        return;
+      }
+      window.open(resolvedUrl, '_blank', 'noopener,noreferrer');
       return;
     }
 
@@ -1462,16 +1843,17 @@ const ProjectRoom = ({
   };
 
   const handleCopyFinalArtifactLink = async (artifact: FinalArtifactItem) => {
-    if (!artifact.url) {
+    const resolvedUrl = resolveArtifactUrl(artifact.url);
+    if (!resolvedUrl) {
       addToast('该成果没有可复制链接', 'info');
       return;
     }
 
     try {
       if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(artifact.url);
+        await navigator.clipboard.writeText(resolvedUrl);
       } else {
-        window.prompt('复制以下链接', artifact.url);
+        window.prompt('复制以下链接', resolvedUrl);
       }
       addToast('成果链接已复制', 'success');
     } catch (error) {
@@ -1722,8 +2104,31 @@ const ProjectRoom = ({
   const splitChecklist = (input: string) =>
     input
       .split(/\n|；|;|,|，/)
-      .map((item) => item.trim())
+      .map((item) => sanitizePrefillText(item))
       .filter(Boolean);
+
+  const openDesignReviewModal = useCallback((action?: ProjectRequiredAction) => {
+    setDesignReviewForm((prev) => {
+      if (!isDesignReviewFormBlank(prev)) {
+        return prev;
+      }
+      const source = [
+        action?.prefillContent,
+        latestDesignExecution?.outputPreview,
+        latestDesignExecution?.promptSummary,
+        latestDesignExecution?.errorMessage,
+      ]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .join('\n\n');
+      const prefilled = buildDesignReviewPrefill({
+        source,
+        actionDetail: action?.detail,
+      });
+      return prefilled || prev;
+    });
+    setIsDesignReviewOpen(true);
+  }, [latestDesignExecution]);
 
   const handleSubmitDesignReview = async () => {
     if (!project.id) {
@@ -1752,8 +2157,14 @@ const ProjectRoom = ({
 
     setIsSubmittingDesignReview(true);
     try {
+      const reviewChecklist = [
+        '设计说明可支撑开发实施，不依赖口头解释。',
+        '无障碍检查项至少 3 条并可验证。',
+        '审查结论明确（通过/驳回）且有理由。',
+      ];
       await projectsApi.submitStage(project.id, {
         title: `设计审查卡 ${new Date().toLocaleDateString('zh-CN')}`,
+        finalizeApproval: false,
         content: [
           '# 设计阶段交付',
           '',
@@ -1768,6 +2179,15 @@ const ProjectRoom = ({
           '',
           '## 品牌语气',
           `- ${designReviewForm.brandTone.trim()}`,
+          '',
+          '## UX 原则',
+          ...uxPrinciples.map((item) => `- ${item}`),
+          '',
+          '## 可访问性检查',
+          ...accessibilityChecklist.map((item) => `- ${item}`),
+          '',
+          '## 验收检查清单',
+          ...reviewChecklist.map((item) => `- ${item}`),
         ].join('\n'),
         designReview: {
           visualDirection: designReviewForm.visualDirection.trim(),
@@ -1803,6 +2223,7 @@ const ProjectRoom = ({
   };
 
   const designReviewTips = [
+    '当设计 Agent 识别到需求不清晰/无法继续时，系统会自动预填该表单',
     '视觉方向必须明确（品牌气质 + 主色氛围）',
     '版式策略必须说明首屏到 CTA 的叙事顺序',
     '组件规范至少列出 Hero/能力卡/流程/案例/CTA',
@@ -1856,8 +2277,12 @@ const ProjectRoom = ({
         return;
       }
       if (action.action === 'open_design_review') {
-        setIsDesignReviewOpen(true);
-        addToast('请先完成设计审查卡，再继续推进', 'info');
+        openDesignReviewModal(action);
+        if (action.reasonCode === 'design_ambiguity') {
+          addToast('已根据设计 Agent 的输出自动预填，你可以直接提交或补充编辑。', 'info');
+        } else {
+          addToast('请先完成设计审查卡，再继续推进', 'info');
+        }
         return;
       }
       if (action.action === 'review_pending_stage') {
@@ -1937,7 +2362,7 @@ const ProjectRoom = ({
           </button>
           {isDesignPhase ? (
             <button
-              onClick={() => setIsDesignReviewOpen(true)}
+              onClick={() => openDesignReviewModal(designReviewRequiredAction || undefined)}
               className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 bg-primary text-slate-950 hover:bg-primary/90 rounded-lg text-xs sm:text-sm font-semibold transition-colors"
             >
               <FileText size={16} />
@@ -2128,38 +2553,50 @@ const ProjectRoom = ({
                   <Layers size={14} />
                   活跃任务
                 </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {effectiveProjectTasks.map((task) => (
-                    <div key={task.id} className="bg-surface-soft border border-border-subtle p-5 rounded-2xl space-y-4 hover:border-white/20 transition-all group">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <h4 className="font-semibold text-white text-sm group-hover:text-primary transition-colors">{task.title}</h4>
-                          <p className="text-xs text-slate-500 mt-1 flex items-center gap-1.5">
-                            <BrainCircuit size={10} />
-                            指派给: {task.agent}
-                          </p>
-                        </div>
-                        <Badge variant={task.status === 'Completed' ? 'primary' : task.status === 'In Progress' ? 'accent' : task.status === 'Blocked' ? 'danger' : 'default'}>
-                          {task.status === 'Completed' ? '已完成' : task.status === 'In Progress' ? '进行中' : task.status === 'Blocked' ? '已阻塞' : '待处理'}
-                        </Badge>
+                <div className="space-y-4">
+                  {groupedProjectTasks.map((group) => (
+                    <div key={group.stageType} className="rounded-2xl border border-border-subtle bg-surface-soft/40 p-3 sm:p-4 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-bold text-slate-300 uppercase tracking-widest">
+                          阶段: {STAGE_LABELS[group.stageType] || group.stageType}
+                        </p>
+                        <Badge variant="default">{group.tasks.length} 项任务</Badge>
                       </div>
-                      <div className="space-y-2">
-                        <div className="flex justify-between text-[10px] text-slate-500">
-                          <span>进度</span>
-                          <span>{task.progress}%</span>
-                        </div>
-                        <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
-                          <motion.div
-                            initial={{ width: 0 }}
-                            animate={{ width: `${task.progress}%` }}
-                            className={cn('h-full rounded-full transition-all duration-500', task.status === 'Blocked' ? 'bg-danger' : 'bg-primary')}
-                          />
-                        </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {group.tasks.map((task) => (
+                          <div key={task.id} className="bg-surface-soft border border-border-subtle p-5 rounded-2xl space-y-4 hover:border-white/20 transition-all group">
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <h4 className="font-semibold text-white text-sm group-hover:text-primary transition-colors">{task.title}</h4>
+                                <p className="text-xs text-slate-500 mt-1 flex items-center gap-1.5">
+                                  <BrainCircuit size={10} />
+                                  指派给: {task.agent}
+                                </p>
+                              </div>
+                              <Badge variant={task.status === 'Completed' ? 'primary' : task.status === 'In Progress' ? 'accent' : task.status === 'Blocked' ? 'danger' : 'default'}>
+                                {task.status === 'Completed' ? '已完成' : task.status === 'In Progress' ? '进行中' : task.status === 'Blocked' ? '已阻塞' : '待处理'}
+                              </Badge>
+                            </div>
+                            <div className="space-y-2">
+                              <div className="flex justify-between text-[10px] text-slate-500">
+                                <span>进度</span>
+                                <span>{task.progress}%</span>
+                              </div>
+                              <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
+                                <motion.div
+                                  initial={{ width: 0 }}
+                                  animate={{ width: `${task.progress}%` }}
+                                  className={cn('h-full rounded-full transition-all duration-500', task.status === 'Blocked' ? 'bg-danger' : 'bg-primary')}
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     </div>
                   ))}
                   {effectiveProjectTasks.length === 0 ? (
-                    <div className="col-span-full bg-surface-soft border border-border-subtle p-6 rounded-2xl text-center text-sm text-slate-500">
+                    <div className="bg-surface-soft border border-border-subtle p-6 rounded-2xl text-center text-sm text-slate-500">
                       当前项目暂无任务数据
                     </div>
                   ) : null}
@@ -2962,7 +3399,7 @@ const ProjectRoom = ({
       <SurfaceModal
         isOpen={isDesignReviewOpen}
         onClose={() => setIsDesignReviewOpen(false)}
-        title="设计审查卡（开发前必填）"
+        title="设计审查卡（需求不清晰时介入）"
         panelClassName="max-w-3xl"
       >
         <div className="space-y-5">
@@ -3119,6 +3556,40 @@ const ProjectRoom = ({
                   复制正文
                 </button>
               </div>
+              {isVisualPreviewDeliverable(previewDeliverable) ? (
+                <div className="rounded-xl border border-warning/20 bg-warning/8 p-3">
+                  <p className="text-xs font-semibold text-white">这是交付物静态预览，不是 5173 的实时项目页面</p>
+                  <p className="mt-1 text-[11px] leading-5 text-slate-300">
+                    该窗口仅用于确认设计稿或 HTML 产物本身是否可读、可审查。
+                    如果要判断项目当前状态、审批结果或新建项目弹窗内容，请回到实时前端页面与 API 状态查看。
+                  </p>
+                </div>
+              ) : null}
+              {canRenderVisualPreview ? (
+                <div className="rounded-xl border border-border-subtle bg-surface-soft/40 p-3 space-y-2">
+                  <p className="text-xs text-slate-300">视觉设计预览（确认后再进入开发）</p>
+                  {previewDeliverableHtml ? (
+                    <iframe
+                      title="视觉设计预览"
+                      sandbox=""
+                      srcDoc={previewDeliverableHtml}
+                      className="w-full h-[58vh] rounded-lg border border-border-subtle bg-white"
+                    />
+                  ) : null}
+                  {!previewDeliverableHtml && previewDeliverableImage ? (
+                    <img
+                      src={previewDeliverableImage}
+                      alt="视觉设计稿预览"
+                      className="w-full max-h-[58vh] object-contain rounded-lg border border-border-subtle bg-slate-950"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+              {previewDeliverable && isVisualPreviewDeliverable(previewDeliverable) && !canRenderVisualPreview ? (
+                <p className="text-xs text-warning">
+                  当前未检测到可渲染的视觉预览，请在交付物中补充静态图链接或 ```html 单页代码。
+                </p>
+              ) : null}
               <div className="max-h-[60vh] overflow-y-auto rounded-xl border border-border-subtle bg-surface-muted p-4">
                 <pre className="text-xs leading-6 text-slate-200 whitespace-pre-wrap break-words">{previewDeliverable.content || '该交付物暂无正文内容。'}</pre>
               </div>
