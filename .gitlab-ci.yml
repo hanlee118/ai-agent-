@@ -1,0 +1,63 @@
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: never
+
+stages:
+  - verify
+
+default:
+  image: node:20-bookworm
+  cache:
+    key:
+      files:
+        - pnpm-lock.yaml
+    paths:
+      - .pnpm-store/
+  before_script:
+    - corepack enable
+    - corepack prepare pnpm@10.32.1 --activate
+    - pnpm config set store-dir .pnpm-store
+    - pnpm install --no-frozen-lockfile
+
+variables:
+  DATABASE_URL: file:./prisma/dev.db
+
+build:
+  stage: verify
+  script:
+    - pnpm --filter @occ/api db:generate
+    - pnpm db:baseline
+    - pnpm --filter @occ/api db:migrate:deploy
+    - pnpm --filter @occ/api db:migrate:status
+    - pnpm --filter @occ/api db:push
+    - |
+      mkdir -p apps/api/prisma
+      if [ ! -f apps/api/prisma/dev.db ] && [ -f apps/api/prisma/prisma/dev.db ]; then
+        cp apps/api/prisma/prisma/dev.db apps/api/prisma/dev.db
+      fi
+      if [ ! -f apps/api/prisma/dev.db ] && [ -f prisma/dev.db ]; then
+        cp prisma/dev.db apps/api/prisma/dev.db
+      fi
+      if [ ! -f apps/api/prisma/dev.db ]; then
+        echo "missing apps/api/prisma/dev.db" >&2
+        ls -la apps/api/prisma >&2 || true
+        ls -la prisma >&2 || true
+        exit 1
+      fi
+    - pnpm --filter @occ/shared build
+    - pnpm --filter @occ/api test:routes
+    - pnpm typecheck
+    - pnpm build
+    - |
+      nohup pnpm --filter @occ/api exec tsx src/index.ts > /tmp/occ-api.log 2>&1 &
+      for attempt in $(seq 1 30); do
+        node -e "fetch('http://127.0.0.1:8787/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" && exit 0
+        sleep 1
+      done
+      echo "OCC API failed to start" >&2
+      cat /tmp/occ-api.log >&2 || true
+      exit 1
+    - pnpm health:check
+    - CI_SKIP_OPENCLAW_CHECKS=true pnpm test:smoke
