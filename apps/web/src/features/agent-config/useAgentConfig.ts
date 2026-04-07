@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Agent, Model } from '../../types';
 import { agentsApi, openclawAgentsApi } from '../../lib/api';
 
+const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
+
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
 type ConfigSource = 'openclaw' | 'managed';
 
@@ -31,7 +33,7 @@ export function useAgentConfig({
       tasks: 0,
       memoryCount: 0,
       tokensUsed: 0,
-      tokenLimit: 100000,
+      tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
       sessionCount: 0,
     }
   ), [agents, agentId]);

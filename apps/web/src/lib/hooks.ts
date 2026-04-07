@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback } from 'react';
 import * as api from './api';
 
+function getErrorMessage(err: unknown, fallback: string) {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === 'string' && err.trim()) return err;
+  return fallback;
+}
+
 // ============ useApi Hook ============
 export function useApi<T>(
   fetchFn: () => Promise<T>,
@@ -42,10 +48,9 @@ export function useModels() {
     try {
       const result = await api.modelsApi.list();
       setModels(result);
-    } catch (err: any) {
-      // Fallback to mock data if API fails
-      console.warn('Using mock data for models:', err.message);
-      setModels(getMockModels());
+    } catch (err: unknown) {
+      setModels([]);
+      setError(getErrorMessage(err, 'Failed to load models'));
     } finally {
       setLoading(false);
     }
@@ -101,8 +106,9 @@ export function useAgents() {
     try {
       const primary = await api.agentsApi.list();
       setAgents(primary);
-    } catch (err: any) {
-      // Fallback: OpenClaw workspace endpoint
+      return;
+    } catch (err: unknown) {
+      // Fallback to OpenClaw workspace endpoint before surfacing an error.
       try {
         const result = await fetch('/api/openclaw/agents', { credentials: 'include' });
         if (!result.ok) throw new Error(`HTTP ${result.status}`);
@@ -125,9 +131,10 @@ export function useAgents() {
         }));
 
         setAgents(mapped);
-      } catch (openClawErr: any) {
-        console.warn('Using mock data for agents:', openClawErr.message || err.message);
-        setAgents(getMockAgents());
+        return;
+      } catch (openClawErr: unknown) {
+        setAgents([]);
+        setError(getErrorMessage(openClawErr, getErrorMessage(err, 'Failed to load agents')));
       }
     } finally {
       setLoading(false);
@@ -219,9 +226,9 @@ export function useProjects() {
       }));
       
       setProjects(mapped);
-    } catch (err: any) {
-      console.warn('Using mock data for projects:', err.message);
-      setProjects(getMockProjects());
+    } catch (err: unknown) {
+      setProjects([]);
+      setError(getErrorMessage(err, 'Failed to load projects'));
     } finally {
       setLoading(false);
     }

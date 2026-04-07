@@ -506,12 +506,6 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
     ? '围绕选品准确率与响应速度双目标，构建“发现-评估-跟品-复盘”闭环。'
     : '围绕产品长期目标落地本次需求，保持可执行与可验证。';
   const localDiscussion = buildLocalDiscussionItems(input, roleIds);
-  const localConsensus = localDiscussion
-    .map((item) => item.proposal)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((item) => `共识：${item}`);
-
   return {
     issueId: `local-${Date.now()}`,
     title: fallbackSuggestName(input) || '新需求',
@@ -603,45 +597,55 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
       acceptanceCriteria: isCrossBorder
         ? ['每日候选榜单可解释', '关键异常可告警', '完成真实样例闭环']
         : ['核心流程可演示', '关键目标可验证', '形成方案文档与排期'],
-      artifacts: ['客户汇报方案（PPT）', '实施方案（Word）', '设计审查卡', 'Demo 原型', '项目排期'],
+      artifacts: ['需求分析文档', '项目排期', '设计审查卡', '视觉定稿单页', '技术方案与选型', '实现结果说明', '运行地址与部署说明', '测试报告'],
       designTheme,
       valueNarrative,
     },
-    discussion: localDiscussion,
-    debate: {
-      mode: 'fallback',
-      generatedAt: new Date().toISOString(),
-      consensus: localConsensus,
-      divergences: localDiscussion.length > 2 ? ['部分角色关注点存在差异，请在确认前核对关键参数。'] : [],
-      note: '当前为本地降级讨论结果，建议恢复模型模式后重新分析。',
-      opinions: localDiscussion.map((item, index) => ({
-        id: `${item.id}-opinion`,
-        roleId: item.roleId,
-        roleLabel: item.roleLabel,
-        focus: item.focus,
-        concern: item.concern,
-        proposal: item.proposal,
-        provider: 'scripted',
-        model: 'local-fallback',
-        elapsedMs: 0,
-        mode: 'fallback',
-        rawPreview: `${item.concern} ${item.proposal}`.slice(0, 180),
-      })),
+    discussion: [],
+    discussionDraft: localDiscussion,
+    debate: null,
+    analysisGate: {
+      canProceed: false,
+      blockers: [
+        '当前仅生成本地分析草稿，尚未获得真实模型多角色讨论结果。',
+      ],
+      checks: [
+        {
+          id: 'runtime-real-model',
+          label: '运行时必须启用真实模型',
+          passed: false,
+          detail: '当前为本地降级分析，无法确认运行时真实模型状态。',
+        },
+        {
+          id: 'debate-enabled',
+          label: '必须启用真实多角色讨论',
+          passed: false,
+          detail: '本地草稿未创建真实多角色讨论任务。',
+        },
+        {
+          id: 'debate-model-completed',
+          label: '正式讨论必须由真实模型完成',
+          passed: false,
+          detail: '当前仅有规则草稿提示，不能作为正式分析结论。',
+        },
+      ],
+      runtimeMode: 'local-fallback',
+      requestedRuntimeMode: 'unknown',
     },
     expectedArtifacts: [
       {
-        id: 'artifact-ppt',
-        name: '客户汇报方案（PPT）',
-        description: '面向客户的价值说明与阶段成果汇报材料。',
-        stageType: 'DESIGN',
-        ownerRoleId: 'ROLE_DESIGN',
+        id: 'artifact-analysis-doc',
+        name: '需求分析文档',
+        description: '面向设计与研发的结构化需求、边界、约束、风险与验收标准。',
+        stageType: 'ANALYSIS',
+        ownerRoleId: 'ROLE_ANALYST',
       },
       {
-        id: 'artifact-word',
-        name: '实施方案（Word）',
-        description: '需求、约束、验收口径与执行策略文档。',
-        stageType: 'DESIGN',
-        ownerRoleId: 'ROLE_DESIGN',
+        id: 'artifact-schedule',
+        name: '项目排期',
+        description: '里程碑、负责人、依赖与风险缓冲的执行排期。',
+        stageType: 'ANALYSIS',
+        ownerRoleId: 'ROLE_PM',
       },
       {
         id: 'artifact-design-review',
@@ -651,18 +655,39 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
         ownerRoleId: 'ROLE_DESIGN',
       },
       {
-        id: 'artifact-demo',
-        name: 'Demo 原型',
-        description: '覆盖核心链路的可演示原型。',
+        id: 'artifact-visual-preview',
+        name: '视觉定稿单页',
+        description: '可供业务确认和研发实现的静态图或 HTML 单页设计预览。',
+        stageType: 'DESIGN',
+        ownerRoleId: 'ROLE_DESIGN',
+      },
+      {
+        id: 'artifact-tech-plan',
+        name: '技术方案与选型',
+        description: '研发实现前的系统边界、接口契约、数据链路与技术取舍。',
+        stageType: 'DEV',
+        ownerRoleId: 'ROLE_ARCH',
+      },
+      {
+        id: 'artifact-impl-result',
+        name: '实现结果说明',
+        description: '真实页面、接口、代码改动与验证证据说明。',
         stageType: 'DEV',
         ownerRoleId: 'ROLE_DEV',
       },
       {
-        id: 'artifact-schedule',
-        name: '项目排期',
-        description: '里程碑、依赖与负责人计划。',
-        stageType: 'ANALYSIS',
-        ownerRoleId: 'ROLE_PM',
+        id: 'artifact-runtime-delivery',
+        name: '运行地址与部署说明',
+        description: '运行入口、启动方式、环境变量与联调验证步骤。',
+        stageType: 'DEV',
+        ownerRoleId: 'ROLE_DEV',
+      },
+      {
+        id: 'artifact-test-report',
+        name: '测试报告',
+        description: '面向验收阶段的测试范围、结果、阻断项与回归结论。',
+        stageType: 'ACCEPT',
+        ownerRoleId: 'ROLE_QA',
       },
     ],
     workflow: null,

@@ -57,6 +57,9 @@ const Badge = ({ children, variant = 'default' }: any) => {
     </span>
   );
 };
+
+const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
+
 const AgentCommander = ({
   agentId,
   addToast,
@@ -78,12 +81,12 @@ const AgentCommander = ({
     tasks: 0,
     memoryCount: 0,
     tokensUsed: 0,
-    tokenLimit: 100000,
+    tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
     sessionCount: 0,
   };
   const activeAgent = agents.find((agent) => agent.id === agentId) || agents[0] || fallbackAgent;
 
-  const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit || 100000);
+  const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT);
   const [dailyUsage, setDailyUsage] = useState(12450);
   const [currentModelId, setCurrentModelId] = useState(activeAgent.currentModelId || models[0]?.id || '');
   const [commandInput, setCommandInput] = useState('');
@@ -97,7 +100,7 @@ const AgentCommander = ({
   const agentSessions = sessions.filter((session) => session.agentId === activeAgent.id);
 
   useEffect(() => {
-    setTokenLimit(activeAgent.tokenLimit || 100000);
+    setTokenLimit(activeAgent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT);
     setDailyUsage(activeAgent.tokensUsed || 0);
     setCurrentModelId(activeAgent.currentModelId || models[0]?.id || '');
   }, [activeAgent.id]);

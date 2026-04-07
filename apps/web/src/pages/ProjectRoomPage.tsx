@@ -2242,6 +2242,16 @@ const ProjectRoom = ({
     if (!(error instanceof ApiRequestError)) {
       return false;
     }
+    const formatExecutionProtocolMessage = () => {
+      const details = error.details && typeof error.details === 'object' ? error.details : {};
+      const rawMessage = typeof (details as { rawMessage?: unknown }).rawMessage === 'string'
+        ? String((details as { rawMessage?: string }).rawMessage)
+        : '';
+      if (/TERMINAL_COLLAB_PROTOCOL_VIOLATION:/i.test(rawMessage)) {
+        return error.message || '当前阶段未通过协作交接卡协议，请补齐缺失字段后再重试。';
+      }
+      return error.message || '当前阶段未通过执行协议门禁，请先修复阻断项';
+    };
     if (error.code === 'NO_PENDING_APPROVAL') {
       addToast(error.message || '当前没有待确认事项', 'info');
       void loadProjectDetail();
@@ -2250,6 +2260,12 @@ const ProjectRoom = ({
     const required = Array.isArray(error.details?.requiredActions)
       ? (error.details.requiredActions as ProjectRequiredAction[])
       : [];
+    if (error.code === 'EXECUTION_PROTOCOL_GATE_FAILED') {
+      setActiveTab('交付物');
+      addToast(formatExecutionProtocolMessage(), 'error');
+      void loadProjectDetail();
+      return true;
+    }
     if (required.length === 0) {
       return false;
     }

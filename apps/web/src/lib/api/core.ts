@@ -136,7 +136,16 @@ function resolveRequestCredentials(url: string, explicit?: RequestCredentials): 
   }
   try {
     const target = new URL(url, window.location.origin);
-    return target.origin === window.location.origin ? 'include' : 'omit';
+    if (target.origin === window.location.origin) {
+      return 'include';
+    }
+    const localHosts = new Set(['localhost', '127.0.0.1', '::1']);
+    const currentHost = String(window.location.hostname || '').toLowerCase();
+    const targetHost = String(target.hostname || '').toLowerCase();
+    if (localHosts.has(currentHost) && localHosts.has(targetHost)) {
+      return 'include';
+    }
+    return 'omit';
   } catch {
     return 'same-origin';
   }

@@ -10,6 +10,19 @@ export type IssueSourceType =
 export type ConflictSeverity = 'critical' | 'warning' | 'info';
 export type IssueDebateTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
 
+export interface IssueAnalysisGate {
+  canProceed: boolean;
+  blockers: string[];
+  checks: Array<{
+    id: string;
+    label: string;
+    passed: boolean;
+    detail: string;
+  }>;
+  runtimeMode: string;
+  requestedRuntimeMode: string;
+}
+
 export interface IssueListItem {
   id: string;
   title: string;
@@ -97,6 +110,14 @@ export interface IssuePreview {
     concern: string;
     proposal: string;
   }>;
+  discussionDraft: Array<{
+    id: string;
+    roleId: string;
+    roleLabel: string;
+    focus: string;
+    concern: string;
+    proposal: string;
+  }>;
   debate?: {
     mode: 'model' | 'fallback';
     generatedAt: string;
@@ -122,6 +143,7 @@ export interface IssuePreview {
     status: IssueDebateTaskStatus;
     pollAfterMs?: number;
   } | null;
+  analysisGate: IssueAnalysisGate;
   expectedArtifacts: Array<{
     id: string;
     name: string;
@@ -147,7 +169,9 @@ export interface IssueDebatePollingResult {
   taskId: string | null;
   status: IssueDebateTaskStatus;
   discussion: IssuePreview['discussion'];
+  discussionDraft: IssuePreview['discussionDraft'];
   debate: IssuePreview['debate'];
+  analysisGate: IssuePreview['analysisGate'];
   error?: string | null;
   updatedAt: string;
   pollAfterMs?: number;
