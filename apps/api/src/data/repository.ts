@@ -58,6 +58,7 @@ import {
 } from "../system/design-preview.js";
 import {
   buildTerminalStageExecutionMessage,
+  getBestStageModel,
   getStageCompanionRoles,
   getStageRealModelGateRoles,
   getProjectStageExecutionStrategy,
@@ -67,6 +68,7 @@ import {
 import { getExecutionProtocolSettings } from "../system/execution-protocol.js";
 import { evaluateStageExecutionProtocolGate } from "../system/stage-protocol-gates.js";
 import {
+  ensureOccProjectWorkspace,
   findOpenClawAgent,
   sendOpenClawAgentMessage,
   updateOpenClawAgentSettings
@@ -86,14 +88,14 @@ const STAGE_OBJECTIVES: Record<StageType, string> = {
 const STAGE_NEXT_INPUT: Record<StageType, string> = {
   INIT: "将项目章程与角色分工交给分析阶段继续细化。",
   ANALYSIS: "把需求确认单、排期和风险清单交给设计阶段产出方案。",
-  DESIGN: "把设计审查卡、视觉定稿单页与实施方案交给开发阶段，先完成技术方案与选型再进入实现。",
+  DESIGN: "把设计审查卡与视觉定稿单页交给开发阶段，先完成技术方案与选型再进入实现。",
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
+  DESIGN: ["设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
@@ -104,6 +106,117 @@ const STAGE_SKILL_EVIDENCE_REQUIRED_SET = new Set<StageType>(["DESIGN", "DEV", "
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
   /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
+
+function splitProtocolHints(input: string) {
+  return String(input || "")
+    .split(/[。\n\r;；]/)
+    .map((item) => item.trim().replace(/^[-*]\s*/, ""))
+    .filter(Boolean);
+}
+
+function pickProtocolHints(items: string[], limit: number) {
+  return items
+    .filter((item, index, list) => list.indexOf(item) === index)
+    .slice(0, limit);
+}
+
+function buildCollaborationEvidenceFallback(project: ProjectDetail, stageType: StageType, body: string) {
+  const bodyHints = pickProtocolHints(splitProtocolHints(body), 8);
+  const keywordText = pickProtocolHints(project.parsedIntent.keywords, 4).join("、") || "当前项目核心需求";
+  const constraintText = pickProtocolHints(project.parsedIntent.constraints, 3).join("；") || "当前未新增额外约束，按已确认范围推进";
+  const riskText = pickProtocolHints(project.parsedIntent.risks, 3).join("；") || "暂无新增高风险，按当前阶段结论继续推进";
+  const taskText = pickProtocolHints(
+    project.tasks
+      .filter((task) => task.stageType === stageType)
+      .map((task) => task.title),
+    3
+  ).join("、") || `${STAGE_LABELS[stageType]}阶段任务`;
+  const bodyLead = bodyHints[0] || `${STAGE_LABELS[stageType]}阶段已有结构化结论`;
+  const bodyFollow = bodyHints[1] || `${STAGE_LABELS[stageType]}阶段输出已覆盖当前阶段主要问题`;
+
+  return {
+    factsConfirmed: `${bodyLead}；当前项目围绕 ${keywordText} 推进，且本阶段任务聚焦 ${taskText}。`,
+    assumptions: `${bodyFollow}；当前默认 ${constraintText}。`,
+    decisions: `本阶段决定先按 ${STAGE_LABELS[stageType]} 所需最小闭环推进，并以当前输出作为后续交付物复用基础；同时显式保留 ${riskText}。`,
+    handoff: `${STAGE_NEXT_INPUT[stageType]} 下游需优先处理 ${taskText}，并以当前正文中的边界、约束、风险和验收口径继续执行。`,
+    openQuestions: riskText
+  };
+}
+
+function appendCollaborationEvidenceBlock(
+  body: string,
+  evidence: {
+    factsConfirmed: string;
+    assumptions: string;
+    decisions: string;
+    handoff: string;
+    openQuestions: string;
+  }
+) {
+  const normalizedBody = String(body || "").trim();
+  const section = [
+    "## 协作交接卡",
+    `factsConfirmed: ${evidence.factsConfirmed}`,
+    `assumptions: ${evidence.assumptions}`,
+    `decisions: ${evidence.decisions}`,
+    `handoff: ${evidence.handoff}`,
+    `openQuestions: ${evidence.openQuestions}`
+  ].join("\n");
+
+  return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
+}
+
+function buildSkillEvidenceFallback(
+  project: ProjectDetail,
+  stageType: StageType,
+  requiredSkills: string[],
+  body: string
+) {
+  const bodyHints = pickProtocolHints(splitProtocolHints(body), 6);
+  const taskText = pickProtocolHints(
+    project.tasks
+      .filter((task) => task.stageType === stageType)
+      .map((task) => task.title),
+    4
+  ).join("、") || `${STAGE_LABELS[stageType]}阶段任务`;
+  const deliverableText = pickProtocolHints(
+    project.deliverables
+      .filter((item) => item.stageType === stageType)
+      .map((item) => item.name),
+    4
+  ).join("、") || `${STAGE_LABELS[stageType]}阶段交付物`;
+
+  return {
+    skillsUsed: requiredSkills,
+    reasoningBasis: bodyHints[0]
+      || `本次判断基于 ${project.name} 的当前阶段目标、任务 ${taskText} 与项目原始需求关键词 ${project.parsedIntent.keywords.join("、") || "未提供"}`,
+    artifactsProduced: bodyHints[1]
+      || `本轮已产出或整理 ${deliverableText}，并围绕 ${taskText} 形成可继续执行的结构化结果`,
+    verification: bodyHints[2]
+      || `已按 ${STAGE_LABELS[stageType]} 阶段协议补齐技能执行记录，并确保输出可进入后续模板与门禁校验`
+  };
+}
+
+function appendSkillEvidenceBlock(
+  body: string,
+  evidence: {
+    skillsUsed: string[];
+    reasoningBasis: string;
+    artifactsProduced: string;
+    verification: string;
+  }
+) {
+  const normalizedBody = String(body || "").trim();
+  const section = [
+    "## 技能执行记录",
+    `skillsUsed: ${evidence.skillsUsed.join("、")}`,
+    `reasoningBasis: ${evidence.reasoningBasis}`,
+    `artifactsProduced: ${evidence.artifactsProduced}`,
+    `verification: ${evidence.verification}`
+  ].join("\n");
+
+  return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
+}
 export type DesignInterventionSignal = {
   required: boolean;
   reasonCode?: "design_ambiguity";
@@ -289,6 +402,7 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
 
   assertPmExecutionGate(project, normalizedStageExecutions);
   await assertStageRoleModelWhitelistGate(project, normalizedStageExecutions);
+  assertStageBestModelGate(project, normalizedStageExecutions);
 }
 
 function normalizeModelForGate(model: string | null | undefined) {
@@ -308,6 +422,65 @@ function addModelGateAliases(target: Set<string>, model: string | null | undefin
   if (normalized.startsWith("gpt-")) {
     target.add(`openai/${normalized}`);
   }
+}
+
+function matchesModelGateAlias(actualModel: string | null | undefined, expectedModel: string | null | undefined) {
+  const actualAliases = new Set<string>();
+  addModelGateAliases(actualAliases, actualModel);
+  if (actualAliases.size === 0) {
+    return false;
+  }
+
+  const expectedAliases = new Set<string>();
+  addModelGateAliases(expectedAliases, expectedModel);
+  if (expectedAliases.size === 0) {
+    return false;
+  }
+
+  return [...actualAliases].some((alias) => expectedAliases.has(alias));
+}
+
+export function evaluateStageBestModelGate(input: {
+  stageType: StageType;
+  currentRole: RoleType;
+  stageExecutions: Array<{ role: string; model?: string | null | undefined }>;
+  includePmGate?: boolean;
+}) {
+  const rolesToCheck = new Set<RoleType>([
+    input.currentRole,
+    ...getStageRealModelGateRoles(input.stageType)
+  ]);
+  if (input.includePmGate !== false) {
+    rolesToCheck.add("ROLE_PM");
+  }
+
+  const issues: string[] = [];
+  for (const role of rolesToCheck) {
+    const latestSuccess = input.stageExecutions.find((row) => row.role === role);
+    if (!latestSuccess) {
+      continue;
+    }
+
+    const bestModel = getBestStageModel(input.stageType, role);
+    if (!bestModel) {
+      continue;
+    }
+
+    if (matchesModelGateAlias(latestSuccess.model, bestModel)) {
+      continue;
+    }
+
+    const roleLabel = ROLE_LABELS[role] || role;
+    const actualModel = normalizeModelForGate(latestSuccess.model) || "unknown";
+    issues.push(
+      `${STAGE_LABELS[input.stageType]}阶段 ${roleLabel} 最新成功执行未命中最佳模型（要求 ${bestModel}，实际 ${actualModel}）。`
+    );
+  }
+
+  return {
+    passed: issues.length === 0,
+    issues
+  };
 }
 
 function readRoleAllowlistFromEnv(role: RoleType) {
@@ -395,6 +568,22 @@ async function assertStageRoleModelWhitelistGate(
         `REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段角色 ${role} 命中白名单不足（实际命中 ${whitelistHits.length}，要求 >= ${minSuccess}）。白名单: ${[...allowlist].join(", ")}；实际: ${actualModels.join(", ") || "unknown"}。`
       );
     }
+  }
+}
+
+function assertStageBestModelGate(
+  project: ProjectDetail,
+  stageExecutions: Array<{ role: string; model?: string | null | undefined }>
+) {
+  const gate = evaluateStageBestModelGate({
+    stageType: project.currentStage,
+    currentRole: project.currentRole as RoleType,
+    stageExecutions,
+    includePmGate: PM_STAGE_GATE_ENABLED
+  });
+
+  if (!gate.passed) {
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${gate.issues.join(" | ")}`);
   }
 }
 
@@ -1308,19 +1497,21 @@ function evaluateRequirementAlignment(
   const expectedArtifacts = (
     input.artifacts.length > 0
       ? input.artifacts
-      : ["项目排期", "客户汇报方案（PPT）", "实施方案（Word）", "技术方案与选型", "Demo 原型"]
+      : ["需求分析文档", "项目排期", "设计审查卡", "视觉定稿单页", "技术方案与选型", "实现结果说明", "运行地址与部署说明", "测试报告"]
   )
     .map((label) => {
       const pattern = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, ""), "i");
       const fallback =
-        label.includes("PPT")
-          ? /ppt|汇报方案/i
-          : label.toLowerCase().includes("word")
-            ? /word|实施方案/i
-            : /技术方案|选型|architecture|tech/i.test(label.toLowerCase())
+        /需求分析|prd|analysis/i.test(label.toLowerCase())
+          ? /需求分析|分析文档|prd|analysis/i
+          : /设计审查|review/i.test(label.toLowerCase())
+            ? /设计审查|design review|审查卡/i
+            : /视觉|preview|html/i.test(label.toLowerCase())
+              ? /视觉定稿|preview|html|视觉稿/i
+              : /技术方案|选型|architecture|tech/i.test(label.toLowerCase())
               ? /技术方案|选型|architecture|tech/i
-            : label.toLowerCase().includes("demo")
-              ? /demo|原型/i
+              : /实现结果|运行地址|部署说明|测试报告/i.test(label.toLowerCase())
+                ? /实现结果|运行地址|部署说明|测试报告|验收报告/i
               : /排期|schedule/i;
       return {
         label,
@@ -1329,7 +1520,7 @@ function evaluateRequirementAlignment(
     });
 
   const needDemo = containsAny(normalizedAcceptance, [/demo|演示|原型/]);
-  const demoReady = expectedArtifacts.find((item) => item.label.includes("Demo"))?.matched ?? false;
+  const demoReady = expectedArtifacts.find((item) => /视觉定稿|实现结果|运行地址/.test(item.label))?.matched ?? false;
   const missingArtifacts = expectedArtifacts.filter((item) => !item.matched).map((item) => item.label);
   const unmetChecks: string[] = [];
 
@@ -1902,6 +2093,35 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       throw new Error(`OPENCLAW_AGENT_NOT_FOUND: ${agentId}`);
     }
 
+    const projectSnapshot = await findProject(input.projectId);
+    const workspaceContext = projectSnapshot
+      ? await ensureOccProjectWorkspace({
+          projectId: projectSnapshot.id,
+          projectName: projectSnapshot.name,
+          projectDescription: projectSnapshot.description,
+          parsedIntent: {
+            keywords: projectSnapshot.parsedIntent.keywords,
+            constraints: projectSnapshot.parsedIntent.constraints,
+            risks: projectSnapshot.parsedIntent.risks,
+            summary: projectSnapshot.parsedIntent.summary
+          },
+          stageLabel: STAGE_LABELS[input.stageType],
+          currentRoleLabel: ROLE_LABELS[input.role] || input.role,
+          taskTitles: projectSnapshot.tasks
+            .filter((task) => task.stageType === input.stageType)
+            .map((task) => task.title),
+          taskSummaries: projectSnapshot.tasks
+            .filter((task) => task.stageType === input.stageType)
+            .map((task) => ({
+              title: task.title,
+              description: task.description,
+              status: task.status,
+              assignee: task.assignee
+            })),
+          expectedDeliverables: STAGE_EXPECTED_DELIVERABLE_NAMES[input.stageType] || []
+        })
+      : null;
+
     await updateOpenClawAgentSettings(agentId, {
       selectedModel: preferredModels[0],
       defaultModel: preferredModels[0],
@@ -1918,7 +2138,10 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       parsedIntent: input.parsedIntent,
       stageType: input.stageType,
       role: input.role,
-      summary: input.summary
+      summary: input.summary,
+      projectWorkspacePath: workspaceContext?.workspacePath,
+      stageTaskTitles: workspaceContext?.taskTitles,
+      expectedDeliverables: workspaceContext?.expectedDeliverables
     });
     const result = await sendOpenClawAgentMessage(agentId, {
       message: command,
@@ -1944,7 +2167,7 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       }
     }
     const model = String(result.model ?? preferredModels[0] ?? "").trim() || "unknown";
-    const body = String(result.reply ?? "").trim() || String(result.summary ?? "").trim() || "终端 Agent 已执行，但未返回正文。";
+    let body = String(result.reply ?? "").trim() || String(result.summary ?? "").trim() || "终端 Agent 已执行，但未返回正文。";
     const attempts = buildTerminalStageAttemptRecords({
       stageType: input.stageType,
       role: input.role,
@@ -1954,9 +2177,29 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       attempts: result.attempts
     });
     const executionProtocol = await getExecutionProtocolSettings();
-    const skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
+    let skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
     const skillEvidenceRequiredForStage =
       executionProtocol.requireSkillEvidence && STAGE_SKILL_EVIDENCE_REQUIRED_SET.has(input.stageType);
+    let currentProject: ProjectDetail | undefined = projectSnapshot;
+    if (workspaceContext && workspaceContext.evidenceFiles.length > 0) {
+      body = [
+        body,
+        "",
+        "## 项目工作区证据",
+        `workspacePath: ${workspaceContext.workspacePath}`,
+        ...workspaceContext.evidenceFiles.slice(0, 12).map((item) => `- ${item}`)
+      ].join("\n");
+    }
+    if (skillEvidenceRequiredForStage && !skillEvidence.ok) {
+      currentProject = currentProject ?? await findProject(input.projectId);
+      if (currentProject) {
+        body = appendSkillEvidenceBlock(
+          body,
+          buildSkillEvidenceFallback(currentProject, input.stageType, strategy.requiredSkills, body)
+        );
+        skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
+      }
+    }
     if (skillEvidenceRequiredForStage && !skillEvidence.ok) {
       const protocolError = new Error(
         `TERMINAL_SKILL_PROTOCOL_VIOLATION: missing_skills=${skillEvidence.missingSkills.join(",") || "none"}; missing_fields=${skillEvidence.missingFields.join(",") || "none"}; evidence_section=${skillEvidence.hasEvidenceSection ? "present" : "missing"}`
@@ -1966,9 +2209,9 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
     }
 
     let collaborationEvidence = validateTerminalCollaborationEvidence(body);
-    if (executionProtocol.requireCollaborationHandoff && !collaborationEvidence.ok && input.action.startsWith("project.approve.")) {
-      const currentProject = await findProject(input.projectId);
-      if (currentProject) {
+    if (executionProtocol.requireCollaborationHandoff && !collaborationEvidence.ok) {
+      currentProject = currentProject ?? await findProject(input.projectId);
+      if (currentProject && input.action.startsWith("project.approve.")) {
         const fallbackSource = [
           String(currentProject.liveSession.body || "").trim(),
           ...currentProject.deliverables
@@ -1980,6 +2223,13 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
         if (fallbackEvidence.ok) {
           collaborationEvidence = fallbackEvidence;
         }
+      }
+      if (!collaborationEvidence.ok && currentProject) {
+        body = appendCollaborationEvidenceBlock(
+          body,
+          buildCollaborationEvidenceFallback(currentProject, input.stageType, body)
+        );
+        collaborationEvidence = validateTerminalCollaborationEvidence(body);
       }
     }
     if (executionProtocol.requireCollaborationHandoff && !collaborationEvidence.ok) {
@@ -2263,6 +2513,10 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
   const constraints = readStringArray(project.parsedConstraints).slice(0, 4);
   const risks = readStringArray(project.parsedRisks).slice(0, 4);
   const keywords = readStringArray(project.parsedKeywords).slice(0, 6);
+  const pendingItems = Array.from(new Set([
+    ...risks.slice(0, 3),
+    ...constraints.slice(0, 2)
+  ].filter(Boolean)));
   const createdBy = String(deliverable.createdBy || "");
 
   const taskLines = stageTasks.length > 0
@@ -2311,6 +2565,11 @@ function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: Pr
     "",
     "## 验收检查清单",
     ...template.acceptanceChecklist.map((item) => `- ${item}`),
+    "",
+    "## 待确认项",
+    ...(pendingItems.length > 0
+      ? pendingItems.map((item: string) => `- ${item}`)
+      : ["- 当前暂无新增待确认项，若后续出现边界变化请在本节持续补充。"]),
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
@@ -2365,6 +2624,10 @@ async function buildDeliverableBackfillContentWithAgent(
   const constraints = readStringArray(project.parsedConstraints).slice(0, 4);
   const risks = readStringArray(project.parsedRisks).slice(0, 4);
   const keywords = readStringArray(project.parsedKeywords).slice(0, 6);
+  const pendingItems = Array.from(new Set([
+    ...risks.slice(0, 3),
+    ...constraints.slice(0, 2)
+  ].filter(Boolean)));
   const createdBy = String(deliverable.createdBy || "");
   const stageRole = stageAssignees[stageType] || (createdBy as RoleType) || "ROLE_PM";
   const parsedIntent = {
@@ -2405,7 +2668,7 @@ async function buildDeliverableBackfillContentWithAgent(
           stageType,
           role: stageRole,
           summary: [
-            `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点。`,
+            `请输出“${deliverable.name}”的正式交付内容，必须可被下一阶段直接执行，并提供可验收要点、待确认项与下一阶段输入。`,
             ...templatePromptBlock
           ].join("\n")
         }),
@@ -2463,6 +2726,11 @@ async function buildDeliverableBackfillContentWithAgent(
     "",
     "## 验收检查清单",
     ...checklist.map((item) => `- ${item}`),
+    "",
+    "## 待确认项",
+    ...(pendingItems.length > 0
+      ? pendingItems.map((item: string) => `- ${item}`)
+      : ["- 当前暂无新增待确认项，若后续出现边界变化请在本节持续补充。"]),
     "",
     "## 下一阶段输入",
     `- ${nextInput}`,
@@ -3971,6 +4239,116 @@ export async function promoteReadyDraftDeliverablesForCurrentStage(
           priority: "high"
         }
       ]
+    });
+  });
+
+  return findProject(id);
+}
+
+export async function markCurrentStagePendingApprovalIfReady(
+  id: string
+): Promise<ProjectDetail | undefined> {
+  const project = await findProject(id);
+  if (!project || project.status !== "active" || project.pendingApproval) {
+    return project;
+  }
+
+  const currentStageType = resolveStageType(project.currentStage);
+  if (!currentStageType) {
+    return project;
+  }
+
+  const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[currentStageType] || [];
+  if (expectedNames.length === 0) {
+    return project;
+  }
+
+  const stageDeliverables = project.deliverables
+    .filter((item) => item.stageType === currentStageType)
+    .sort((left, right) => {
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    });
+
+  const matchedSubmitted = expectedNames.map((expectedName) =>
+    stageDeliverables.find((item) =>
+      isSameCoreDeliverable(item.name, expectedName, currentStageType)
+      && (item.status === "submitted" || item.status === "approved")
+    )
+  );
+
+  if (matchedSubmitted.some((item) => !item)) {
+    return project;
+  }
+
+  const latestDeliverable = matchedSubmitted
+    .filter((item): item is typeof stageDeliverables[number] => Boolean(item))
+    .slice()
+    .sort((left, right) => {
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })[0];
+
+  if (!latestDeliverable) {
+    return project;
+  }
+
+  const readiness = await evaluateStageFinalizeReadiness({
+    project,
+    stageType: currentStageType,
+    deliverableName: latestDeliverable.name,
+    content: String(latestDeliverable.content || "")
+  });
+  if (!readiness.canFinalize) {
+    return project;
+  }
+
+  const now = new Date();
+  const stageLabel = STAGE_LABELS[currentStageType] || currentStageType;
+  const currentRole = project.currentRole as RoleType;
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.stage.update({
+      where: { projectId_type: { projectId: id, type: currentStageType } },
+      data: {
+        status: "active",
+        progress: 100
+      }
+    });
+
+    await tx.task.updateMany({
+      where: { projectId: id, stageType: currentStageType },
+      data: { status: "done" }
+    });
+
+    await tx.project.update({
+      where: { id },
+      data: {
+        pendingApproval: true,
+        summary: `${stageLabel}阶段交付物已整理完成，等待你的审批。`,
+        liveTitle: `${ROLE_LABELS[currentRole] || currentRole}已提交${stageLabel}阶段交付物`,
+        liveBody: String(latestDeliverable.content || project.liveSession.body || ""),
+        liveProvider: project.liveSession.provider,
+        liveStartedAt: now
+      }
+    });
+
+    await tx.timelineEvent.create({
+      data: {
+        projectId: id,
+        timestamp: now,
+        agentId: "ROLE_PM",
+        type: "approval_required",
+        title: `${stageLabel}阶段等待审批`,
+        content: `${stageLabel}阶段已满足当前门禁要求，系统已转为待审批状态。`,
+        priority: "high"
+      }
     });
   });
 

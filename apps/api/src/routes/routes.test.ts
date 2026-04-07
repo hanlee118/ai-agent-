@@ -1058,11 +1058,12 @@ describe("Error Matrix: issues + role-sets", () => {
         conflictResolution: "以当前 issue 场景为准，覆盖长期记忆中的冲突项。"
       });
 
-    assert.equal(confirmRes.status, 200);
-    assert.equal(confirmRes.body.success, true);
-    assert.ok(confirmRes.body.data.issue);
-    assert.ok(confirmRes.body.data.project);
-    assert.equal(confirmRes.body.data.issue.status, "confirmed");
+    assert.equal(confirmRes.status, 409);
+    assert.equal(confirmRes.body.success, false);
+    assert.equal(confirmRes.body.error.code, "VALIDATION_ERROR");
+    assert.ok(String(confirmRes.body.error.message || "").trim().length > 0);
+    assert.ok(Array.isArray(confirmRes.body.error.analysisGate?.checks));
+    assert.ok((confirmRes.body.error.analysisGate?.checks || []).some((item: { passed?: boolean }) => item.passed === false));
     });
   });
 

@@ -64,7 +64,10 @@ test("terminal stage message removes dangerous shell characters", () => {
     },
     stageType: "DESIGN",
     role: "ROLE_DESIGN",
-    summary: "输出新的视觉与交互方向"
+    summary: "输出新的视觉与交互方向",
+    projectWorkspacePath: "/tmp/occ-projects/trendhunter",
+    stageTaskTitles: ["视觉探索", "交互定稿"],
+    expectedDeliverables: ["设计审查卡.md", "视觉定稿单页.preview.html.md"]
   });
 
   assert.equal(message.includes("\n"), false);
@@ -75,6 +78,8 @@ test("terminal stage message removes dangerous shell characters", () => {
   assert.equal(message.includes(">"), false);
   assert.equal(message.includes("允许参考长期记忆"), true);
   assert.equal(message.includes("高度相关"), true);
+  assert.equal(message.includes("项目工作区绝对路径 /tmp/occ-projects/trendhunter"), true);
+  assert.equal(message.includes("当前阶段任务 视觉探索、交互定稿"), true);
   assert.equal(message.includes("design-to-code"), true);
   assert.equal(message.includes("frontend-design"), true);
   assert.equal(message.includes("requiredSkills"), true);
@@ -98,12 +103,17 @@ test("dev terminal stage message enforces tool-driven execution", () => {
     },
     stageType: "DEV",
     role: "ROLE_DEV",
-    summary: "完成代码实现与验证"
+    summary: "完成代码实现与验证",
+    projectWorkspacePath: "/tmp/occ-projects/trendhunter",
+    stageTaskTitles: ["代码实现", "终端验证与回归检查"],
+    expectedDeliverables: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"]
   });
 
   assert.equal(message.includes("coding-agent"), true);
   assert.equal(message.includes("必须通过终端工具链完成代码修改"), true);
   assert.equal(message.includes("如果 requiredSkills 或终端工具不可用"), true);
+  assert.equal(message.includes("如果项目工作区当前缺少源码或运行骨架"), true);
+  assert.equal(message.includes("目标交付物 技术方案与选型.md、实现结果说明.md、运行地址与部署说明.md"), true);
 });
 
 test("skill evidence validator requires structured evidence fields and all required skills", () => {
@@ -176,4 +186,31 @@ test("skill evidence validator still requires structured fields when no required
     []
   );
   assert.equal(valid.ok, true);
+});
+
+test("skill evidence validator prefers the latest structured section when fallback appends corrected evidence", () => {
+  const result = validateTerminalSkillEvidence(
+    [
+      "## 技能执行记录",
+      "skillsUsed: 1) `design-to-code`；2) `frontend-design`；3) `frontend-design-pro`",
+      "reasoningBasis: 早期输出使用了带编号的技能列表。",
+      "artifactsProduced: 初稿。",
+      "verification: 初稿自检。",
+      "",
+      "## 技能执行记录",
+      "skillsUsed: design-to-code、frontend-design、frontend-design-pro",
+      "reasoningBasis: 已由系统补齐规范化技能记录。",
+      "artifactsProduced: 设计审查卡母稿、视觉定稿母稿。",
+      "verification: 协议字段与技能列表均已标准化。"
+    ].join("\n"),
+    ["design-to-code", "frontend-design", "frontend-design-pro"]
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.missingSkills, []);
+  assert.deepEqual(result.parsedEvidence?.skillsUsed, [
+    "design-to-code",
+    "frontend-design",
+    "frontend-design-pro"
+  ]);
 });

@@ -48,6 +48,7 @@ import {
   listProjectExecutions,
   listTasks,
   listProjects,
+  markCurrentStagePendingApprovalIfReady,
   runProjectStageAgent,
   postProjectMessage,
   promoteReadyDraftDeliverablesForCurrentStage,
@@ -98,6 +99,7 @@ import {
 import { previewRequirement } from "./utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "./utils/official-site.js";
 import {
+  ensureOccProjectWorkspace,
   buildOpenClawProjectReport,
   createOpenClawAgent,
   findOpenClawAgent,
@@ -168,7 +170,7 @@ const PROJECT_ADVANCE_CANCEL_TTL_MS = Math.max(
 const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["客户汇报方案.ppt.md", "实施方案说明.word.md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
+  DESIGN: ["设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
@@ -402,6 +404,10 @@ async function executeManualAdvanceCycle(projectId: string) {
 
       const promoted = await promoteReadyDraftDeliverablesForCurrentStage(projectId);
       if (promoted?.pendingApproval) {
+        return;
+      }
+      const readyPending = await markCurrentStagePendingApprovalIfReady(projectId);
+      if (readyPending?.pendingApproval) {
         return;
       }
 
@@ -655,13 +661,22 @@ function buildDeliverableSpecificSections(
   title: string,
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ) {
+  const pendingItems = [
+    ...project.parsedIntent.risks.slice(0, 3),
+    ...project.parsedIntent.constraints.slice(0, 2)
+  ].filter(Boolean);
   return [
     "## 专业模板约束",
     ...buildDeliverableTemplatePromptBlock(title, stageType, project.parsedIntent.keywords).map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
     "",
     "## 交付细化说明",
     "- 说明本交付物如何作为下一阶段输入。",
-    "- 说明可验证证据与审批关注点。"
+    "- 说明可验证证据与审批关注点。",
+    "",
+    "## 待确认项",
+    ...(pendingItems.length > 0
+      ? pendingItems.map((item) => `- ${item}`)
+      : ["- 当前暂无新增待确认项，若后续出现边界变化请在本节持续补充。"])
   ];
 }
 
@@ -825,21 +840,45 @@ function ensureTemplateSectionCoverage(
   return normalized;
 }
 
-function buildDevGateEvidenceAppendix(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
-  const projectTag = `${project.name} (${project.id})`;
+async function buildDevGateEvidenceAppendix(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  const workspace = await ensureOccProjectWorkspace({
+    projectId: project.id,
+    projectName: project.name,
+    projectDescription: project.description,
+    parsedIntent: {
+      keywords: project.parsedIntent.keywords,
+      constraints: project.parsedIntent.constraints,
+      risks: project.parsedIntent.risks,
+      summary: project.parsedIntent.summary
+    },
+    stageLabel: STAGE_LABELS[project.currentStage as StageType] || project.currentStage,
+    currentRoleLabel: ROLE_LABELS[project.currentRole as RoleType] || project.currentRole,
+    taskTitles: project.tasks.filter((task) => task.stageType === project.currentStage).map((task) => task.title),
+    taskSummaries: project.tasks
+      .filter((task) => task.stageType === project.currentStage)
+      .map((task) => ({
+        title: task.title,
+        description: task.description,
+        status: task.status,
+        assignee: task.assignee
+      })),
+    expectedDeliverables: STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage as StageType] || []
+  });
+
   return [
-    "## 研发落地证据（自动补强）",
-    `- 项目标识: ${projectTag}`,
-    "- 页面/路由证据: /dashboard、/products、/products/:id、/alerts",
-    "- API 证据: GET /api/hot-products、GET /api/hot-products/:id、POST /api/trackings、GET /api/trackings",
-    "- 存储证据: 使用 Prisma + PostgreSQL，包含 migration、schema 与索引策略。",
-    "- 代码路径证据:",
-    "  - apps/api/src/routes/projects.ts",
-    "  - apps/api/src/data/repository.ts",
-    "- 运行与联调: `pnpm dev` 启动，环境变量通过 `.env` 管理（API_BASE_URL/API_KEY 等）。",
-    "- 验证结果: `curl http://127.0.0.1:8787/health` 返回 HTTP 200，关键链路回归通过。",
-    "- 平台来源: TikTok / Amazon / Temu 数据源统一进入采集层。",
-    "- 更新机制: 定时轮询 + 增量同步，支持实时刷新与告警触发。"
+    "## 研发落地证据（自动收集）",
+    `- 项目标识: ${project.name} (${project.id})`,
+    `- 项目工作区: ${workspace.workspacePath}`,
+    `- 当前阶段任务: ${workspace.taskTitles.join("、") || "暂无"}`,
+    `- 目标交付物: ${workspace.expectedDeliverables.join("、") || "暂无"}`,
+    ...(workspace.evidenceFiles.length > 0
+      ? [
+          "- 当前已发现工作区文件:",
+          ...workspace.evidenceFiles.slice(0, 12).map((item) => `  - ${item}`)
+        ]
+      : [
+          "- 当前尚未发现业务源码文件，需在上述工作区继续补齐实现后再进入审批。"
+        ])
   ].join("\n");
 }
 
@@ -1080,7 +1119,7 @@ async function buildAutoStageSubmissions(
     role: project.currentRole as RoleType,
     summary: [
       `请围绕原始需求输出当前阶段完整交付内容，供以下交付物复用：${titles.join("、")}`,
-      "必须引用至少 3 个需求关键词、2 个当前阶段任务标题，并给出可验收条目与下一阶段输入。",
+      "必须引用至少 3 个需求关键词、2 个当前阶段任务标题，并给出可验收条目、下一阶段输入、待确认项/待澄清项。",
       "以下是交付模板约束（请严格遵循）：",
       ...templateGuidance
     ].join("\n")
@@ -1141,7 +1180,7 @@ async function buildAutoStageSubmissions(
       deliverableTitle: title
     });
     if (project.currentStage === "DEV") {
-      content = `${content}\n\n${buildDevGateEvidenceAppendix(project)}`;
+      content = `${content}\n\n${await buildDevGateEvidenceAppendix(project)}`;
     }
 
     const quality = evaluateAutoSubmissionQuality({
@@ -1283,6 +1322,13 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
             skipped += 1;
             awaitingConfirmation += 1;
             firstError = firstError ?? `project ${project.id} pending user confirmation`;
+            return;
+          }
+
+          const readyPending = await markCurrentStagePendingApprovalIfReady(project.id);
+          if (readyPending?.pendingApproval) {
+            awaitingConfirmation += 1;
+            firstError = firstError ?? `project ${project.id} is waiting for manual stage confirmation`;
             return;
           }
 
@@ -1545,28 +1591,28 @@ const FINAL_REQUIRED_ARTIFACTS: Array<{
     patterns: [/排期|里程碑|schedule/i]
   },
   {
-    key: "ppt",
-    category: "客户汇报方案（PPT）",
+    key: "analysis_doc",
+    category: "需求分析文档",
     required: true,
-    patterns: [/ppt|汇报方案|路演|汇报/i]
+    patterns: [/需求分析|分析文档|prd|requirement/i]
   },
   {
-    key: "word",
-    category: "实施方案（Word）",
+    key: "design_review",
+    category: "设计审查卡",
     required: true,
-    patterns: [/word|实施方案|执行方案|落地方案/i]
+    patterns: [/设计审查|design review|审查卡/i]
   },
   {
-    key: "demo",
-    category: "Demo / 原型",
-    required: false,
-    patterns: [/demo|原型/i]
+    key: "visual_preview",
+    category: "视觉定稿 / 设计预览",
+    required: true,
+    patterns: [/视觉定稿|preview|html|视觉稿|设计预览/i]
   },
   {
     key: "runtime_delivery",
     category: "真实开发结果（运行/联调证据）",
     required: true,
-    patterns: [/demo原型|技术方案|实现说明|运行说明|部署说明|联调说明/i]
+    patterns: [/技术方案|实现结果|运行地址|运行说明|部署说明|联调说明/i]
   },
   {
     key: "acceptance_report",

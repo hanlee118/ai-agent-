@@ -34,6 +34,31 @@ import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import { syncProjectGitLabHarness } from "./gitlab.js";
 
+function formatTerminalCollaborationViolation(message: string) {
+  const normalized = String(message || "").trim();
+  const match = normalized.match(/TERMINAL_COLLAB_PROTOCOL_VIOLATION:\s*missing_fields=([^;]+);\s*section=([a-z]+)/i);
+  if (!match) {
+    return "";
+  }
+
+  const rawFields = String(match[1] || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const labelMap: Record<string, string> = {
+    factsConfirmed: "factsConfirmed（已确认事实）",
+    assumptions: "assumptions（当前假设）",
+    decisions: "decisions（已做决策）",
+    handoff: "handoff（交给下游 Agent 的明确输入与动作）",
+    openQuestions: "openQuestions（待确认问题或风险空白）"
+  };
+  const formattedFields = rawFields.map((field) => labelMap[field] || field).join("、");
+  const sectionState = String(match[2] || "").toLowerCase() === "present"
+    ? "已检测到协作交接卡区块，但字段未填写完整"
+    : "未检测到完整协作交接卡区块";
+  return `最新执行未通过协作交接卡协议：${sectionState}，缺少字段 ${formattedFields || "unknown"}。请补齐 factsConfirmed / assumptions / decisions / handoff / openQuestions 后重试。`;
+}
+
 /**
  * @openapi
  * /api/projects/parse:
@@ -2097,11 +2122,13 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     }
     if (message.startsWith("EXECUTION_PROTOCOL_GATE_FAILED:")) {
       const protocolGatePrecheck = await getProjectExecutionProtocolPrecheck(projectId);
+      const rawProtocolMessage = message.replace("EXECUTION_PROTOCOL_GATE_FAILED:", "").trim();
       res.status(422).json({
         success: false,
         error: {
           code: "EXECUTION_PROTOCOL_GATE_FAILED",
-          message: message.replace("EXECUTION_PROTOCOL_GATE_FAILED:", "").trim(),
+          message: formatTerminalCollaborationViolation(rawProtocolMessage) || rawProtocolMessage,
+          rawMessage: rawProtocolMessage,
           protocolGatePrecheck
         }
       });

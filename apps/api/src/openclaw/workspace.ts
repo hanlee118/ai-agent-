@@ -196,6 +196,16 @@ type RawProjectTasksPayload = {
   blockers_summary?: Record<string, string[]>;
 };
 
+export type OccProjectWorkspaceContext = {
+  workspacePath: string;
+  relativePath: string;
+  contextFilePath: string;
+  stageNotePath: string;
+  taskTitles: string[];
+  expectedDeliverables: string[];
+  evidenceFiles: string[];
+};
+
 const execFileAsync = promisify(execFile);
 
 const TEAM_FILE_PATH = path.join(OPENCLAW_WORKSPACE_ROOT, "TEAM.md");
@@ -305,7 +315,7 @@ export function classifyOpenClawAttemptFailure(errorText: string): OpenClawAttem
   const isModelUnavailableError = /no available channel|model\s+.*not supported|unsupported model|model not found|unknown model/i.test(normalized);
   const isTransportError = /timeout|timed out|gateway|network|econnreset|socket hang up|aborted|relay service error|bad_response_status_code|5\d{2}/i.test(normalized);
   const isUnexpectedModelError = /unexpected execution model/i.test(normalized);
-  const isGatewayRepairableError = /gateway closed|gateway connect failed|connect challenge timeout|session file locked|locked \(timeout/i.test(normalized);
+  const isGatewayRepairableError = /gateway closed|gateway connect failed|connect challenge timeout/i.test(normalized);
   const kind = isLockError
     ? "lock"
     : isTokenError
@@ -351,6 +361,220 @@ export function selectOpenClawFallbackModel(input: {
 
 function buildAgentMainSessionKey(agentId: string) {
   return `agent:${agentId}:main`;
+}
+
+function isProcessAlive(pid: number) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function extractSessionLockPath(errorText: string) {
+  const match = String(errorText || "").match(/(\/[^\s"'`]+\.jsonl\.lock)/);
+  return match?.[1] ? String(match[1]).trim() : "";
+}
+
+type SessionLockRecord = {
+  pid?: number;
+  createdAt?: string;
+};
+
+async function readSessionLockRecord(lockPath: string) {
+  const normalizedPath = String(lockPath || "").trim();
+  if (!normalizedPath) {
+    return null;
+  }
+
+  try {
+    const raw = await readFile(normalizedPath, "utf8");
+    return JSON.parse(raw) as SessionLockRecord;
+  } catch {
+    return null;
+  }
+}
+
+async function cleanupStaleSessionLock(lockPath: string) {
+  const normalizedPath = String(lockPath || "").trim();
+  if (!normalizedPath) {
+    return false;
+  }
+
+  try {
+    const parsed = await readSessionLockRecord(normalizedPath);
+    const pid = Number(parsed?.pid);
+    if (Number.isInteger(pid) && pid > 0 && isProcessAlive(pid)) {
+      return false;
+    }
+  } catch {
+    // If the lock file cannot be parsed or no longer exists, treat it as removable.
+  }
+
+  try {
+    await rm(normalizedPath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function readProcessCommand(pid: number) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return "";
+  }
+  try {
+    const result = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
+      maxBuffer: 1024 * 64
+    });
+    return String(result.stdout || "").trim();
+  } catch {
+    return "";
+  }
+}
+
+function isOpenClawOwnedProcess(command: string) {
+  const normalized = String(command || "").trim().toLowerCase();
+  return /(^|\s|\/)openclaw(-agent|-gateway)?(\s|$)/i.test(normalized);
+}
+
+async function terminateProcessGracefully(pid: number, timeoutMs: number) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  if (!isProcessAlive(pid)) {
+    return true;
+  }
+
+  try {
+    process.kill(pid, "SIGTERM");
+  } catch {
+    return !isProcessAlive(pid);
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (!isProcessAlive(pid)) {
+      return true;
+    }
+    await sleep(150);
+  }
+
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch {
+    return !isProcessAlive(pid);
+  }
+
+  await sleep(200);
+  return !isProcessAlive(pid);
+}
+
+async function releaseActiveSessionLock(lockPath: string, input: {
+  agentId: string;
+  minAgeMs: number;
+  terminateTimeoutMs: number;
+}) {
+  const normalizedPath = String(lockPath || "").trim();
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const expectedFragment = `${path.sep}agents${path.sep}${input.agentId}${path.sep}sessions${path.sep}`;
+  if (!normalizedPath.includes(expectedFragment)) {
+    return false;
+  }
+
+  const record = await readSessionLockRecord(normalizedPath);
+  const pid = Number(record?.pid);
+  if (!Number.isInteger(pid) || pid <= 0 || !isProcessAlive(pid)) {
+    return false;
+  }
+
+  const createdAtMs = record?.createdAt ? new Date(record.createdAt).getTime() : NaN;
+  if (!Number.isFinite(createdAtMs) || Date.now() - createdAtMs < input.minAgeMs) {
+    return false;
+  }
+
+  const command = await readProcessCommand(pid);
+  if (!isOpenClawOwnedProcess(command)) {
+    return false;
+  }
+
+  const terminated = await terminateProcessGracefully(pid, input.terminateTimeoutMs);
+  if (!terminated) {
+    return false;
+  }
+
+  try {
+    await rm(normalizedPath, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function cleanupOpenClawAgentStaleSessionLocks(agentId: string) {
+  const sessionDir = path.join(OPENCLAW_ROOT, "agents", agentId, "sessions");
+  try {
+    const entries = await readdir(sessionDir);
+    let removedCount = 0;
+    for (const entry of entries) {
+      if (!entry.endsWith(".jsonl.lock")) {
+        continue;
+      }
+      const removed = await cleanupStaleSessionLock(path.join(sessionDir, entry));
+      if (removed) {
+        removedCount += 1;
+      }
+    }
+    return removedCount;
+  } catch {
+    return 0;
+  }
+}
+
+async function resetOpenClawAgentMainSession(agentId: string, input?: {
+  lockedSessionFile?: string;
+}) {
+  const sessionStorePath = path.join(OPENCLAW_ROOT, "agents", agentId, "sessions", "sessions.json");
+  const sessionStore = await readJsonFile<Record<string, SessionRecord>>(sessionStorePath);
+  if (!sessionStore) {
+    return false;
+  }
+
+  const sessionKey = buildAgentMainSessionKey(agentId);
+  const sessionEntry = sessionStore[sessionKey];
+  if (!sessionEntry) {
+    return false;
+  }
+
+  const mainSessionFile = String(sessionEntry.sessionFile || "").trim();
+  const lockedSessionFile = String(input?.lockedSessionFile || "").trim();
+  if (lockedSessionFile && mainSessionFile && lockedSessionFile !== mainSessionFile) {
+    return false;
+  }
+
+  const nextStore = { ...sessionStore };
+  delete nextStore[sessionKey];
+
+  if (Object.keys(nextStore).length === 0) {
+    await rm(sessionStorePath, { force: true });
+  } else {
+    await writeJsonFile(sessionStorePath, nextStore);
+  }
+
+  if (mainSessionFile) {
+    await rm(`${mainSessionFile}.lock`, { force: true }).catch(() => {
+      // ignore lock cleanup failure during session reset
+    });
+  }
+
+  return true;
 }
 
 function resolveAgentConfiguredPrimaryModel(
@@ -936,6 +1160,9 @@ export async function createOpenClawAgent(
       executionMode: "confirm_first",
       requireConfirmation: true,
       autoApproveMinorSteps: false,
+      maxPromptTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
+      maxCompletionTokens: null,
+      maxDailyTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
       memoryEnabled: true,
       allowedAgentIds,
       toolAllowlist: tools
@@ -1403,15 +1630,26 @@ export async function sendOpenClawAgentMessage(
     isDesignAgent,
     shouldIsolateSession
   });
+  const isCodingExecution = /\bcoding-agent\b/i.test(message) || agentId === "rd_manager" || agentId === "rd_director";
   let gatewayRepairAttempted = false;
   const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
   const cliTimeoutSeconds = Math.max(
-    preferLocalExecution ? 45 : 15,
-    Number(process.env.OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS ?? 20)
+    preferLocalExecution
+      ? (isCodingExecution ? 180 : 90)
+      : (isCodingExecution ? 120 : 30),
+    Number(process.env.OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS ?? 75)
   );
   const commandTimeoutMs = Math.max(
-    (cliTimeoutSeconds + 15) * 1000,
-    Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 45_000)
+    (cliTimeoutSeconds + 20) * 1000,
+    Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 90_000)
+  );
+  const liveLockStealAfterMs = Math.max(
+    12_000,
+    Number(process.env.OPENCLAW_LIVE_LOCK_STEAL_AFTER_MS ?? 15_000)
+  );
+  const liveLockTerminateTimeoutMs = Math.max(
+    600,
+    Number(process.env.OPENCLAW_LIVE_LOCK_TERMINATE_TIMEOUT_MS ?? 2_000)
   );
   let finalError: string | null = null;
   const attempts: OpenClawAgentAttemptTrace[] = [];
@@ -1467,8 +1705,12 @@ export async function sendOpenClawAgentMessage(
   }
 
   await syncOpenClawAgentMainSessionRuntimeModel(agentId, activeModel);
+  await cleanupOpenClawAgentStaleSessionLocks(agentId);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (attempt > 1) {
+      await cleanupOpenClawAgentStaleSessionLocks(agentId);
+    }
     const attemptStartedAtMs = Date.now();
     const attemptStartedAt = new Date(attemptStartedAtMs).toISOString();
     const sessionId = shouldIsolateSession
@@ -1501,11 +1743,33 @@ export async function sendOpenClawAgentMessage(
       });
       const nextStdout = result.stdout;
       const nextStderr = result.stderr;
-      const payloadError = extractOpenClawGatewayError(`${nextStdout || ""}\n${nextStderr || ""}`);
+      const combinedOutput = `${nextStdout || ""}\n${nextStderr || ""}`;
+      const payloadError = extractOpenClawGatewayError(combinedOutput);
       if (payloadError) {
         throw new Error(payloadError);
       }
       const successPayload = parseOpenClawJson(nextStdout || nextStderr || "");
+      const stopReason = String(
+        successPayload.result?.meta?.stopReason ?? extractJsonStringField(combinedOutput, "stopReason") ?? ""
+      )
+        .trim()
+        .toLowerCase();
+      const promptErrorDetected = /"customType"\s*:\s*"openclaw:prompt-error"/i.test(combinedOutput);
+      const promptErrorMessage =
+        extractJsonStringField(combinedOutput, "errorMessage")
+        ?? extractJsonStringField(combinedOutput, "error")
+        ?? "";
+      if (
+        stopReason === "aborted"
+        || stopReason === "cancelled"
+        || stopReason === "error"
+        || promptErrorDetected
+        || /request was aborted/i.test(promptErrorMessage)
+      ) {
+        throw new Error(
+          promptErrorMessage || `OpenClaw returned interrupted result (stopReason=${stopReason || "unknown"})`
+        );
+      }
       const actualModel = normalizeModelForRouting(successPayload.result?.meta?.agentMeta?.model);
       if (isDesignAgent && actualModel && !isDesignModelPreferred(actualModel) && !fallbackCandidates.includes(actualModel)) {
         throw new Error(`unexpected execution model: ${actualModel}`);
@@ -1640,6 +1904,61 @@ export async function sendOpenClawAgentMessage(
       }
 
       if (isLockError) {
+        const lockPath = extractSessionLockPath(finalError);
+        const removedStaleLock = await cleanupStaleSessionLock(lockPath);
+        if (removedStaleLock && attempt < maxAttempts) {
+          const lockedSessionFile = lockPath.endsWith(".lock") ? lockPath.slice(0, -5) : "";
+          await resetOpenClawAgentMainSession(agentId, { lockedSessionFile }).catch(() => {
+            // ignore best-effort main session reset
+          });
+          attempts.push({
+            attempt,
+            route: "openclaw-cli",
+            status: "failed",
+            startedAt: attemptStartedAt,
+            elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+            requestedModel,
+            selectedModel: activeModel,
+            isolatedSession: shouldIsolateSession,
+            sessionId,
+            localExecution: preferLocalExecution,
+            failureKind: failure.kind,
+            recoveryAction: "cleanup_stale_lock",
+            error: finalError
+          });
+          await sleep(Math.min(1200, 300 * attempt));
+          continue;
+        }
+        const releasedLiveLock = (shouldIsolateSession || preferLocalExecution)
+          ? await releaseActiveSessionLock(lockPath, {
+            agentId,
+            minAgeMs: liveLockStealAfterMs,
+            terminateTimeoutMs: liveLockTerminateTimeoutMs
+          })
+          : false;
+        if (releasedLiveLock && attempt < maxAttempts) {
+          const lockedSessionFile = lockPath.endsWith(".lock") ? lockPath.slice(0, -5) : "";
+          await resetOpenClawAgentMainSession(agentId, { lockedSessionFile }).catch(() => {
+            // ignore best-effort main session reset
+          });
+          attempts.push({
+            attempt,
+            route: "openclaw-cli",
+            status: "failed",
+            startedAt: attemptStartedAt,
+            elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+            requestedModel,
+            selectedModel: activeModel,
+            isolatedSession: shouldIsolateSession,
+            sessionId,
+            localExecution: preferLocalExecution,
+            failureKind: failure.kind,
+            recoveryAction: "terminate_live_lock_owner",
+            error: finalError
+          });
+          await sleep(Math.min(1500, 350 * attempt));
+          continue;
+        }
         if (preferLocalExecution && attempt < maxAttempts) {
           attempts.push({
             attempt,
@@ -1678,6 +1997,13 @@ export async function sendOpenClawAgentMessage(
       }
 
       if ((isTransportError || isUnexpectedModelError) && attempt < maxAttempts) {
+        if (failure.kind === "lock") {
+          const lockPath = extractSessionLockPath(finalError);
+          if (lockPath) {
+            await cleanupStaleSessionLock(lockPath);
+          }
+          await cleanupOpenClawAgentStaleSessionLocks(agentId);
+        }
         attempts.push({
           attempt,
           route: "openclaw-cli",
@@ -1727,6 +2053,27 @@ export async function sendOpenClawAgentMessage(
   const raw = (stdout || stderr).trim();
   const payload = parseOpenClawJson(raw);
   const result = payload?.result;
+  const stopReason = String(result?.meta?.stopReason ?? extractJsonStringField(raw, "stopReason") ?? "")
+    .trim()
+    .toLowerCase();
+  const promptErrorDetected = /"customType"\s*:\s*"openclaw:prompt-error"/i.test(raw);
+  const promptErrorMessage =
+    extractJsonStringField(raw, "errorMessage")
+    ?? extractJsonStringField(raw, "error")
+    ?? "";
+  if (
+    stopReason === "aborted"
+    || stopReason === "cancelled"
+    || stopReason === "error"
+    || promptErrorDetected
+    || /request was aborted/i.test(promptErrorMessage)
+  ) {
+    const commandError = new Error(
+      promptErrorMessage || `OpenClaw returned interrupted result (stopReason=${stopReason || "unknown"})`
+    ) as Error & { attempts?: OpenClawAgentAttemptTrace[] };
+    commandError.attempts = attempts;
+    throw commandError;
+  }
   const replyFromPayload = Array.isArray(result?.payloads)
     ? result.payloads
         .map((item: { text?: string }) => String(item?.text ?? "").trim())
@@ -2941,6 +3288,242 @@ function decodeProjectId(value: string) {
   return Buffer.from(value, "base64url").toString("utf8");
 }
 
+function sanitizeWorkspaceSegment(value: string) {
+  const normalized = String(value ?? "")
+    .normalize("NFKD")
+    .replace(/[^\w.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .toLowerCase();
+  return normalized || "project";
+}
+
+async function writeTextFileIfChanged(filePath: string, content: string) {
+  const normalizedContent = content.endsWith("\n") ? content : `${content}\n`;
+  try {
+    const current = await readFile(filePath, "utf8");
+    if (current === normalizedContent) {
+      return;
+    }
+  } catch {
+    // ignore read failures and write the file below
+  }
+  await mkdir(path.dirname(filePath), { recursive: true });
+  await writeFile(filePath, normalizedContent, "utf8");
+}
+
+async function createFileIfMissing(filePath: string, content: string) {
+  try {
+    await stat(filePath);
+    return;
+  } catch {
+    await writeTextFileIfChanged(filePath, content);
+  }
+}
+
+async function collectOccWorkspaceEvidenceFiles(
+  workspacePath: string,
+  options?: { maxDepth?: number; maxFiles?: number }
+) {
+  const maxDepth = Math.max(1, Number(options?.maxDepth ?? 3));
+  const maxFiles = Math.max(4, Number(options?.maxFiles ?? 18));
+  const ignoredDirs = new Set([".git", "node_modules", "dist", "build", ".next", ".turbo", "coverage"]);
+  const allowedExtensions = new Set([".ts", ".tsx", ".js", ".jsx", ".json", ".md", ".html", ".css", ".scss", ".prisma", ".yaml", ".yml"]);
+  const evidence: string[] = [];
+
+  async function walk(currentPath: string, depth: number): Promise<void> {
+    if (evidence.length >= maxFiles || depth > maxDepth) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = await readdir(currentPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    entries.sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+
+    for (const entry of entries) {
+      if (evidence.length >= maxFiles) {
+        return;
+      }
+
+      const fullPath = path.join(currentPath, entry.name);
+      const relativePath = normalizeRelativePath(path.relative(workspacePath, fullPath));
+      if (!relativePath) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        if (!ignoredDirs.has(entry.name) && depth < maxDepth) {
+          await walk(fullPath, depth + 1);
+        }
+        continue;
+      }
+
+      const extension = path.extname(entry.name).toLowerCase();
+      if (!allowedExtensions.has(extension)) {
+        continue;
+      }
+      if (/^(OCC_PROJECT_CONTEXT|CURRENT_STAGE)\.md$/i.test(entry.name)) {
+        continue;
+      }
+      evidence.push(relativePath);
+    }
+  }
+
+  await walk(workspacePath, 0);
+  return evidence;
+}
+
+export async function ensureOccProjectWorkspace(input: {
+  projectId: string;
+  projectName: string;
+  projectDescription: string;
+  parsedIntent: {
+    keywords: string[];
+    constraints: string[];
+    risks: string[];
+    summary: string;
+  };
+  stageLabel: string;
+  currentRoleLabel: string;
+  taskTitles: string[];
+  taskSummaries: Array<{ title: string; description?: string; status?: string; assignee?: string }>;
+  expectedDeliverables: string[];
+}) : Promise<OccProjectWorkspaceContext> {
+  const directoryName = `${sanitizeWorkspaceSegment(input.projectId)}-${sanitizeWorkspaceSegment(input.projectName).slice(0, 48)}`;
+  const workspacePath = path.join(OPENCLAW_WORKSPACE_ROOT, "occ-projects", directoryName);
+  const relativePath = normalizeRelativePath(path.relative(OPENCLAW_WORKSPACE_ROOT, workspacePath));
+  const contextFilePath = path.join(workspacePath, "OCC_PROJECT_CONTEXT.md");
+  const stageNotePath = path.join(workspacePath, "CURRENT_STAGE.md");
+  const tasksPath = path.join(workspacePath, "tasks.json");
+  const requirementsPath = path.join(workspacePath, "requirements.md");
+  const readmePath = path.join(workspacePath, "README.md");
+  const appReadmePath = path.join(workspacePath, "app", "README.md");
+
+  await mkdir(workspacePath, { recursive: true });
+
+  await createFileIfMissing(readmePath, [
+    `# ${input.projectName}`,
+    "",
+    "该目录由 OCC 为当前项目自动创建，供 OpenClaw Agent 在真实项目上下文中执行分析、设计、研发与验收。",
+    "",
+    "建议工作约定：",
+    "- 业务实现代码放在 `app/` 目录或同级明确子目录中。",
+    "- 阶段上下文查看 `CURRENT_STAGE.md`。",
+    "- 原始需求与约束查看 `requirements.md` 与 `OCC_PROJECT_CONTEXT.md`。"
+  ].join("\n"));
+
+  await createFileIfMissing(requirementsPath, [
+    `# ${input.projectName} 需求说明`,
+    "",
+    "## 项目摘要",
+    input.parsedIntent.summary || input.projectDescription,
+    "",
+    "## 原始需求",
+    input.projectDescription,
+    "",
+    "## 关键词",
+    ...(input.parsedIntent.keywords.length > 0 ? input.parsedIntent.keywords.map((item) => `- ${item}`) : ["- 暂无"]),
+    "",
+    "## 约束",
+    ...(input.parsedIntent.constraints.length > 0 ? input.parsedIntent.constraints.map((item) => `- ${item}`) : ["- 暂无"]),
+    "",
+    "## 风险",
+    ...(input.parsedIntent.risks.length > 0 ? input.parsedIntent.risks.map((item) => `- ${item}`) : ["- 暂无"])
+  ].join("\n"));
+
+  await createFileIfMissing(appReadmePath, [
+    "# app",
+    "",
+    "如果当前项目还没有业务代码，请从此目录开始创建最小可运行实现。",
+    "",
+    "最低要求：",
+    "- 保留真实源码、配置文件与启动命令。",
+    "- 能说明页面 / 路由、数据链路、验证方式与已知风险。",
+    "- 所有实现与验证结果都要能回写到阶段交付物。"
+  ].join("\n"));
+
+  await writeTextFileIfChanged(contextFilePath, [
+    `# ${input.projectName} OCC 项目上下文`,
+    "",
+    `- 项目 ID: ${input.projectId}`,
+    `- 当前阶段: ${input.stageLabel}`,
+    `- 当前负责人: ${input.currentRoleLabel}`,
+    `- 目标交付物: ${input.expectedDeliverables.join("、") || "暂无"}`,
+    "",
+    "## 原始需求",
+    input.projectDescription,
+    "",
+    "## 关键词",
+    ...(input.parsedIntent.keywords.length > 0 ? input.parsedIntent.keywords.map((item) => `- ${item}`) : ["- 暂无"]),
+    "",
+    "## 约束",
+    ...(input.parsedIntent.constraints.length > 0 ? input.parsedIntent.constraints.map((item) => `- ${item}`) : ["- 暂无"]),
+    "",
+    "## 风险",
+    ...(input.parsedIntent.risks.length > 0 ? input.parsedIntent.risks.map((item) => `- ${item}`) : ["- 暂无"])
+  ].join("\n"));
+
+  await writeTextFileIfChanged(stageNotePath, [
+    `# ${input.stageLabel} 阶段执行卡`,
+    "",
+    `- 当前负责人: ${input.currentRoleLabel}`,
+    `- 阶段任务标题: ${input.taskTitles.join("、") || "暂无"}`,
+    `- 本阶段目标交付物: ${input.expectedDeliverables.join("、") || "暂无"}`,
+    "",
+    "## 当前阶段任务",
+    ...(input.taskSummaries.length > 0
+      ? input.taskSummaries.map((task, index) => [
+          `### ${index + 1}. ${task.title}`,
+          `- 状态: ${task.status || "todo"}`,
+          `- 负责人: ${task.assignee || "未分配"}`,
+          `- 说明: ${task.description || "暂无补充说明"}`
+        ].join("\n"))
+      : ["- 当前暂无任务，请先补充后再推进。"]),
+    "",
+    "## 执行约束",
+    "- 必须在该工作区内落真实文件、真实命令与真实验证结果。",
+    "- 如果当前没有业务代码，可以在 `app/` 中从 0 开始创建最小可运行实现。",
+    "- 交付物必须能回溯到本工作区中的真实文件与命令。"
+  ].join("\n"));
+
+  await writeTextFileIfChanged(tasksPath, JSON.stringify({
+    project: {
+      name: input.projectName,
+      directory: relativePath,
+      type: "occ-project",
+      note: `${input.projectId} ${input.stageLabel}`
+    },
+    created: new Date().toISOString(),
+    last_updated: new Date().toISOString(),
+    tasks: input.taskSummaries.map((task, index) => ({
+      id: String(index + 1),
+      title: task.title,
+      agent: task.assignee || input.currentRoleLabel,
+      task: task.description || task.title,
+      progress: task.status === "done" ? 100 : task.status === "in_progress" ? 55 : task.status === "blocked" ? 15 : 0,
+      status: task.status || "todo",
+      deliverable: input.expectedDeliverables[index] || input.expectedDeliverables[0] || undefined,
+      blockers: []
+    }))
+  }, null, 2));
+
+  const evidenceFiles = await collectOccWorkspaceEvidenceFiles(workspacePath);
+  return {
+    workspacePath,
+    relativePath,
+    contextFilePath,
+    stageNotePath,
+    taskTitles: input.taskTitles,
+    expectedDeliverables: input.expectedDeliverables,
+    evidenceFiles
+  };
+}
+
 function resolveProjectDir(projectId: string) {
   const decodedPath = decodeProjectId(projectId);
 
@@ -3373,6 +3956,8 @@ function normalizeNumericLimit(value?: number | null, fallback?: number) {
   return Math.round(numberValue);
 }
 
+const DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT = 100_000_000;
+
 function buildUsageSummary(
   usageLogs: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; createdAt: Date }>,
   dailyLimit?: number
@@ -3536,6 +4121,9 @@ async function ensureManagedAgentConfigExists(
       executionMode: "confirm_first",
       requireConfirmation: true,
       autoApproveMinorSteps: false,
+      maxPromptTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
+      maxCompletionTokens: null,
+      maxDailyTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
       memoryEnabled: true,
       allowedAgentIds: [],
       toolAllowlist: []
@@ -3712,7 +4300,10 @@ async function switchAgentModelForRetry(
       agentId,
       selectedModel: normalizedModel,
       defaultModel: normalizedModel,
-      fallbackModel: normalizedModel
+      fallbackModel: normalizedModel,
+      maxPromptTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
+      maxCompletionTokens: null,
+      maxDailyTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT
     },
     update: {
       selectedModel: normalizedModel

@@ -210,6 +210,10 @@ export function getPreferredStageModels(stageType: StageType, role: RoleType) {
   ]);
 }
 
+export function getBestStageModel(stageType: StageType, role: RoleType) {
+  return getPreferredStageModels(stageType, role)[0] ?? "";
+}
+
 export function getStageCompanionRoles(stageType: StageType, primaryRole: RoleType) {
   return (STAGE_COMPANION_ROLE_MAP[stageType] ?? []).filter((role) => role !== primaryRole);
 }
@@ -347,6 +351,9 @@ export function buildTerminalStageExecutionMessage(input: {
   stageType: StageType;
   role: RoleType;
   summary?: string;
+  projectWorkspacePath?: string;
+  stageTaskTitles?: string[];
+  expectedDeliverables?: string[];
 }) {
   const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
   const objective = sanitizeTerminalSegment(
@@ -368,6 +375,10 @@ export function buildTerminalStageExecutionMessage(input: {
     strategy.requiredCollaborationFields.join("、") || "无",
     220
   );
+  const workspacePath = sanitizeTerminalSegment(input.projectWorkspacePath || "未提供", 260);
+  const stageTasks = sanitizeTerminalSegment((input.stageTaskTitles ?? []).join("、") || "未提供", 220);
+  const deliverables = sanitizeTerminalSegment((input.expectedDeliverables ?? []).join("、") || "未提供", 220);
+  const requiresToolDrivenDelivery = input.stageType === "DEV" || input.role === "ROLE_ARCH" || input.role === "ROLE_DEV";
 
   return [
     "请只基于当前项目执行阶段任务，允许参考长期记忆用于学习与复用经验",
@@ -376,6 +387,9 @@ export function buildTerminalStageExecutionMessage(input: {
     `项目 ${sanitizeTerminalSegment(input.projectName, 120)}`,
     `阶段 ${STAGE_LABELS[input.stageType]}`,
     `角色 ${ROLE_LABELS[input.role]}`,
+    `项目工作区绝对路径 ${workspacePath}`,
+    `当前阶段任务 ${stageTasks}`,
+    `目标交付物 ${deliverables}`,
     `目标 ${objective}`,
     `需求 ${description}`,
     `关键词 ${keywords}`,
@@ -383,10 +397,20 @@ export function buildTerminalStageExecutionMessage(input: {
     `风险 ${risks}`,
     `requiredSkills ${requiredSkills}`,
     `requiredCollaborationFields ${collaborationFields}`,
+    "必须先进入项目工作区核对真实文件，再开始分析、改动、验证与总结",
+    ...(requiresToolDrivenDelivery
+      ? [
+          "如果项目工作区当前缺少源码或运行骨架，你必须在该工作区内从 0 创建满足需求的最小可运行实现，再继续验证",
+          "禁止因为初始目录为空就只输出阻塞说明；除非工作区不可写、技能缺失或运行依赖确实不可用，才允许报告阻塞"
+        ]
+      : []),
     ...skillDirectives,
     ...collaborationDirectives,
     "正文中必须给出可供下游 Agent 继续执行的协作交接卡，字段名必须保持原样",
     "协作交接卡格式为 协作交接卡；factsConfirmed: 已确认事实；assumptions: 当前假设；decisions: 已做决策与取舍；handoff: 交给下游 Agent 的明确输入与动作；openQuestions: 待确认问题或风险空白",
+    "factsConfirmed / assumptions / decisions / handoff / openQuestions 五个字段必须全部出现且逐项填写，禁止省略字段名、禁止留空、禁止只写泛泛一句话",
+    "handoff 必须明确写给下游 Agent 的输入、动作、优先级与继续执行方式；openQuestions 必须明确写仍待确认的事项、风险空白或待补齐信息",
+    "如果当前是 INIT 或项目经理角色，handoff 默认写给分析阶段，openQuestions 默认列出待澄清问题与需要继续验证事项",
     "输出末尾必须追加结构化技能证据区块，字段名必须保持原样",
     "证据区块格式为 技能执行记录；skillsUsed: 实际使用的技能列表；reasoningBasis: 本次判断依据；artifactsProduced: 已产出的页面、代码、文档或命令结果；verification: 已完成的检查、测试或人工校验",
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
@@ -396,10 +420,14 @@ export function buildTerminalStageExecutionMessage(input: {
 function extractStructuredEvidenceField(output: string, field: TerminalSkillEvidenceField) {
   const pattern = new RegExp(
     `(?:^|\\n)\\s*(?:[-*]\\s*)?${field}\\s*[：:]\\s*([\\s\\S]*?)(?=\\n\\s*(?:[-*]\\s*)?(?:${TERMINAL_EVIDENCE_FIELDS.join("|")})\\s*[：:]|\\n##\\s|$)`,
-    "i"
+    "gi"
   );
-  const matched = pattern.exec(String(output ?? ""));
-  return String(matched?.[1] ?? "").replace(/\s+/g, " ").trim();
+  let matched: RegExpExecArray | null = null;
+  let lastValue = "";
+  while ((matched = pattern.exec(String(output ?? ""))) !== null) {
+    lastValue = String(matched[1] ?? "");
+  }
+  return lastValue.replace(/\s+/g, " ").trim();
 }
 
 function splitSkillNames(input: string) {
@@ -413,10 +441,14 @@ function splitSkillNames(input: string) {
 function extractStructuredCollaborationField(output: string, field: TerminalCollaborationField) {
   const pattern = new RegExp(
     `(?:^|\\n)\\s*(?:[-*]\\s*)?${field}\\s*[：:]\\s*([\\s\\S]*?)(?=\\n\\s*(?:[-*]\\s*)?(?:${TERMINAL_COLLABORATION_FIELDS.join("|")})\\s*[：:]|\\n##\\s|$)`,
-    "i"
+    "gi"
   );
-  const matched = pattern.exec(String(output ?? ""));
-  return String(matched?.[1] ?? "").replace(/\s+/g, " ").trim();
+  let matched: RegExpExecArray | null = null;
+  let lastValue = "";
+  while ((matched = pattern.exec(String(output ?? ""))) !== null) {
+    lastValue = String(matched[1] ?? "");
+  }
+  return lastValue.replace(/\s+/g, " ").trim();
 }
 
 export function validateTerminalSkillEvidence(output: string, requiredSkills: string[]): TerminalSkillEvidenceValidation {
