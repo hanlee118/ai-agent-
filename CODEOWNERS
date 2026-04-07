@@ -1,0 +1,14 @@
+# Shared CODEOWNERS for GitHub and GitLab.
+# If your GitLab username/group handle differs from GitHub, update the owner
+# handles below before enabling required Code Owner approvals on GitLab.
+
+* @hanlee118
+
+/apps/api/ @hanlee118
+/apps/web/ @hanlee118
+/packages/ @hanlee118
+/scripts/ @hanlee118
+/docs/ @hanlee118
+/.github/ @hanlee118
+/.gitlab/ @hanlee118
+/CODEOWNERS @hanlee118

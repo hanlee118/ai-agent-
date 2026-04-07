@@ -256,6 +256,7 @@ pnpm start:prod
 - `main` 仅保留可发布代码，所有功能开发在 `codex/*` 分支完成并回合到 `main`。
 - 临时日志、运行缓存、本地数据库、`node_modules`、构建产物不得入库。
 - 每轮改造需同步更新 `docs/` 与桌面主文档，确保“仓库版”和“本地版”一致。
+- 统一治理细则见 [docs/REPOSITORY_GOVERNANCE.md](docs/REPOSITORY_GOVERNANCE.md)。
 
 ## 文档索引
 

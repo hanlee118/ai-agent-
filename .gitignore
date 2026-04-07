@@ -8,7 +8,8 @@ coverage
 .env
 .occ-secret
 apps/api/.occ-secret
-pnpm-lock.yaml
+# `pnpm-lock.yaml` is intentionally versioned for reproducible installs.
+!pnpm-lock.yaml
 *.tsbuildinfo
 *.db
 *.db-journal
