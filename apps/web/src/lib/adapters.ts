@@ -444,7 +444,7 @@ function mapProjectOwner(project: OpenClawProjectDetail): string {
 
 function mapAgent(agent: OpenClawAgentSummary): Agent {
   const load = clamp(agent.activeSessionCount * 35 + agent.taskCount * 12 + agent.blockedTaskCount * 8, 0, 100);
-  const tokenLimit = agent.commander?.maxDailyTokens ?? agent.usage?.dailyLimit ?? 100000;
+  const tokenLimit = agent.commander?.maxDailyTokens ?? agent.usage?.dailyLimit ?? 100000000;
   const runtimeModel = String(agent.model || '').trim();
 
   return {

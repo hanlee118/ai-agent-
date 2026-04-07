@@ -10,6 +10,7 @@ import {
   type OpenClawWorkspaceOverview,
 } from './adapters';
 import { agentsApi } from './api';
+import { ApiRequestError } from './api/core';
 import { useSSE } from '../hooks/useSSE';
 
 export interface RealDataState {
@@ -37,6 +38,13 @@ export function useRealData(): RealDataState {
   const [error, setError] = useState<string | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasLoadedOnceRef = useRef(false);
+
+  const toDataLoadError = useCallback((err: unknown) => {
+    if (err instanceof ApiRequestError && err.status === 401) {
+      return new Error('OpenClaw 接口需要登录后才能访问，请先完成登录。');
+    }
+    return err instanceof Error ? err : new Error('Failed to load OpenClaw data');
+  }, []);
 
   const fetchManagedAgents = useCallback(async (): Promise<Agent[]> => {
     try {
@@ -89,18 +97,23 @@ export function useRealData(): RealDataState {
     setError(null);
 
     try {
-      const [data, managedAgents, coreData] = await Promise.all([
-        fetchOpenClawData().catch(() => ({
-          agents: [],
-          projects: [],
-          tasks: [],
-          sessions: [],
-          workspace: null,
-          runtime: null,
-        })),
-        fetchManagedAgents().catch(() => []),
-        fetchCoreProjectData().catch(() => ({ projects: [], tasks: [], sessions: [] })),
+      const [openClawResult, managedAgentsResult, coreDataResult] = await Promise.allSettled([
+        fetchOpenClawData(),
+        fetchManagedAgents(),
+        fetchCoreProjectData(),
       ]);
+
+      if (openClawResult.status === 'rejected') {
+        throw toDataLoadError(openClawResult.reason);
+      }
+
+      const data = openClawResult.value;
+      const managedAgents =
+        managedAgentsResult.status === 'fulfilled' ? managedAgentsResult.value : [];
+      const coreData =
+        coreDataResult.status === 'fulfilled'
+          ? coreDataResult.value
+          : { projects: [], tasks: [], sessions: [] };
 
       setAgents(mergeAgents(managedAgents, data.agents));
       // 项目主数据仅以 core API 为准，避免回退到 OpenClaw 工作区样例项目。
@@ -110,7 +123,8 @@ export function useRealData(): RealDataState {
       setWorkspace(data.workspace);
       setRuntime(data.runtime);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to load OpenClaw data';
+      const normalizedError = toDataLoadError(err);
+      const message = normalizedError.message;
       setError(message);
       if (isFirstLoad) {
         setAgents([]);

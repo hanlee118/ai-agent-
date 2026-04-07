@@ -225,8 +225,10 @@ export function useNewProjectModalController({
           }
           return {
             ...prev,
-            discussion: result.discussion?.length ? result.discussion : prev.discussion,
+            discussion: Array.isArray(result.discussion) ? result.discussion : prev.discussion,
+            discussionDraft: Array.isArray(result.discussionDraft) ? result.discussionDraft : prev.discussionDraft,
             debate: result.debate ?? prev.debate ?? null,
+            analysisGate: result.analysisGate ?? prev.analysisGate,
             debateTask: result.taskId
               ? {
                   taskId: result.taskId,
@@ -240,12 +242,12 @@ export function useNewProjectModalController({
         if (result.status === 'completed') {
           setIsPollingDebate(false);
           setDiscussionAcknowledged(false);
-          addToast('多角色辩论已完成，请确认最新讨论结论', 'success');
+          addToast('真实多角色讨论已完成，请确认正式讨论结论', 'success');
           return;
         }
         if (result.status === 'failed') {
           setIsPollingDebate(false);
-          addToast(`多角色辩论未完成，已保留初步结论: ${result.error || '未知错误'}`, 'info');
+          addToast(`真实多角色讨论失败，当前阶段已阻断: ${result.error || '未知错误'}`, 'error');
           return;
         }
 
@@ -430,7 +432,7 @@ export function useNewProjectModalController({
           }
         : prev));
 
-      addToast('已重新生成多角色讨论结论，请确认后继续', 'success');
+      addToast('已重新触发真实多角色讨论，请等待正式结论生成', 'success');
     } catch (error) {
       addToast(`重新生成讨论失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
@@ -455,7 +457,7 @@ export function useNewProjectModalController({
           sourceType: issueSourceType,
         });
       } catch (error) {
-        addToast(`Issue 预分析失败，已降级到本地解析: ${error instanceof Error ? error.message : '未知错误'}`, 'info');
+        addToast(`Issue 预分析失败，当前仅保留本地草稿提示: ${error instanceof Error ? error.message : '未知错误'}`, 'info');
       }
 
       let parsedIntent: ParsedProjectIntent;
@@ -520,7 +522,12 @@ export function useNewProjectModalController({
       if (requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
         addToast(`已完成需求分析，但当前未匹配到灵魂角色 ${roleLabel(soulRoleId)}，请手动补充`, 'error');
       } else {
-        addToast('已完成需求分析并自动分配 Agent，请继续澄清确认', 'success');
+        addToast(
+          resolvedPreview.analysisGate.canProceed
+            ? '已完成需求分析并生成正式讨论结论，请继续澄清确认'
+            : `已生成分析草案，但当前不可推进: ${resolvedPreview.analysisGate.blockers[0] || '缺少真实讨论结果'}`,
+          resolvedPreview.analysisGate.canProceed ? 'success' : 'info',
+        );
       }
     } catch (error) {
       addToast(`需求分析失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
@@ -561,8 +568,13 @@ export function useNewProjectModalController({
         return;
       }
 
+      if (!issuePreview.analysisGate.canProceed) {
+        addToast(issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足推进条件', 'error');
+        return;
+      }
+
       if ((issuePreview.discussion || []).length > 0 && !discussionAcknowledged && !discussionOverride.trim()) {
-        addToast('请先确认讨论结论，或填写“不同意时的修正意见”后再继续', 'error');
+        addToast('请先确认正式讨论结论，或填写“不同意时的修正意见”后再继续', 'error');
         return;
       }
     }
@@ -797,7 +809,7 @@ export function useNewProjectModalController({
           historyReferenceBlock ? `\n历史参考:\n${historyReferenceBlock}` : '',
           '',
           '目标产出物：',
-          artifactsText || '- 客户汇报方案（PPT）\n- 实施方案（Word）\n- 设计审查卡\n- Demo 原型\n- 项目排期',
+          artifactsText || '- 需求分析文档\n- 项目排期\n- 设计审查卡\n- 视觉定稿单页\n- 技术方案与选型\n- 实现结果说明\n- 运行地址与部署说明\n- 测试报告',
           '',
           '请按以下节奏执行：',
           '1. 先完成需求分析与任务拆解',

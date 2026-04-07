@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { BookText } from 'lucide-react';
 import { ApiRequestError, productContextApi } from '../../lib/api';
+import { cn } from '../../lib/utils';
 
 type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -166,157 +167,236 @@ export default function ProductContextPanel({ addToast }: Props) {
     }
   };
 
-  const textClassName = 'w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-primary/50';
+  const textClassName =
+    'w-full rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-400/40';
+  const labelClassName = 'text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500';
+  const cardClassName = 'rounded-[24px] border border-white/10 bg-white/[0.03] p-5';
+  const historyCount = history.length;
+  const filledSections = [
+    draft.productName,
+    draft.background,
+    draft.mission,
+    draft.goals,
+    draft.principles,
+    draft.constraints,
+    draft.forbiddenKeywords,
+    draft.requiredKeywords,
+  ].filter((item) => item.trim()).length;
 
   return (
-    <section className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
-      <div className="px-6 py-4 border-b border-border-subtle bg-white/5 flex items-center justify-between">
-        <h2 className="font-semibold text-white flex items-center gap-2">
-          <BookText size={18} className="text-primary" />
-          产品说明文档（长期记忆）
-        </h2>
-        <button
-          onClick={() => void handleSave()}
-          disabled={loading || saving}
-          className="px-3 py-1.5 bg-primary text-surface rounded-lg text-xs font-bold hover:bg-primary/90 transition-colors disabled:opacity-50"
-        >
-          {saving ? '保存中...' : '保存文档'}
-        </button>
+    <section className="overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(15,23,42,0.9))] shadow-[0_24px_80px_rgba(2,6,23,0.3)]">
+      <div className="border-b border-white/10 bg-white/[0.04] px-6 py-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 rounded-2xl border border-white/10 bg-white/[0.06] p-2 text-slate-100">
+              <BookText size={18} />
+            </div>
+            <div>
+              <div className="inline-flex items-center rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-100">
+                Product Context
+              </div>
+              <h2 className="mt-3 text-xl font-semibold text-white">产品说明文档与长期记忆</h2>
+              <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
+                把产品背景、使命、边界和长期记忆沉淀在同一块。后续需求对齐、协议门禁和回填记录都会围绕这里继续长出来。
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="grid min-w-[220px] grid-cols-2 gap-3 rounded-[22px] border border-white/10 bg-slate-950/30 p-3">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">已填字段</p>
+                <p className="mt-1 text-lg font-semibold text-white">{filledSections}/8</p>
+              </div>
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">回填历史</p>
+                <p className="mt-1 text-lg font-semibold text-cyan-100">{historyCount}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => void handleSave()}
+              disabled={loading || saving}
+              className="rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
+            >
+              {saving ? '保存中...' : '保存文档'}
+            </button>
+          </div>
+        </div>
       </div>
 
-      <div className="p-6 space-y-4">
-        <div className="space-y-2">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">产品名称</label>
-          <input
-            type="text"
-            value={draft.productName}
-            onChange={(event) => setDraft((prev) => ({ ...prev, productName: event.target.value }))}
-            className={textClassName}
-            placeholder="例如：Aegis OS"
-            disabled={loading}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">产品背景</label>
-          <textarea
-            rows={3}
-            value={draft.background}
-            onChange={(event) => setDraft((prev) => ({ ...prev, background: event.target.value }))}
-            className={`${textClassName} resize-none`}
-            placeholder="描述当前产品所处阶段、目标用户和业务上下文。"
-            disabled={loading}
-          />
-        </div>
-
-        <div className="space-y-2">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">使命</label>
-          <textarea
-            rows={2}
-            value={draft.mission}
-            onChange={(event) => setDraft((prev) => ({ ...prev, mission: event.target.value }))}
-            className={`${textClassName} resize-none`}
-            placeholder="一句话描述产品长期使命。"
-            disabled={loading}
-          />
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">目标（每行一个）</label>
-            <textarea
-              rows={4}
-              value={draft.goals}
-              onChange={(event) => setDraft((prev) => ({ ...prev, goals: event.target.value }))}
-              className={`${textClassName} resize-none`}
-              placeholder="例如：\n提升需求落地效率\n降低跨团队沟通成本"
-              disabled={loading}
-            />
+      <div className="space-y-6 p-6">
+        <div className={cardClassName}>
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Foundation</p>
+              <h3 className="mt-1 text-base font-semibold text-white">产品定位</h3>
+            </div>
+            <p className="text-xs text-slate-400">先定义产品是谁、为什么存在，再继续往目标和约束展开。</p>
           </div>
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">原则（每行一个）</label>
-            <textarea
-              rows={4}
-              value={draft.principles}
-              onChange={(event) => setDraft((prev) => ({ ...prev, principles: event.target.value }))}
-              className={`${textClassName} resize-none`}
-              placeholder="例如：\n文档驱动研发\n先确认再执行"
-              disabled={loading}
-            />
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className={labelClassName}>产品名称</label>
+              <input
+                type="text"
+                value={draft.productName}
+                onChange={(event) => setDraft((prev) => ({ ...prev, productName: event.target.value }))}
+                className={textClassName}
+                placeholder="例如：Aegis OS"
+                disabled={loading}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className={labelClassName}>产品背景</label>
+              <textarea
+                rows={3}
+                value={draft.background}
+                onChange={(event) => setDraft((prev) => ({ ...prev, background: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="描述当前产品所处阶段、目标用户和业务上下文。"
+                disabled={loading}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className={labelClassName}>使命</label>
+              <textarea
+                rows={2}
+                value={draft.mission}
+                onChange={(event) => setDraft((prev) => ({ ...prev, mission: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="一句话描述产品长期使命。"
+                disabled={loading}
+              />
+            </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">约束（每行一个）</label>
-            <textarea
-              rows={3}
-              value={draft.constraints}
-              onChange={(event) => setDraft((prev) => ({ ...prev, constraints: event.target.value }))}
-              className={`${textClassName} resize-none`}
-              placeholder="例如：必须本地部署"
-              disabled={loading}
-            />
+        <div className={cardClassName}>
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Policy</p>
+              <h3 className="mt-1 text-base font-semibold text-white">目标、原则与约束</h3>
+            </div>
+            <p className="text-xs text-slate-400">把“必须坚持什么”和“绝不能越线什么”放在一层，后续扩展也不容易乱。</p>
           </div>
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">禁用关键词</label>
-            <textarea
-              rows={3}
-              value={draft.forbiddenKeywords}
-              onChange={(event) => setDraft((prev) => ({ ...prev, forbiddenKeywords: event.target.value }))}
-              className={`${textClassName} resize-none`}
-              placeholder="例如：绕过审计"
-              disabled={loading}
-            />
-          </div>
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">必含关键词</label>
-            <textarea
-              rows={3}
-              value={draft.requiredKeywords}
-              onChange={(event) => setDraft((prev) => ({ ...prev, requiredKeywords: event.target.value }))}
-              className={`${textClassName} resize-none`}
-              placeholder="例如：验收标准"
-              disabled={loading}
-            />
+
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <label className={labelClassName}>目标（每行一个）</label>
+              <textarea
+                rows={4}
+                value={draft.goals}
+                onChange={(event) => setDraft((prev) => ({ ...prev, goals: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="例如：&#10;提升需求落地效率&#10;降低跨团队沟通成本"
+                disabled={loading}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className={labelClassName}>原则（每行一个）</label>
+              <textarea
+                rows={4}
+                value={draft.principles}
+                onChange={(event) => setDraft((prev) => ({ ...prev, principles: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="例如：&#10;文档驱动研发&#10;先确认再执行"
+                disabled={loading}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className={labelClassName}>约束（每行一个）</label>
+              <textarea
+                rows={3}
+                value={draft.constraints}
+                onChange={(event) => setDraft((prev) => ({ ...prev, constraints: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="例如：必须本地部署"
+                disabled={loading}
+              />
+            </div>
+            <div className="space-y-2">
+              <label className={labelClassName}>禁用关键词</label>
+              <textarea
+                rows={3}
+                value={draft.forbiddenKeywords}
+                onChange={(event) => setDraft((prev) => ({ ...prev, forbiddenKeywords: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="例如：绕过审计"
+                disabled={loading}
+              />
+            </div>
+            <div className="space-y-2 md:col-span-2">
+              <label className={labelClassName}>必含关键词</label>
+              <textarea
+                rows={3}
+                value={draft.requiredKeywords}
+                onChange={(event) => setDraft((prev) => ({ ...prev, requiredKeywords: event.target.value }))}
+                className={`${textClassName} resize-none`}
+                placeholder="例如：验收标准"
+                disabled={loading}
+              />
+            </div>
           </div>
         </div>
 
-        <div className="space-y-2">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-wider">需求回填历史</label>
-          <div className="space-y-2">
+        <div className={cardClassName}>
+          <div className="mb-4 flex items-center justify-between gap-4">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">History</p>
+              <h3 className="mt-1 text-base font-semibold text-white">需求回填历史</h3>
+            </div>
+            <p className="text-xs text-slate-400">只保留最近最有价值的上下文，避免历史模板把当前项目带偏。</p>
+          </div>
+
+          <div className="space-y-3">
             {history.length > 0 ? (
               history.slice(0, 5).map((item) => (
-                <div key={item.id} className="px-3 py-2 bg-white/5 border border-border-subtle rounded-xl text-xs">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-slate-200 font-medium">{item.title}</p>
+                <div key={item.id} className="rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-xs">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-medium text-slate-100">{item.title}</p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        <span className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                          {item.status}
+                        </span>
+                        <span
+                          className={cn(
+                            'rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em]',
+                            item.validationStatus === 'matched'
+                              ? 'border-emerald-400/30 text-emerald-200'
+                              : item.validationStatus === 'mismatch'
+                                ? 'border-rose-400/30 text-rose-200'
+                                : 'border-amber-400/30 text-amber-200',
+                          )}
+                        >
+                          {item.validationStatus}
+                        </span>
+                      </div>
+                    </div>
                     <button
                       onClick={() => void handleDeleteHistory(item.id)}
                       disabled={deletingHistoryId === item.id}
-                      className="px-2 py-1 rounded-lg border border-danger/40 text-danger text-[10px] hover:bg-danger/10 disabled:opacity-50"
+                      className="rounded-xl border border-rose-400/30 px-3 py-1.5 text-[10px] font-semibold text-rose-200 transition hover:bg-rose-400/10 disabled:opacity-50"
                     >
                       {deletingHistoryId === item.id ? '删除中...' : '删除'}
                     </button>
                   </div>
-                  <p className="text-slate-500 mt-1">
-                    状态: {item.status} · 校验: {item.validationStatus} · 创建于 {new Date(item.createdAt).toLocaleString('zh-CN')}
+                  <p className="mt-3 text-slate-500">
+                    创建于 {new Date(item.createdAt).toLocaleString('zh-CN')}
+                    {item.completedAt ? ` · 完成于 ${new Date(item.completedAt).toLocaleString('zh-CN')}` : ''}
                   </p>
-                  {item.completedAt && (
-                    <p className="text-slate-500 mt-1">
-                      完成于: {new Date(item.completedAt).toLocaleString('zh-CN')}
-                    </p>
-                  )}
-                  {item.validationNote && <p className="text-slate-400 mt-1 leading-relaxed">说明: {item.validationNote}</p>}
-                  {item.implementationSummary && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-slate-400">查看实施总结</summary>
-                      <pre className="whitespace-pre-wrap text-[11px] text-slate-500 mt-2">{item.implementationSummary}</pre>
+                  {item.validationNote ? <p className="mt-2 leading-relaxed text-slate-400">说明: {item.validationNote}</p> : null}
+                  {item.implementationSummary ? (
+                    <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                      <summary className="cursor-pointer text-slate-300">查看实施总结</summary>
+                      <pre className="mt-3 whitespace-pre-wrap text-[11px] leading-6 text-slate-500">{item.implementationSummary}</pre>
                     </details>
-                  )}
-                  {item.requirementContract && (
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-slate-400">查看需求确认单</summary>
-                      <div className="mt-2 space-y-1 text-[11px] text-slate-500">
+                  ) : null}
+                  {item.requirementContract ? (
+                    <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                      <summary className="cursor-pointer text-slate-300">查看需求确认单</summary>
+                      <div className="mt-3 space-y-1 text-[11px] leading-6 text-slate-500">
                         <p>目标: {item.requirementContract.objective}</p>
                         <p>In Scope: {(item.requirementContract.inScope || []).join('；') || '暂无'}</p>
                         <p>Out of Scope: {(item.requirementContract.outOfScope || []).join('；') || '暂无'}</p>
@@ -324,11 +404,13 @@ export default function ProductContextPanel({ addToast }: Props) {
                         <p>产出: {(item.requirementContract.artifacts || []).join('、') || '暂无'}</p>
                       </div>
                     </details>
-                  )}
+                  ) : null}
                 </div>
               ))
             ) : (
-              <p className="text-xs text-slate-500">暂无回填记录</p>
+              <div className="rounded-2xl border border-dashed border-white/10 bg-slate-950/20 px-4 py-6 text-sm text-slate-500">
+                暂无回填记录
+              </div>
             )}
           </div>
         </div>

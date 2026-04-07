@@ -42,6 +42,11 @@ export default function IssueAnalysisPanel({ controller }: Props) {
     return null;
   }
 
+  const formalDiscussion = issuePreview?.discussion || [];
+  const discussionDraft = issuePreview?.discussionDraft || [];
+  const analysisGate = issuePreview?.analysisGate;
+  const primaryAnalysisBlocker = analysisGate?.blockers?.[0] || '';
+
   return (
     <div className="space-y-5 p-5 bg-surface-soft border border-primary/20 rounded-2xl">
       <div className="flex items-center justify-between">
@@ -313,10 +318,10 @@ export default function IssueAnalysisPanel({ controller }: Props) {
             </div>
           </div>
 
-          {issuePreview.discussion.length > 0 && (
+          {(formalDiscussion.length > 0 || discussionDraft.length > 0 || analysisGate) && (
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-slate-400">基于 Issue 的多角色讨论结论</p>
+                <p className="text-xs text-slate-400">基于 Issue 的多角色讨论</p>
                 <div className="flex items-center gap-2">
                   {issuePreview.debateTask && (
                     <Badge variant={debateTaskStatus === 'failed' ? 'danger' : debateTaskStatus === 'completed' ? 'primary' : 'accent'}>
@@ -336,16 +341,43 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                       {issuePreview.debate.mode === 'model' ? '模型多角色讨论' : '降级讨论'}
                     </Badge>
                   )}
+                  {analysisGate && (
+                    <Badge variant={analysisGate.canProceed ? 'primary' : 'danger'}>
+                      {analysisGate.canProceed ? '可推进' : '阻断中'}
+                    </Badge>
+                  )}
                 </div>
               </div>
+              {analysisGate && (
+                <div className={cn(
+                  'rounded-xl border p-3 space-y-2',
+                  analysisGate.canProceed
+                    ? 'border-primary/30 bg-primary/10'
+                    : 'border-danger/40 bg-danger/10',
+                )}>
+                  <p className={cn('text-xs font-semibold', analysisGate.canProceed ? 'text-primary' : 'text-danger')}>
+                    {analysisGate.canProceed ? '分析阶段已满足推进条件' : '分析阶段阻断'}
+                  </p>
+                  {!analysisGate.canProceed && primaryAnalysisBlocker ? (
+                    <p className="text-[11px] text-slate-200 leading-relaxed">{primaryAnalysisBlocker}</p>
+                  ) : null}
+                  <div className="space-y-1">
+                    {analysisGate.checks.map((check) => (
+                      <p key={check.id} className={cn('text-[11px] leading-relaxed', check.passed ? 'text-slate-400' : 'text-warning')}>
+                        {check.passed ? '通过' : '未通过'} · {check.label}：{check.detail}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              )}
               {issuePreview.debateTask && (debateTaskStatus === 'queued' || debateTaskStatus === 'running' || isPollingDebate) ? (
                 <p className="text-[11px] text-accent">
-                  正在异步生成多角色辩论结果，你可以先查看草案，系统会自动刷新为模型结论。
+                  正在异步生成真实多角色辩论结果。下方草稿只作参考，不能作为正式推进依据。
                 </p>
               ) : null}
               {issuePreview.debate && issuePreview.debate.mode !== 'model' ? (
                 <p className="text-[11px] text-warning">
-                  当前为降级讨论（scripted/fallback），角色观点仅用于流程保底。建议在模型中心配置可用模型后重新触发辩论。
+                  当前为降级讨论（scripted/fallback），角色观点仅用于草稿提示，不可作为正式分析结论。
                 </p>
               ) : null}
               {debatePollingError ? <p className="text-[11px] text-warning">辩论轮询异常: {debatePollingError}</p> : null}
@@ -375,38 +407,73 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                   ) : null}
                 </div>
               )}
+              {formalDiscussion.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-slate-300">正式讨论结论</p>
+                  {formalDiscussion.map((item) => {
+                    const opinion = issuePreview.debate?.opinions?.find((candidate) => candidate.roleId === item.roleId);
+                    return (
+                      <details key={item.id} className="p-3 rounded-xl bg-white/5 border border-border-subtle">
+                        <summary className="text-xs font-semibold text-white cursor-pointer list-none">
+                          {item.roleLabel} · {item.focus}
+                        </summary>
+                        <div className="space-y-1 pt-2">
+                          <p className="text-[11px] text-slate-400 leading-relaxed">讨论要点: {item.concern}</p>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">结论建议: {item.proposal}</p>
+                          {opinion && (
+                            <p className="text-[10px] text-slate-500">
+                              模型来源: {opinion.provider}/{opinion.model}
+                            </p>
+                          )}
+                        </div>
+                      </details>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {discussionDraft.length > 0 ? (
+                <div className="space-y-2">
+                  <p className="text-[11px] text-slate-300">讨论草稿提示（不可作为正式结果）</p>
+                  {discussionDraft.map((item) => {
+                    const opinion = issuePreview.debate?.opinions?.find((candidate) => candidate.roleId === item.roleId);
+                    return (
+                      <details key={item.id} className="p-3 rounded-xl border border-warning/20 bg-warning/5">
+                        <summary className="text-xs font-semibold text-white cursor-pointer list-none">
+                          {item.roleLabel} · {item.focus}
+                        </summary>
+                        <div className="space-y-1 pt-2">
+                          <p className="text-[11px] text-slate-400 leading-relaxed">草稿要点: {item.concern}</p>
+                          <p className="text-[11px] text-slate-300 leading-relaxed">草稿建议: {item.proposal}</p>
+                          {opinion ? (
+                            <p className="text-[10px] text-slate-500">
+                              执行来源: {opinion.provider}/{opinion.model}
+                            </p>
+                          ) : (
+                            <p className="text-[10px] text-slate-500">
+                              当前仍为规则草稿，尚未绑定真实模型讨论输出
+                            </p>
+                          )}
+                        </div>
+                      </details>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {formalDiscussion.length > 0 ? (
+                <label className="flex items-center gap-2 text-xs text-slate-300">
+                  <input
+                    type="checkbox"
+                    className="accent-primary"
+                    checked={discussionAcknowledged}
+                    onChange={(event) => setDiscussionAcknowledged(event.target.checked)}
+                  />
+                  我确认以上正式讨论结论，可据此形成任务并进入执行
+                </label>
+              ) : null}
               <div className="space-y-2">
-                {issuePreview.discussion.map((item) => {
-                  const opinion = issuePreview.debate?.opinions?.find((candidate) => candidate.roleId === item.roleId);
-                  return (
-                    <details key={item.id} className="p-3 rounded-xl bg-white/5 border border-border-subtle">
-                      <summary className="text-xs font-semibold text-white cursor-pointer list-none">
-                        {item.roleLabel} · {item.focus}
-                      </summary>
-                      <div className="space-y-1 pt-2">
-                        <p className="text-[11px] text-slate-400 leading-relaxed">讨论要点: {item.concern}</p>
-                        <p className="text-[11px] text-slate-300 leading-relaxed">结论建议: {item.proposal}</p>
-                        {opinion && (
-                          <p className="text-[10px] text-slate-500">
-                            模型来源: {opinion.provider}/{opinion.model}
-                          </p>
-                        )}
-                      </div>
-                    </details>
-                  );
-                })}
-              </div>
-              <label className="flex items-center gap-2 text-xs text-slate-300">
-                <input
-                  type="checkbox"
-                  className="accent-primary"
-                  checked={discussionAcknowledged}
-                  onChange={(event) => setDiscussionAcknowledged(event.target.checked)}
-                />
-                我确认以上讨论结论，可据此形成任务并进入执行
-              </label>
-              <div className="space-y-2">
-                <p className="text-[11px] text-slate-500">如果你不同意当前结论，可补充修正意见后继续，或重新生成讨论。</p>
+                <p className="text-[11px] text-slate-500">
+                  如果你不同意正式结论，可补充修正意见；若当前仍是阻断状态，请先重新触发真实多角色讨论。
+                </p>
                 <textarea
                   rows={2}
                   value={discussionOverride}
@@ -420,7 +487,7 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                     disabled={isRefreshingDebate}
                     className="py-2 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all disabled:opacity-50"
                   >
-                    {isRefreshingDebate ? '重生成中...' : '重新生成多角色讨论'}
+                    {isRefreshingDebate ? '重生成中...' : '重新生成真实多角色讨论'}
                   </button>
                   <button
                     onClick={() => setStep('input')}

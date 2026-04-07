@@ -14,7 +14,7 @@ function mapApiAgent(agent: ApiAgent): Agent {
     tasks: Number(agent.tasks || 0),
     memoryCount: Number(agent.memoryCount || 0),
     tokensUsed: Number(agent.tokensUsed || 0),
-    tokenLimit: Number(agent.tokenLimit || 1000000),
+    tokenLimit: Number(agent.tokenLimit || 100000000),
     sessionCount: Number(agent.sessionCount || 0),
   };
 }

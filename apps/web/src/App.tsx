@@ -53,7 +53,8 @@ const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
   Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
 
 const AUTH_CACHE_KEY = 'occ-auth-bootstrap';
-const AUTH_BYPASS_IN_DEV = import.meta.env.DEV && import.meta.env.VITE_ENABLE_AUTH !== 'true';
+const AUTH_BYPASS_IN_DEV =
+  import.meta.env.DEV && import.meta.env.VITE_ENABLE_AUTH_BYPASS === 'true';
 
 const readCachedAuthState = (): { setupComplete: boolean; authenticated: boolean } | null => {
   if (typeof window === 'undefined') {
