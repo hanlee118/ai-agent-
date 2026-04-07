@@ -29,6 +29,8 @@ import {
   listIssues,
   resolveRequirementMismatches,
   updateIssue,
+  type IssueAnalysisGate,
+  type IssueAnalysisGateCheck,
   type IssueDebateTaskStatus,
   type IssueDiscussionItem,
   type IssueSourceType
@@ -122,6 +124,7 @@ interface DebateTaskState {
   updatedAt: string;
   debate: RuntimeIssueDebateResult | null;
   discussion: IssueDiscussionItem[];
+  discussionDraft: IssueDiscussionItem[];
   error?: string;
 }
 
@@ -151,6 +154,60 @@ function toDiscussionFromDebate(
   }));
 }
 
+function buildIssueAnalysisGate(input: {
+  runtime: Awaited<ReturnType<typeof getRuntimeStatus>>;
+  debateStatus?: IssueDebateTaskStatus | null;
+  debate?: { mode?: string | null } | null;
+  shouldCreateDebateTask: boolean;
+}): IssueAnalysisGate {
+  const checks: IssueAnalysisGateCheck[] = [];
+
+  const runtimeReady = input.runtime.mode !== "scripted";
+  checks.push({
+    id: "runtime-real-model",
+    label: "运行时必须启用真实模型",
+    passed: runtimeReady,
+    detail: runtimeReady
+      ? `当前运行模式为 ${input.runtime.mode}，可用于真实多角色讨论。`
+      : "当前运行模式仍为 scripted，讨论输出可能是模板/降级结果。"
+  });
+
+  const debateEnabled = input.shouldCreateDebateTask;
+  checks.push({
+    id: "debate-enabled",
+    label: "必须启用真实多角色讨论",
+    passed: debateEnabled,
+    detail: debateEnabled
+      ? "已创建真实多角色讨论任务。"
+      : "当前分析未启用真实多角色讨论，不能以草稿提示替代正式结论。"
+  });
+
+  const debateCompleted = input.debate?.mode === "model";
+  const debateStatusLabel = input.debateStatus ?? "missing";
+  checks.push({
+    id: "debate-model-completed",
+    label: "正式讨论必须由真实模型完成",
+    passed: debateCompleted,
+    detail: debateCompleted
+      ? "真实模型多角色讨论已完成，可作为正式分析结论。"
+      : debateStatusLabel === "queued" || debateStatusLabel === "running"
+        ? "真实模型多角色讨论仍在进行中，需等待完成后再推进。"
+        : debateStatusLabel === "failed"
+          ? "真实模型多角色讨论执行失败，当前阶段已阻断。"
+          : input.debate
+            ? "当前仅得到降级/scripted 讨论结果，不能作为正式分析结论。"
+            : "尚未产生真实模型多角色讨论结果。"
+  });
+
+  return {
+    canProceed: checks.every((item) => item.passed),
+    blockers: checks.filter((item) => !item.passed).map((item) => item.detail),
+    checks,
+    runtimeMode: input.runtime.mode,
+    requestedRuntimeMode: String(input.runtime.requestedMode ?? input.runtime.mode)
+  };
+}
+
 function createDebateTaskId(issueId: string) {
   return `debate-${issueId}-${randomUUID().slice(0, 8)}`;
 }
@@ -174,7 +231,8 @@ function startIssueDebateTask(input: {
     createdAt: startedAt,
     updatedAt: startedAt,
     debate: null,
-    discussion: input.fallbackDiscussion
+    discussion: [],
+    discussionDraft: input.fallbackDiscussion
   };
   issueDebateTaskStore.set(input.taskId, queuedState);
   issueLatestDebateTask.set(input.issueId, input.taskId);
@@ -205,6 +263,7 @@ function startIssueDebateTask(input: {
         industryCode: input.industryCode
       });
       const discussion = toDiscussionFromDebate(debate, input.fallbackDiscussion);
+      const formalDiscussion = debate.mode === "model" ? discussion : [];
       const completedAt = nowIso();
       issueDebateTaskStore.set(input.taskId, {
         taskId: input.taskId,
@@ -213,12 +272,14 @@ function startIssueDebateTask(input: {
         createdAt: startedAt,
         updatedAt: completedAt,
         debate,
-        discussion
+        discussion: formalDiscussion,
+        discussionDraft: input.fallbackDiscussion
       });
 
       await updateIssue(input.issueId, (current) => ({
         ...current,
-        discussion,
+        discussion: formalDiscussion,
+        discussionDraft: input.fallbackDiscussion,
         debate,
         debateStatus: "completed",
         debateTaskId: input.taskId,
@@ -235,13 +296,15 @@ function startIssueDebateTask(input: {
         createdAt: startedAt,
         updatedAt: failedAt,
         debate: null,
-        discussion: input.fallbackDiscussion,
+        discussion: [],
+        discussionDraft: input.fallbackDiscussion,
         error: message
       });
 
       await updateIssue(input.issueId, (current) => ({
         ...current,
-        discussion: input.fallbackDiscussion,
+        discussion: [],
+        discussionDraft: input.fallbackDiscussion,
         debate: current.debate ?? null,
         debateStatus: "failed",
         debateTaskId: input.taskId,
@@ -285,15 +348,25 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       ?? issue.debateStatus
       ?? (issue.debate ? "completed" : "failed");
     const discussion = task?.discussion?.length ? task.discussion : (issue.discussion ?? []);
+    const discussionDraft = task?.discussionDraft?.length ? task.discussionDraft : (issue.discussionDraft ?? []);
     const debate = task?.debate ?? issue.debate ?? null;
     const error = task?.error || issue.debateError || "";
+    const runtime = await getRuntimeStatus();
+    const analysisGate = buildIssueAnalysisGate({
+      runtime,
+      debateStatus: status,
+      debate,
+      shouldCreateDebateTask: Boolean(issue.debateTaskId)
+    });
 
     sendSuccess(res, {
       issueId,
       taskId: taskId || null,
       status,
       discussion,
+      discussionDraft,
       debate,
+      analysisGate,
       error: error || null,
       updatedAt: task?.updatedAt || issue.debateUpdatedAt || issue.updatedAt,
       pollAfterMs: status === "queued" || status === "running" ? ISSUE_DEBATE_POLL_AFTER_MS : 0
@@ -370,6 +443,13 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const shouldCreateDebateTask = debateMode !== "off";
     const debateTaskId = shouldCreateDebateTask ? createDebateTaskId(`issue-${Date.now()}`) : undefined;
     const debateStatus: IssueDebateTaskStatus = shouldCreateDebateTask ? "queued" : "completed";
+    const runtime = await getRuntimeStatus();
+    const analysisGate = buildIssueAnalysisGate({
+      runtime,
+      debateStatus,
+      debate: null,
+      shouldCreateDebateTask
+    });
 
     const issue = await createIssueDraft({
       title,
@@ -386,7 +466,8 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       suggestedAnswers,
       relatedHistory,
       requirementContract,
-      discussion,
+      discussion: [],
+      discussionDraft: discussion,
       debate: null,
       debateStatus,
       debateTaskId,
@@ -426,7 +507,8 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       relatedHistory,
       requirementContract,
       refinement,
-      discussion,
+      discussion: [],
+      discussionDraft: discussion,
       debate: null,
       debateTask: activeDebateTaskId
         ? {
@@ -435,6 +517,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
             pollAfterMs: ISSUE_DEBATE_POLL_AFTER_MS
           }
         : null,
+      analysisGate,
       expectedArtifacts,
       workflow: config.workflows.find((item) => item.isDefault) ?? config.workflows[0] ?? null
     });
@@ -487,6 +570,25 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       });
     }
 
+    const runtime = await getRuntimeStatus();
+    const analysisGate = buildIssueAnalysisGate({
+      runtime,
+      debateStatus: issue.debateStatus ?? null,
+      debate: issue.debate ?? null,
+      shouldCreateDebateTask: Boolean(issue.debateTaskId)
+    });
+    if (!analysisGate.canProceed) {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "VALIDATION_ERROR",
+          message: analysisGate.blockers[0] || "分析阶段尚未满足推进条件。",
+          analysisGate
+        }
+      });
+      return;
+    }
+
     const requestedTeamRoleIds = normalizeRoleList(payload.teamRoleIds);
     const selectedRoleIds = requestedTeamRoleIds.length > 0
       ? requestedTeamRoleIds
@@ -537,7 +639,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         team: constrainedRoleIds,
         requirementContract: confirmedContract
       },
-      (await getRuntimeStatus()).mode
+      runtime.mode
     );
 
     const updated = await updateIssue(issueId, (current) => ({

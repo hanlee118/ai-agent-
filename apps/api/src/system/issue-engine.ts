@@ -800,18 +800,18 @@ export function buildIssueDiscussion(
 export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
   return [
     {
-      id: "artifact-ppt",
-      name: "客户汇报方案（PPT）",
-      description: "面向客户的价值说明、范围边界、阶段成果与下一步计划。",
-      stageType: "DESIGN",
-      ownerRoleId: "ROLE_PRODUCT"
+      id: "artifact-analysis-doc",
+      name: "需求分析文档",
+      description: "面向设计与研发的结构化需求、边界、约束、风险与验收标准。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_ANALYST"
     },
     {
-      id: "artifact-word",
-      name: "实施方案（Word）",
-      description: "结构化需求、约束、验收标准、风险与执行策略。",
-      stageType: "DESIGN",
-      ownerRoleId: "ROLE_PRODUCT"
+      id: "artifact-schedule",
+      name: "项目排期",
+      description: "里程碑、负责人、依赖与风险缓冲的执行排期。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_PM"
     },
     {
       id: "artifact-design-review",
@@ -821,18 +821,39 @@ export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
       ownerRoleId: "ROLE_DESIGN"
     },
     {
-      id: "artifact-demo",
-      name: "Demo 原型",
-      description: "覆盖核心用户路径的可演示原型或可运行最小实现。",
+      id: "artifact-visual-preview",
+      name: "视觉定稿单页",
+      description: "可供业务确认和研发实现的静态图或 HTML 单页设计预览。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_DESIGN"
+    },
+    {
+      id: "artifact-tech-plan",
+      name: "技术方案与选型",
+      description: "研发实现前的系统边界、接口契约、数据链路与技术取舍。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_ARCH"
+    },
+    {
+      id: "artifact-impl-result",
+      name: "实现结果说明",
+      description: "真实页面、接口、代码改动与验证证据说明。",
       stageType: "DEV",
       ownerRoleId: "ROLE_DEV"
     },
     {
-      id: "artifact-schedule",
-      name: "项目排期",
-      description: "里程碑、负责人、依赖与风险缓冲的执行排期。",
-      stageType: "ANALYSIS",
-      ownerRoleId: "ROLE_PM"
+      id: "artifact-runtime-delivery",
+      name: "运行地址与部署说明",
+      description: "运行入口、启动方式、环境变量与联调验证步骤。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_DEV"
+    },
+    {
+      id: "artifact-test-report",
+      name: "测试报告",
+      description: "面向验收阶段的测试范围、结果、阻断项与回归结论。",
+      stageType: "ACCEPT",
+      ownerRoleId: "ROLE_QA"
     }
   ];
 }
@@ -1004,8 +1025,8 @@ export function buildDesignBlueprint(input: {
     coreScenarios: input.refinement.inScopeDraft.slice(0, 3),
     proposedMilestones: [
       "需求澄清与边界确认",
-      "方案设计与对外汇报材料输出",
-      "研发实现与 Demo 原型交付",
+      "方案设计与研发输入确认",
+      "研发实现与运行验证",
       "验收回填与产品说明文档更新"
     ]
   };
@@ -1086,7 +1107,7 @@ export function buildSuggestedAnswers(input: {
     : `必须交付：${input.refinement.inScopeDraft.slice(0, 2).join("；")}。不做：${input.refinement.outOfScopeDraft.slice(0, 2).join("；")}。`;
   const acceptanceSuggestion = industryDraft?.acceptance
     ? `${industryDraft.acceptance} 建议补充：${input.refinement.acceptanceDraft.slice(0, 2).join("；")}。`
-    : `验收标准：${input.refinement.acceptanceDraft.join("；")}；并完成客户汇报方案、实施方案、Demo 与排期。`;
+    : `验收标准：${input.refinement.acceptanceDraft.join("；")}；并完成需求分析、项目排期、设计审查、研发实现说明、运行说明与测试报告。`;
 
   const byId: Record<string, IssueSuggestedAnswer> = {
     goal: {

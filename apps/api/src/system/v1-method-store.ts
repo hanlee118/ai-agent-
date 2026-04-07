@@ -127,6 +127,21 @@ export interface IssueDiscussionItem {
   proposal: string;
 }
 
+export interface IssueAnalysisGateCheck {
+  id: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+}
+
+export interface IssueAnalysisGate {
+  canProceed: boolean;
+  blockers: string[];
+  checks: IssueAnalysisGateCheck[];
+  runtimeMode: string;
+  requestedRuntimeMode: string;
+}
+
 export interface IssueHistoryReference {
   id: string;
   issueId: string;
@@ -155,6 +170,7 @@ export interface IssueRecord {
   relatedHistory?: IssueHistoryReference[];
   requirementContract?: RequirementContract;
   discussion?: IssueDiscussionItem[];
+  discussionDraft?: IssueDiscussionItem[];
   debate?: IssueDebateResult | null;
   debateStatus?: IssueDebateTaskStatus;
   debateTaskId?: string;
@@ -441,6 +457,7 @@ export async function createIssueDraft(input: {
   relatedHistory?: IssueHistoryReference[];
   requirementContract?: RequirementContract;
   discussion?: IssueDiscussionItem[];
+  discussionDraft?: IssueDiscussionItem[];
   debate?: IssueDebateResult | null;
   debateStatus?: IssueDebateTaskStatus;
   debateTaskId?: string;
@@ -466,6 +483,7 @@ export async function createIssueDraft(input: {
     relatedHistory: input.relatedHistory,
     requirementContract: input.requirementContract,
     discussion: input.discussion,
+    discussionDraft: input.discussionDraft,
     debate: input.debate,
     debateStatus: input.debateStatus,
     debateTaskId: input.debateTaskId,

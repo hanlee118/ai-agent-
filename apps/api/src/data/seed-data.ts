@@ -323,28 +323,6 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
     });
     all.push({
       id: randomUUID(),
-      name: "客户汇报方案.ppt.md",
-      type: "markdown",
-      content: "# 客户汇报方案（PPT）\n\n包含背景、目标、范围、里程碑与阶段成果。",
-      version: 1,
-      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
-      stageType: "DESIGN",
-      createdBy: "ROLE_DESIGN",
-      updatedAt: baseDate.toISOString()
-    });
-    all.push({
-      id: randomUUID(),
-      name: "实施方案说明.word.md",
-      type: "markdown",
-      content: "# 实施方案（Word）\n\n结构化描述需求、约束、验收标准与执行计划。",
-      version: 1,
-      status: currentStage === "ANALYSIS" ? "draft" : currentStage === "DESIGN" ? "submitted" : "approved",
-      stageType: "DESIGN",
-      createdBy: "ROLE_DESIGN",
-      updatedAt: baseDate.toISOString()
-    });
-    all.push({
-      id: randomUUID(),
       name: "设计审查卡.md",
       type: "markdown",
       content:
@@ -411,22 +389,6 @@ export function buildDeliverables(currentStage: StageType, projectId: string): D
       createdBy: "ROLE_DEV",
       updatedAt: baseDate.toISOString()
     });
-    all.push({
-      id: randomUUID(),
-      name: "Demo原型说明.md",
-      type: "markdown",
-      content: "# Demo 原型\n\n核心路径可演示，支持评审与客户沟通。",
-      version: 1,
-      status:
-        currentStage === "ANALYSIS" || currentStage === "DESIGN"
-          ? "draft"
-          : currentStage === "DEV"
-            ? "submitted"
-            : "approved",
-      stageType: "DEV",
-      createdBy: "ROLE_DEV",
-      updatedAt: baseDate.toISOString()
-    });
   }
 
   if (hasReached("ACCEPT")) {
@@ -476,14 +438,12 @@ export function buildTasks(
       { title: "定义页面与结构", description: "固定核心页面、布局与交互顺序。" },
       { title: "完成设计审查卡", description: "确认视觉方向、品牌语气、可访问性与审查结论。" },
       { title: "输出视觉定稿单页", description: "生成可视化确认稿（静态图或单页 HTML），供业务确认后再开发。" },
-      { title: "输出客户汇报PPT", description: "整理客户沟通所需的背景、目标、范围与成果。" },
-      { title: "输出实施方案Word", description: "沉淀结构化方案、约束与验收标准。" },
       { title: "输出组件与接口草案", description: "为开发阶段准备结构化输入。" }
     ],
     DEV: [
       { title: "输出技术方案与选型", description: "明确系统架构、技术选型、取舍理由和风险缓解策略。" },
       { title: "打通主链路", description: "基于技术方案完成创建、审批、返工、观测四条主链路实现。" },
-      { title: "实现 Demo 原型", description: "完成可演示的核心用户路径原型。" },
+      { title: "补齐实现结果说明", description: "沉淀真实页面、接口、代码改动与验证证据。" },
       { title: "补全仓储与接口", description: "让任务、交付物和时间轴全部落库。" }
     ],
     ACCEPT: [

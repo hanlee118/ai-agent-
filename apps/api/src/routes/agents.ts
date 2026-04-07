@@ -9,6 +9,8 @@ import {
   sendSuccess
 } from "./utils.js";
 
+const DEFAULT_AGENT_TOKEN_LIMIT = 100_000_000;
+
 interface CreateAgentBody {
   name?: unknown;
   role?: unknown;
@@ -67,14 +69,14 @@ function resolveTokenLimit(
   }
 
   if (currentModelId && modelLimitById.has(currentModelId)) {
-    return modelLimitById.get(currentModelId) ?? 1_000_000;
+    return modelLimitById.get(currentModelId) ?? DEFAULT_AGENT_TOKEN_LIMIT;
   }
 
   if (currentModelId && modelLimitByName.has(currentModelId)) {
-    return modelLimitByName.get(currentModelId) ?? 1_000_000;
+    return modelLimitByName.get(currentModelId) ?? DEFAULT_AGENT_TOKEN_LIMIT;
   }
 
-  return 1_000_000;
+  return DEFAULT_AGENT_TOKEN_LIMIT;
 }
 
 async function agentExists(agentId: string) {
@@ -316,9 +318,9 @@ export function createAgentsRouter() {
           executionMode: "confirm_first",
           requireConfirmation: true,
           autoApproveMinorSteps: false,
-          maxPromptTokens: null,
+          maxPromptTokens: DEFAULT_AGENT_TOKEN_LIMIT,
           maxCompletionTokens: null,
-          maxDailyTokens: null,
+          maxDailyTokens: DEFAULT_AGENT_TOKEN_LIMIT,
           memoryEnabled: true,
           allowedAgentIds: [],
           toolAllowlist: []
@@ -496,9 +498,9 @@ export function createAgentsRouter() {
         executionMode: "confirm_first",
         requireConfirmation: true,
         autoApproveMinorSteps: false,
-        maxPromptTokens: null,
+        maxPromptTokens: DEFAULT_AGENT_TOKEN_LIMIT,
         maxCompletionTokens: null,
-        maxDailyTokens: null,
+        maxDailyTokens: DEFAULT_AGENT_TOKEN_LIMIT,
         memoryEnabled: true,
         allowedAgentIds: [],
         toolAllowlist: []
