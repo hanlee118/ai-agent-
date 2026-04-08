@@ -29,6 +29,13 @@ export default function ProjectConfirmCard({ controller }: Props) {
     return null;
   }
 
+  const canCreate = Boolean(issuePreview?.issueId) && Boolean(issuePreview?.analysisGate.canProceed) && !isCreating;
+  const createBlockedHint = !issuePreview?.issueId
+    ? '请先回到需求输入步骤完成 Issue 分析。'
+    : !issuePreview.analysisGate.canProceed
+      ? (issuePreview.analysisGate.blockers[0] || '正式讨论尚未完成，请稍后重试。')
+      : '';
+
   return (
     <div className="bg-surface-soft border border-warning/20 rounded-2xl p-5 space-y-5">
       <div className="flex items-center justify-between">
@@ -156,12 +163,15 @@ export default function ProjectConfirmCard({ controller }: Props) {
         </button>
         <button
           onClick={() => void handleCreateFromParsed()}
-          disabled={isCreating}
+          disabled={!canCreate}
           className="flex-1 py-2.5 bg-primary text-surface rounded-xl text-xs font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
         >
-          {isCreating ? '创建中...' : '确认创建并启动执行'}
+          {isCreating ? '创建中...' : (canCreate ? '确认创建并启动执行' : '等待分析完成')}
         </button>
       </div>
+      {createBlockedHint ? (
+        <p className="text-[11px] text-warning/80">{createBlockedHint}</p>
+      ) : null}
 
       <button
         onClick={handleClose}

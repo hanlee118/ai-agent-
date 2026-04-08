@@ -627,6 +627,14 @@ export function useNewProjectModalController({
     if (!parsedProject) {
       return;
     }
+    if (!issuePreview?.issueId) {
+      addToast('当前缺少需求 Issue 上下文，请先完成需求分析后再创建项目', 'error');
+      return;
+    }
+    if (!issuePreview.analysisGate.canProceed) {
+      addToast(issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足推进条件，请等待正式讨论完成', 'info');
+      return;
+    }
 
     const effectiveSummary = String(editableDraft?.summary || issuePreview?.summary || parsedProject.description).trim();
     const effectiveProblemStatement = String(editableDraft?.problemStatement || issuePreview?.refinement.problemStatement || '').trim();
@@ -776,10 +784,6 @@ export function useNewProjectModalController({
 
     setIsCreating(true);
     try {
-      if (!issuePreview?.issueId) {
-        throw new Error('需求预分析结果缺失，请重新从需求输入开始创建项目');
-      }
-
       const confirmation = await issuesApi.confirm(issuePreview.issueId, {
         finalName: parsedProject.name,
         finalDescription,
@@ -836,7 +840,7 @@ export function useNewProjectModalController({
     }
   };
 
-  const handleManualSubmit = () => {
+  const handleManualSubmit = async () => {
     if (!formData.name.trim()) {
       addToast('请输入项目名称', 'error');
       return;
@@ -866,6 +870,38 @@ export function useNewProjectModalController({
       return;
     }
 
+    setIsParsing(true);
+    let manualPreview: IssuePreview;
+    try {
+      manualPreview = await issuesApi.preview({
+        input: formData.description.trim(),
+        industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
+        sourceType: (issueSourceType === 'prd' ? 'prd' : 'text') as IssueSourceType,
+      });
+    } catch (error) {
+      addToast(`手动模式需求分析失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      setIsParsing(false);
+      return;
+    }
+
+    setIssuePreview(manualPreview);
+    setEditableDraft(buildEditableDraftFromPreview(manualPreview));
+    setIssueAnswers(applySuggestedAnswers(manualPreview.questions || [], manualPreview.suggestedAnswers || []));
+    setConflictAcknowledged((manualPreview.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
+    setConflictResolution('');
+    setDiscussionAcknowledged((manualPreview.discussion || []).length === 0);
+    setDiscussionOverride('');
+    setDebateTaskId(manualPreview.debateTask?.taskId ?? null);
+    setDebateTaskStatus(
+      manualPreview.debateTask?.status
+        ?? (manualPreview.debate ? 'completed' : null),
+    );
+    setDebatePollingError('');
+    setIsPollingDebate(Boolean(
+      manualPreview.debateTask
+        && (manualPreview.debateTask.status === 'queued' || manualPreview.debateTask.status === 'running'),
+    ));
+
     setAnalysisRecommendations(
       manualSelected.map((agent) => ({
         agentId: agent!.id,
@@ -892,7 +928,13 @@ export function useNewProjectModalController({
     });
     setDiscussionOverride('');
     setStep('team');
-    addToast('已生成项目草案，请确认团队分配后继续', 'success');
+    addToast(
+      manualPreview.analysisGate.canProceed
+        ? '已生成项目草案并完成正式分析，请确认团队分配后继续'
+        : `已生成项目草案，正式讨论仍在进行：${manualPreview.analysisGate.blockers[0] || '请稍后继续'}`,
+      manualPreview.analysisGate.canProceed ? 'success' : 'info',
+    );
+    setIsParsing(false);
   };
 
   const handleUseManualFromParsed = () => {

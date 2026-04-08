@@ -198,11 +198,11 @@ export default function IssueInputPanel({ controller }: Props) {
           </div>
 
           <button
-            onClick={handleManualSubmit}
-            disabled={isCreating}
+            onClick={() => void handleManualSubmit()}
+            disabled={isCreating || isParsing}
             className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-2 disabled:opacity-50"
           >
-            生成确认卡
+            {isParsing ? '生成中...' : '生成确认卡'}
           </button>
         </div>
       )}

@@ -97,6 +97,20 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
         addToast(error.message || '需要你先补充关键信息后才能继续推进', 'info');
         addToast(`待处理事项: ${formatRequiredActionsHint(requiredActions)}`, 'info');
         onSelectProject(projectId);
+      } else if (error instanceof ApiRequestError && error.code === 'PROJECT_ADVANCE_IN_PROGRESS') {
+        const pollAfterMs = Number((error.details as { pollAfterMs?: unknown } | undefined)?.pollAfterMs ?? 0);
+        const pollAfterSeconds = pollAfterMs > 0 ? Math.max(1, Math.ceil(pollAfterMs / 1000)) : 2;
+        addToast(error.message || '项目正在后台推进中，请稍后刷新。', 'info');
+        addToast(`建议约 ${pollAfterSeconds} 秒后刷新项目状态`, 'info');
+        window.setTimeout(() => {
+          void onRefreshData();
+        }, Math.max(800, pollAfterMs || 2000));
+      } else if (
+        error instanceof ApiRequestError
+        && (error.code === 'PROJECT_ISSUE_FIRST_REQUIRED' || error.code === 'LOCAL_ISSUE_REQUIRED')
+      ) {
+        addToast(error.message || '该项目尚未绑定需求 Issue，请先完成 Issue 确认后再推进。', 'info');
+        onSelectProject(projectId);
       } else if (error instanceof ApiRequestError && error.code === 'NO_PENDING_APPROVAL') {
         addToast(error.message || '当前没有待确认事项', 'info');
         await onRefreshData();
