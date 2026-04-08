@@ -241,6 +241,7 @@ export default function App() {
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [recentProjectId, setRecentProjectId] = useState<string | null>(null);
   const [urlSearch, setUrlSearch] = useState<string>(() => (typeof window !== 'undefined' ? window.location.search : ''));
   const deepLinkRouteHandledRef = useRef<string | null>(null);
 
@@ -697,7 +698,14 @@ export default function App() {
                 className="h-full"
               >
                 {activeTab === 'dashboard' && <DashboardPage onNavigate={handleNavigate} onSelectProject={handleSelectProject} onSelectAgent={handleSelectAgent} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onOpenDecisionCenter={() => setIsDecisionCenterOpen(true)} />}
-                {activeTab === 'agent-commander' && <AgentCommanderPage agentId={selectedAgentId} addToast={addToast} sendCommand={sendAgentMessage} />}
+                {activeTab === 'agent-commander' && (
+                  <AgentCommanderPage
+                    agentId={selectedAgentId}
+                    selectedProjectId={selectedProjectId}
+                    addToast={addToast}
+                    sendCommand={sendAgentMessage}
+                  />
+                )}
                 {activeTab === 'project-room' && (
                   <ProjectRoomPage
                     projectId={selectedProjectId}
@@ -715,7 +723,7 @@ export default function App() {
                 {activeTab === 'system-health' && <SystemOpsPage onNavigate={handleNavigate} addToast={addToast} onRefreshData={refreshAllData} />}
                 {activeTab === 'model-nexus' && <ModelNexusPage addToast={addToast} onOpenNewModel={() => setIsNewModelOpen(true)} onRefreshData={refreshAllData} />}
                 {activeTab === 'monitoring' && <MonitoringPage addToast={addToast} onNavigate={handleNavigate} />}
-                {activeTab === 'projects' && <ProjectsPage onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onRefreshData={refreshAllData} />}
+                {activeTab === 'projects' && <ProjectsPage recentProjectId={recentProjectId} onSelectProject={handleSelectProject} addToast={addToast} onOpenNewProject={() => setIsNewProjectOpen(true)} onRefreshData={refreshAllData} />}
                 {activeTab === 'agents' && (
                   <AgentsPage
                     onSelectAgent={handleSelectAgent}
@@ -750,7 +758,12 @@ export default function App() {
               {isTopologyOpen && <TeamTopologyModal isOpen={isTopologyOpen} onClose={() => setIsTopologyOpen(false)} />}
               {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} onDeployed={refreshAllData} />}
               {isRoleSetsOpen && <IndustryRoleSetsModal isOpen={isRoleSetsOpen} onClose={() => setIsRoleSetsOpen(false)} addToast={addToast} onUpdated={refreshAllData} />}
-              {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={() => { void refreshAllData(); }} />}
+              {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={async (project) => {
+                setRecentProjectId(project.id);
+                await refreshAllData();
+                setSelectedProjectId(project.id);
+                setActiveTab('project-room');
+              }} />}
               {isDecisionCenterOpen && <DecisionCenterModal isOpen={isDecisionCenterOpen} onClose={() => setIsDecisionCenterOpen(false)} addToast={addToast} />}
             </AnimatePresence>
           </Suspense>

@@ -1,0 +1,78 @@
+{
+  "task_type": "stabilization",
+  "title": "收敛 ProjectRoom 双实现风险，只保留一套真实入口和事实实现",
+  "issue_labels": {
+    "fixed": ["execution", "hardening", "codex-ready"],
+    "dynamic": ["projectroom"]
+  },
+  "source_of_truth": {
+    "route_entry": ["apps/web/src/App.tsx"],
+    "active_implementation": ["apps/web/src/pages/ProjectRoomPage.impl.tsx"],
+    "candidate_compat_layer": [
+      "apps/web/src/pages/ProjectRoomPage.tsx",
+      "apps/web/src/pages/ProjectRoomPage/index.tsx"
+    ],
+    "related_files": ["apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts"]
+  },
+  "validation_commands": [
+    { "command": "pnpm --filter @occ/web typecheck", "required": true },
+    { "command": "pnpm --filter @occ/web build", "required": true }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要开始 AgentCommander 接入",
+      "不要新增 task/delegation 平行状态语义"
+    ],
+    "soft_stop": [
+      "不要把本任务扩大为 ProjectRoom 全量重构",
+      "不要改动无关页面或无关 API"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "如必须保留兼容入口，兼容入口只能作为无逻辑转发层，不能承载第二套业务逻辑"
+  },
+  "context": {
+    "background": [
+      "ProjectRoom 这一轮收口已经比较扎实，当前状态足够支撑继续演示。",
+      "最影响演示可信度的 4 个问题已经压下去，包括 reviewer 清空链路、delegation 明细刷新一致性、ready-for-review 门禁、task/delegation 失败提示优化。",
+      "当前不宜直接继续接 AgentCommander，更高优先级的问题是收掉 ProjectRoom 双实现风险。"
+    ],
+    "current_constraint": [
+      "可以继续接 AgentCommander",
+      "但当前不应直接接入",
+      "必须先收敛 ProjectRoom 双实现风险"
+    ]
+  },
+  "decision": {
+    "summary": "先收掉 ProjectRoom 双实现风险，再做最小回归，之后才接 AgentCommander。",
+    "why": [
+      "当前状态已足够支撑继续演示",
+      "4 个最伤演示可信度的问题已修复",
+      "双实现风险高于继续扩能力"
+    ]
+  },
+  "scope": {
+    "goals": [
+      "只保留一套真实入口和事实实现",
+      "补最小回归，确认路由、构建、页面主链没漂",
+      "让后续 AgentCommander 接入只能复用这一套事实实现"
+    ],
+    "non_goals": [
+      "暂不接 AgentCommander",
+      "不新增第二套状态语义",
+      "不做无关重构"
+    ]
+  },
+  "acceptance": [
+    "ProjectRoom 页面行为与当前版本一致",
+    "task 选中/切换/刷新主链无明显回退",
+    "delegation 展示与交互无明显回退",
+    "不再存在两套都像真实实现的 ProjectRoom 页面入口"
+  ],
+  "risks": [
+    "误删当前真实入口",
+    "顺手扩大为重构",
+    "兼容层重新承载业务逻辑"
+  ]
+}

@@ -207,6 +207,16 @@ function isLikelyTruncatedHtml(content: string | undefined, stopReason?: string)
 }
 
 function buildSystemPrompt(context: AgentRunContext) {
+  if (context.promptMode === "issue_debate") {
+    return [
+      "你正在参与多角色需求辩论。",
+      "必须只输出当前角色立场，不要写成通用分析文档或完整 PRD。",
+      "严格使用指定 Markdown 标题，不得改名，不得省略。",
+      "所有结论必须具体、可执行，禁止输出“角色结论 / 建议如下 / 待补充”这类空话。",
+      "待确认项必须写真实问题，handoff 必须写给下游角色的明确输入和动作。"
+    ].join("\n");
+  }
+
   const base = [
     "你是 AI 协作工作台里的专业 Agent。",
     "你必须输出清晰、结构化、可执行的中文内容。",
@@ -241,6 +251,24 @@ function buildSystemPrompt(context: AgentRunContext) {
 }
 
 function buildOutputGuidance(context: AgentRunContext) {
+  if (context.promptMode === "issue_debate") {
+    return [
+      "请严格使用以下结构：",
+      "## 角色目标",
+      "- 1 条，写当前角色最关心的判断目标",
+      "## 核心风险",
+      "- 1 到 2 条，写真实风险或依赖",
+      "## 反对点",
+      "- 1 条，写你明确反对什么推进方式",
+      "## 角色结论",
+      "- 1 到 2 条，必须是可执行结论，不能是标题、空话或复述原需求",
+      "## 待确认项",
+      "- 至少 1 条，写仍未闭合的关键问题",
+      "## Handoff",
+      "- 1 条，写交给哪个角色、交什么、下一步做什么"
+    ];
+  }
+
   if (context.stageType === "INIT") {
     return [
       "请输出以下结构：",

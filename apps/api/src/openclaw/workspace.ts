@@ -1576,7 +1576,7 @@ export async function sendOpenClawAgentMessage(
   }
 
   // 安全验证：命令注入防护
-  validateCommandInput(message);
+  validateCommandInput(message, { allowMultiline: true });
   validateCommandInput(agentId);
 
   const agent = await findOpenClawAgent(agentId);
@@ -3887,6 +3887,27 @@ function extractOpenClawGatewayError(raw: string) {
     return null;
   }
 
+  const knownTextErrorPatterns = [
+    /HTTP\s+\d{3}\s+(?:new_api_error|bad_response_status_code):[^\n]+/i,
+    /Gateway agent failed; falling back to embedded:[^\n]+/i,
+    /FallbackSummaryError:[^\n]+/i,
+    /session file locked[^\n]*/i,
+    /locked \(timeout[^\n]*/i,
+    /no available channel[^\n]*/i,
+    /unsupported model[^\n]*/i,
+    /model not found[^\n]*/i,
+    /auth status failed[^\n]*/i,
+    /request timeout[^\n]*/i,
+    /relay service error[^\n]*/i
+  ] as const;
+
+  for (const pattern of knownTextErrorPatterns) {
+    const match = normalizedRaw.match(pattern);
+    if (match?.[0]) {
+      return match[0].trim();
+    }
+  }
+
   const payloadMatch = normalizedRaw.match(/HTTP\s+\d{3}\s+(?:new_api_error|bad_response_status_code):[^\n]+/i);
   if (payloadMatch?.[0]) {
     return payloadMatch[0].trim();
@@ -4728,7 +4749,7 @@ export function parseOpenClawStatusJson(raw: string) {
 /**
  * 验证命令输入参数，防止命令注入攻击
  */
-function validateCommandInput(input: string) {
+function validateCommandInput(input: string, options?: { allowMultiline?: boolean }) {
   if (!input) {
     throw new Error("输入参数不能为空");
   }
@@ -4739,7 +4760,10 @@ function validateCommandInput(input: string) {
   }
 
   // 检查危险字符
-  const dangerousChars = [';', '&', '|', '$', '`', '<', '>', '\n', '\r'];
+  const dangerousChars = [';', '&', '|', '$', '`', '<', '>'];
+  if (!options?.allowMultiline) {
+    dangerousChars.push('\n', '\r');
+  }
   for (const char of dangerousChars) {
     if (input.includes(char)) {
       throw new Error(`输入参数不能包含危险字符: ${char}`);

@@ -1,0 +1,47 @@
+{
+  "issue_title": "对齐 INIT 轻执行产物与阶段协议，确保首轮推进可进入可审批状态",
+  "issue_labels": ["execution", "hardening", "codex-ready", "stabilization", "project-lifecycle", "init-stage"],
+  "source_of_truth": {
+    "route_entry": [
+      "apps/api/src/data/repository.ts",
+      "apps/api/src/system/stage-protocol-gates.ts"
+    ],
+    "active_implementation": [
+      "apps/api/src/agents/runtime.ts",
+      "apps/api/src/agents/providers/scripted-provider.ts"
+    ],
+    "related_files": [
+      "apps/api/src/system/project-stage-execution.ts",
+      "apps/api/src/system/stage-protocol-gates.test.ts"
+    ]
+  },
+  "validation_commands": [
+    {
+      "command": "pnpm --filter @occ/api typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/api build",
+      "required": true
+    }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要重新放大 INIT 为 terminal-agent 全链路",
+      "不要修改 ProjectRoom 或 AgentCommander 的 task/delegation 语义",
+      "不要改动后续 ANALYSIS/DESIGN/DEV 阶段的真实模型门禁",
+      "不要引入新的审批状态或平行协议"
+    ],
+    "soft_stop": [
+      "不要把本任务扩大成整套阶段协议重构",
+      "不要顺手做无关 UI 改版",
+      "不要修改无关 API 契约"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": false,
+    "rule": "本轮只能让 INIT 轻执行产物复用既有阶段协议与模板约束，不新增新的兼容协议层"
+  },
+  "issue_body": "# 背景\n- #39 已把 INIT 首轮推进从超时/真实模型门禁失败收轻到可在演示节奏内产出真实交付物。\n- 最新 QA 复测显示：项目创建约 2.5 秒，35 秒内已能看到 `项目章程.md` 提交成功，说明“创建 -> 首轮推进 -> 产物出现”已经恢复。\n- 但当前 INIT 产物仍会被阶段协议质检拦在“继续补充中”，没有进入可审批状态。\n- timeline 明确提示：`项目章程.md 自动质检未通过`，当前缺少协作交接卡字段，并且 `项目目标 / 范围边界` 没有被现有协议规则识别。\n\n# 当前判断\n当前剩余的主链 blocker 不再是执行耗时，而是 INIT 轻执行产物与阶段协议之间存在语义错位。应继续做最小收口，让首轮推进结果既能出现，也能被协议正确识别并进入审批链路。\n\n# 本次目标\n- 对齐 INIT scripted/direct-model 产物与阶段协议要求\n- 让首轮推进后的 `项目章程.md` 能通过当前协议质检并进入可审批状态\n- 保持 ProjectRoom / AgentCommander 继续复用既有 task/delegation 语义，不引入平行状态\n\n# 本次不做\n- 不恢复 INIT terminal-agent 重路径\n- 不重构整套阶段协议\n- 不修改 ANALYSIS/DESIGN/DEV 的门禁策略\n- 不扩展 UI 能力\n\n# 事实源文件\n## 路由与提交流程\n- `apps/api/src/data/repository.ts`\n- `apps/api/src/system/stage-protocol-gates.ts`\n\n## 当前执行实现\n- `apps/api/src/agents/runtime.ts`\n- `apps/api/src/agents/providers/scripted-provider.ts`\n\n## 相关文件\n- `apps/api/src/system/project-stage-execution.ts`\n- `apps/api/src/system/stage-protocol-gates.test.ts`\n\n# 执行要求\n- 先以最新 QA 事实为准，只处理 INIT 首轮推进“有产物但不能进入审批”的问题\n- 优先复用现有协作交接卡与模板约束，不要新增第二套协议字段\n- 只允许做最小闭环修改，让 direct-model / scripted 的 INIT 输出能被当前协议接受\n- 如果需要补兜底逻辑，必须落在现有执行/协议链中，不能新加平行审批口径\n- 修复后重新做真实接口复测，至少确认：项目创建、首次推进、交付物出现、进入可审批或明确可继续审批的状态\n\n# 验收标准\n- INIT 首轮推进后不再停在“立项阶段继续补充中”这一错误错位状态\n- `项目章程.md` 可通过当前协议对 `项目目标 / 范围边界 / 协作交接卡` 的识别\n- 项目创建和 task 项目隔离结果保持不回退\n- `pnpm --filter @occ/api typecheck` 通过\n- `pnpm --filter @occ/api build` 通过\n\n# 风险提醒\n- 不要为了解决 INIT 问题而放宽后续阶段协议要求\n- 不要把协议识别修补扩大为内容质量门禁整体降级\n- 不要让 scripted 输出再次长出与模板库不一致的新章节口径\n\n# 交付要求\n最终结果必须明确给出：\n1. INIT 首轮推进最终为什么能进入可审批状态\n2. 修改了哪些文件，以及各自修改原因\n3. 协议识别与 scripted 输出分别做了哪些最小调整\n4. 复测结果如何\n5. 还有哪些残留风险未处理",
+  "codex_prompt": "你现在要执行一个收口型任务，请严格按范围执行，不要自行扩展。任务标题：对齐 INIT 轻执行产物与阶段协议，确保首轮推进可进入可审批状态。任务背景：#39 已让 INIT 首轮推进在演示节奏内产出真实交付物，但当前 QA 显示 `项目章程.md` 会被阶段协议质检拦在“继续补充中”，原因是缺少协作交接卡字段，且 `项目目标 / 范围边界` 没有被现有协议规则识别。本次目标：1. 对齐 INIT scripted/direct-model 产物与阶段协议要求；2. 让首轮推进后的 `项目章程.md` 能通过协议质检并进入可审批状态；3. 保持 ProjectRoom / AgentCommander 语义不变。本次明确不做：不恢复 INIT terminal-agent 重路径；不重构整套阶段协议；不修改 ANALYSIS/DESIGN/DEV 门禁；不扩展 UI。必须先核对的事实源文件：`apps/api/src/data/repository.ts`、`apps/api/src/system/stage-protocol-gates.ts`、`apps/api/src/agents/runtime.ts`、`apps/api/src/agents/providers/scripted-provider.ts`、`apps/api/src/system/project-stage-execution.ts`、`apps/api/src/system/stage-protocol-gates.test.ts`。执行要求：优先复用现有协作交接卡与模板约束，只做最小闭环修改，让 direct-model/scripted 的 INIT 输出能被当前协议接受；不要新增第二套协议字段；修复后重新做真实接口复测，至少确认项目创建、首次推进、交付物出现、进入可审批或明确可继续审批的状态。验收标准：INIT 首轮推进不再卡在错误错位状态；`项目章程.md` 可通过当前协议对 `项目目标 / 范围边界 / 协作交接卡` 的识别；`pnpm --filter @occ/api typecheck` 与 `pnpm --filter @occ/api build` 通过。完成后输出：变更说明、修改文件、最小调整点、复测结果、残留风险。"
+}

@@ -104,7 +104,6 @@ const TERMINAL_COLLABORATION_FIELDS: TerminalCollaborationField[] = [
 ];
 
 const TERMINAL_STAGE_ROLE_SET = new Set<string>([
-  "INIT:ROLE_PM",
   "ANALYSIS:ROLE_ANALYST",
   "ANALYSIS:ROLE_PRODUCT",
   "DESIGN:ROLE_PRODUCT",

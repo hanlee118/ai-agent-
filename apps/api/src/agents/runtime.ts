@@ -65,7 +65,7 @@ const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   INIT: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex"],
-  ANALYSIS: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex", "kimi-k2.5"],
+  ANALYSIS: ["qwen3-coder-plus", "openai/gpt-5.2", "openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex", "kimi-k2.5"],
   DESIGN: ["anthropic/claude-opus-4-20250514", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
   DEV: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "anthropic/claude-sonnet-4-20250514", "qwen3-coder-plus"],
   ACCEPT: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex"]
@@ -78,7 +78,7 @@ const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: str
   },
   ANALYSIS: {
     objective: "抽取约束/风险/验收标准，形成可执行分析。",
-    bestFit: "openai/gpt-5.4（复杂分析） -> anthropic/claude-sonnet-4-20250514（深度补位）"
+    bestFit: "qwen3-coder-plus（结构化需求分析首选） -> openai/gpt-5.2（稳定补位） -> openai/gpt-5.4（复杂语义兜底）"
   },
   DESIGN: {
     objective: "输出高质量视觉与交互策略，避免模板化设计。",
@@ -129,6 +129,17 @@ type ExecutionRoute = {
   source: string;
   apiBaseUrl: string;
   apiKey: string;
+};
+
+const ROLE_MANAGED_AGENT_ALIASES: Partial<Record<RoleType, string>> = {
+  ROLE_PM: "project_manager",
+  ROLE_ANALYST: "requirements_analyst",
+  ROLE_PRODUCT: "product_director",
+  ROLE_DESIGN: "jeremy",
+  ROLE_ARCH: "rd_director",
+  ROLE_DEV: "rd_manager",
+  ROLE_QA: "qa_engineer",
+  ROLE_HR: "hr_director"
 };
 
 function isRealModelGateEnabled() {
@@ -272,7 +283,7 @@ async function probeRouteModel(route: ExecutionRoute, model: string, timeoutMs: 
   } catch (error) {
     const message = normalizeErrorMessage(error).toUpperCase();
     if (message.includes("ABORT") || message.includes("TIMEOUT") || message.includes("TIMED OUT")) {
-      return { reason: `PREWARM_TIMEOUT: ${normalizeErrorMessage(error)}`, ttlMs: ROUTE_TIMEOUT_COOLDOWN_MS };
+      return { reason: null, ttlMs: 0 };
     }
     if (message.includes("ECONNRESET") || message.includes("ECONNREFUSED") || message.includes("ENOTFOUND")) {
       return { reason: `PREWARM_NETWORK: ${normalizeErrorMessage(error)}`, ttlMs: ROUTE_NETWORK_COOLDOWN_MS };
@@ -314,10 +325,12 @@ export async function runStageAgent(input: {
   stageType: StageType;
   role: RoleType;
   summary?: string;
+  promptMode?: "default" | "issue_debate";
 }): Promise<StageAgentRunResult> {
   const runtime = await getResolvedRuntimeExecutionConfig();
   const requestedRealMode = runtime.status.requestedMode === "openai-compatible";
   const enforceRealModelGate = isRealModelGateEnabled();
+  const allowInitScriptedBootstrap = enforceRealModelGate && input.stageType === "INIT";
   const attempts: StageModelAttemptTrace[] = [];
 
   const trackAttempt = (payload: {
@@ -345,7 +358,11 @@ export async function runStageAgent(input: {
       throw new Error(enforceRealModelGate ? `REAL_MODEL_GATE_FAILED: ${gateMessage}` : `REAL_MODEL_NOT_CONFIGURED: ${gateMessage}`);
     }
 
-    if (shouldFastFailRealRuntime(runtime.status.lastValidationStatus, runtime.status.lastValidatedAt)) {
+    if (shouldFastFailRealRuntime(
+      runtime.status.lastValidationStatus,
+      runtime.status.lastValidatedAt,
+      runtime.status.lastValidationError
+    )) {
       if (enforceRealModelGate) {
         throw new Error(
           `REAL_MODEL_GATE_FAILED: 最近一次模型健康校验失败，已命中快速失败窗口（status=${runtime.status.lastValidationStatus || "unknown"}）。`
@@ -433,6 +450,7 @@ export async function runStageAgent(input: {
           }
           const startedAtMs = Date.now();
           try {
+            const attemptTimeoutMs = resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs);
             const run = await withTimeout(
               runAnthropicCompatibleAgent(
                 {
@@ -440,11 +458,14 @@ export async function runStageAgent(input: {
                   apiKey: route.apiKey,
                   model
                 },
-                input
+                {
+                  ...input,
+                  requestTimeoutMs: attemptTimeoutMs
+                }
               ),
               routeRemainingMs,
               `anthropic:${model}@${route.source}`,
-              resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs)
+              attemptTimeoutMs
             );
             trackAttempt({ model, route: routeLabel, status: "success", startedAtMs });
             return { ...run, attempts };
@@ -499,6 +520,7 @@ export async function runStageAgent(input: {
           }
           const startedAtMs = Date.now();
           try {
+            const attemptTimeoutMs = resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs);
             const run = await withTimeout(
               runOpenAICompatibleAgent(
                 {
@@ -506,11 +528,14 @@ export async function runStageAgent(input: {
                   apiKey: route.apiKey,
                   model
                 },
-                input
+                {
+                  ...input,
+                  requestTimeoutMs: attemptTimeoutMs
+                }
               ),
               routeRemainingMs,
               `openai-compatible:${model}@${route.source}`,
-              resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs)
+              attemptTimeoutMs
             );
             trackAttempt({ model, route: routeLabel, status: "success", startedAtMs });
             return { ...run, attempts };
@@ -565,6 +590,7 @@ export async function runStageAgent(input: {
           }
           const startedAtMs = Date.now();
           try {
+            const attemptTimeoutMs = resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs);
             const run = await withTimeout(
               runOpenAICompatibleAgent(
                 {
@@ -572,11 +598,14 @@ export async function runStageAgent(input: {
                   apiKey: route.apiKey,
                   model
                 },
-                input
+                {
+                  ...input,
+                  requestTimeoutMs: attemptTimeoutMs
+                }
               ),
               routeRemainingMs,
               `openai-compatible:${model}@${route.source}`,
-              resolveSingleAttemptTimeoutMs(input.role, input.stageType, routeRemainingMs)
+              attemptTimeoutMs
             );
             trackAttempt({ model, route: routeLabel, status: "success", startedAtMs });
             return { ...run, attempts };
@@ -619,6 +648,7 @@ export async function runStageAgent(input: {
       }
       const startedAtMs = Date.now();
       try {
+        const attemptTimeoutMs = resolveSingleAttemptTimeoutMs(input.role, input.stageType, remainingMs);
         const run = await withTimeout(
           runOpenAICompatibleAgent(
             {
@@ -626,11 +656,14 @@ export async function runStageAgent(input: {
               apiKey: runtime.apiKey,
               model
             },
-            input
+            {
+              ...input,
+              requestTimeoutMs: attemptTimeoutMs
+            }
           ),
           remainingMs,
           `openai-compatible:${model}@runtime-selected`,
-          resolveSingleAttemptTimeoutMs(input.role, input.stageType, remainingMs)
+          attemptTimeoutMs
         );
         trackAttempt({ model, route: runtimeRouteLabel, status: "success", startedAtMs });
         return { ...run, attempts };
@@ -673,7 +706,7 @@ export async function runStageAgent(input: {
     };
   }
 
-  if (enforceRealModelGate) {
+  if (enforceRealModelGate && !allowInitScriptedBootstrap) {
     throw new Error("REAL_MODEL_GATE_FAILED: 当前运行模式为 scripted，未满足真实模型门禁要求。");
   }
 
@@ -686,9 +719,15 @@ export async function runStageAgent(input: {
 
 function shouldFastFailRealRuntime(
   lastValidationStatus: string | null | undefined,
-  lastValidatedAt: string | null | undefined
+  lastValidatedAt: string | null | undefined,
+  lastValidationError: string | null | undefined
 ) {
   if (String(lastValidationStatus || "").toLowerCase() !== "failed") {
+    return false;
+  }
+  const message = String(lastValidationError || "").trim().toLowerCase();
+  const permanentFailure = /auth_|unauthorized|invalid api key|forbidden|配置不完整|not configured|缺少 api|401|403/.test(message);
+  if (!permanentFailure) {
     return false;
   }
   const timestamp = Date.parse(String(lastValidatedAt || ""));
@@ -856,25 +895,30 @@ async function resolveRoleModelPlan(role: RoleType, stageType: StageType, runtim
 
   // 1) 角色专属配置（Agent Config）
   try {
-    const managed = await prisma.managedAgentConfig.findUnique({
-      where: { agentId: role },
+    const agentIds = Array.from(
+      new Set([role, ROLE_MANAGED_AGENT_ALIASES[role]].filter((value): value is string => Boolean(value)))
+    );
+    const managed = await prisma.managedAgentConfig.findFirst({
+      where: { agentId: { in: agentIds } },
+      orderBy: { updatedAt: "desc" },
       select: { selectedModel: true, fallbackModel: true }
     });
-    managedSelectedModel = String(managed?.selectedModel ?? "").trim();
-    managedFallbackModel = String(managed?.fallbackModel ?? "").trim();
+    managedSelectedModel = await normalizeConfiguredModelRef(managed?.selectedModel);
+    managedFallbackModel = await normalizeConfiguredModelRef(managed?.fallbackModel);
   } catch {
     // ignore database read errors and continue with runtime/env fallbacks
   }
 
+  // 1) 角色专属配置优先，显式 Agent 模型选择不应被阶段默认策略覆盖。
   push(managedSelectedModel);
 
-  // 2) 运行时模型优先，避免在不可用通道上长时间阻塞。
-  push(runtimeModel);
-
-  // 3) 阶段级策略：按阶段推荐补充可选模型。
+  // 2) 阶段级策略作为补位，确保没有显式角色配置时仍命中更适配的模型。
   for (const preferredModel of STAGE_MODEL_PREFERENCES[stageType] || []) {
     push(preferredModel);
   }
+
+  // 3) 运行时模型作为补位，避免完全丢失用户/环境层的显式配置。
+  push(runtimeModel);
 
   if (role === "ROLE_DESIGN") {
     push(process.env.DESIGN_MODEL || DESIGN_MODEL_PRIMARY);
@@ -894,6 +938,25 @@ async function resolveRoleModelPlan(role: RoleType, stageType: StageType, runtim
   push("kimi-k2.5");
 
   return models;
+}
+
+async function normalizeConfiguredModelRef(value?: string | null) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  try {
+    const model = await prisma.model.findFirst({
+      where: {
+        OR: [{ id: normalized }, { name: normalized }]
+      },
+      select: { name: true }
+    });
+    return String(model?.name ?? normalized).trim();
+  } catch {
+    return normalized;
+  }
 }
 
 async function withTimeout<T>(

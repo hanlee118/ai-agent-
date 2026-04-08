@@ -1,3 +1,12 @@
+import type {
+  ProjectDetail as SharedProjectDetail,
+  Task as SharedTask,
+  TaskDelegation as SharedTaskDelegation,
+  TaskDependencySummary as SharedTaskDependencySummary,
+  TaskExecutionContext as SharedTaskExecutionContext,
+  TaskParticipant as SharedTaskParticipant,
+} from '@occ/shared';
+
 export interface Model {
   id: string;
   name: string;
@@ -111,16 +120,17 @@ export interface Deliverable {
   approvedAt?: string;
 }
 
-export interface Task {
-  id: string;
-  title: string;
-  description?: string;
-  status: 'pending' | 'in_progress' | 'done';
-  priority?: 'high' | 'medium' | 'low';
-  assignee?: string;
-  projectId: string;
-  progress?: number;
-  due?: string;
+export type Task = SharedTask;
+export type TaskDelegation = SharedTaskDelegation;
+export type TaskDependencySummary = SharedTaskDependencySummary;
+export type TaskParticipant = SharedTaskParticipant;
+export type TaskExecutionContext = SharedTaskExecutionContext;
+export type ProjectDetail = SharedProjectDetail;
+
+export interface TaskDelegationBundle {
+  task: Task;
+  participants: TaskParticipant[];
+  delegations: TaskDelegation[];
 }
 
 export interface Session {

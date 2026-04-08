@@ -1,0 +1,55 @@
+{
+  "issue_title": "修复 Project 主链推进卡死与任务项目过滤失配，恢复端到端 QA 可信度",
+  "issue_labels": ["execution", "hardening", "codex-ready", "qa", "projectroom", "agentcommander"],
+  "source_of_truth": {
+    "route_entry": [
+      "apps/api/src/routes/projects.ts",
+      "apps/api/src/openclaw/workspace.ts"
+    ],
+    "active_implementation": [
+      "apps/api/src/data/repository.ts",
+      "apps/web/src/lib/api/tasksApi.ts"
+    ],
+    "related_files": [
+      "apps/api/src/index.ts",
+      "scripts/audit-project-lifecycle.mjs",
+      "scripts/verify-smoke.sh"
+    ]
+  },
+  "validation_commands": [
+    {
+      "command": "pnpm --filter @occ/api typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/web typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/web build",
+      "required": true
+    },
+    {
+      "command": "CONFIGURED_ADMIN_PASSWORD='QaTemp@12345' pnpm verify:smoke",
+      "required": true
+    }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要扩展新的 AgentCommander 交互能力",
+      "不要修改 task/delegation 领域语义",
+      "不要引入新的平行项目推进状态模型",
+      "不要进入 Prisma migrate deploy 稳定性专项"
+    ],
+    "soft_stop": [
+      "不要把本任务扩大为 OpenClaw 全量重构",
+      "不要做无关 UI 美化",
+      "不要顺手改动无关 API"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "允许为非 JSON OpenClaw 失败输出增加识别与恢复兼容，但兼容层只能做错误识别与映射，不能引入第二套执行状态逻辑"
+  },
+  "issue_body": "# 背景\n- 当前 ProjectRoom 已完成单事实实现收口，AgentCommander 也已接入既有 task/delegation 语义。\n- 本轮 QA 在真实主链上发现两个高优先级问题，直接影响“项目创建 -> 实施 -> 结果”的演示可信度。\n- 第一，项目在 INIT 阶段反复返回 `PROJECT_ADVANCE_IN_PROGRESS`，但后台真实失败原因是 OpenClaw CLI 输出了非 JSON 的锁冲突/回退文本，现有恢复逻辑没有识别，导致项目长时间卡死。\n- 第二，前端 `tasksApi.list({ projectId })` 请求 `/api/tasks?projectId=...`，但后端当前 `/api/tasks` 没有消费这些查询条件，导致实际返回跨项目任务，破坏 ProjectRoom/AgentCommander 的项目隔离可信度。\n\n# 当前判断\n优先修复项目推进恢复链路与 `/api/tasks` 查询语义，使 QA 主链重新具备“能推进、看得对、状态隔离正确”的最小可信度。\n\n判断依据：\n- 当前最阻塞的不是页面外观，而是主链真实推进失败。\n- Agent Team + Delegated Sub-Agent 的价值必须建立在项目确实能从创建进入实施并产出结果。\n- ProjectRoom 与 AgentCommander 都依赖 task 列表项目隔离；如果 `/api/tasks?projectId=` 不成立，两个页面都会出现语义漂移。\n- 这两个问题都可以通过最小收口修复，不需要扩展领域模型。\n\n当前约束：\n- 可以继续做主链硬化\n- 但当前不应扩展新功能\n- 本轮只修复主链推进与项目隔离一致性\n\n# 本次目标\n- 修复项目 `advance` 因 OpenClaw 非 JSON 失败输出未识别而卡死的问题\n- 让 `/api/tasks` 支持并正确执行 `projectId/status/assignee` 查询过滤，和前端约定保持一致\n- 补齐最小 QA 验证，确认项目创建、推进、任务查询三条主链已恢复可信\n\n# 本次不做\n- 不扩展 AgentCommander 新能力\n- 不新增 task/delegation 平行状态语义\n- 不重构 OpenClaw 执行架构\n- 不做无关 UI 改版\n\n# 事实源文件\n## 路由入口\n- `apps/api/src/routes/projects.ts`\n- `apps/api/src/openclaw/workspace.ts`\n\n## 当前事实实现\n- `apps/api/src/data/repository.ts`\n- `apps/web/src/lib/api/tasksApi.ts`\n\n## 相关文件\n- `apps/api/src/index.ts`\n- `scripts/audit-project-lifecycle.mjs`\n- `scripts/verify-smoke.sh`\n\n# 执行要求\n- 先以 QA 发现为准，优先修复可明确复现的问题\n- OpenClaw 兼容修复只能识别并映射现有失败文本，不得发明新状态流\n- `/api/tasks` 的查询行为必须与前端现有调用约定一致\n- 修复后必须重新做最小端到端验证，至少覆盖项目创建、项目推进、项目任务查询\n- 如果代码事实与 QA 结论不一致，以代码事实为准，但必须在结果中说明\n\n# 验收标准\n- 项目 `advance` 不再因为 OpenClaw 非 JSON 锁冲突文本陷入长期 `PROJECT_ADVANCE_IN_PROGRESS` 假活跃\n- `/api/tasks?projectId=<id>` 返回结果与该项目实际任务一致，不再混入其他项目任务\n- ProjectRoom / AgentCommander 继续复用同一套 task/delegation 语义，不出现新的平行状态\n- `pnpm --filter @occ/api typecheck` 通过\n- `pnpm --filter @occ/web typecheck` 通过\n- `pnpm --filter @occ/web build` 通过\n- `CONFIGURED_ADMIN_PASSWORD='QaTemp@12345' pnpm verify:smoke` 通过\n\n# 风险提醒\n- 不要把 OpenClaw 兼容修复扩大成 CLI 全量重写\n- 不要只修脚本而不修真实接口语义\n- 不要为了兼容查询而让 `/api/tasks` 与 `/api/projects/:id/tasks` 再次长出两套口径\n\n# 交付要求\n最终结果必须明确给出：\n1. 修复了哪些主链阻塞点\n2. 修改了哪些文件，以及各自修改原因\n3. `advance` 卡死的根因是什么，最终如何收口\n4. `/api/tasks` 与前端查询约定是否已对齐\n5. 验证命令是否通过\n6. 还有哪些残留 QA 风险未处理"
+}

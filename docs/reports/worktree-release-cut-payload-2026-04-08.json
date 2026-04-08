@@ -1,0 +1,59 @@
+{
+  "issue_title": "收敛当前工作区未提交改动并切出本次改造发版候选，避免后续开发继续叠脏",
+  "issue_labels": ["execution", "hardening", "codex-ready", "release-hygiene", "projectroom", "agentcommander"],
+  "source_of_truth": {
+    "route_entry": [
+      "apps/web/src/App.tsx",
+      "apps/api/src/index.ts"
+    ],
+    "active_implementation": [
+      "apps/web/src/pages/ProjectRoomPage.impl.tsx",
+      "apps/web/src/pages/AgentCommanderPage.tsx",
+      "apps/api/src/data/repository.ts",
+      "apps/api/src/routes/projects.ts"
+    ],
+    "related_files": [
+      ".gitignore",
+      "scripts/release-local.sh",
+      "scripts/start-local-prod.sh",
+      "docs/reports/qa-mainchain-hardening-2026-04-08.md"
+    ]
+  },
+  "validation_commands": [
+    {
+      "command": "pnpm --filter @occ/api typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/api build",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/web typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/web build",
+      "required": true
+    }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要把本地 QA 密钥/密码备份文件带入提交或发版候选",
+      "不要在未隔离脏工作区前直接从 main 发版",
+      "不要顺手重构无关模块",
+      "不要回退已验证通过的 ProjectRoom / AgentCommander / INIT 主链收口"
+    ],
+    "soft_stop": [
+      "不要把收口任务扩大成新的功能开发",
+      "不要把临时报告全部都纳入正式版本",
+      "不要继续在 main 上长期堆叠未提交改动"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "允许保留正式报告与自动化模板，但本地敏感/临时 QA 产物必须从候选发版范围中剔除或忽略"
+  },
+  "issue_body": "# 背景\n- 当前 ProjectRoom 单事实实现、AgentCommander 语义复用、INIT 首轮推进收口已经完成到可继续推进的程度。\n- 但工作区仍堆积大量未提交改动，横跨前端、后端、schema、自动化脚本、GitLab issue 模板与 QA 报告。\n- 如果继续在当前脏工作区上迭代，会显著增加误提、误改、发版边界漂移和回归定位困难。\n- 最新检查还发现本地 QA 产物中存在不应进入提交/发版范围的敏感文件，例如 `docs/reports/qa-auth-backup-2026-04-08.json`。\n\n# 当前判断\n当前应优先把工作区做一次发版边界收口：隔离本地敏感/临时产物，整理本次改造的候选发版范围，并切出独立分支承载本轮提交，避免继续在 `main` 上叠脏。\n\n# 本次目标\n- 隔离本地 QA 敏感/临时产物，降低工作区噪音\n- 切出一条承载本次改造的候选发版分支\n- 只把本次改造相关的源码、schema、自动化脚本、正式文档与验证结果整理进入候选发版范围\n\n# 本次不做\n- 不继续扩展新功能\n- 不做无关重构\n- 不直接宣称完全稳定发版\n- 不把敏感备份和临时健康检查产物纳入版本历史\n\n# 事实源文件\n## 路由与主链入口\n- `apps/web/src/App.tsx`\n- `apps/api/src/index.ts`\n\n## 当前事实实现\n- `apps/web/src/pages/ProjectRoomPage.impl.tsx`\n- `apps/web/src/pages/AgentCommanderPage.tsx`\n- `apps/api/src/data/repository.ts`\n- `apps/api/src/routes/projects.ts`\n\n## 工作区治理相关\n- `.gitignore`\n- `scripts/release-local.sh`\n- `scripts/start-local-prod.sh`\n- `docs/reports/qa-mainchain-hardening-2026-04-08.md`\n\n# 执行要求\n- 先盘点哪些文件属于本次改造范围，哪些属于本地临时/敏感产物\n- 优先通过忽略规则或范围隔离收掉不该进版本历史的文件\n- 候选发版必须切到独立分支，不继续直接在 `main` 上承载\n- 提交前必须重新确认 api/web 构建通过\n- 如果发现某些文件来源不明或风险过高，不要强行提交，需在结果中明确标注\n\n# 验收标准\n- 工作区中不再继续暴露本地 QA 敏感/临时产物作为待提交噪音\n- 已切出独立分支承载本次改造候选版本\n- 本次改造相关代码与正式文档可形成一组清晰的候选发版范围\n- `pnpm --filter @occ/api typecheck` 通过\n- `pnpm --filter @occ/api build` 通过\n- `pnpm --filter @occ/web typecheck` 通过\n- `pnpm --filter @occ/web build` 通过\n\n# 风险提醒\n- 不要误把敏感文件写入 git 历史\n- 不要把无关本地实验文件混入候选发版提交\n- 不要因为要清理工作区而回退已经跑通的主链修复\n\n# 交付要求\n最终结果必须明确给出：\n1. 哪些文件被纳入本次候选发版范围\n2. 哪些文件被明确排除，以及为什么\n3. 是否已切出独立分支\n4. 验证命令是否通过\n5. 还有哪些残留工作区风险未处理",
+  "codex_prompt": "你现在要执行一个收口型任务，请严格按范围执行，不要自行扩展。任务标题：收敛当前工作区未提交改动并切出本次改造发版候选，避免后续开发继续叠脏。任务背景：当前主链关键改造已经基本完成，但工作区仍堆积大量未提交改动，并且存在不应进入提交/发版范围的本地 QA 敏感文件。当前目标：1. 隔离本地 QA 敏感/临时产物；2. 切出独立分支承载本次改造候选版本；3. 整理本次改造相关的源码、schema、自动化脚本、正式文档与验证结果进入候选发版范围。明确不做：不扩展新功能；不做无关重构；不把敏感备份和临时健康检查产物纳入版本历史。必须先核对的事实源文件：`apps/web/src/App.tsx`、`apps/api/src/index.ts`、`apps/web/src/pages/ProjectRoomPage.impl.tsx`、`apps/web/src/pages/AgentCommanderPage.tsx`、`apps/api/src/data/repository.ts`、`apps/api/src/routes/projects.ts`、`.gitignore`、`scripts/release-local.sh`。执行要求：先盘点候选发版范围与应排除项；优先用忽略规则或范围隔离收掉本地噪音；候选发版必须切到独立分支；提交前重新确认 api/web 构建通过。完成后输出：纳入范围文件、排除文件、分支信息、验证结果、残留风险。"
+}

@@ -1,0 +1,85 @@
+{
+  "task_type": "feature",
+  "title": "固化 rollout playbook 执行器控制层，支持校验与 issue 物化",
+  "issue_labels": {
+    "fixed": ["execution", "feature", "codex-ready"],
+    "dynamic": ["playbook", "automation", "gitlab"]
+  },
+  "source_of_truth": {
+    "entry_points": [
+      "scripts/generate-gitlab-codex-payload.mjs",
+      "scripts/prepare-gitlab-codex-run.mjs"
+    ],
+    "existing_domain_model": [
+      "docs/ISSUE_AUTOMATION_PAYLOADS.md"
+    ],
+    "ui_reference": [
+      "templates/issue-automation/stabilization.template.json",
+      "templates/issue-automation/integration.template.json"
+    ],
+    "api_reference": [
+      "scripts/lib/gitlab-automation.mjs"
+    ]
+  },
+  "validation_commands": [
+    { "command": "node scripts/validate-playbook.mjs --input templates/playbooks/projectroom-to-agentcommander-rollout.playbook.json", "required": true },
+    { "command": "node scripts/materialize-playbook-issue.mjs --input templates/playbooks/projectroom-to-agentcommander-rollout.playbook.json --issue-id projectroom-minimal-no-behavior-split", "required": true }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要改写现有 issue automation payload 基础格式",
+      "不要引入新的业务状态语义",
+      "不要跳过 result_schema 或 artifact_requirements 的机器校验"
+    ],
+    "soft_stop": [
+      "不要把本任务扩展为完整调度器实现",
+      "不要顺手改无关业务代码"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": false,
+    "rule": "新增脚本必须复用现有 issue automation payload 链路，只补 playbook 级校验与 issue 物化能力，不再新建第二套执行格式"
+  },
+  "context": {
+    "background": [
+      "仓库已具备 issue automation payload 生成、GitLab issue upsert 和 bundle 产出能力。",
+      "用户已经提供 projectroom-to-agentcommander rollout playbook v1.1.0，并补齐了 transition rules、artifact requirements、result schema 等执行器控制层字段。",
+      "当前还缺少把 playbook 直接落到仓库并做机器校验/issue 物化的支撑脚本。"
+    ],
+    "current_constraint": [
+      "继续复用同源 issue/prompt payload 体系",
+      "不在本轮实现完整调度器",
+      "优先补齐可验证、可消费、可持续维护的最小支撑层"
+    ]
+  },
+  "decision": {
+    "summary": "先把 rollout playbook、校验脚本和 issue 物化脚本固化进仓库，再让后续自动化调度直接基于这些稳定产物执行。",
+    "why": [
+      "playbook 只有入库并可校验，才能避免后续手工拷贝和字段漂移",
+      "没有 issue 物化脚本，执行器还得手工从 playbook 抽取 payload",
+      "现有仓库已经有 issue automation 基础设施，这次只需贴着现有链路扩一层"
+    ]
+  },
+  "scope": {
+    "goals": [
+      "把 rollout playbook v1.1.0 正式落到仓库",
+      "提供 playbook 结构/依赖/校验命令脚本",
+      "提供从 playbook issue 节点直接物化出 issue payload 的脚本与文档"
+    ],
+    "non_goals": [
+      "不实现完整自动调度器",
+      "不改现有 GitLab issue automation 基础字段格式",
+      "不改业务主链"
+    ]
+  },
+  "acceptance": [
+    "playbook 文件可在仓库内被校验通过",
+    "可从 playbook 中按 issue id 直接输出现有 issue automation payload",
+    "文档能说明如何校验 playbook 与物化某一步 issue"
+  ],
+  "risks": [
+    "脚本只校验表面字段，遗漏依赖引用或 recommended_order 一致性",
+    "物化脚本输出格式与现有 create/prepare 脚本不兼容",
+    "把 playbook 专属逻辑写散到多个脚本，后续难维护"
+  ]
+}

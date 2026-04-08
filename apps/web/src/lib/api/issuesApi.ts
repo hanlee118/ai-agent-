@@ -168,6 +168,12 @@ export interface IssueDebatePollingResult {
   issueId: string;
   taskId: string | null;
   status: IssueDebateTaskStatus;
+  summary: IssuePreview['summary'];
+  refinement: IssuePreview['refinement'] | null;
+  contextAlignment: IssuePreview['contextAlignment'] | null;
+  designBlueprint: IssuePreview['designBlueprint'] | null;
+  suggestedAnswers: IssuePreview['suggestedAnswers'];
+  requirementContract: IssuePreview['requirementContract'] | null;
   discussion: IssuePreview['discussion'];
   discussionDraft: IssuePreview['discussionDraft'];
   debate: IssuePreview['debate'];

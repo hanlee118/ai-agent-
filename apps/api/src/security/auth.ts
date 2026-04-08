@@ -87,7 +87,7 @@ export async function validateSession(sessionToken?: string | null) {
   }
 
   if (session.expiresAt.getTime() <= Date.now()) {
-    await prisma.authSession.delete({ where: { tokenHash } });
+    await prisma.authSession.deleteMany({ where: { tokenHash } });
     return false;
   }
 

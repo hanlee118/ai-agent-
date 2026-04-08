@@ -8,6 +8,8 @@ export interface AgentRunContext {
   stageType: StageType;
   role: RoleType;
   summary?: string;
+  promptMode?: "default" | "issue_debate";
+  requestTimeoutMs?: number;
 }
 
 export interface AgentRunResult {
@@ -22,6 +24,31 @@ export async function runScriptedAgent(context: AgentRunContext): Promise<AgentR
   const keywords = context.parsedIntent.keywords.join(" / ") || "信息未提供";
   const constraints = context.parsedIntent.constraints.join("；") || "信息未提供";
   const risks = context.parsedIntent.risks.join("；") || "信息未提供";
+
+  if (context.promptMode === "issue_debate") {
+    const body = [
+      "## 角色目标",
+      `- 围绕 ${ROLE_LABELS[context.role]} 视角澄清需求边界与执行前提。`,
+      "## 核心风险",
+      `- 当前仍缺少关键事实闭环，主要约束为：${constraints}`,
+      "## 反对点",
+      `- 不接受在风险未收敛前直接推进，当前主要风险为：${risks}`,
+      "## 角色结论",
+      "- 先补齐关键待确认项，再进入正式方案和执行拆解。",
+      "## 待确认项",
+      "- 需确认目标用户、真实数据来源、首期验收指标。",
+      "## Handoff",
+      "- 交给产品经理和项目经理补齐关键边界，再进入下游执行。"
+    ].join("\n");
+
+    return {
+      provider: "scripted",
+      model: "scripted-agent",
+      title: `${ROLE_LABELS[context.role]}正在推进${STAGE_LABELS[context.stageType]}阶段`,
+      body,
+      thinkingSummary: `${ROLE_LABELS[context.role]} 已完成当前阶段的结构化推演，正在准备正式输出。`
+    };
+  }
 
   const stageBodyByType: Record<StageType, string[]> = {
     INIT: [

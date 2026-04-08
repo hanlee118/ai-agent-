@@ -28,9 +28,7 @@ import {
   applySuggestedAnswers,
   buildAgentRecommendations,
   buildEditableDraftFromPreview,
-  buildLocalIssuePreview,
   detectDomains,
-  fallbackParseNaturalLanguage,
   fallbackSuggestName,
   formatClarificationBlock,
   formatIssueAnswersBlock,
@@ -150,7 +148,12 @@ export function useNewProjectModalController({
           return;
         }
         setIndustryRoleSets(list);
-        setSelectedIndustryCode((prev) => prev || list[0]?.industryCode || '');
+        setSelectedIndustryCode((prev) => {
+          if (prev && list.some((item) => item.industryCode === prev)) {
+            return prev;
+          }
+          return list.find((item) => item.industryCode === 'saas')?.industryCode || list[0]?.industryCode || '';
+        });
       } catch (error) {
         if (!cancelled) {
           addToast(`加载行业角色集失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
@@ -225,6 +228,12 @@ export function useNewProjectModalController({
           }
           return {
             ...prev,
+            summary: result.summary || prev.summary,
+            refinement: result.refinement ?? prev.refinement,
+            contextAlignment: result.contextAlignment ?? prev.contextAlignment,
+            designBlueprint: result.designBlueprint ?? prev.designBlueprint,
+            suggestedAnswers: Array.isArray(result.suggestedAnswers) ? result.suggestedAnswers : prev.suggestedAnswers,
+            requirementContract: result.requirementContract ?? prev.requirementContract,
             discussion: Array.isArray(result.discussion) ? result.discussion : prev.discussion,
             discussionDraft: Array.isArray(result.discussionDraft) ? result.discussionDraft : prev.discussionDraft,
             debate: result.debate ?? prev.debate ?? null,
@@ -449,22 +458,24 @@ export function useNewProjectModalController({
 
     setIsParsing(true);
     try {
-      let preview: IssuePreview | null = null;
-      try {
-        preview = await issuesApi.preview({
-          input,
-          industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
-          sourceType: issueSourceType,
-        });
-      } catch (error) {
-        addToast(`Issue 预分析失败，当前仅保留本地草稿提示: ${error instanceof Error ? error.message : '未知错误'}`, 'info');
-      }
+      const preview = await issuesApi.preview({
+        input,
+        industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
+        sourceType: issueSourceType,
+      });
 
       let parsedIntent: ParsedProjectIntent;
       try {
         parsedIntent = await projectsApi.parse(input);
       } catch {
-        parsedIntent = fallbackParseNaturalLanguage(input);
+        parsedIntent = {
+          name: preview.title || fallbackSuggestName(input) || '新项目',
+          description: preview.summary || input,
+          phase: '规划中',
+          agents: [],
+          team: preview.recommendedRoleIds || [],
+          priority: inferPriorityFromText(input),
+        };
       }
 
       const parsedTeamRoleIds = (preview?.recommendedRoleIds || parsedIntent.team || []).map((role) => normalizeRoleId(role));
@@ -482,35 +493,30 @@ export function useNewProjectModalController({
       const priority = parsedIntent.priority || inferPriorityFromText(input);
       const domains = detectDomains(input);
 
-      const resolvedPreview = preview ?? buildLocalIssuePreview(
-        input,
-        selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
-        recommendationRoleIds,
-      );
       const parsedDescription = String(parsedIntent.description || '').trim();
       const fullDescription = parsedDescription.length > input.length ? parsedDescription : input;
 
-      setIssuePreview(resolvedPreview);
-      setDebateTaskId(resolvedPreview.debateTask?.taskId ?? null);
+      setIssuePreview(preview);
+      setDebateTaskId(preview.debateTask?.taskId ?? null);
       setDebateTaskStatus(
-        resolvedPreview.debateTask?.status
-          ?? (resolvedPreview.debate ? 'completed' : null),
+        preview.debateTask?.status
+          ?? (preview.debate ? 'completed' : null),
       );
       setDebatePollingError('');
       setIsPollingDebate(Boolean(
-        resolvedPreview.debateTask
-          && (resolvedPreview.debateTask.status === 'queued' || resolvedPreview.debateTask.status === 'running'),
+        preview.debateTask
+          && (preview.debateTask.status === 'queued' || preview.debateTask.status === 'running'),
       ));
-      setEditableDraft(buildEditableDraftFromPreview(resolvedPreview));
-      setIssueAnswers(applySuggestedAnswers(resolvedPreview.questions || [], resolvedPreview.suggestedAnswers || []));
-      setConflictAcknowledged((resolvedPreview.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
-      setDiscussionAcknowledged((resolvedPreview.discussion || []).length === 0);
+      setEditableDraft(buildEditableDraftFromPreview(preview));
+      setIssueAnswers(applySuggestedAnswers(preview.questions || [], preview.suggestedAnswers || []));
+      setConflictAcknowledged((preview.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
+      setDiscussionAcknowledged((preview.discussion || []).length === 0);
       setDiscussionOverride('');
       setDetectedDomains(domains);
       setAnalysisRecommendations(recommendations);
       setClarification(INITIAL_CLARIFICATION);
       setParsedProject({
-        name: parsedIntent.name || resolvedPreview.title || fallbackSuggestName(input) || '新项目',
+        name: parsedIntent.name || preview.title || fallbackSuggestName(input) || '新项目',
         description: fullDescription,
         phase: parsedIntent.phase || '规划中',
         agents: recommendedNames,
@@ -523,10 +529,10 @@ export function useNewProjectModalController({
         addToast(`已完成需求分析，但当前未匹配到灵魂角色 ${roleLabel(soulRoleId)}，请手动补充`, 'error');
       } else {
         addToast(
-          resolvedPreview.analysisGate.canProceed
+          preview.analysisGate.canProceed
             ? '已完成需求分析并生成正式讨论结论，请继续澄清确认'
-            : `已生成分析草案，但当前不可推进: ${resolvedPreview.analysisGate.blockers[0] || '缺少真实讨论结果'}`,
-          resolvedPreview.analysisGate.canProceed ? 'success' : 'info',
+            : `已生成分析草案，但当前不可推进: ${preview.analysisGate.blockers[0] || '缺少真实讨论结果'}`,
+          preview.analysisGate.canProceed ? 'success' : 'info',
         );
       }
     } catch (error) {
@@ -770,27 +776,21 @@ export function useNewProjectModalController({
 
     setIsCreating(true);
     try {
-      let created: { id: string; name?: string };
-      const canUseIssueConfirm = Boolean(issuePreview?.issueId && !issuePreview.issueId.startsWith('local-'));
-      if (canUseIssueConfirm && issuePreview) {
-        const confirmation = await issuesApi.confirm(issuePreview.issueId, {
-          finalName: parsedProject.name,
-          finalDescription,
-          clarificationAnswers: {
-            ...issueAnswers,
-          },
-          teamRoleIds: parsedProject.team,
-          conflictResolution: conflictResolution.trim() || undefined,
-        });
-        created = confirmation.project;
-      } else {
-        created = await projectsApi.create({
-          name: parsedProject.name,
-          description: finalDescription,
-          requirements: sourceInput.trim() || parsedProject.description,
-          team: parsedProject.team,
-        });
+      if (!issuePreview?.issueId) {
+        throw new Error('需求预分析结果缺失，请重新从需求输入开始创建项目');
       }
+
+      const confirmation = await issuesApi.confirm(issuePreview.issueId, {
+        finalName: parsedProject.name,
+        finalDescription,
+        clarificationAnswers: {
+          ...issueAnswers,
+        },
+        teamRoleIds: parsedProject.team,
+        conflictResolution: conflictResolution.trim() || undefined,
+      });
+      const created = confirmation.project;
+      addToast(`项目已创建: ${created.name || parsedProject.name}`, 'success');
 
       if (assignedAgentIds.length > 0) {
         const artifactsText = (issuePreview?.expectedArtifacts || [])
@@ -819,15 +819,15 @@ export function useNewProjectModalController({
 
         try {
           await sendBatchAgentMessage(assignedAgentIds, executionInstruction);
-          addToast(`项目创建成功，已向 ${assignedAgentIds.length} 个 Agent 下发执行指令`, 'success');
+          addToast(`已向 ${assignedAgentIds.length} 个 Agent 下发启动指令`, 'success');
         } catch (error) {
-          addToast(`项目已创建，但下发执行指令失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+          addToast(`项目已创建，但 Agent 启动指令下发失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
         }
       } else {
-        addToast('项目创建成功，暂未匹配到可下发指令的 Agent', 'info');
+        addToast('项目已创建，但当前未匹配到可直接启动的 Agent', 'info');
       }
 
-      await onProjectCreated?.();
+      await onProjectCreated?.(created);
       handleClose();
     } catch (error: any) {
       addToast(`创建失败: ${error?.message || '未知错误'}`, 'error');

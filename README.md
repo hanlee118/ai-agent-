@@ -59,6 +59,13 @@
 - 支持 GitLab Harness：项目执行动作可同步为 Issue，并接收 webhook 回写
 - 支持本地 GitLab 协作和主干保护流程
 
+GitLab webhook 运维注意：
+
+- 如果 GitLab 运行在 Docker 容器内，project webhook 不能指向 `http://127.0.0.1:8787`
+- 这类场景应改为容器可回调宿主机的地址，例如 `http://host.docker.internal:8787/api/gitlab/webhook`
+- webhook token 必须与 `GITLAB_WEBHOOK_SECRET` 保持一致，否则 OCC 会返回 `403`
+- 当前本地链路已验证：GitLab issue `closed -> OCC task done`，GitLab issue `opened/reopen -> OCC task in_progress`
+
 ## 技术栈
 
 - Frontend: React 18 + Vite 6 + TypeScript
@@ -149,6 +156,32 @@ pnpm verify:local
 pnpm verify:smoke
 ```
 
+GitLab webhook 检查与自愈：
+
+```bash
+pnpm gitlab:webhook:check
+pnpm gitlab:webhook:fix
+```
+
+这两个命令会检查 GitLab project webhook 是否存在、URL 是否正确、`issues_events` 是否开启，以及本地 Docker GitLab 是否能真实回调 OCC API。
+
+如果当前环境已配置 `GITLAB_TOKEN`，则：
+
+- `pnpm health:check` 会自动纳入 GitLab webhook 真链路检查
+- `./scripts/release-local.sh` 会在发布烟测阶段阻塞校验 GitLab webhook 真链路
+
+健康检查管理员会话注入：
+
+- 匿名模式：`pnpm health:check`
+- 带管理员会话：`HEALTHCHECK_SESSION_COOKIE='occ_session=...' pnpm health:check`
+- 带管理员密码自动登录：`HEALTHCHECK_ADMIN_PASSWORD='...' pnpm health:check`
+
+烟测管理员会话注入：
+
+- 复用现有管理员会话：`VERIFY_SMOKE_SESSION_COOKIE='occ_session=...' pnpm verify:smoke`
+- 用管理员密码自动登录：`VERIFY_SMOKE_ADMIN_PASSWORD='...' pnpm verify:smoke`
+- 未提供时会回退到临时会话，仅用于本地烟测兜底
+
 ## 环境变量
 
 示例文件：[`apps/api/.env.example`](apps/api/.env.example)
@@ -170,12 +203,17 @@ pnpm verify:smoke
 - `PORT`
 - `HOST`
 - `ALLOWED_ORIGINS`
+- `GITLAB_BASE_URL`
+- `GITLAB_TOKEN`
+- `GITLAB_DEFAULT_PROJECT`
+- `GITLAB_WEBHOOK_SECRET`
 
 说明：
 
 - 未显式配置 `OPENCLAW_ROOT` 时，默认使用 `~/.openclaw`
 - 当 `MODEL_PROVIDER=openai-compatible` 时，必须同时提供 `MODEL_API_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME`
 - 生产模式必须配置 `ALLOWED_ORIGINS`，不能使用通配符
+- 当 GitLab 部署在 Docker 中时，project webhook 需使用宿主机可达地址，例如 `http://host.docker.internal:8787/api/gitlab/webhook`
 
 ## 数据与治理模型
 

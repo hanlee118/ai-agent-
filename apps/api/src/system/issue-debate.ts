@@ -9,6 +9,8 @@ export interface IssueDebateOpinion {
   focus: string;
   concern: string;
   proposal: string;
+  openQuestions: string[];
+  handoff: string;
   provider: string;
   model: string;
   elapsedMs: number;
@@ -54,8 +56,90 @@ const FALLBACK_FOCUS: Record<RoleType, string> = {
   ROLE_HR: "协作资源与组织节奏"
 };
 
+const ROLE_DEBATE_BRIEFS: Record<RoleType, { objective: string; pushback: string; handoff: string }> = {
+  ROLE_ASSISTANT: {
+    objective: "收敛分歧并保证结论可进入后续执行",
+    pushback: "不能把未澄清事项当成既定事实",
+    handoff: "把已确认结论同步给 PM 和后续执行角色"
+  },
+  ROLE_PM: {
+    objective: "锁定 MVP 范围、推进顺序和阶段门禁",
+    pushback: "反对关键依赖未确认就直接排期开工",
+    handoff: "向产品、架构和研发同步首期边界与排期前提"
+  },
+  ROLE_ANALYST: {
+    objective: "识别业务目标、核心链路和未澄清约束",
+    pushback: "反对把模糊描述直接落成确定方案",
+    handoff: "向产品和 PM 交接待确认项与业务边界"
+  },
+  ROLE_PRODUCT: {
+    objective: "定义用户价值、MVP 决策口径和非目标",
+    pushback: "反对堆功能而不说明优先级和价值取舍",
+    handoff: "向设计和研发交接 P0 用户路径与非目标"
+  },
+  ROLE_DESIGN: {
+    objective: "定义真实业务对象、关键视图和交互闭环",
+    pushback: "反对只讲页面美观、不讲业务决策链路",
+    handoff: "向产品和研发交接关键界面、状态和交互约束"
+  },
+  ROLE_ARCH: {
+    objective: "明确数据链路、系统边界和技术风险",
+    pushback: "反对数据来源和稳定性未确认就承诺能力",
+    handoff: "向研发和 QA 交接接口、依赖和风险闸门"
+  },
+  ROLE_DEV: {
+    objective: "确认真实实现路径、数据一致性和交付顺序",
+    pushback: "反对用假数据或 mock fallback 掩盖主链问题",
+    handoff: "向 PM 和 QA 交接实现边界与验证路径"
+  },
+  ROLE_QA: {
+    objective: "定义可验证的验收标准和阻断条件",
+    pushback: "反对只有主观描述、没有量化验收口径",
+    handoff: "向 PM 和研发交接必测路径、样例和阻断条件"
+  },
+  ROLE_HR: {
+    objective: "识别资源协同与责任边界风险",
+    pushback: "反对角色责任不清导致执行失真",
+    handoff: "向 PM 交接协作资源与责任边界风险"
+  }
+};
+
 function normalizeText(input: string) {
   return String(input || "").replace(/\s+/g, " ").trim();
+}
+
+const DEBATE_SECTION_LABELS = new Set([
+  "角色目标",
+  "核心风险",
+  "反对点",
+  "角色结论",
+  "待确认项",
+  "开放问题",
+  "handoff",
+  "交接"
+]);
+
+function isMeaningfulDebateStatement(input: string) {
+  const normalized = normalizeText(input)
+    .replace(/^[-*]\s+/, "")
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[0-9]+[.)、]\s*/, "")
+    .trim();
+  if (!normalized) {
+    return false;
+  }
+  const plain = normalized
+    .replace(/[：:]+$/, "")
+    .replace(/\*+/g, "")
+    .trim()
+    .toLowerCase();
+  if (!plain) {
+    return false;
+  }
+  if (DEBATE_SECTION_LABELS.has(plain) || DEBATE_SECTION_LABELS.has(normalized.replace(/[：:]+$/, "").trim())) {
+    return false;
+  }
+  return true;
 }
 
 function cleanMarkdownLine(line: string) {
@@ -109,6 +193,34 @@ function pickBulletFromSection(sections: Array<{ heading: string; lines: string[
   return pickFirstBullet(section.lines);
 }
 
+function pickBulletsFromSection(sections: Array<{ heading: string; lines: string[] }>, keywords: string[]) {
+  const section = sections.find((item) =>
+    keywords.some((keyword) => item.heading.toLowerCase().includes(keyword.toLowerCase()))
+  );
+  if (!section) {
+    return [] as string[];
+  }
+  return section.lines
+    .filter((line) => /^[-*]\s+/.test(line))
+    .map((line) => normalizeText(cleanMarkdownLine(line)))
+    .filter(Boolean);
+}
+
+function pickFirstMeaningfulLineFromSection(
+  sections: Array<{ heading: string; lines: string[] }>,
+  keywords: string[]
+) {
+  const section = sections.find((item) =>
+    keywords.some((keyword) => item.heading.toLowerCase().includes(keyword.toLowerCase()))
+  );
+  if (!section) {
+    return "";
+  }
+  return section.lines
+    .map((line) => normalizeText(cleanMarkdownLine(line)))
+    .find((line) => isMeaningfulDebateStatement(line)) || "";
+}
+
 function extractOpinionFields(body: string, thinkingSummary: string, roleId: RoleType) {
   const rawLines = String(body || "")
     .split(/\r?\n/)
@@ -117,23 +229,45 @@ function extractOpinionFields(body: string, thinkingSummary: string, roleId: Rol
   const lines = rawLines.map((line) => cleanMarkdownLine(line)).filter(Boolean);
   const sections = collectSectionLines(rawLines);
 
+  const focus =
+    pickBulletFromSection(sections, ["角色目标", "关注点", "focus"]) ||
+    pickLineByPrefixes(lines, ["角色目标", "关注点", "focus", "职责"]) ||
+    FALLBACK_FOCUS[roleId] ||
+    "多角色协同评审";
+
   const concern =
     pickBulletFromSection(sections, ["风险", "问题", "依赖"]) ||
+    pickBulletFromSection(sections, ["反对点", "反对", "质疑"]) ||
     pickLineByPrefixes(lines, ["关注点", "风险", "问题", "核心风险", "关键风险"]) ||
     pickBulletFromSection(sections, ["业务背景", "场景"]) ||
     pickFirstBullet(rawLines) ||
     normalizeText(thinkingSummary || "需要先明确需求边界与执行约束。");
 
   const proposal =
-    pickBulletFromSection(sections, ["下一步", "建议", "行动"]) ||
-    pickLineByPrefixes(lines, ["结论建议", "建议", "结论", "行动建议", "下一步"]) ||
-    normalizeText(lines.find((line) => line.includes("建议") || line.includes("结论")) || "") ||
+    pickBulletFromSection(sections, ["角色结论", "建议", "行动", "handoff", "交接"]) ||
+    pickLineByPrefixes(lines, ["角色结论", "结论建议", "建议", "结论", "行动建议", "下一步"]) ||
+    pickFirstMeaningfulLineFromSection(sections, ["角色结论", "建议", "行动"]) ||
+    normalizeText(
+      lines.find((line) =>
+        isMeaningfulDebateStatement(line)
+        && (line.includes("建议") || line.includes("结论") || line.includes("下一步"))
+      ) || ""
+    ) ||
     "先完成关键澄清，再推进任务拆解与执行。";
 
+  const openQuestions = pickBulletsFromSection(sections, ["待确认", "开放问题", "openquestion", "open question"]);
+  const handoff =
+    pickBulletFromSection(sections, ["handoff", "交接"]) ||
+    pickLineByPrefixes(lines, ["handoff", "交接", "下游交接"]) ||
+    pickFirstMeaningfulLineFromSection(sections, ["handoff", "交接"]) ||
+    "将关键结论同步给下游角色，并在进入执行前补齐待确认项。";
+
   return {
-    focus: FALLBACK_FOCUS[roleId] || "多角色协同评审",
+    focus: normalizeText(focus),
     concern: normalizeText(concern),
-    proposal: normalizeText(proposal)
+    proposal: normalizeText(proposal),
+    openQuestions,
+    handoff: normalizeText(handoff)
   };
 }
 
@@ -156,18 +290,52 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
 }
 
 function getDebateRoles(input: { recommendedRoleIds: RoleType[]; soulRoleId: RoleType }) {
-  const maxRoles = Math.max(3, Number(process.env.ISSUE_DEBATE_MAX_ROLES ?? 5));
+  // 默认至少覆盖分析、PM、产品、设计、研发等关键视角，避免设计/产品产物继续由 draft 补位。
+  const maxRoles = Math.max(4, Number(process.env.ISSUE_DEBATE_MAX_ROLES ?? 6));
   const ordered: RoleType[] = [];
   const push = (roleId: RoleType) => {
     if (!ordered.includes(roleId)) {
       ordered.push(roleId);
     }
   };
-  push(input.soulRoleId);
+  const preferredOrder: RoleType[] = [
+    input.soulRoleId,
+    "ROLE_PM",
+    "ROLE_ANALYST",
+    "ROLE_PRODUCT",
+    "ROLE_DESIGN",
+    "ROLE_ARCH",
+    "ROLE_DEV",
+    "ROLE_QA"
+  ];
+  for (const roleId of preferredOrder) {
+    push(roleId);
+  }
   for (const roleId of input.recommendedRoleIds) {
     push(roleId);
   }
   return ordered.slice(0, maxRoles);
+}
+
+async function runDebateRoleBatch(
+  roles: RoleType[],
+  execute: (roleId: RoleType) => Promise<IssueDebateOpinion>
+) {
+  const settled: PromiseSettledResult<IssueDebateOpinion>[] = [];
+  for (const roleId of roles) {
+    try {
+      settled.push({
+        status: "fulfilled",
+        value: await execute(roleId)
+      });
+    } catch (error) {
+      settled.push({
+        status: "rejected",
+        reason: error
+      });
+    }
+  }
+  return settled;
 }
 
 function fallbackConsensus(opinions: IssueDebateOpinion[]) {
@@ -226,22 +394,36 @@ function buildDebateSummaryPrompt(input: {
   issue: string;
   summary: string;
   industryCode: string;
+  roleId: RoleType;
   roleLabel: string;
 }) {
+  const brief = ROLE_DEBATE_BRIEFS[input.roleId] ?? ROLE_DEBATE_BRIEFS.ROLE_PRODUCT;
   return [
-    "你正在参与多角色需求辩论，请只给角色立场结论，不要输出完整PRD。",
+    "你正在参与多角色需求辩论，请只输出角色立场结论，不要输出完整 PRD。",
     `行业: ${input.industryCode}`,
     `Issue: ${input.issue}`,
     `需求摘要: ${input.summary}`,
     `当前角色: ${input.roleLabel}`,
+    `角色目标: ${brief.objective}`,
+    `必须坚持: ${brief.pushback}`,
+    `下游交接目标: ${brief.handoff}`,
     "",
-    "请至少明确：",
-    "1) 关注点（最多2条）",
-    "2) 风险（最多2条）",
-    "3) 结论建议（最多2条）",
-    "4) 需要用户确认的关键参数（至少1条）",
+    "请严格使用下面的 Markdown 结构输出，字段名不要改：",
+    "## 角色目标",
+    "- 1 条",
+    "## 核心风险",
+    "- 1 到 2 条",
+    "## 反对点",
+    "- 1 条，写清你反对什么推进方式",
+    "## 角色结论",
+    "- 1 到 2 条，必须能指导后续动作",
+    "## 待确认项",
+    "- 至少 1 条",
+    "## Handoff",
+    "- 1 条，写清要交给谁、交什么",
     "",
-    "请尽量使用“关注点: ... / 结论建议: ...”格式，便于系统抽取。"
+    "要求：结论必须体现你的角色判断边界，不能写成通用模板，也不要复述需求原文。",
+    "禁止把“角色结论”“建议”“下一步”等标题词本身当成结论内容。"
   ].join("\n");
 }
 
@@ -267,43 +449,53 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
   // 辩论任务已改为异步执行，不再需要过短超时。
   // 这里必须覆盖 runStageAgent 的内部阶段预算（通常约 90s），避免“模型仍在执行但外层提前判失败”。
   const roleTimeoutMs = Math.max(60000, Number(process.env.ISSUE_DEBATE_ROLE_TIMEOUT_MS ?? 130000));
-  const settled = await Promise.allSettled(
-    selectedRoles.map(async (roleId) => {
-      const roleLabel = ROLE_LABELS[roleId] ?? roleId;
-      const startedAt = Date.now();
-      const run = await withTimeout(
-        runStageAgent({
-          projectName: input.title,
-          projectDescription: input.input,
-          parsedIntent,
-          stageType: "ANALYSIS",
-          role: roleId,
-          summary: buildDebateSummaryPrompt({
-            issue: input.input,
-            summary: input.summary,
-            industryCode: input.industryCode,
-            roleLabel
-          })
-        }),
-        roleTimeoutMs,
-        roleId
-      );
-      const fields = extractOpinionFields(run.body, run.thinkingSummary, roleId);
-      return {
-        id: `debate-${roleId}-${Date.now()}`,
-        roleId,
-        roleLabel,
-        focus: fields.focus,
-        concern: fields.concern,
-        proposal: fields.proposal,
-        provider: run.provider,
-        model: run.model,
-        elapsedMs: Math.max(0, Date.now() - startedAt),
-        mode: run.provider === "scripted" ? "scripted" : "model",
-        rawPreview: normalizeText(run.thinkingSummary || run.body).slice(0, 200)
-      } as IssueDebateOpinion;
-    })
-  );
+  const debateConcurrency = Math.max(1, Number(process.env.ISSUE_DEBATE_CONCURRENCY ?? 2));
+  const executeRole = async (roleId: RoleType) => {
+    const roleLabel = ROLE_LABELS[roleId] ?? roleId;
+    const startedAt = Date.now();
+    const run = await withTimeout(
+      runStageAgent({
+        projectName: input.title,
+        projectDescription: input.input,
+        parsedIntent,
+        stageType: "ANALYSIS",
+        role: roleId,
+        promptMode: "issue_debate",
+        summary: buildDebateSummaryPrompt({
+          issue: input.input,
+          summary: input.summary,
+          industryCode: input.industryCode,
+          roleId,
+          roleLabel
+        })
+      }),
+      roleTimeoutMs,
+      roleId
+    );
+    const fields = extractOpinionFields(run.body, run.thinkingSummary, roleId);
+    return {
+      id: `debate-${roleId}-${Date.now()}`,
+      roleId,
+      roleLabel,
+      focus: fields.focus,
+      concern: fields.concern,
+      proposal: fields.proposal,
+      openQuestions: fields.openQuestions,
+      handoff: fields.handoff,
+      provider: run.provider,
+      model: run.model,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      mode: run.provider === "scripted" ? "scripted" : "model",
+      rawPreview: normalizeText(run.thinkingSummary || run.body).slice(0, 200)
+    } as IssueDebateOpinion;
+  };
+
+  const settled: PromiseSettledResult<IssueDebateOpinion>[] = [];
+  for (let index = 0; index < selectedRoles.length; index += debateConcurrency) {
+    const batch = selectedRoles.slice(index, index + debateConcurrency);
+    const batchSettled = await runDebateRoleBatch(batch, executeRole);
+    settled.push(...batchSettled);
+  }
 
   const successfulOpinions = settled
     .filter((item): item is PromiseFulfilledResult<IssueDebateOpinion> => item.status === "fulfilled")
@@ -323,6 +515,8 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
       focus: FALLBACK_FOCUS[roleId] || "多角色协同评审",
       concern: "该角色模型调用超时或失败，已降级为保底意见。",
       proposal: "请在确认卡补充该角色关注参数后再进入执行。",
+      openQuestions: ["该角色真实模型输出缺失，需人工补充关键待确认项。"],
+      handoff: "先补齐该角色待确认项，再进入下游执行。",
       provider: "scripted",
       model: "debate-fallback",
       elapsedMs: roleTimeoutMs,

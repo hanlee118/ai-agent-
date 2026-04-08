@@ -78,6 +78,113 @@ function normalizeApiBaseUrl(value: string) {
   return String(value || "").trim().replace(/\/$/, "");
 }
 
+function normalizeProbeModelName(name: string) {
+  const normalized = String(name ?? "").trim();
+  if (normalized.startsWith("openai/")) {
+    return normalized.slice("openai/".length);
+  }
+  return normalized;
+}
+
+function requiresStreamProbe(model: string) {
+  const normalized = String(model ?? "").trim().toLowerCase();
+  return normalized.startsWith("openai/gpt-5.4")
+    || normalized.startsWith("gpt-5.4")
+    || normalized.startsWith("openai/gpt-5.3-codex")
+    || normalized.startsWith("gpt-5.3-codex");
+}
+
+async function readProbeError(response: Response) {
+  const raw = await response.text();
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: string };
+      message?: string;
+    };
+    return String(parsed.error?.message ?? parsed.message ?? raw).trim();
+  } catch {
+    return String(raw).trim();
+  }
+}
+
+async function probeOpenAICompatibleHealth(input: {
+  apiBaseUrl: string;
+  apiKey: string;
+  model: string;
+}) {
+  const endpoint = `${normalizeApiBaseUrl(input.apiBaseUrl)}/chat/completions`;
+  const request = async (stream: boolean) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    const startedAt = Date.now();
+    try {
+      const response = await fetch(endpoint, {
+        method: "POST",
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${input.apiKey}`
+        },
+        body: JSON.stringify({
+          model: normalizeProbeModelName(input.model),
+          temperature: 0,
+          max_tokens: 16,
+          stream,
+          messages: [{ role: "user", content: "Reply with OK only." }]
+        })
+      });
+      return {
+        ok: response.ok,
+        response,
+        latencyMs: Date.now() - startedAt
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  try {
+    let stream = requiresStreamProbe(input.model);
+    let result = await request(stream);
+    if (!result.ok) {
+      const message = await readProbeError(result.response);
+      if (!stream && /stream must be set to true/i.test(message)) {
+        stream = true;
+        result = await request(stream);
+      } else if (stream && /stream/i.test(message)) {
+        stream = false;
+        result = await request(stream);
+      } else {
+        return {
+          reachable: false,
+          latencyMs: result.latencyMs,
+          error: message || `upstream status ${result.response.status}`
+        };
+      }
+    }
+
+    if (!result.ok) {
+      return {
+        reachable: false,
+        latencyMs: result.latencyMs,
+        error: await readProbeError(result.response)
+      };
+    }
+
+    return {
+      reachable: true,
+      latencyMs: result.latencyMs,
+      error: null as string | null
+    };
+  } catch (error) {
+    return {
+      reachable: false,
+      latencyMs: null as number | null,
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 function buildModelsUrl(apiBaseUrl: string) {
   return `${normalizeApiBaseUrl(apiBaseUrl)}/models`;
 }
@@ -608,14 +715,27 @@ export function createModelsRouter() {
       return;
     }
 
-    const reachable = Boolean(
-      model.apiBaseUrl
+    const canProbe = Boolean(
+      model.provider === "openai-compatible"
+      && model.apiBaseUrl
       && /^https?:\/\//i.test(model.apiBaseUrl)
       && model.apiKey
     );
+    const probe = canProbe
+      ? await probeOpenAICompatibleHealth({
+        apiBaseUrl: String(model.apiBaseUrl ?? ""),
+        apiKey: String(model.apiKey ?? ""),
+        model: model.name
+      })
+      : {
+        reachable: false,
+        latencyMs: null as number | null,
+        error: "Model API endpoint is not reachable"
+      };
 
-    const latency = reachable ? "120ms" : "N/A";
-    const error = reachable ? null : "Model API endpoint is not reachable";
+    const reachable = probe.reachable;
+    const latency = Number.isFinite(probe.latencyMs) ? `${Math.round(Number(probe.latencyMs))}ms` : "N/A";
+    const error = reachable ? null : probe.error || "Model API endpoint is not reachable";
 
     await prisma.$transaction([
       prisma.model.update({
@@ -629,7 +749,7 @@ export function createModelsRouter() {
           modelId: id,
           timestamp: new Date(),
           type: "system",
-          content: reachable ? "health check passed" : "health check failed",
+          content: reachable ? `health check passed (${latency})` : `health check failed: ${error}`,
           label: "health-check"
         }
       })

@@ -55,6 +55,7 @@ import {
   reconcileProjectDeliverablesNow,
   rejectProjectStage,
   resumeProject,
+  startProjectWarmupAfterCreate,
   submitCurrentStage,
   updateTaskStatus
 } from "./data/repository.js";
@@ -128,7 +129,12 @@ import { createSystemRouter } from "./routes/system.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createOpenClawRouter } from "./routes/openclaw.js";
 import { createProjectsRouter } from "./routes/projects.js";
+import { createTasksRouter } from "./routes/tasks.js";
 import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js";
+import {
+  buildProjectIssueFirstMessage,
+  ensureProjectIssueFirst
+} from "./services/project-issue-first.js";
 import { buildOpenApiSpec } from "./system/openapi.js";
 
 const app = express();
@@ -148,7 +154,7 @@ const projectAutomationState: {
   lastError: string | null;
   lastSummary: string;
 } = {
-  enabled: process.env.PROJECT_AUTO_ADVANCE !== "false",
+  enabled: process.env.PROJECT_AUTO_ADVANCE === "true",
   intervalMs: projectAutoAdvanceIntervalMs,
   running: false,
   lastRunAt: null,
@@ -255,7 +261,7 @@ const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lor
 const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(2, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
-  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 180_000)
+  Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 60_000)
 );
 const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
   900,
@@ -703,11 +709,15 @@ function evaluateAutoSubmissionQuality(input: {
   const diagnostics: string[] = [];
   let score = 100;
   const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true" || isRealModelGateEnabled();
+  const allowInitScriptedBootstrap =
+    input.stageType === "INIT"
+    && input.run.provider === "scripted"
+    && !input.run.degraded;
 
   if (input.run.provider === "scripted") {
-    score -= strictRealModel ? 42 : 8;
-    diagnostics.push("执行模式: scripted（降级）");
-    if (strictRealModel) {
+    score -= strictRealModel && !allowInitScriptedBootstrap ? 42 : 8;
+    diagnostics.push(allowInitScriptedBootstrap ? "执行模式: scripted（INIT 首轮立项允许）" : "执行模式: scripted（降级）");
+    if (strictRealModel && !allowInitScriptedBootstrap) {
       issues.push("当前输出来自 scripted 降级模式，不满足真实模型执行要求。");
     }
   }
@@ -1283,6 +1293,23 @@ async function trySyncGitLabHarnessForProject(
   }
 }
 
+async function handleProjectCreatedIssueFirst(projectId: string) {
+  const issueFirst = await ensureProjectIssueFirst({ projectId });
+  if (!issueFirst.ok) {
+    console.warn(`[ProjectIssueFirst] project bootstrap gated for ${projectId}: ${issueFirst.code} ${issueFirst.message}`);
+    return issueFirst;
+  }
+
+  void startProjectWarmupAfterCreate(projectId).catch((error) => {
+    console.warn(
+      `[project] async warmup after create failed for ${projectId}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  });
+  kickProjectAutomationTick();
+  return issueFirst;
+}
+
 async function runProjectAutomationTick(options?: { force?: boolean }) {
   const force = options?.force === true;
 
@@ -1315,6 +1342,13 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
           const project = await findProject(summary.id);
           if (!project || project.status !== "active") {
             skipped += 1;
+            return;
+          }
+
+          const issueFirst = await ensureProjectIssueFirst({ projectId: project.id });
+          if (!issueFirst.ok) {
+            skipped += 1;
+            firstError = firstError ?? buildProjectIssueFirstMessage(issueFirst);
             return;
           }
 
@@ -2850,8 +2884,8 @@ app.use("/api/team", createTeamRouter());
 app.use("/api/role-sets", createRoleSetsRouter());
 app.use("/api/product-context", createProductContextRouter());
 app.use("/api/issues", createIssuesRouter({
-  onProjectCreated: () => {
-    kickProjectAutomationTick();
+  onProjectCreated: async (projectId) => {
+    await handleProjectCreatedIssueFirst(projectId);
   }
 }));
 app.use("/api/system", createSystemRouter({
@@ -2860,6 +2894,9 @@ app.use("/api/system", createSystemRouter({
   sendEvent
 }));
 app.use("/api/gitlab", createGitLabRouter());
+app.use(createTasksRouter({
+  safeAudit
+}));
 app.use("/api", createNotificationsRouter({
   asyncRoute,
   safeAudit

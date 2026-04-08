@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,6 +11,13 @@ const apiRoot = path.join(repoRoot, "apps", "api");
 const sqliteDbPath = path.join(apiRoot, "prisma", "dev.db");
 const apiBase = (process.env.HEALTHCHECK_API_BASE || 'http://127.0.0.1:8787').replace(/\/$/, '');
 const requireRealModelForHealth = String(process.env.REQUIRE_REAL_MODEL_FOR_HEALTH || "").trim().toLowerCase() === "true";
+const gitlabDoctorEnabled = shouldRunGitLabDoctor();
+const configuredHealthcheckCookie = normalizeSessionCookie(
+  process.env.HEALTHCHECK_SESSION_COOKIE || process.env.OCC_SESSION_COOKIE || ''
+);
+const configuredHealthcheckAdminPassword = String(
+  process.env.HEALTHCHECK_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || ''
+).trim();
 
 const reportsDir = path.join(repoRoot, 'docs', 'reports');
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -18,6 +26,7 @@ const latestPath = path.join(reportsDir, 'system-health-check-latest.json');
 
 async function run() {
   const checks = [];
+  const authContext = await resolveHealthcheckAuthContext();
 
   checks.push(await check('DB 连接', async () => {
     const result = await execCapture(
@@ -89,26 +98,48 @@ async function run() {
     };
   }));
 
-  const routeChecks = [
-    { path: '/health', expected: [200] },
-    { path: '/ready', expected: [200, 503] },
-    { path: '/api/openclaw/agents', expected: [200] },
-    { path: '/api/projects', expected: [200] },
-    { path: '/api/product-context', expected: [200] },
-  ];
-
-  for (const route of routeChecks) {
-    checks.push(await check(`关键路由 ${route.path}`, async () => {
-      const response = await fetch(`${apiBase}${route.path}`);
-      const ok = route.expected.includes(response.status);
+  if (gitlabDoctorEnabled) {
+    checks.push(await check('GitLab webhook 真链路', async () => {
+      const result = await execCapture(
+        'node',
+        ['scripts/gitlab-webhook-doctor.mjs'],
+        { cwd: repoRoot }
+      );
+      const output = `${result.stdout}\n${result.stderr}`.trim();
+      const lastLine = output.split('\n').filter(Boolean).slice(-1)[0] || 'gitlab-webhook-doctor: ok';
       return {
-        ok,
-        detail: `HTTP ${response.status}${ok ? '' : ` (expected: ${route.expected.join('/')})`}`,
+        ok: true,
+        detail: lastLine.slice(0, 240),
       };
     }));
   }
 
-  const realModelSelfCheck = await buildRealModelSelfCheck();
+  const routeChecks = [
+    { path: '/health', expected: [200] },
+    { path: '/ready', expected: [200, 503] },
+    { path: '/api/openclaw/agents', expected: authContext.authenticated ? [200] : [200, 401] },
+    { path: '/api/projects', expected: authContext.authenticated ? [200] : [200, 401] },
+    { path: '/api/product-context', expected: authContext.authenticated ? [200] : [200, 401] },
+  ];
+
+  for (const route of routeChecks) {
+    checks.push(await check(`关键路由 ${route.path}`, async () => {
+      const response = await fetch(`${apiBase}${route.path}`, {
+        headers: buildAuthHeaders(authContext)
+      });
+      const ok = route.expected.includes(response.status);
+      return {
+        ok,
+        detail: formatProtectedRouteDetail({
+          status: response.status,
+          expected: route.expected,
+          authContext
+        }),
+      };
+    }));
+  }
+
+  const realModelSelfCheck = await buildRealModelSelfCheck(authContext);
   const repairGuide = buildRuntimeRepairGuide(realModelSelfCheck);
 
   const passed = checks.filter((item) => item.ok).length;
@@ -116,6 +147,12 @@ async function run() {
   const report = {
     generatedAt: new Date().toISOString(),
     apiBase,
+    auth: {
+      setupComplete: authContext.setupComplete,
+      authenticated: authContext.authenticated,
+      source: authContext.source,
+      note: authContext.note
+    },
     summary: {
       total: checks.length,
       passed,
@@ -160,11 +197,12 @@ async function run() {
   }
 }
 
-async function buildRealModelSelfCheck() {
+async function buildRealModelSelfCheck(authContext) {
   const checkedAt = new Date().toISOString();
-  const healthResult = await requestJson(`${apiBase}/health`, { method: 'GET' });
-  const runtimeResult = await requestJson(`${apiBase}/api/system/runtime`, { method: 'GET' });
-  const validateResult = await requestJson(`${apiBase}/api/system/runtime/validate`, { method: 'POST' });
+  const authHeaders = buildAuthHeaders(authContext);
+  const healthResult = await requestJson(`${apiBase}/health`, { method: 'GET', headers: authHeaders });
+  const runtimeResult = await requestJson(`${apiBase}/api/system/runtime`, { method: 'GET', headers: authHeaders });
+  const validateResult = await requestJson(`${apiBase}/api/system/runtime/validate`, { method: 'POST', headers: authHeaders });
 
   const runtimeFromRuntimeApi = toObject(runtimeResult.body);
   const runtimeFromHealth = toObject(toObject(healthResult.body)?.runtime);
@@ -183,7 +221,7 @@ async function buildRealModelSelfCheck() {
   }
   if (!runtimeResult.ok && !runtimeAuthRequired) {
     issues.push(`无法读取 /api/system/runtime（HTTP ${runtimeResult.status}）`);
-  } else if (runtimeAuthRequired) {
+  } else if (runtimeAuthRequired && authContext?.authenticated) {
     issues.push(`读取 /api/system/runtime 需要管理员会话（HTTP ${runtimeResult.status}）`);
   }
 
@@ -202,17 +240,17 @@ async function buildRealModelSelfCheck() {
   if (!runtime.configured) {
     issues.push('真实模型配置不完整（configured=false）');
   }
-  if (runtime.lastValidationStatus === 'failed') {
+  if (runtime.lastValidationStatus === 'failed' && !lastValidateOk) {
     issues.push(
       runtime.lastValidationError
         ? `最近一次校验失败：${runtime.lastValidationError}`
         : '最近一次校验失败（无错误明细）'
     );
   }
-  if (validateAuthRequired && !validationFromRuntimeHealthy) {
+  if (validateAuthRequired && !validationFromRuntimeHealthy && authContext?.authenticated) {
     issues.push(`读取 /api/system/runtime/validate 需要管理员会话（HTTP ${validateResult.status}）`);
   }
-  if (!lastValidateOk && (!validateAuthRequired || !validationFromRuntimeHealthy)) {
+  if (!lastValidateOk && (!validateAuthRequired || !validationFromRuntimeHealthy) && authContext?.authenticated) {
     const validateMessage = String(validateBody?.message || '').trim();
     const validateError = String(validateBody?.runtime?.lastValidationError || '').trim();
     issues.push(
@@ -220,10 +258,11 @@ async function buildRealModelSelfCheck() {
     );
   }
 
+  const authUnavailableButExpected = !authContext?.authenticated && runtimeAuthRequired;
   const ready = runtime.requestedMode === 'openai-compatible'
     && runtime.mode === 'openai-compatible'
     && runtime.configured
-    && (lastValidateOk || runtime.lastValidationStatus === 'healthy');
+    && (lastValidateOk || runtime.lastValidationStatus === 'healthy' || authUnavailableButExpected);
 
   return {
     checkedAt,
@@ -240,6 +279,7 @@ async function buildRealModelSelfCheck() {
     lastValidationError: runtime.lastValidationError,
     lastValidateOk,
     lastValidateStatusCode: validateResult.status,
+    usedAuthenticatedSession: Boolean(authContext?.authenticated),
     authRequired: {
       runtime: runtimeAuthRequired,
       validate: validateAuthRequired
@@ -367,6 +407,66 @@ function looksLikeRuntimeStatus(value) {
   return typeof runtime.mode === 'string' && typeof runtime.requestedMode === 'string';
 }
 
+async function resolveHealthcheckAuthContext() {
+  const anonymousStatus = await requestJson(`${apiBase}/api/auth/status`, { method: 'GET' });
+  const anonymousBody = toObject(anonymousStatus.body) || {};
+  const setupComplete = Boolean(anonymousBody.setupComplete);
+
+  if (!setupComplete) {
+    return {
+      setupComplete: false,
+      authenticated: false,
+      source: 'anonymous',
+      cookie: '',
+      note: '管理员尚未初始化'
+    };
+  }
+
+  if (configuredHealthcheckCookie) {
+    const cookieStatus = await requestJson(`${apiBase}/api/auth/status`, {
+      method: 'GET',
+      headers: { Cookie: configuredHealthcheckCookie }
+    });
+    const cookieBody = toObject(cookieStatus.body) || {};
+    if (Boolean(cookieBody.authenticated)) {
+      return {
+        setupComplete: true,
+        authenticated: true,
+        source: 'env-cookie',
+        cookie: configuredHealthcheckCookie,
+        note: '使用 HEALTHCHECK_SESSION_COOKIE / OCC_SESSION_COOKIE'
+      };
+    }
+  }
+
+  if (configuredHealthcheckAdminPassword) {
+    const loginResult = await requestJson(`${apiBase}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: configuredHealthcheckAdminPassword })
+    });
+    const setCookie = loginResult.headers?.get('set-cookie') || '';
+    const cookie = extractOccSessionCookie(setCookie);
+    if (loginResult.ok && cookie) {
+      return {
+        setupComplete: true,
+        authenticated: true,
+        source: 'env-password',
+        cookie,
+        note: '使用 HEALTHCHECK_ADMIN_PASSWORD / ADMIN_PASSWORD'
+      };
+    }
+  }
+
+  return {
+    setupComplete: true,
+    authenticated: false,
+    source: 'anonymous',
+    cookie: '',
+    note: '未注入管理员会话；受保护接口以匿名模式检查'
+  };
+}
+
 async function requestJson(url, options) {
   try {
     const response = await fetch(url, options);
@@ -382,7 +482,8 @@ async function requestJson(url, options) {
     return {
       ok: response.ok,
       status: response.status,
-      body
+      body,
+      headers: response.headers
     };
   } catch (error) {
     return {
@@ -390,7 +491,8 @@ async function requestJson(url, options) {
       status: 0,
       body: {
         error: error instanceof Error ? error.message : String(error)
-      }
+      },
+      headers: null
     };
   }
 }
@@ -455,6 +557,52 @@ function execCapture(command, args, options = {}) {
       reject(new Error(`命令失败: ${command} ${args.join(' ')}\n${stderr || stdout}`));
     });
   });
+}
+
+function buildAuthHeaders(authContext) {
+  if (!authContext?.authenticated || !authContext.cookie) {
+    return undefined;
+  }
+  return {
+    Cookie: authContext.cookie
+  };
+}
+
+function normalizeSessionCookie(value) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return '';
+  }
+  return raw.includes('=') ? raw : `occ_session=${raw}`;
+}
+
+function extractOccSessionCookie(setCookieHeader) {
+  const header = String(setCookieHeader || '');
+  if (!header) {
+    return '';
+  }
+  const matched = header.match(/occ_session=[^;]+/);
+  return matched ? matched[0] : '';
+}
+
+function formatProtectedRouteDetail(input) {
+  if (input.status === 401 && !input.authContext.authenticated) {
+    return `HTTP 401 (anonymous mode; ${input.authContext.note})`;
+  }
+  return `HTTP ${input.status}${input.expected.includes(input.status) ? '' : ` (expected: ${input.expected.join('/')})`}`;
+}
+
+function shouldRunGitLabDoctor() {
+  const tokenFromProcess = String(process.env.GITLAB_TOKEN || '').trim();
+  if (tokenFromProcess) {
+    return true;
+  }
+  const envFile = path.join(repoRoot, 'apps', 'api', '.env');
+  if (!existsSync(envFile)) {
+    return false;
+  }
+  const content = readFileSync(envFile, 'utf8');
+  return /^GITLAB_TOKEN="?[^"\n]+/m.test(content);
 }
 
 run().catch((error) => {

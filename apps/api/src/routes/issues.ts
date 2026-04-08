@@ -15,10 +15,12 @@ import {
   buildRequirementContract,
   buildRequirementRefinement,
   buildSuggestedAnswers,
+  detectIndustry,
   detectConflicts,
   inferIssueSummary,
   inferIssueTitle,
-  recommendRoles
+  recommendRoles,
+  synthesizeIssueArtifactsFromDebate
 } from "../system/issue-engine.js";
 import { buildIssueRoleDebate, type IssueDebateResult as RuntimeIssueDebateResult } from "../system/issue-debate.js";
 import {
@@ -113,7 +115,7 @@ function normalizeStringMap(input: unknown) {
 }
 
 interface CreateIssuesRouterOptions {
-  onProjectCreated?: (projectId: string) => void;
+  onProjectCreated?: (projectId: string) => void | Promise<void>;
 }
 
 interface DebateTaskState {
@@ -264,6 +266,30 @@ function startIssueDebateTask(input: {
       });
       const discussion = toDiscussionFromDebate(debate, input.fallbackDiscussion);
       const formalDiscussion = debate.mode === "model" ? discussion : [];
+      const draftIssue = await getIssue(input.issueId);
+      const synthesized = debate.mode === "model"
+        && draftIssue?.refinement
+        && draftIssue.contextAlignment
+        && draftIssue.designBlueprint
+        && draftIssue.suggestedAnswers
+        && draftIssue.requirementContract
+        ? synthesizeIssueArtifactsFromDebate({
+            rawInput: input.rawInput,
+            productContext: await getProductContext(),
+            industryCode: input.industryCode,
+            questions: draftIssue.questions,
+            expectedArtifacts: buildExpectedArtifacts(),
+            draft: {
+              summary: draftIssue.summary,
+              refinement: draftIssue.refinement,
+              contextAlignment: draftIssue.contextAlignment,
+              designBlueprint: draftIssue.designBlueprint,
+              suggestedAnswers: draftIssue.suggestedAnswers,
+              requirementContract: draftIssue.requirementContract
+            },
+            debate
+          })
+        : null;
       const completedAt = nowIso();
       issueDebateTaskStore.set(input.taskId, {
         taskId: input.taskId,
@@ -278,6 +304,12 @@ function startIssueDebateTask(input: {
 
       await updateIssue(input.issueId, (current) => ({
         ...current,
+        summary: synthesized?.summary ?? current.summary,
+        refinement: synthesized?.refinement ?? current.refinement,
+        contextAlignment: synthesized?.contextAlignment ?? current.contextAlignment,
+        designBlueprint: synthesized?.designBlueprint ?? current.designBlueprint,
+        suggestedAnswers: synthesized?.suggestedAnswers ?? current.suggestedAnswers,
+        requirementContract: synthesized?.requirementContract ?? current.requirementContract,
         discussion: formalDiscussion,
         discussionDraft: input.fallbackDiscussion,
         debate,
@@ -363,6 +395,12 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       issueId,
       taskId: taskId || null,
       status,
+      summary: issue.summary,
+      refinement: issue.refinement ?? null,
+      contextAlignment: issue.contextAlignment ?? null,
+      designBlueprint: issue.designBlueprint ?? null,
+      suggestedAnswers: issue.suggestedAnswers ?? [],
+      requirementContract: issue.requirementContract ?? null,
       discussion,
       discussionDraft,
       debate,
@@ -395,7 +433,10 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       return;
     }
 
-    const config = getIndustryConfig(industryCode) ?? listIndustryConfigs()[0];
+    const resolvedIndustryCode = industryCode || detectIndustry(input) || "saas";
+    const config = getIndustryConfig(resolvedIndustryCode)
+      ?? getIndustryConfig("saas")
+      ?? listIndustryConfigs()[0];
     if (!config) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", "No industry role sets configured");
       return;
@@ -461,6 +502,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       soulRoleId: config.assemblyRule.soulRoleId,
       conflicts,
       questions,
+      refinement,
       contextAlignment,
       designBlueprint,
       suggestedAnswers,
@@ -661,7 +703,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       requirementContract: confirmedContract
     });
 
-    options.onProjectCreated?.(project.id);
+    await options.onProjectCreated?.(project.id);
     sendSuccess(res, {
       issue: updated,
       project,

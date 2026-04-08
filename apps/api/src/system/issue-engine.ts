@@ -2,6 +2,7 @@ import { ROLE_LABELS, type RoleType, type StageType } from "@occ/shared";
 import type { IndustryTeamConfig } from "../routes/role-sets.js";
 import type {
   IssueConflict,
+  IssueDebateResult,
   IssueQuestion,
   ProductContext,
   RequirementBackfillItem,
@@ -76,7 +77,7 @@ function tokenize(text: string) {
   return Array.from(new Set([...latinTokens, ...hanBigrams]));
 }
 
-function detectIndustry(text: string) {
+export function detectIndustry(text: string) {
   const normalized = normalizeText(text);
   if (!normalized) {
     return "";
@@ -186,6 +187,76 @@ function truncateText(input: string, limit: number) {
     return normalized;
   }
   return `${normalized.slice(0, limit)}...`;
+}
+
+function buildUniqueDrafts(items: Array<string | undefined>, limit: number) {
+  const unique: string[] = [];
+  for (const item of items) {
+    const normalized = trimSentenceTail(String(item || ""));
+    if (!normalized || unique.includes(normalized)) {
+      continue;
+    }
+    unique.push(normalized);
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+  return unique;
+}
+
+const INVALID_DEBATE_SYNTHESIS_VALUES = [
+  "角色结论",
+  "请在确认卡补充该角色关注参数后再进入执行",
+  "该角色模型调用超时或失败，已降级为保底意见",
+  "模型调用失败，已降级",
+  "先补齐该角色待确认项，再进入下游执行"
+];
+
+function isMeaningfulDebateSynthesisText(input: string) {
+  const normalized = trimSentenceTail(String(input || ""))
+    .replace(/\*+/g, "")
+    .trim();
+  if (!normalized) {
+    return false;
+  }
+  const lowered = normalized.toLowerCase();
+  if (["角色目标", "核心风险", "反对点", "角色结论", "待确认项", "handoff", "交接"].includes(normalized)) {
+    return false;
+  }
+  return !INVALID_DEBATE_SYNTHESIS_VALUES.some((item) => lowered === item.toLowerCase());
+}
+
+function getPreferredDebateOpinion(
+  debate: IssueDebateResult,
+  roleId: RoleType
+) {
+  const candidates = debate.opinions.filter((item) => item.roleId === roleId);
+  return candidates.find((item) => item.mode === "model")
+    || candidates.find((item) => item.mode !== "fallback")
+    || candidates[0];
+}
+
+function findDebateOpinionText(
+  debate: IssueDebateResult,
+  roleId: RoleType,
+  field: "proposal" | "concern" | "handoff"
+) {
+  const opinion = getPreferredDebateOpinion(debate, roleId) as
+    | (IssueDebateResult["opinions"][number] & { handoff?: string })
+    | undefined;
+  const value = trimSentenceTail(String(opinion?.[field] ?? ""));
+  return isMeaningfulDebateSynthesisText(value) ? value : "";
+}
+
+function findDebateOpenQuestions(debate: IssueDebateResult, roleId: RoleType) {
+  const opinion = getPreferredDebateOpinion(debate, roleId) as
+    | (IssueDebateResult["opinions"][number] & { openQuestions?: string[] })
+    | undefined;
+  return Array.isArray(opinion?.openQuestions)
+    ? opinion.openQuestions
+      .map((item) => trimSentenceTail(item))
+      .filter((item) => isMeaningfulDebateSynthesisText(item))
+    : [];
 }
 
 function extractCrossBorderPlatformLabels(text: string) {
@@ -1167,6 +1238,179 @@ export function buildRequirementContract(input: {
     artifacts: input.expectedArtifacts.map((artifact) => artifact.name),
     designTheme: input.designBlueprint.designTheme,
     valueNarrative: input.designBlueprint.valueNarrative
+  };
+}
+
+export function synthesizeIssueArtifactsFromDebate(input: {
+  rawInput: string;
+  productContext: ProductContext;
+  industryCode?: string;
+  questions: IssueQuestion[];
+  expectedArtifacts: IssueExpectedArtifact[];
+  draft: {
+    summary: string;
+    refinement: RequirementRefinement;
+    contextAlignment: IssueContextAlignment;
+    designBlueprint: IssueDesignBlueprint;
+    suggestedAnswers: IssueSuggestedAnswer[];
+    requirementContract: RequirementContract;
+  };
+  debate: IssueDebateResult;
+}) {
+  if (!input.debate || input.debate.opinions.length === 0) {
+    return input.draft;
+  }
+
+  const analystConcern = findDebateOpinionText(input.debate, "ROLE_ANALYST", "concern");
+  const analystProposal = findDebateOpinionText(input.debate, "ROLE_ANALYST", "proposal");
+  const pmProposal = findDebateOpinionText(input.debate, "ROLE_PM", "proposal");
+  const pmConcern = findDebateOpinionText(input.debate, "ROLE_PM", "concern");
+  const productProposal = findDebateOpinionText(input.debate, "ROLE_PRODUCT", "proposal");
+  const productConcern = findDebateOpinionText(input.debate, "ROLE_PRODUCT", "concern");
+  const designProposal = findDebateOpinionText(input.debate, "ROLE_DESIGN", "proposal");
+  const archProposal = findDebateOpinionText(input.debate, "ROLE_ARCH", "proposal")
+    || findDebateOpinionText(input.debate, "ROLE_DEV", "proposal");
+  const qaProposal = findDebateOpinionText(input.debate, "ROLE_QA", "proposal");
+  const qaConcern = findDebateOpinionText(input.debate, "ROLE_QA", "concern");
+  const productOpenQuestions = findDebateOpenQuestions(input.debate, "ROLE_PRODUCT");
+  const analystOpenQuestions = findDebateOpenQuestions(input.debate, "ROLE_ANALYST");
+
+  const summary = truncateText(
+    [
+      input.rawInput ? `原始需求：${truncateText(trimSentenceTail(extractFirstSentence(input.rawInput)), 40)}` : "",
+      productProposal ? `产品结论：${productProposal}` : "",
+      analystConcern ? `需求风险：${analystConcern}` : "",
+      qaProposal ? `验收口径：${qaProposal}` : ""
+    ]
+      .filter(Boolean)
+      .join(" "),
+    220
+  ) || input.draft.summary;
+
+  const refinement: RequirementRefinement = {
+    problemStatement: analystConcern || productConcern || pmConcern || input.draft.refinement.problemStatement,
+    expectedOutcome: productProposal || pmProposal || analystProposal || input.draft.refinement.expectedOutcome,
+    inScopeDraft: buildUniqueDrafts(
+      [
+        productProposal ? `产品主张：${productProposal}` : "",
+        pmProposal ? `推进边界：${pmProposal}` : "",
+        archProposal ? `实现约束：${archProposal}` : "",
+        ...input.draft.refinement.inScopeDraft
+      ],
+      5
+    ),
+    outOfScopeDraft: buildUniqueDrafts(
+      [
+        pmProposal.includes("二期") ? "二期扩展项后置，首期不纳入当前范围。" : "",
+        analystOpenQuestions[0] ? `待确认项未闭合前，不进入自动执行：${analystOpenQuestions[0]}` : "",
+        ...input.draft.refinement.outOfScopeDraft
+      ],
+      5
+    ),
+    acceptanceDraft: buildUniqueDrafts(
+      [
+        qaProposal ? `QA 验收口径：${qaProposal}` : "",
+        qaConcern ? `QA 阻断风险：${qaConcern}` : "",
+        ...input.draft.refinement.acceptanceDraft
+      ],
+      5
+    )
+  };
+
+  const contextAlignment: IssueContextAlignment = {
+    ...input.draft.contextAlignment,
+    missionAnchor: productProposal || input.draft.contextAlignment.missionAnchor,
+    contextNotes: buildUniqueDrafts(
+      [
+        ...input.draft.contextAlignment.contextNotes,
+        input.productContext.productName ? `当前产品: ${input.productContext.productName}` : "",
+        input.industryCode ? `当前行业: ${input.industryCode}` : "",
+        analystConcern ? `需求分析结论：${analystConcern}` : "",
+        productProposal ? `产品对齐结论：${productProposal}` : "",
+        archProposal ? `架构/研发约束：${archProposal}` : "",
+        productOpenQuestions[0] ? `产品待确认项：${productOpenQuestions[0]}` : ""
+      ],
+      6
+    )
+  };
+
+  const designBlueprint: IssueDesignBlueprint = {
+    designTheme: designProposal || input.draft.designBlueprint.designTheme,
+    valueNarrative: buildUniqueDrafts(
+      [
+        designProposal ? `设计方向：${designProposal}` : "",
+        productProposal ? `产品价值：${productProposal}` : "",
+        input.draft.designBlueprint.valueNarrative
+      ],
+      2
+    ).join(" "),
+    targetUsers: input.draft.designBlueprint.targetUsers,
+    coreScenarios: buildUniqueDrafts(
+      [
+        designProposal,
+        productProposal,
+        pmProposal,
+        ...input.draft.designBlueprint.coreScenarios
+      ],
+      4
+    ),
+    proposedMilestones: buildUniqueDrafts(
+      [
+        pmProposal,
+        archProposal,
+        qaProposal,
+        ...input.draft.designBlueprint.proposedMilestones
+      ],
+      4
+    )
+  };
+
+  const suggestedAnswers = input.questions.map((question) => {
+    if (question.id === "goal") {
+      return {
+        questionId: question.id,
+        answer:
+          productProposal
+          || input.draft.suggestedAnswers.find((item) => item.questionId === "goal")?.answer
+          || input.draft.requirementContract.objective,
+        reason: "根据产品/需求角色的真实辩论结论回写。"
+      };
+    }
+    if (question.id === "scope") {
+      return {
+        questionId: question.id,
+        answer: `必须交付：${buildUniqueDrafts([productProposal, pmProposal, archProposal, ...refinement.inScopeDraft], 3).join("；")}。不做：${buildUniqueDrafts(refinement.outOfScopeDraft, 2).join("；") || "超出首期范围的横向扩展。"}。`,
+        reason: "根据 PM、产品、架构/研发角色的真实辩论结论回写。"
+      };
+    }
+    if (question.id === "acceptance") {
+      return {
+        questionId: question.id,
+        answer: `验收标准：${buildUniqueDrafts([qaProposal, qaConcern, ...refinement.acceptanceDraft], 3).join("；")}。`,
+        reason: "根据 QA 角色的真实辩论结论回写。"
+      };
+    }
+    return input.draft.suggestedAnswers.find((item) => item.questionId === question.id) ?? {
+      questionId: question.id,
+      answer: "",
+      reason: "暂无对应角色结论。"
+    };
+  });
+
+  const requirementContract = buildRequirementContract({
+    suggestedAnswers,
+    refinement,
+    designBlueprint,
+    expectedArtifacts: input.expectedArtifacts
+  });
+
+  return {
+    summary,
+    refinement,
+    contextAlignment,
+    designBlueprint,
+    suggestedAnswers,
+    requirementContract
   };
 }
 

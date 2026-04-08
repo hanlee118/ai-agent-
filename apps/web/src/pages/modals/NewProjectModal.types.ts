@@ -2,7 +2,7 @@ export type NewProjectModalProps = {
   isOpen: boolean;
   onClose: () => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
-  onProjectCreated?: () => Promise<void> | void;
+  onProjectCreated?: (project: { id: string; name?: string }) => Promise<void> | void;
 };
 
 export type Priority = 'High' | 'Medium' | 'Low';

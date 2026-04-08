@@ -1,5 +1,5 @@
 import { request } from './core';
-import type { Deliverable, Pagination, Project, Stage } from './types';
+import type { Deliverable, Pagination, Project, ProjectDetail, Stage } from './types';
 
 const toProjectPathId = (id: string) => encodeURIComponent(String(id || '').trim());
 
@@ -353,54 +353,7 @@ export const projectsApi = {
   },
 
   async getDetail(id: string) {
-    return request<{
-      id: string;
-      name: string;
-      status: string;
-      currentStage: string;
-      pendingApproval: boolean;
-      progress: number;
-      summary?: string;
-      stages?: Array<{
-        type: string;
-        label: string;
-        assignee: string;
-        status: 'pending' | 'active' | 'completed' | 'blocked' | 'rejected';
-        progress: number;
-        startedAt?: string;
-        endedAt?: string;
-      }>;
-      tasks?: Array<{
-        id: string;
-        projectId: string;
-        stageType: string;
-        title: string;
-        description: string;
-        assignee: string;
-        status: 'todo' | 'in_progress' | 'blocked' | 'done';
-        priority: 'low' | 'normal' | 'high';
-        updatedAt: string;
-      }>;
-      deliverables?: Array<{
-        id: string;
-        name: string;
-        type: string;
-        status: 'draft' | 'submitted' | 'approved' | 'rejected';
-        stageType: string;
-        content?: string;
-        version?: number;
-        createdBy?: string;
-        updatedAt: string;
-      }>;
-      timeline?: Array<{
-        id: string;
-        timestamp: string;
-        agentId?: string;
-        type: string;
-        title: string;
-        content: string;
-        priority: 'low' | 'normal' | 'high' | 'urgent';
-      }>;
+    return request<ProjectDetail & {
       requiredActions?: ProjectRequiredAction[];
     }>(`/projects/${toProjectPathId(id)}`);
   },

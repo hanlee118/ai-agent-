@@ -1,0 +1,48 @@
+{
+  "task_type": "stabilization",
+  "title": "{{title}}",
+  "issue_labels": {
+    "fixed": ["execution", "codex-ready", "hardening"],
+    "dynamic": ["{{dynamic_label_1}}"]
+  },
+  "source_of_truth": {
+    "route_entry": ["{{route_entry_path}}"],
+    "active_implementation": ["{{active_impl_path}}"],
+    "candidate_compat_layer": ["{{compat_layer_path}}"],
+    "related_files": ["{{related_file_1}}", "{{related_file_2}}"]
+  },
+  "validation_commands": [
+    { "command": "{{validation_command_1}}", "required": true },
+    { "command": "{{validation_command_2}}", "required": true }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要扩大为无关重构",
+      "不要新增平行状态语义",
+      "不要改动无关页面或无关 API",
+      "不要提前进入后续功能接入"
+    ],
+    "soft_stop": [
+      "如 issue 描述与代码事实不一致，以代码事实为准，但必须在结果中说明",
+      "若保留兼容层，兼容层只能作为无逻辑转发层"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "如必须保留兼容入口，兼容入口只能作为无逻辑转发层，不能承载第二套业务逻辑"
+  },
+  "context": {
+    "background": ["{{background_1}}", "{{background_2}}", "{{background_3}}"],
+    "current_constraint": ["{{constraint_1}}", "{{constraint_2}}", "{{constraint_3}}"]
+  },
+  "decision": {
+    "summary": "{{decision_summary}}",
+    "why": ["{{decision_reason_1}}", "{{decision_reason_2}}", "{{decision_reason_3}}"]
+  },
+  "scope": {
+    "goals": ["{{goal_1}}", "{{goal_2}}", "{{goal_3}}"],
+    "non_goals": ["{{non_goal_1}}", "{{non_goal_2}}", "{{non_goal_3}}"]
+  },
+  "acceptance": ["{{acceptance_1}}", "{{acceptance_2}}"],
+  "risks": ["{{risk_1}}", "{{risk_2}}", "{{risk_3}}"]
+}

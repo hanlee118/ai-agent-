@@ -1,0 +1,47 @@
+{
+  "task_type": "integration",
+  "title": "{{title}}",
+  "issue_labels": {
+    "fixed": ["execution", "codex-ready", "integration"],
+    "dynamic": ["{{dynamic_label_1}}"]
+  },
+  "source_of_truth": {
+    "upstream_system": ["{{upstream_file_1}}", "{{upstream_file_2}}"],
+    "downstream_system": ["{{downstream_file_1}}", "{{downstream_file_2}}"],
+    "shared_contract": ["{{contract_file_1}}"],
+    "integration_entry": ["{{integration_entry_file}}"]
+  },
+  "validation_commands": [
+    { "command": "{{validation_command_1}}", "required": true },
+    { "command": "{{validation_command_2}}", "required": true },
+    { "command": "{{validation_command_3}}", "required": false }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要同时改造上下游的领域定义",
+      "不要在联调时顺手重写任一系统",
+      "不要引入新的并行协议或状态语义"
+    ],
+    "soft_stop": [
+      "不要跳过现有共享契约"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "若存在过渡适配层，适配层只能做协议映射，不能承载新的业务状态定义"
+  },
+  "context": {
+    "background": ["{{background_1}}", "{{background_2}}", "{{background_3}}"]
+  },
+  "scope": {
+    "goals": ["{{goal_1}}", "{{goal_2}}", "{{goal_3}}"],
+    "non_goals": ["{{non_goal_1}}", "{{non_goal_2}}", "{{non_goal_3}}"]
+  },
+  "integration_rules": [
+    "联调必须复用现有共享契约",
+    "不允许上下游各自发明一套映射不一致的状态语义",
+    "若发现契约缺口，只能在共享契约层补，不要分别在两端私自兜底出不同逻辑"
+  ],
+  "acceptance": ["{{acceptance_1}}", "{{acceptance_2}}", "{{acceptance_3}}"],
+  "risks": ["{{risk_1}}", "{{risk_2}}", "{{risk_3}}"]
+}

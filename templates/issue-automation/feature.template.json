@@ -1,0 +1,46 @@
+{
+  "task_type": "feature",
+  "title": "{{title}}",
+  "issue_labels": {
+    "fixed": ["execution", "codex-ready", "feature"],
+    "dynamic": ["{{dynamic_label_1}}"]
+  },
+  "source_of_truth": {
+    "entry_points": ["{{entry_1}}", "{{entry_2}}"],
+    "existing_domain_model": ["{{domain_model_file_1}}"],
+    "ui_reference": ["{{ui_file_1}}", "{{ui_file_2}}"],
+    "api_reference": ["{{api_file_1}}"]
+  },
+  "validation_commands": [
+    { "command": "{{validation_command_1}}", "required": true },
+    { "command": "{{validation_command_2}}", "required": true }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要重写已有主链",
+      "不要发明第二套领域语义",
+      "不要顺手改无关功能"
+    ],
+    "soft_stop": [
+      "不要在本任务里夹带重构"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": false,
+    "rule": "新增功能必须直接复用既有领域模型与状态语义，不通过兼容层另起一套"
+  },
+  "context": {
+    "background": ["{{background_1}}", "{{background_2}}"]
+  },
+  "scope": {
+    "goals": ["{{goal_1}}", "{{goal_2}}", "{{goal_3}}"],
+    "non_goals": ["{{non_goal_1}}", "{{non_goal_2}}", "{{non_goal_3}}"]
+  },
+  "reuse_constraints": [
+    "必须复用现有领域模型与状态语义",
+    "不允许并行发明第二套功能状态",
+    "若发现现有语义不足，只能记录为 follow-up，不在本 issue 擅自扩模"
+  ],
+  "acceptance": ["{{acceptance_1}}", "{{acceptance_2}}", "{{acceptance_3}}"],
+  "risks": ["{{risk_1}}", "{{risk_2}}", "{{risk_3}}"]
+}

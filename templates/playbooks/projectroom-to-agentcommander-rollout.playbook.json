@@ -1,0 +1,648 @@
+{
+  "playbook_name": "projectroom-to-agentcommander-rollout",
+  "playbook_version": "1.1.0",
+  "description": "先稳定 ProjectRoom，再定义 AgentCommander 边界，最后按只读 -> 可操作顺序接入",
+  "global_rules": {
+    "language": "zh-CN",
+    "issue_generation_mode": "machine-first",
+    "prompt_generation_mode": "same-source",
+    "default_block_on_failure": true,
+    "require_explicit_source_of_truth": true,
+    "require_validation_commands": true,
+    "require_stop_conditions": true,
+    "require_result_schema": true,
+    "require_artifacts_before_transition": true
+  },
+  "recommended_order": [
+    "projectroom-minimal-no-behavior-split",
+    "agentcommander-projectroom-boundary-definition",
+    "agentcommander-projectroom-readonly-integration",
+    "agentcommander-projectroom-action-integration"
+  ],
+  "transition_rules": {
+    "default_transition_policy": "strict-sequential",
+    "rules": [
+      {
+        "from_status": ["passed"],
+        "to_next_issue": "allow_if_dependencies_satisfied"
+      },
+      {
+        "from_status": ["failed", "blocked"],
+        "to_next_issue": "deny"
+      },
+      {
+        "from_status": ["passed"],
+        "requires_artifacts": true,
+        "on_missing_artifacts": "deny"
+      },
+      {
+        "from_status": ["passed"],
+        "requires_result_schema_match": true,
+        "on_schema_mismatch": "deny"
+      },
+      {
+        "from_status": ["passed"],
+        "requires_required_validations_passed": true,
+        "on_validation_failure": "deny"
+      }
+    ],
+    "manual_override_policy": {
+      "allow_manual_override": true,
+      "required_fields": [
+        "operator",
+        "reason",
+        "approved_issue_id",
+        "timestamp"
+      ],
+      "note": "仅允许人工明确覆盖自动阻断，不允许静默跳过依赖或 schema 校验"
+    }
+  },
+  "issue_creation_payload_schema": {
+    "type": "object",
+    "required": [
+      "issue_title",
+      "issue_labels",
+      "source_of_truth",
+      "validation_commands",
+      "stop_conditions",
+      "compatibility_policy",
+      "issue_body",
+      "codex_prompt"
+    ],
+    "properties": {
+      "issue_title": {
+        "type": "string",
+        "minLength": 5
+      },
+      "issue_labels": {
+        "type": "array",
+        "minItems": 1,
+        "items": { "type": "string" }
+      },
+      "source_of_truth": {
+        "type": "object",
+        "minProperties": 1
+      },
+      "validation_commands": {
+        "type": "array",
+        "minItems": 1,
+        "items": {
+          "type": "object",
+          "required": ["command", "required"],
+          "properties": {
+            "command": { "type": "string" },
+            "required": { "type": "boolean" }
+          }
+        }
+      },
+      "stop_conditions": {
+        "type": "object",
+        "required": ["hard_stop", "soft_stop"],
+        "properties": {
+          "hard_stop": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "soft_stop": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "compatibility_policy": {
+        "type": "object",
+        "required": ["allow_compat_layer", "rule"],
+        "properties": {
+          "allow_compat_layer": { "type": "boolean" },
+          "rule": { "type": "string" }
+        }
+      },
+      "issue_body": {
+        "type": "string",
+        "minLength": 50
+      },
+      "codex_prompt": {
+        "type": "string",
+        "minLength": 50
+      }
+    }
+  },
+  "codex_result_ingest_schema": {
+    "type": "object",
+    "required": [
+      "issue_id",
+      "status",
+      "summary",
+      "validation_results"
+    ],
+    "properties": {
+      "issue_id": {
+        "type": "string"
+      },
+      "status": {
+        "type": "string",
+        "enum": ["passed", "failed", "blocked"]
+      },
+      "summary": {
+        "type": "string"
+      },
+      "gitlab_issue_url": {
+        "type": "string"
+      },
+      "gitlab_note_url": {
+        "type": "string"
+      },
+      "validation_results": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "required": ["command", "passed"],
+          "properties": {
+            "command": { "type": "string" },
+            "passed": { "type": "boolean" },
+            "details": { "type": "string" }
+          }
+        }
+      },
+      "artifacts": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "warnings": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    }
+  },
+  "auto_retry_policy": {
+    "enabled": true,
+    "max_retries_per_issue": 1,
+    "retryable_conditions": [
+      {
+        "kind": "issue_creation_failure",
+        "policy": "retry_once_if_network_or_gitlab_transient"
+      },
+      {
+        "kind": "codex_execution_failure",
+        "policy": "retry_once_only_if_failure_is_non_deterministic_and_no_code_change_committed"
+      },
+      {
+        "kind": "validation_command_failure",
+        "policy": "do_not_retry_automatically"
+      },
+      {
+        "kind": "result_schema_mismatch",
+        "policy": "do_not_retry_automatically"
+      },
+      {
+        "kind": "missing_required_artifact",
+        "policy": "do_not_retry_automatically"
+      }
+    ],
+    "non_retryable_reasons": [
+      "required validation failed",
+      "hard stop violated",
+      "artifacts missing",
+      "schema mismatch",
+      "scope expanded beyond stop_conditions"
+    ],
+    "notes": [
+      "自动重试只适用于瞬时失败，不适用于语义失败",
+      "若 Codex 已提交变更但结果不合规，应转人工审查，不应自动重跑覆盖"
+    ]
+  },
+  "runtime_decision_rules": {
+    "before_issue_creation": [
+      "校验 issue payload 是否满足 issue_creation_payload_schema",
+      "若缺少 source_of_truth 或 validation_commands，拒绝创建"
+    ],
+    "before_codex_dispatch": [
+      "确认依赖 issue 的 status 全部为 passed",
+      "确认依赖 issue 的 artifact_requirements 已满足",
+      "确认上一步结果满足对应 result_schema"
+    ],
+    "after_codex_completion": [
+      "按 codex_result_ingest_schema 校验回收结果",
+      "校验 required validation_commands 是否全部 passed",
+      "校验当前 issue 的 must_produce artifacts 是否齐全"
+    ],
+    "before_transition_to_next_issue": [
+      "当前 issue status 必须为 passed",
+      "当前 issue artifacts 必须完整",
+      "当前 issue result_schema 必须匹配",
+      "当前 issue required validations 必须全部通过"
+    ]
+  },
+  "suggested_executor_guards": [
+    "如果上一步 status != passed，则所有 auto_run_if_previous_passed=true 的后续任务全部挂起",
+    "如果 validation_results 中任一 required command passed=false，则后续任务全部挂起",
+    "如果 artifacts 不满足 artifact_requirements.must_produce，则后续任务全部挂起",
+    "如果结果对象不满足 result_schema，则后续任务全部挂起",
+    "如果发现输出中出现明显越过 hard_stop 的行为，应将当前任务标记为 blocked 而不是 failed，等待人工判断"
+  ],
+  "issues": [
+    {
+      "id": "projectroom-minimal-no-behavior-split",
+      "depends_on": [],
+      "auto_run_if_previous_passed": false,
+      "blocking_policy": {
+        "on_issue_creation_failure": "stop",
+        "on_codex_execution_failure": "stop",
+        "on_validation_failure": "stop"
+      },
+      "artifact_requirements": {
+        "must_produce": [
+          "gitlab_issue_url",
+          "codex_result_summary",
+          "modified_files",
+          "validation_results",
+          "remaining_risks"
+        ],
+        "optional": [
+          "architecture_notes"
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "status",
+          "summary",
+          "modified_files",
+          "active_implementation",
+          "compat_layers",
+          "validation_results",
+          "remaining_risks"
+        ],
+        "properties": {
+          "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+          "summary": { "type": "string" },
+          "modified_files": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "reason"],
+              "properties": {
+                "path": { "type": "string" },
+                "reason": { "type": "string" }
+              }
+            }
+          },
+          "active_implementation": { "type": "string" },
+          "compat_layers": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "validation_results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["command", "passed"],
+              "properties": {
+                "command": { "type": "string" },
+                "passed": { "type": "boolean" },
+                "details": { "type": "string" }
+              }
+            }
+          },
+          "remaining_risks": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      },
+      "issue_title": "对 ProjectRoom 唯一事实实现做最小无行为拆分，降低维护风险",
+      "issue_labels": ["execution", "hardening", "codex-ready", "stabilization", "projectroom"],
+      "source_of_truth": {
+        "route_entry": ["apps/web/src/App.tsx"],
+        "stable_entry_points": [
+          "apps/web/src/pages/ProjectRoomPage.tsx",
+          "apps/web/src/pages/ProjectRoomPage/index.tsx"
+        ],
+        "active_implementation": ["apps/web/src/pages/ProjectRoomPage.impl.tsx"],
+        "related_files": [
+          "apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts"
+        ]
+      },
+      "validation_commands": [
+        {
+          "command": "pnpm --filter @occ/web typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web build",
+          "required": true
+        }
+      ],
+      "stop_conditions": {
+        "hard_stop": [
+          "不要开始 AgentCommander 接入",
+          "不要新增 task/delegation 平行状态语义",
+          "不要修改现有 API 契约",
+          "不要改变 ready-for-review 门禁行为"
+        ],
+        "soft_stop": [
+          "不要把本任务扩大为 ProjectRoom 全量重构",
+          "不要做无关 UI 美化",
+          "不要顺手重排页面信息架构"
+        ]
+      },
+      "compatibility_policy": {
+        "allow_compat_layer": true,
+        "rule": "现有兼容入口可以保留，但仍必须保持无逻辑转发；本轮新增拆分只能发生在唯一事实实现内部或其新拆出的子组件中"
+      },
+      "issue_body": "# 背景\n- ProjectRoom 双实现风险已经完成收口，当前唯一事实实现已落在 `apps/web/src/pages/ProjectRoomPage.impl.tsx`。\n- 当前路由与兼容入口已经稳定，页面行为、typecheck、build 都已通过。\n- 当前剩余的主要问题不再是演示可信度，而是维护风险：`ProjectRoomPage.impl.tsx` 体量仍然偏大，后续继续迭代时容易再次堆积逻辑。\n- 当前仍不宜直接开始 AgentCommander 接入，优先级更高的是继续降低 ProjectRoom 的结构维护风险。\n\n# 当前判断\n先对 `ProjectRoomPage.impl.tsx` 做最小无行为拆分，降低维护风险，再准备 AgentCommander 接入约束。\n\n# 本次目标\n- 对 `ProjectRoomPage.impl.tsx` 做最小无行为拆分\n- 优先拆出 `task/delegation` 详情相关的 1 到 2 个子组件\n- 降低单文件继续膨胀的速度，同时保持现有页面行为稳定\n\n# 本次不做\n- 暂不接 AgentCommander\n- 不新增第二套状态语义\n- 不改 task/delegation 的接口或业务规则\n- 不做无关 UI 优化\n- 不把本任务扩大成 ProjectRoom 全量重构\n",
+      "codex_prompt": "你现在要执行一个收口型任务，请严格按范围执行，不要自行扩展。任务标题：对 ProjectRoom 唯一事实实现做最小无行为拆分，降低维护风险。请先核对 `apps/web/src/App.tsx`、`apps/web/src/pages/ProjectRoomPage.tsx`、`apps/web/src/pages/ProjectRoomPage/index.tsx`、`apps/web/src/pages/ProjectRoomPage.impl.tsx`、`apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts`。本次目标是做最小无行为拆分，优先拆 task/delegation 详情相关的 1 到 2 个子组件；不接 AgentCommander，不改 API 契约，不改 ready-for-review 门禁行为，不新增平行状态语义。完成后要说明拆出的子组件职责、修改文件、ProjectRoomPage.impl.tsx 剩余职责、兼容入口是否仍为无逻辑转发，并给出 typecheck/build 结果和残留维护风险。"
+    },
+    {
+      "id": "agentcommander-projectroom-boundary-definition",
+      "depends_on": ["projectroom-minimal-no-behavior-split"],
+      "auto_run_if_previous_passed": true,
+      "blocking_policy": {
+        "on_issue_creation_failure": "stop",
+        "on_codex_execution_failure": "stop",
+        "on_validation_failure": "stop",
+        "on_missing_artifact": "stop"
+      },
+      "artifact_requirements": {
+        "must_produce": [
+          "gitlab_issue_url",
+          "codex_result_summary",
+          "shared_semantics_list",
+          "state_ownership_matrix",
+          "allowed_capabilities",
+          "forbidden_patterns",
+          "follow_up_gaps",
+          "validation_results"
+        ],
+        "optional": [
+          "integration_notes"
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "status",
+          "summary",
+          "shared_semantics_list",
+          "state_ownership_matrix",
+          "allowed_capabilities",
+          "forbidden_patterns",
+          "follow_up_gaps",
+          "validation_results"
+        ],
+        "properties": {
+          "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+          "summary": { "type": "string" }
+        }
+      },
+      "issue_title": "定义 AgentCommander 接入 ProjectRoom 的联调边界，强制复用 task/delegation 语义",
+      "issue_labels": ["execution", "integration", "codex-ready", "boundary-definition", "agentcommander", "projectroom"],
+      "source_of_truth": {
+        "upstream_system": [
+          "apps/web/src/pages/ProjectRoomPage.impl.tsx",
+          "apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts"
+        ],
+        "downstream_system": [
+          "apps/web/src/pages/AgentCommanderPage.tsx"
+        ],
+        "shared_contract": [
+          "apps/api/src/routes/tasks.ts",
+          "apps/api/src/services/task-coordination.ts"
+        ],
+        "integration_entry": [
+          "apps/web/src/App.tsx"
+        ]
+      },
+      "validation_commands": [
+        {
+          "command": "pnpm --filter @occ/api typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web build",
+          "required": true
+        }
+      ],
+      "stop_conditions": {
+        "hard_stop": [
+          "不要直接开始实现 AgentCommander 新交互",
+          "不要新增 task/delegation 平行状态语义",
+          "不要在 AgentCommander 内部重新定义 reviewer、delegation、ready-for-review、blocked 等核心状态含义",
+          "不要修改现有 API 契约来迎合前端各自为政的状态模型"
+        ],
+        "soft_stop": [
+          "不要顺手重构 ProjectRoom 或 AgentCommander 大页面结构",
+          "不要在本任务里追加 UI 美化",
+          "不要把联调边界定义任务扩展为完整实现任务"
+        ]
+      },
+      "compatibility_policy": {
+        "allow_compat_layer": true,
+        "rule": "若后续确实需要适配层，适配层只能做视图映射或字段映射，不能承载新的业务状态定义；ProjectRoom 仍是 task/delegation 语义的事实来源，AgentCommander 只能消费和触发现有语义"
+      },
+      "issue_body": "# 背景\n- ProjectRoom 当前主链已经接近“演示可信、交互顺手、状态一致”的水平，且双实现风险已完成收口。\n- 当前 ProjectRoom 的 task/delegation 语义已经相对稳定，包括 reviewer、delegation 状态、ready-for-review 门禁、依赖阻塞、失败提示等。\n- AgentCommander 后续需要接入这套能力，但如果不先定义联调边界，很容易在 AgentCommander 内部再长出一套平行状态语义。\n\n# 联调目标\n- 明确 AgentCommander 接入 ProjectRoom 时应复用的 task/delegation 核心语义\n- 明确哪些状态由 ProjectRoom/API 作为事实来源，哪些只允许 AgentCommander 做消费或触发\n- 为后续 AgentCommander 实现 issue 提供单一边界依据，避免并行发明第二套状态系统\n",
+      "codex_prompt": "你现在要执行一个联调边界定义任务，请先定语义边界，不要直接开始编码实现。任务标题：定义 AgentCommander 接入 ProjectRoom 的联调边界，强制复用 task/delegation 语义。必须先核对 `apps/web/src/pages/ProjectRoomPage.impl.tsx`、`apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts`、`apps/web/src/pages/AgentCommanderPage.tsx`、`apps/api/src/routes/tasks.ts`、`apps/api/src/services/task-coordination.ts`、`apps/web/src/App.tsx`。输出共享核心语义清单、状态归属表、AgentCommander 允许接入的能力边界、明确禁止项和 follow-up；不要直接实现交互，不要改 API 契约，不要新造平行状态语义。"
+    },
+    {
+      "id": "agentcommander-projectroom-readonly-integration",
+      "depends_on": ["agentcommander-projectroom-boundary-definition"],
+      "auto_run_if_previous_passed": true,
+      "blocking_policy": {
+        "on_issue_creation_failure": "stop",
+        "on_codex_execution_failure": "stop",
+        "on_validation_failure": "stop",
+        "on_missing_artifact": "stop",
+        "on_schema_mismatch": "stop"
+      },
+      "artifact_requirements": {
+        "must_produce": [
+          "gitlab_issue_url",
+          "codex_result_summary",
+          "readonly_sections",
+          "semantic_reuse_map",
+          "modified_files",
+          "validation_results",
+          "remaining_prerequisites_for_actions"
+        ],
+        "optional": [
+          "ui_mapping_notes"
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "status",
+          "summary",
+          "readonly_sections",
+          "semantic_reuse_map",
+          "modified_files",
+          "validation_results",
+          "remaining_prerequisites_for_actions"
+        ],
+        "properties": {
+          "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+          "summary": { "type": "string" }
+        }
+      },
+      "issue_title": "让 AgentCommander 只读接入 ProjectRoom 语义，先完成展示映射，不开放触发操作",
+      "issue_labels": ["execution", "integration", "feature", "codex-ready", "readonly", "agentcommander", "projectroom"],
+      "source_of_truth": {
+        "upstream_system": [
+          "apps/web/src/pages/ProjectRoomPage.impl.tsx",
+          "apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts"
+        ],
+        "downstream_system": [
+          "apps/web/src/pages/AgentCommanderPage.tsx"
+        ],
+        "shared_contract": [
+          "apps/api/src/routes/tasks.ts",
+          "apps/api/src/services/task-coordination.ts"
+        ],
+        "integration_entry": [
+          "apps/web/src/App.tsx"
+        ],
+        "boundary_reference": [
+          "上一张联调边界定义 issue 的结论"
+        ]
+      },
+      "validation_commands": [
+        {
+          "command": "pnpm --filter @occ/api typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web build",
+          "required": true
+        }
+      ],
+      "stop_conditions": {
+        "hard_stop": [
+          "不要开放任何会修改 task/delegation 状态的操作入口",
+          "不要新增 task/delegation 平行状态语义",
+          "不要在 AgentCommander 内复制一套 ProjectRoom 业务判断逻辑",
+          "不要修改 API 契约来迁就只读展示"
+        ],
+        "soft_stop": [
+          "不要顺手重构 AgentCommander 大页面结构",
+          "不要追加无关 UI 美化",
+          "不要把只读接入扩大成全功能接入"
+        ]
+      },
+      "compatibility_policy": {
+        "allow_compat_layer": true,
+        "rule": "若需要增加映射层，映射层只能做字段整形、展示态归一和文案复用，不能定义新的业务状态"
+      },
+      "issue_body": "# 背景\n- ProjectRoom 当前已经形成较稳定的 task/delegation 语义，是后续 AgentCommander 接入时的事实来源。\n- 在真正开放交互前，更稳妥的方式是先完成只读接入，验证 AgentCommander 对 ProjectRoom 语义的展示映射是否成立。\n\n# 功能目标\n- 在 AgentCommander 中只读展示与 ProjectRoom 对齐的 task/delegation 核心状态信息\n- 复用现有语义，避免在 AgentCommander 里复制第二套业务口径\n- 为后续可触发操作接入提供稳定展示基础\n",
+      "codex_prompt": "你现在要执行一个联调实现任务，但范围只到只读展示，不要开放写操作。任务标题：让 AgentCommander 只读接入 ProjectRoom 语义，先完成展示映射，不开放触发操作。请先核对 `apps/web/src/pages/ProjectRoomPage.impl.tsx`、`apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts`、`apps/web/src/pages/AgentCommanderPage.tsx`、`apps/api/src/routes/tasks.ts`、`apps/api/src/services/task-coordination.ts`、`apps/web/src/App.tsx`。只读展示 reviewer、pending delegation、blocked、ready-for-review 提示、delegation 摘要等；不要出现写操作按钮，不要复制 ProjectRoom 的业务判断逻辑，不要修改 API 契约。"
+    },
+    {
+      "id": "agentcommander-projectroom-action-integration",
+      "depends_on": ["agentcommander-projectroom-readonly-integration"],
+      "auto_run_if_previous_passed": true,
+      "blocking_policy": {
+        "on_issue_creation_failure": "stop",
+        "on_codex_execution_failure": "stop",
+        "on_validation_failure": "stop",
+        "on_missing_artifact": "stop",
+        "on_schema_mismatch": "stop"
+      },
+      "artifact_requirements": {
+        "must_produce": [
+          "gitlab_issue_url",
+          "codex_result_summary",
+          "enabled_actions",
+          "gating_reuse_map",
+          "error_message_reuse_map",
+          "modified_files",
+          "validation_results",
+          "deferred_actions"
+        ],
+        "optional": [
+          "shared_action_helper_notes"
+        ]
+      },
+      "result_schema": {
+        "type": "object",
+        "required": [
+          "status",
+          "summary",
+          "enabled_actions",
+          "gating_reuse_map",
+          "error_message_reuse_map",
+          "modified_files",
+          "validation_results",
+          "deferred_actions"
+        ],
+        "properties": {
+          "status": { "type": "string", "enum": ["passed", "failed", "blocked"] },
+          "summary": { "type": "string" }
+        }
+      },
+      "issue_title": "在 AgentCommander 中接入受控的 task/delegation 操作入口，严格复用现有语义与门禁",
+      "issue_labels": ["execution", "integration", "feature", "codex-ready", "actions", "agentcommander", "projectroom"],
+      "source_of_truth": {
+        "upstream_system": [
+          "apps/web/src/pages/ProjectRoomPage.impl.tsx",
+          "apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts"
+        ],
+        "downstream_system": [
+          "apps/web/src/pages/AgentCommanderPage.tsx"
+        ],
+        "shared_contract": [
+          "apps/api/src/routes/tasks.ts",
+          "apps/api/src/services/task-coordination.ts"
+        ],
+        "integration_entry": [
+          "apps/web/src/App.tsx"
+        ],
+        "boundary_reference": [
+          "联调边界定义 issue 的结论"
+        ],
+        "readonly_reference": [
+          "只读接入 issue 的实现结果"
+        ]
+      },
+      "validation_commands": [
+        {
+          "command": "pnpm --filter @occ/api typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web typecheck",
+          "required": true
+        },
+        {
+          "command": "pnpm --filter @occ/web build",
+          "required": true
+        }
+      ],
+      "stop_conditions": {
+        "hard_stop": [
+          "不要新增 task/delegation 平行状态语义",
+          "不要绕开现有 API 或门禁逻辑自行在前端决定最终状态",
+          "不要放开未定义清楚的写操作",
+          "不要修改现有 API 契约来适配 AgentCommander 私有流程"
+        ],
+        "soft_stop": [
+          "不要顺手重构 AgentCommander 或 ProjectRoom 大结构",
+          "不要追加无关 UI 美化",
+          "不要一次性接入所有可能操作，超出边界的能力记为 follow-up"
+        ]
+      },
+      "compatibility_policy": {
+        "allow_compat_layer": true,
+        "rule": "若需要共享动作包装层，只能封装现有 API 调用、既有门禁判断复用和错误文案映射，不能定义 AgentCommander 私有状态流"
+      },
+      "issue_body": "# 背景\n- ProjectRoom 已经形成较稳定的 task/delegation 语义、门禁规则和错误处理口径。\n- AgentCommander 的只读接入已验证展示映射成立，接下来才适合开放受控操作入口。\n\n# 功能目标\n- 在 AgentCommander 中接入经过约束的 task/delegation 操作入口\n- 复用现有 ProjectRoom/API 的操作语义、门禁和错误提示口径\n- 让 AgentCommander 成为受控的操作入口，而不是独立状态系统\n",
+      "codex_prompt": "你现在要执行一个受控联调实现任务，可以接入操作入口，但必须严格复用既有语义、门禁和错误口径。任务标题：在 AgentCommander 中接入受控的 task/delegation 操作入口，严格复用现有语义与门禁。先核对 `apps/web/src/pages/ProjectRoomPage.impl.tsx`、`apps/web/src/pages/ProjectRoomPage/taskCollaborationUi.ts`、`apps/web/src/pages/AgentCommanderPage.tsx`、`apps/api/src/routes/tasks.ts`、`apps/api/src/services/task-coordination.ts`、`apps/web/src/App.tsx`。只接入语义明确、门禁已知、错误提示已有口径的操作；不要绕开既有 API 和门禁，不要新造 AgentCommander 私有状态流。"
+    }
+  ]
+}

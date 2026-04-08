@@ -111,6 +111,37 @@ test("init stage protocol gate accepts collaboration evidence from content when 
   assert.equal(result.protocolChecks.some((item) => item.key === "collaboration" && item.passed === true), true);
 });
 
+test("init stage protocol gate accepts charter template headings", () => {
+  const result = evaluateStageExecutionProtocolGate({
+    stageType: "INIT",
+    liveBody: [
+      "## 项目背景与目标",
+      "- 围绕 ProjectRoom 与 AgentCommander 主链做首轮推进验证",
+      "## 范围定义（In Scope / Out of Scope）",
+      "- In Scope: 项目创建、首轮推进、交付物与审批链路",
+      "- Out of Scope: 新一轮 schema 重构",
+      "## 角色分工与责任",
+      "- 阶段负责人: ROLE_PM",
+      "## 待确认项",
+      "- ACCEPT 阶段真实模型证据仍需继续验证",
+      "协作交接卡",
+      "factsConfirmed: 已确认 INIT 产物可在首轮推进中生成",
+      "assumptions: 默认当前 scripted 运行态继续用于本地主链验证",
+      "decisions: 先让 INIT 轻执行产物通过当前协议，再继续推进后续阶段",
+      "handoff: 交给分析阶段继续细化范围、约束与验收标准",
+      "openQuestions: ANALYSIS 到 ACCEPT 的剩余真机链路还需后续回归"
+    ].join("\n"),
+    deliverables: [],
+    executions: [],
+    requireSkillEvidence: true,
+    requireCollaborationHandoff: true
+  });
+
+  assert.equal(result.passed, true);
+  assert.equal(result.contentChecks.some((item) => item.key === "goal" && item.passed === true), true);
+  assert.equal(result.contentChecks.some((item) => item.key === "scope" && item.passed === true), true);
+});
+
 test("accept stage protocol gate requires explicit skill evidence in content for direct-model stages", () => {
   const result = evaluateStageExecutionProtocolGate({
     stageType: "ACCEPT",

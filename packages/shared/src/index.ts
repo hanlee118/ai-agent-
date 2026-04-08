@@ -2,6 +2,27 @@ export type StageType = "INIT" | "ANALYSIS" | "DESIGN" | "DEV" | "ACCEPT";
 export type ProjectStatus = "active" | "paused" | "blocked" | "completed";
 export type StageStatus = "pending" | "active" | "completed" | "blocked" | "rejected";
 export type DeliverableStatus = "draft" | "submitted" | "approved" | "rejected";
+export type CoordinationMode = "single_owner" | "team_collab" | "delegated_execution";
+export type DelegationPolicy = "forbidden" | "manual_only" | "auto_allowed";
+export type SyncPolicy = "db_only" | "db_plus_gitlab" | "full_mirror";
+export type ContextScope = "local" | "stage" | "project" | "cross_project";
+export type TaskParticipantRole = "owner" | "supporter" | "reviewer" | "observer";
+export type TaskDependencyType = "blocks" | "soft_depends" | "relates_to";
+export type TaskDelegationMode = "research" | "coding" | "validation" | "summarization" | "review";
+export type TaskDelegationStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "expired";
+export type TaskBlockedReasonCode =
+  | "dependency_blocked"
+  | "delegation_failed"
+  | "pending_approval"
+  | "external_sync_blocked"
+  | "manual_intervention_required";
+export type TaskNextActionCode =
+  | "waiting_for_owner"
+  | "waiting_for_reviewer"
+  | "waiting_for_dependency"
+  | "waiting_for_retry"
+  | "waiting_for_approval";
+export type TaskGitLabSyncStatus = "not_synced" | "sync_required" | "synced";
 export type RoleType =
   | "ROLE_ASSISTANT"
   | "ROLE_PM"
@@ -15,7 +36,19 @@ export type RoleType =
 export type TimelinePriority = "low" | "normal" | "high" | "urgent";
 export type RuntimeMode = "scripted" | "openai-compatible";
 export type ProjectStageExecutionMode = "direct_model" | "terminal_agent";
-export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
+export type TaskStatus =
+  | "draft"
+  | "ready"
+  | "assigned"
+  | "todo"
+  | "in_progress"
+  | "blocked"
+  | "pending_review"
+  | "pending_approval"
+  | "done"
+  | "completed"
+  | "rejected"
+  | "cancelled";
 export type TaskPriority = "low" | "normal" | "high";
 export type ServiceStatus = "healthy" | "degraded";
 export type RuntimeValidationStatus = "unknown" | "healthy" | "failed";
@@ -68,6 +101,20 @@ export interface Task {
   title: string;
   description: string;
   assignee: RoleType;
+  ownerAgentId?: string;
+  reviewAgentId?: string;
+  coordinationMode?: CoordinationMode;
+  delegationPolicy?: DelegationPolicy;
+  syncPolicy?: SyncPolicy;
+  contextScope?: ContextScope;
+  parentTaskId?: string;
+  pendingDelegationCount?: number;
+  lastDelegatedAt?: string;
+  blockedReason?: TaskBlockedReason;
+  nextAction?: TaskNextAction;
+  dependencies?: TaskDependencySummary[];
+  delegationSummary?: TaskDelegationSummary[];
+  gitlab?: TaskGitLabSyncInfo;
   status: TaskStatus;
   priority: TaskPriority;
   updatedAt: string;
@@ -79,6 +126,121 @@ export interface TaskBoardItem extends Task {
   projectCurrentStage: StageType;
   projectPendingApproval: boolean;
   projectUpdatedAt: string;
+}
+
+export interface TaskParticipant {
+  id: string;
+  projectId: string;
+  taskId: string;
+  agentId: string;
+  role: TaskParticipantRole;
+  createdAt: string;
+}
+
+export interface TaskDependency {
+  id: string;
+  projectId: string;
+  taskId: string;
+  dependsOnTaskId: string;
+  type: TaskDependencyType;
+  createdAt: string;
+}
+
+export interface TaskDependencySummary extends TaskDependency {
+  taskTitle?: string;
+  dependsOnTaskTitle?: string;
+  dependsOnTaskStatus?: TaskStatus;
+  dependsOnOwnerAgentId?: string;
+}
+
+export interface TaskDelegation {
+  id: string;
+  projectId: string;
+  taskId: string;
+  parentExecutionId?: string;
+  requestedByAgentId: string;
+  targetAgentId?: string;
+  mode: TaskDelegationMode;
+  status: TaskDelegationStatus;
+  title: string;
+  goal: string;
+  inputContextRef?: string;
+  inputSummary?: string;
+  resultSchema?: string;
+  outputSummary?: string;
+  outputPayloadJson?: unknown;
+  outputArtifactsJson?: unknown;
+  budgetTokens?: number;
+  timeoutSec?: number;
+  spawnDepth: number;
+  retryCount: number;
+  maxRetries: number;
+  startedAt?: string;
+  completedAt?: string;
+  expiredAt?: string;
+  failureReason?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TaskDelegationSummary {
+  id: string;
+  mode: TaskDelegationMode;
+  status: TaskDelegationStatus;
+  targetAgentId?: string;
+  outputSummary?: string;
+  failureReason?: string;
+  retryCount: number;
+  maxRetries: number;
+  startedAt?: string;
+  completedAt?: string;
+  expiredAt?: string;
+}
+
+export interface TaskBlockedReason {
+  code: TaskBlockedReasonCode;
+  label: string;
+  detail: string;
+  dependsOnTaskId?: string;
+  dependsOnTaskTitle?: string;
+  delegationId?: string;
+}
+
+export interface TaskNextAction {
+  code: TaskNextActionCode;
+  label: string;
+  detail: string;
+  actorAgentId?: string;
+  dependsOnTaskId?: string;
+}
+
+export interface TaskGitLabSyncInfo {
+  status: TaskGitLabSyncStatus;
+  syncPolicy?: SyncPolicy;
+  projectPath?: string;
+  issueIid?: number;
+  webUrl?: string;
+  lastSyncedAt?: string;
+  lastSyncHash?: string;
+  summary?: string;
+  bindingType?: "task" | "project" | "stage" | "escalation";
+}
+
+export interface TaskExecutionContext {
+  taskSummary: string;
+  acceptanceCriteria: string[];
+  relevantArtifacts: Array<{
+    id: string;
+    name: string;
+    stageType: StageType;
+    status: DeliverableStatus;
+    updatedAt: string;
+    excerpt: string;
+  }>;
+  relevantTimeline: TimelineEvent[];
+  relatedTasks: Task[];
+  constraints: string[];
+  resultFormat: string;
 }
 
 export interface TimelineEvent {

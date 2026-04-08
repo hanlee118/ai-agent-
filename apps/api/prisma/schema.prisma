@@ -188,6 +188,10 @@ model Project {
   updatedAt           DateTime        @updatedAt
   stages              Stage[]
   tasks               Task[]
+  taskParticipants    TaskParticipant[]
+  taskDependencies    TaskDependency[]
+  taskDelegations     TaskDelegation[]
+  gitlabSyncBindings  GitLabSyncBinding[]
   deliverables        Deliverable[]
   timeline            TimelineEvent[]
   executions          ProjectExecution[]
@@ -250,15 +254,99 @@ model Task {
   title       String
   description String
   assignee    String
+  ownerAgentId String?
+  reviewAgentId String?
+  coordinationMode String @default("single_owner")
+  delegationPolicy String @default("manual_only")
+  syncPolicy String @default("db_plus_gitlab")
+  contextScope String?
+  parentTaskId String?
+  pendingDelegationCount Int @default(0)
+  lastDelegatedAt DateTime?
   status      String
   priority    String
   sortOrder   Int
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   project     Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  participants TaskParticipant[]
+  dependencies TaskDependency[] @relation("TaskDependencies")
+  blockingTasks TaskDependency[] @relation("TaskDependencyTargets")
+  delegations TaskDelegation[]
+  gitlabSyncBindings GitLabSyncBinding[]
 
   @@index([projectId, stageType])
   @@index([assignee, status])
+  @@index([ownerAgentId, status])
+  @@index([reviewAgentId, status])
+  @@index([parentTaskId])
+}
+
+model TaskParticipant {
+  id        String   @id @default(cuid())
+  projectId String
+  taskId    String
+  agentId   String
+  role      String
+  createdAt DateTime @default(now())
+  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, agentId, role])
+  @@index([projectId, taskId])
+  @@index([agentId, role])
+}
+
+model TaskDependency {
+  id              String   @id @default(cuid())
+  projectId       String
+  taskId          String
+  dependsOnTaskId String
+  type            String
+  createdAt       DateTime @default(now())
+  project         Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task            Task     @relation("TaskDependencies", fields: [taskId], references: [id], onDelete: Cascade)
+  dependsOnTask   Task     @relation("TaskDependencyTargets", fields: [dependsOnTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([taskId, dependsOnTaskId, type])
+  @@index([projectId, type])
+  @@index([dependsOnTaskId, type])
+}
+
+model TaskDelegation {
+  id                String   @id @default(cuid())
+  projectId         String
+  taskId            String
+  parentExecutionId String?
+  requestedByAgentId String
+  targetAgentId     String?
+  mode              String
+  status            String
+  title             String
+  goal              String
+  inputContextRef   String?
+  inputSummary      String?
+  resultSchema      String?
+  outputSummary     String?
+  outputPayloadJson Json?
+  outputArtifactsJson Json?
+  budgetTokens      Int?
+  timeoutSec        Int?
+  spawnDepth        Int      @default(0)
+  retryCount        Int      @default(0)
+  maxRetries        Int      @default(0)
+  startedAt         DateTime?
+  completedAt       DateTime?
+  expiredAt         DateTime?
+  failureReason     String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task              Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, status, createdAt])
+  @@index([taskId, status, createdAt])
+  @@index([requestedByAgentId, createdAt])
 }
 
 model ProjectExecution {
@@ -338,4 +426,28 @@ model GitLabSync {
 
   @@unique([projectId, issueIid])
   @@index([projectPath, status])
+}
+
+model GitLabSyncBinding {
+  id            String   @id @default(cuid())
+  projectId     String?
+  stageId       String?
+  taskId        String?
+  gitlabProjectId String
+  issueId       String?
+  issueIid      Int?
+  bindingType   String
+  syncPolicy    String
+  lastSyncedAt  DateTime?
+  lastSyncHash  String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  project       Project? @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  task          Task?    @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, bindingType])
+  @@index([taskId, bindingType])
+  @@index([gitlabProjectId, bindingType])
+  @@unique([taskId, bindingType])
+  @@unique([gitlabProjectId, issueIid, bindingType])
 }

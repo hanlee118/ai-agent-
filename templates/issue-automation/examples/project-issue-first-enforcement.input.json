@@ -1,0 +1,87 @@
+{
+  "task_type": "stabilization",
+  "title": "收口项目 issue-first 执行门禁，确保先创建 issue 再推进项目事项",
+  "issue_labels": {
+    "fixed": ["execution", "hardening", "codex-ready"],
+    "dynamic": ["issue-first", "gitlab"]
+  },
+  "source_of_truth": {
+    "route_entry": [
+      "apps/api/src/routes/projects.ts",
+      "apps/api/src/routes/issues.ts",
+      "apps/api/src/index.ts"
+    ],
+    "active_implementation": [
+      "apps/api/src/data/repository.ts",
+      "apps/api/src/routes/gitlab.ts"
+    ],
+    "candidate_compat_layer": [
+      "apps/api/src/services"
+    ],
+    "related_files": [
+      "scripts/prepare-gitlab-codex-run.mjs",
+      "docs/ISSUE_AUTOMATION_PAYLOADS.md"
+    ]
+  },
+  "validation_commands": [
+    { "command": "pnpm --filter @occ/api typecheck", "required": true },
+    { "command": "pnpm --filter @occ/web typecheck", "required": false }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要扩展新的 agent 能力",
+      "不要触碰 Prisma migrate deploy 稳定性专项",
+      "不要把 GitLab 变成主状态源"
+    ],
+    "soft_stop": [
+      "不要把门禁只做在前端",
+      "不要顺手改动无关页面或无关 API"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "如需新增服务层，只能承载 issue-first 编排与门禁逻辑，不能复制第二套项目推进实现"
+  },
+  "context": {
+    "background": [
+      "当前平台已经具备 GitLab 项目主 issue 同步能力，但项目创建后仍可能在主 issue 建立前提前 warmup 与自动推进。",
+      "用户希望后续由平台创建的项目都遵循先创建 issue，再执行项目事项的协作规范。",
+      "这次目标是把 issue-first 做成后端真实门禁，而不是停留在流程建议。"
+    ],
+    "current_constraint": [
+      "当前版本可继续作为开发基线推进",
+      "不扩功能，只收口真实执行链路",
+      "GitLab 仍然是协作 hub，不是唯一事实源"
+    ]
+  },
+  "decision": {
+    "summary": "先在后端补齐 project main issue 门禁，再让项目创建、手动推进、后台自动推进三条路径统一遵守 issue-first。",
+    "why": [
+      "仓库层当前会在 createProject 后直接 warmup，存在先执行后建 issue 的竞态",
+      "只在前端约束无法覆盖 issue 确认建项目和后台 automation tick",
+      "project 主 issue 已经能作为最小治理锚点，收口成本和收益比最好"
+    ]
+  },
+  "scope": {
+    "goals": [
+      "确保项目创建后先完成 project main issue 建立，再进入 warmup/推进",
+      "为手动推进与后台自动推进补齐同一套 issue-first 门禁",
+      "保留 DB-first 边界，同时给出可复查的最小验证路径"
+    ],
+    "non_goals": [
+      "不要求每个 task 都先建 issue 才能运行",
+      "不改 Prisma 自动迁移专项",
+      "不接入 AgentCommander"
+    ]
+  },
+  "acceptance": [
+    "项目创建链路不会在 project main issue 缺失时提前 warmup 执行",
+    "手动推进和后台 automation tick 会遵守同一套 issue-first 门禁",
+    "GitLab 已配置场景下可以明确说明阻塞原因，未配置场景不破坏本地开发"
+  ],
+  "risks": [
+    "错误地把门禁做成全局硬失败，影响未配置 GitLab 的开发环境",
+    "只拦住项目创建，遗漏手动推进或后台自动推进旁路",
+    "门禁和 warmup 拆分后引入新的项目启动时序问题"
+  ]
+}

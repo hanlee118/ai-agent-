@@ -7,8 +7,14 @@ cd "$ROOT_DIR"
 API_BASE_URL="${OCC_BASE_URL:-}"
 TMP_DIR="$(mktemp -d)"
 SESSION_TOKEN=""
+COOKIE_HEADER=""
 API_STARTED_BY_SCRIPT="false"
 SKIP_OPENCLAW_CHECKS="false"
+TEMP_SESSION_CREATED="false"
+API_LOGIN_SESSION_CREATED="false"
+SESSION_SOURCE="none"
+CONFIGURED_SESSION_COOKIE_RAW="${VERIFY_SMOKE_SESSION_COOKIE:-${HEALTHCHECK_SESSION_COOKIE:-${OCC_SESSION_COOKIE:-}}}"
+CONFIGURED_ADMIN_PASSWORD="${VERIFY_SMOKE_ADMIN_PASSWORD:-${HEALTHCHECK_ADMIN_PASSWORD:-${ADMIN_PASSWORD:-}}}"
 
 is_true() {
   local raw="${1:-}"
@@ -21,7 +27,11 @@ if is_true "${CI_SKIP_OPENCLAW_CHECKS:-}" || is_true "${CI:-}"; then
 fi
 
 cleanup() {
-  if [[ -n "$SESSION_TOKEN" ]]; then
+  if [[ "$API_LOGIN_SESSION_CREATED" == "true" && -n "$COOKIE_HEADER" && -n "$API_BASE_URL" ]]; then
+    curl -sS -X POST -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/auth/logout" >/dev/null 2>&1 || true
+  fi
+
+  if [[ "$TEMP_SESSION_CREATED" == "true" && -n "$SESSION_TOKEN" ]]; then
     SESSION_TOKEN="$SESSION_TOKEN" node --input-type=module <<'EOF'
 import { prisma } from "./apps/api/dist/db.js";
 import { hashSessionToken } from "./apps/api/dist/security/secret-store.js";
@@ -114,9 +124,20 @@ assertion(payload);
 EOF
 }
 
-echo "verify-smoke: creating temporary authenticated session"
+normalize_session_cookie() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr -d '\r\n' | sed 's/^ *//;s/ *$//')"
+  [[ -n "$raw" ]] || return 1
+  if [[ "$raw" == *"="* ]]; then
+    printf '%s' "$raw"
+  else
+    printf 'occ_session=%s' "$raw"
+  fi
+}
 
-SESSION_TOKEN="$(node --input-type=module <<'EOF'
+create_temporary_authenticated_session() {
+  echo "verify-smoke: creating temporary authenticated session"
+  SESSION_TOKEN="$(node --input-type=module <<'EOF'
 import { prisma } from "./apps/api/dist/db.js";
 import { generateSessionToken, hashSessionToken } from "./apps/api/dist/security/secret-store.js";
 
@@ -133,7 +154,59 @@ await prisma.$disconnect();
 EOF
 )"
 
-COOKIE_HEADER="occ_session=${SESSION_TOKEN}"
+  COOKIE_HEADER="occ_session=${SESSION_TOKEN}"
+  TEMP_SESSION_CREATED="true"
+  SESSION_SOURCE="temporary-session"
+}
+
+session_is_authenticated() {
+  local cookie_header="${1:-}"
+  [[ -n "$cookie_header" ]] || return 1
+  local auth_status_file="$TMP_DIR/auth-status-session.json"
+  if ! curl -sf -H "Cookie: $cookie_header" "$API_BASE_URL/api/auth/status" > "$auth_status_file"; then
+    return 1
+  fi
+  node --input-type=module - "$auth_status_file" <<'EOF' >/dev/null
+import { readFileSync } from "node:fs";
+const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
+if (payload.authenticated !== true) {
+  process.exit(1);
+}
+EOF
+}
+
+login_admin_authenticated_session() {
+  local password="${1:-}"
+  [[ -n "$password" ]] || return 1
+
+  local body_file="$TMP_DIR/login-body.json"
+  local headers_file="$TMP_DIR/login-headers.txt"
+  local payload
+  payload="$(PASSWORD="$password" node --input-type=module <<'EOF'
+console.log(JSON.stringify({ password: process.env.PASSWORD ?? "" }));
+EOF
+)"
+  local status
+  status="$(curl -sS -D "$headers_file" -o "$body_file" -w "%{http_code}" \
+    -X POST "$API_BASE_URL/api/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "$payload")"
+
+  if [[ "$status" != "200" ]]; then
+    return 1
+  fi
+
+  local set_cookie
+  set_cookie="$(grep -i '^Set-Cookie:' "$headers_file" | sed -E 's/^[Ss]et-[Cc]ookie:[[:space:]]*//' | tr -d '\r' | head -n 1)"
+  local cookie
+  cookie="$(printf '%s' "$set_cookie" | grep -o 'occ_session=[^;]*' | head -n 1 || true)"
+  [[ -n "$cookie" ]] || return 1
+
+  COOKIE_HEADER="$cookie"
+  API_LOGIN_SESSION_CREATED="true"
+  SESSION_SOURCE="password-login"
+  return 0
+}
 
 ensure_api_ready
 API_BASE_URL="${API_BASE_URL:-http://127.0.0.1:8787}"
@@ -176,6 +249,19 @@ assert_json "$TMP_DIR/auth-status.json" '
   if (!payload.setupComplete) throw new Error("auth setup is incomplete");
   if (typeof payload.authenticated !== "boolean") throw new Error("auth status did not expose authenticated flag");
 '
+
+NORMALIZED_CONFIGURED_SESSION_COOKIE="$(normalize_session_cookie "$CONFIGURED_SESSION_COOKIE_RAW" || true)"
+if [[ -n "$NORMALIZED_CONFIGURED_SESSION_COOKIE" ]] && session_is_authenticated "$NORMALIZED_CONFIGURED_SESSION_COOKIE"; then
+  echo "verify-smoke: using configured authenticated session cookie"
+  COOKIE_HEADER="$NORMALIZED_CONFIGURED_SESSION_COOKIE"
+  SESSION_SOURCE="env-cookie"
+elif [[ -n "$CONFIGURED_ADMIN_PASSWORD" ]] && login_admin_authenticated_session "$CONFIGURED_ADMIN_PASSWORD"; then
+  echo "verify-smoke: authenticated via admin password login"
+else
+  create_temporary_authenticated_session
+fi
+
+echo "verify-smoke: session source = $SESSION_SOURCE"
 
 UNAUTH_STATUS="$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE_URL/api/system/runtime")"
 if [[ "$UNAUTH_STATUS" != "401" ]]; then

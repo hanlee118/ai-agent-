@@ -21,3 +21,7 @@ backups/
 # Runtime generated static artifacts
 apps/web/public/generated/
 site/generated/
+
+# Local QA / healthcheck artifacts should not enter version history
+docs/reports/qa-auth-backup-*.json
+docs/reports/system-health-check-*.json

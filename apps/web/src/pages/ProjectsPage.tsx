@@ -7,6 +7,7 @@ import { Badge } from './impl/GovernanceShared';
 import SurfaceModal from './impl/SurfaceModal';
 
 type Props = {
+  recentProjectId?: string | null;
   onSelectProject: (id: string) => void;
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   onOpenNewProject: () => void;
@@ -22,7 +23,7 @@ type AutomationState = {
   lastSummary: string;
 };
 
-export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProject, onRefreshData }: Props) {
+export default function ProjectsPage({ recentProjectId = null, onSelectProject, addToast, onOpenNewProject, onRefreshData }: Props) {
   const [statusFilter, setStatusFilter] = useState<'all' | 'Planning' | 'Development' | 'Testing' | 'Completed' | 'Blocked' | 'At Risk'>('all');
   const [actionKey, setActionKey] = useState<string | null>(null);
   const [automation, setAutomation] = useState<AutomationState | null>(null);
@@ -239,11 +240,28 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
     'At Risk': '风险中',
   };
   const filteredProjects = useMemo(() => {
+    const sorted = [...projects].sort((left, right) => {
+      const leftTime = new Date(left.updatedAt || left.createdAt || 0).getTime();
+      const rightTime = new Date(right.updatedAt || right.createdAt || 0).getTime();
+      return rightTime - leftTime;
+    });
     if (statusFilter === 'all') {
-      return projects;
+      return sorted;
     }
-    return projects.filter((project) => project.status === statusFilter);
+    return sorted.filter((project) => project.status === statusFilter);
   }, [statusFilter, projects]);
+
+  const getActionState = (project: (typeof projects)[number]) => {
+    const isBlocked = project.status === 'Blocked';
+    const isCompleted = project.status === 'Completed';
+    return {
+      canPause: !isBlocked && !isCompleted,
+      canResume: isBlocked,
+      canAdvance: !isBlocked && !isCompleted,
+      canClose: !isCompleted,
+      canDelete: true,
+    };
+  };
 
   const cleanupRows = useMemo(() => {
     if (cleanupMode === 'candidates') {
@@ -389,13 +407,23 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
             </thead>
             <tbody className="divide-y divide-border-subtle">
               {filteredProjects.map((project) => (
-                <tr key={project.id} className="hover:bg-white/5 transition-colors group cursor-pointer" onClick={() => onSelectProject(project.id)}>
+                <tr
+                  key={project.id}
+                  className={cn(
+                    'transition-colors group cursor-pointer',
+                    recentProjectId === project.id ? 'bg-primary/10 ring-1 ring-primary/30' : 'hover:bg-white/5',
+                  )}
+                  onClick={() => onSelectProject(project.id)}
+                >
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
                       <div className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center text-slate-500 group-hover:text-primary transition-colors">
                         <Briefcase size={16} />
                       </div>
-                      <span className="text-sm font-semibold text-white">{project.name}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-semibold text-white">{project.name}</span>
+                        {recentProjectId === project.id ? <Badge variant="accent">刚创建</Badge> : null}
+                      </div>
                     </div>
                   </td>
                   <td className="px-6 py-4">
@@ -423,11 +451,15 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex justify-end gap-2" onClick={(event) => event.stopPropagation()}>
+                      {(() => {
+                        const actionState = getActionState(project);
+                        return (
+                          <>
                       <button
                         type="button"
                         className="px-2 py-1 text-[11px] rounded-md bg-white/5 text-slate-300 hover:bg-white/10"
                         onClick={() => void runProjectAction(project.id, 'pause')}
-                        disabled={actionKey === `${project.id}:pause`}
+                        disabled={actionKey === `${project.id}:pause` || !actionState.canPause}
                         title="暂停项目"
                       >
                         <Pause size={12} />
@@ -436,7 +468,7 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
                         type="button"
                         className="px-2 py-1 text-[11px] rounded-md bg-white/5 text-slate-300 hover:bg-white/10"
                         onClick={() => void runProjectAction(project.id, 'resume')}
-                        disabled={actionKey === `${project.id}:resume`}
+                        disabled={actionKey === `${project.id}:resume` || !actionState.canResume}
                         title="恢复项目"
                       >
                         <Play size={12} />
@@ -447,8 +479,7 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
                         onClick={() => void runProjectAction(project.id, 'advance')}
                         disabled={
                           actionKey === `${project.id}:advance`
-                          || project.status === 'Completed'
-                          || project.status === 'Blocked'
+                          || !actionState.canAdvance
                         }
                         title="推进一步"
                       >
@@ -458,7 +489,7 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
                         type="button"
                         className="px-2 py-1 text-[11px] rounded-md bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
                         onClick={() => void runProjectAction(project.id, 'close')}
-                        disabled={actionKey === `${project.id}:close`}
+                        disabled={actionKey === `${project.id}:close` || !actionState.canClose}
                         title="关闭项目"
                       >
                         <XCircle size={12} />
@@ -467,11 +498,14 @@ export default function ProjectsPage({ onSelectProject, addToast, onOpenNewProje
                         type="button"
                         className="px-2 py-1 text-[11px] rounded-md bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
                         onClick={() => void runProjectAction(project.id, 'delete')}
-                        disabled={actionKey === `${project.id}:delete`}
+                        disabled={actionKey === `${project.id}:delete` || !actionState.canDelete}
                         title="删除项目"
                       >
                         <Trash2 size={12} />
                       </button>
+                          </>
+                        );
+                      })()}
                     </div>
                   </td>
                 </tr>

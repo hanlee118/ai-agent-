@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import {
   Activity,
   BarChart3,
@@ -19,16 +19,34 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
-import type { Agent, Task } from '../types';
+import type { Agent, Task as RuntimeTask } from '../types';
 import { fetchOpenClawAgentDetail } from '../lib/adapters';
 import { agents, models, projects, sessions, tasks } from '../lib/runtimeCollections';
 import { TokenUsageTrendChart } from './impl/GovernanceShared';
+import { tasksApi, type Task, type TaskDelegationBundle } from '../lib/api';
+import { getReadyForReviewBlockReason, normalizeTaskActionError } from './ProjectRoomPage/taskCollaborationUi';
+import {
+  COORDINATION_MODE_LABELS,
+  CONTEXT_SCOPE_LABELS,
+  DELEGATION_POLICY_LABELS,
+  DELEGATION_STATUS_LABELS,
+  DEFAULT_AGENT_BY_ROLE,
+  STAGE_LABELS,
+  SYNC_POLICY_LABELS,
+  TASK_STATUS_LABELS,
+  roleLabel,
+  statusVariantByDelegation,
+  statusVariantByTask,
+} from './ProjectRoomPage/taskCollaborationDisplay';
+import { TaskDetailHeaderCard } from './ProjectRoomPage/TaskDetailHeaderCard';
+import { TaskDelegationStatusPanel } from './ProjectRoomPage/TaskDelegationStatusPanel';
 
 type CommandUnderstandingCard = {
   raw: string;
   summary: string;
   goal: string;
   project: string;
+  taskContext: string[];
   involvedAgent: string;
   eta: string;
   warning?: string;
@@ -60,12 +78,31 @@ const Badge = ({ children, variant = 'default' }: any) => {
 
 const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
 
+const ROLE_TO_OPENCLAW_AGENT_ID: Record<string, string> = {
+  ROLE_PM: 'project_manager',
+  ROLE_ANALYST: 'requirements_analyst',
+  ROLE_PRODUCT: 'product_director',
+  ROLE_DESIGN: 'jeremy',
+  ROLE_ARCH: 'rd_director',
+  ROLE_DEV: 'rd_manager',
+  ROLE_QA: 'qa_engineer',
+  ROLE_HR: 'hr_director',
+};
+
+const OPENCLAW_AGENT_TO_ROLE_ID: Record<string, string> = Object.fromEntries(
+  Object.entries(ROLE_TO_OPENCLAW_AGENT_ID).map(([roleId, agentId]) => [agentId, roleId]),
+);
+
+const normalizeCompareValue = (value: string | null | undefined) => String(value || '').trim().toLowerCase();
+
 const AgentCommander = ({
   agentId,
+  selectedProjectId,
   addToast,
   sendCommand,
 }: {
   agentId: string | null;
+  selectedProjectId?: string | null;
   addToast: (msg: string, type?: any) => void;
   sendCommand?: (agentId: string, message: string) => Promise<unknown>;
 }) => {
@@ -85,6 +122,30 @@ const AgentCommander = ({
     sessionCount: 0,
   };
   const activeAgent = agents.find((agent) => agent.id === agentId) || agents[0] || fallbackAgent;
+  const resolvedOpenClawAgentId = useMemo(
+    () => ROLE_TO_OPENCLAW_AGENT_ID[activeAgent.id] || ROLE_TO_OPENCLAW_AGENT_ID[activeAgent.role] || activeAgent.id,
+    [activeAgent.id, activeAgent.role],
+  );
+  const linkedRoleId = useMemo(
+    () => OPENCLAW_AGENT_TO_ROLE_ID[activeAgent.id] || OPENCLAW_AGENT_TO_ROLE_ID[resolvedOpenClawAgentId] || activeAgent.id,
+    [activeAgent.id, resolvedOpenClawAgentId],
+  );
+  const agentMatchKeys = useMemo(() => {
+    const keys = new Set<string>();
+    [
+      activeAgent.id,
+      activeAgent.name,
+      activeAgent.role,
+      resolvedOpenClawAgentId,
+      linkedRoleId,
+    ].forEach((value) => {
+      const normalized = normalizeCompareValue(value);
+      if (normalized) {
+        keys.add(normalized);
+      }
+    });
+    return keys;
+  }, [activeAgent.id, activeAgent.name, activeAgent.role, resolvedOpenClawAgentId, linkedRoleId]);
 
   const [tokenLimit, setTokenLimit] = useState(activeAgent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT);
   const [dailyUsage, setDailyUsage] = useState(12450);
@@ -98,6 +159,12 @@ const AgentCommander = ({
   const [agentMemoryTags, setAgentMemoryTags] = useState<string[]>([]);
   const [isLoadingAgentProfile, setIsLoadingAgentProfile] = useState(false);
   const agentSessions = sessions.filter((session) => session.agentId === activeAgent.id);
+  const [projectTasks, setProjectTasks] = useState<Task[]>([]);
+  const [isLoadingProjectTasks, setIsLoadingProjectTasks] = useState(false);
+  const [selectedCommanderTaskId, setSelectedCommanderTaskId] = useState<string | null>(null);
+  const [taskBundles, setTaskBundles] = useState<Record<string, TaskDelegationBundle>>({});
+  const [isLoadingTaskBundle, setIsLoadingTaskBundle] = useState(false);
+  const [taskActionLoadingKey, setTaskActionLoadingKey] = useState<string | null>(null);
 
   useEffect(() => {
     setTokenLimit(activeAgent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT);
@@ -118,7 +185,7 @@ const AgentCommander = ({
 
       setIsLoadingAgentProfile(true);
       try {
-        const detail = await fetchOpenClawAgentDetail(activeAgent.id);
+        const detail = await fetchOpenClawAgentDetail(resolvedOpenClawAgentId);
         if (!active) {
           return;
         }
@@ -152,17 +219,181 @@ const AgentCommander = ({
     return () => {
       active = false;
     };
-  }, [activeAgent.id]);
+  }, [activeAgent.id, resolvedOpenClawAgentId]);
+
+  const isTaskRelevantToActiveAgent = useCallback((task: Task) => {
+    const relevantValues = [
+      task.ownerAgentId,
+      task.reviewAgentId,
+      task.assignee,
+      DEFAULT_AGENT_BY_ROLE[task.assignee || ''],
+      ...(task.delegationSummary || []).map((item) => item.targetAgentId),
+      task.nextAction?.actorAgentId,
+    ];
+
+    return relevantValues.some((value) => {
+      const normalized = normalizeCompareValue(value);
+      return normalized ? agentMatchKeys.has(normalized) : false;
+    });
+  }, [agentMatchKeys]);
+
+  const loadTaskBundle = useCallback(async (taskId: string, options?: { silent?: boolean }) => {
+    if (!taskId) {
+      return;
+    }
+    if (!options?.silent) {
+      setIsLoadingTaskBundle(true);
+    }
+    try {
+      const bundle = await tasksApi.listDelegations(taskId);
+      setTaskBundles((current) => ({
+        ...current,
+        [taskId]: bundle,
+      }));
+    } catch (error) {
+      addToast(`加载任务 delegation 失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      if (!options?.silent) {
+        setIsLoadingTaskBundle(false);
+      }
+    }
+  }, [addToast]);
+
+  const loadProjectTasks = useCallback(async () => {
+    if (!selectedProjectId) {
+      setProjectTasks([]);
+      setSelectedCommanderTaskId(null);
+      return;
+    }
+    setIsLoadingProjectTasks(true);
+    try {
+      const nextTasks = await tasksApi.list({ projectId: selectedProjectId });
+      setProjectTasks(nextTasks);
+      setSelectedCommanderTaskId((current) => {
+        if (current && nextTasks.some((task) => task.id === current)) {
+          return current;
+        }
+        return nextTasks.find(isTaskRelevantToActiveAgent)?.id || nextTasks[0]?.id || null;
+      });
+    } catch (error) {
+      addToast(`加载项目任务失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsLoadingProjectTasks(false);
+    }
+  }, [addToast, isTaskRelevantToActiveAgent, selectedProjectId]);
+
+  useEffect(() => {
+    void loadProjectTasks();
+  }, [loadProjectTasks]);
+
+  const agentCollabTasks = useMemo(
+    () => projectTasks.filter(isTaskRelevantToActiveAgent),
+    [isTaskRelevantToActiveAgent, projectTasks],
+  );
+
+  const selectedCommanderTask = useMemo(
+    () => agentCollabTasks.find((task) => task.id === selectedCommanderTaskId) || agentCollabTasks[0] || null,
+    [agentCollabTasks, selectedCommanderTaskId],
+  );
+
+  useEffect(() => {
+    if (!selectedCommanderTask) {
+      return;
+    }
+    void loadTaskBundle(selectedCommanderTask.id, {
+      silent: Boolean(taskBundles[selectedCommanderTask.id]),
+    });
+  }, [loadTaskBundle, selectedCommanderTask?.id, selectedCommanderTask?.updatedAt]);
+
+  const selectedCommanderTaskBundle = selectedCommanderTask ? taskBundles[selectedCommanderTask.id] : undefined;
+  const selectedCommanderDelegations = selectedCommanderTaskBundle?.delegations || [];
+  const selectedCommanderTaskForCard = useMemo(() => {
+    if (!selectedCommanderTask) {
+      return null;
+    }
+    return {
+      id: selectedCommanderTask.id,
+      title: selectedCommanderTask.title,
+      description: selectedCommanderTask.description,
+      status: selectedCommanderTask.status,
+      rawStatus: selectedCommanderTask.status,
+      coordinationMode: selectedCommanderTask.coordinationMode,
+      delegationPolicy: selectedCommanderTask.delegationPolicy,
+      syncPolicy: selectedCommanderTask.syncPolicy,
+      stageType: selectedCommanderTask.stageType,
+      assigneeRoleId: selectedCommanderTask.assignee,
+      ownerAgentId: selectedCommanderTask.ownerAgentId,
+      reviewAgentId: selectedCommanderTask.reviewAgentId,
+      contextScope: selectedCommanderTask.contextScope,
+      lastDelegatedAt: selectedCommanderTask.lastDelegatedAt,
+      blockedReason: selectedCommanderTask.blockedReason,
+      nextAction: selectedCommanderTask.nextAction,
+      gitlab: selectedCommanderTask.gitlab,
+    };
+  }, [selectedCommanderTask]);
+
+  const readyForReviewBlockReason = useMemo(
+    () =>
+      getReadyForReviewBlockReason(
+        selectedCommanderTask
+          ? {
+              reviewAgentId: selectedCommanderTask.reviewAgentId,
+              pendingDelegationCount: selectedCommanderTask.pendingDelegationCount || 0,
+              blockedReason: selectedCommanderTask.blockedReason,
+            }
+          : null,
+      ),
+    [selectedCommanderTask],
+  );
+
+  const runTaskAction = useCallback(async (
+    actionKey: string,
+    action: () => Promise<void>,
+    successMessage: string,
+    options?: { reloadDelegationsTaskId?: string },
+  ) => {
+    setTaskActionLoadingKey(actionKey);
+    try {
+      await action();
+      addToast(successMessage, 'success');
+      await loadProjectTasks();
+      if (options?.reloadDelegationsTaskId) {
+        await loadTaskBundle(options.reloadDelegationsTaskId);
+      }
+    } catch (error) {
+      addToast(normalizeTaskActionError(error), 'error');
+    } finally {
+      setTaskActionLoadingKey(null);
+    }
+  }, [addToast, loadProjectTasks, loadTaskBundle]);
 
   const buildCommandUnderstanding = (input: string): CommandUnderstandingCard => {
     const normalized = input.trim();
-    const linkedProject = projects.find((project) => normalized.includes(project.name));
+    const relatedTasks = tasks.filter((task) => {
+      const taskAgent = normalizeCompareValue(task.agent);
+      return agentMatchKeys.has(taskAgent);
+    });
+    const relatedProjectIds = Array.from(
+      new Set(
+        relatedTasks
+          .map((task) => String((task as RuntimeTask).projectId || '').trim())
+          .filter(Boolean),
+      ),
+    );
+    const inferredProject = projects.find((project) => normalized.includes(project.name))
+      || projects.find((project) => relatedProjectIds.includes(project.id));
     const commandAgent = agents.find((agent) => normalized.includes(agent.name)) || activeAgent;
     const concise = normalized.length > 40 ? `${normalized.slice(0, 40)}...` : normalized;
+    const taskContext = relatedTasks
+      .filter((task) => task.status === 'In Progress' || task.status === 'Blocked')
+      .slice(0, 3)
+      .map((task) => task.title);
     const warning = normalized.length < 8
       ? '指令较短，建议补充项目名称或交付目标。'
-      : !linkedProject
-        ? '未识别到项目名称，将按当前上下文执行。'
+      : !inferredProject && taskContext.length === 0
+        ? '未识别到明确项目或关联任务，发送前请再次确认。'
+        : !inferredProject
+          ? '未识别到项目名称，将按当前 Agent 的关联任务上下文执行。'
         : undefined;
 
     let eta = '2小时内';
@@ -174,11 +405,12 @@ const AgentCommander = ({
 
     return {
       raw: normalized,
-      summary: linkedProject
-        ? `为“${linkedProject.name}”执行“${concise}”`
+      summary: inferredProject
+        ? `为“${inferredProject.name}”执行“${concise}”`
         : `执行指令“${concise}”`,
       goal: normalized,
-      project: linkedProject?.name || '当前工作上下文',
+      project: inferredProject?.name || '当前工作上下文',
+      taskContext,
       involvedAgent: commandAgent?.name || '待分配 Agent',
       eta,
       warning,
@@ -188,7 +420,7 @@ const AgentCommander = ({
   const handleModelChange = (modelId: string) => {
     setCurrentModelId(modelId);
     const model = models.find(m => m.id === modelId);
-    addToast(`已将 ${activeAgent.name} 切换至模型: ${model?.name}`, 'success');
+    addToast(`已切换本地查看模型为: ${model?.name || modelId}；当前不会持久化到后端`, 'info');
   };
 
   const handleConfirmAction = () => {
@@ -198,7 +430,7 @@ const AgentCommander = ({
   const handleTokenLimitChange = (e: ChangeEvent<HTMLInputElement>) => {
     const val = Math.max(parseInt(e.target.value) || 0, 1);
     setTokenLimit(val);
-    addToast(`Token 限制已更新为 ${val.toLocaleString()}`, "success");
+    addToast(`已更新本地 Token 观察值为 ${val.toLocaleString()}；当前不会持久化到后端`, "info");
   };
 
   const handleTrySend = () => {
@@ -223,8 +455,16 @@ const AgentCommander = ({
 
     setIsSendingCommand(true);
     try {
+      const commandPayload = [
+        confirmCard.project !== '当前工作上下文' ? `关联项目: ${confirmCard.project}` : null,
+        confirmCard.taskContext.length > 0 ? `关联任务:\n- ${confirmCard.taskContext.join('\n- ')}` : null,
+        '用户指令:',
+        confirmCard.raw,
+      ]
+        .filter(Boolean)
+        .join('\n\n');
       if (sendCommand) {
-        await sendCommand(activeAgent.id, confirmCard.raw);
+        await sendCommand(resolvedOpenClawAgentId, commandPayload);
       }
       addToast(`已向 ${activeAgent.name} 发送任务`, 'success');
       setConfirmCard(null);
@@ -245,10 +485,10 @@ const AgentCommander = ({
   const linkedTasks = useMemo(
     () =>
       tasks.filter((task) => {
-        const taskAgent = String(task.agent || '').trim();
-        return taskAgent === activeAgent.id || taskAgent === activeAgent.name;
+        const taskAgent = normalizeCompareValue(task.agent);
+        return agentMatchKeys.has(taskAgent);
       }),
-    [tasks, activeAgent.id, activeAgent.name],
+    [tasks, agentMatchKeys],
   );
   const blockedLinkedTasks = linkedTasks.filter((task) => task.status === 'Blocked').slice(0, 3);
   const inProgressLinkedTasks = linkedTasks.filter((task) => task.status === 'In Progress').slice(0, 4);
@@ -269,7 +509,7 @@ const AgentCommander = ({
     }
 
     inProgressLinkedTasks.forEach((task) => {
-      const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
+      const taskRecord = task as RuntimeTask;
       events.push({
         type: 'assistant',
         title: '执行中',
@@ -279,7 +519,7 @@ const AgentCommander = ({
     });
 
     blockedLinkedTasks.forEach((task) => {
-      const taskRecord = task as Task & { updatedAt?: string; createdAt?: string };
+      const taskRecord = task as RuntimeTask;
       events.push({
         type: 'system',
         title: '阻塞告警',
@@ -641,6 +881,173 @@ const AgentCommander = ({
                 </div>
               </div>
             </div>
+
+            <section className="space-y-4">
+              <div className="flex items-center justify-between gap-3">
+                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-widest flex items-center gap-2">
+                  <Workflow size={14} />
+                  ProjectRoom 协作视角
+                </h3>
+                <Badge variant={selectedProjectId ? 'accent' : 'default'}>
+                  {selectedProjectId ? `项目 ${selectedProjectId}` : '未选择项目'}
+                </Badge>
+              </div>
+
+              {!selectedProjectId ? (
+                <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 text-xs text-slate-500">
+                  请先在主链里选中项目，再在 AgentCommander 中查看和操作该项目的真实 task/delegation 协作状态。
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+                  <div className="rounded-2xl border border-border-subtle bg-surface-muted p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+                        关联任务
+                      </p>
+                      <Badge variant={agentCollabTasks.length > 0 ? 'primary' : 'default'}>
+                        {isLoadingProjectTasks ? '加载中' : `${agentCollabTasks.length} 项`}
+                      </Badge>
+                    </div>
+                    {agentCollabTasks.length > 0 ? (
+                      <div className="space-y-3">
+                        {agentCollabTasks.map((task) => (
+                          <button
+                            key={task.id}
+                            type="button"
+                            onClick={() => setSelectedCommanderTaskId(task.id)}
+                            className={cn(
+                              'w-full rounded-xl border p-3 text-left transition-all',
+                              selectedCommanderTask?.id === task.id
+                                ? 'border-primary/40 bg-primary/5'
+                                : 'border-border-subtle bg-white/5 hover:border-white/20',
+                            )}
+                          >
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={statusVariantByTask(task.status)}>{TASK_STATUS_LABELS[task.status] || task.status}</Badge>
+                              <Badge variant={task.coordinationMode === 'delegated_execution' ? 'accent' : 'default'}>
+                                {COORDINATION_MODE_LABELS[task.coordinationMode || 'single_owner'] || task.coordinationMode || 'single_owner'}
+                              </Badge>
+                            </div>
+                            <p className="mt-2 text-sm font-semibold text-white">{task.title}</p>
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              owner: {task.ownerAgentId || DEFAULT_AGENT_BY_ROLE[task.assignee || ''] || '未配置'}
+                            </p>
+                            <p className="mt-1 text-[11px] text-slate-500">
+                              reviewer: {task.reviewAgentId || '未配置'}
+                            </p>
+                            {task.pendingDelegationCount ? (
+                              <p className="mt-1 text-[11px] text-warning">
+                                待回收 delegation: {task.pendingDelegationCount}
+                              </p>
+                            ) : null}
+                            {task.blockedReason ? (
+                              <p className="mt-1 text-[11px] text-danger">
+                                阻塞: {task.blockedReason.label}
+                              </p>
+                            ) : null}
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-border-subtle bg-white/5 p-4 text-xs text-slate-500">
+                        当前项目里，还没有与 {activeAgent.name} 直接关联的 task 协作项。
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-2xl border border-border-subtle bg-surface-muted p-4 space-y-4">
+                    {selectedCommanderTask ? (
+                      <>
+                        {selectedCommanderTaskForCard ? (
+                          <TaskDetailHeaderCard
+                            selectedTask={selectedCommanderTaskForCard}
+                            defaultOwnerAgentId={DEFAULT_AGENT_BY_ROLE[selectedCommanderTask.assignee || ''] || ''}
+                            stageLabels={STAGE_LABELS}
+                            taskStatusLabels={TASK_STATUS_LABELS}
+                            coordinationModeLabels={COORDINATION_MODE_LABELS}
+                            delegationPolicyLabels={DELEGATION_POLICY_LABELS}
+                            syncPolicyLabels={SYNC_POLICY_LABELS}
+                            contextScopeLabels={CONTEXT_SCOPE_LABELS}
+                            statusVariantByTask={statusVariantByTask}
+                            roleLabel={roleLabel}
+                            taskActionLoadingKey={taskActionLoadingKey}
+                            readyForReviewBlockReason={readyForReviewBlockReason}
+                            syncActionKey={`agentcommander-task-sync:${selectedCommanderTask.id}`}
+                            reviewActionKey={`agentcommander-task-review:${selectedCommanderTask.id}`}
+                            onSyncGitlab={() =>
+                              void runTaskAction(
+                                `agentcommander-task-sync:${selectedCommanderTask.id}`,
+                                async () => {
+                                  await tasksApi.syncGitlab(selectedCommanderTask.id);
+                                },
+                                '任务已同步到 GitLab',
+                              )
+                            }
+                            onReadyForReview={() =>
+                              void runTaskAction(
+                                `agentcommander-task-review:${selectedCommanderTask.id}`,
+                                async () => {
+                                  await tasksApi.readyForReview(selectedCommanderTask.id);
+                                },
+                                '任务已进入待审阅',
+                                { reloadDelegationsTaskId: selectedCommanderTask.id },
+                              )
+                            }
+                          />
+                        ) : null}
+
+                        <TaskDelegationStatusPanel
+                          selectedTask={selectedCommanderTask}
+                          selectedTaskDelegations={selectedCommanderDelegations}
+                          isLoadingTaskDelegations={isLoadingTaskBundle}
+                          taskActionLoadingKey={taskActionLoadingKey}
+                          delegationStatusLabels={DELEGATION_STATUS_LABELS}
+                          statusVariantByDelegation={statusVariantByDelegation}
+                          getDispatchLoadingKey={(delegationId) => `agentcommander-delegation-dispatch:${delegationId}`}
+                          getRetryLoadingKey={(delegationId) => `agentcommander-delegation-retry:${delegationId}`}
+                          getCancelLoadingKey={(delegationId) => `agentcommander-delegation-cancel:${delegationId}`}
+                          emptyStateText="当前任务暂无 delegation 明细。若 ProjectRoom 已创建 delegation，这里会复用同一套后端状态与动作。"
+                          onDispatch={(delegationId) =>
+                            void runTaskAction(
+                              `agentcommander-delegation-dispatch:${delegationId}`,
+                              async () => {
+                                await tasksApi.dispatchDelegation(delegationId);
+                              },
+                              'delegation 已执行并回写任务',
+                              { reloadDelegationsTaskId: selectedCommanderTask.id },
+                            )
+                          }
+                          onRetry={(delegationId) =>
+                            void runTaskAction(
+                              `agentcommander-delegation-retry:${delegationId}`,
+                              async () => {
+                                await tasksApi.retryDelegation(delegationId);
+                              },
+                              'delegation 已重新排队',
+                              { reloadDelegationsTaskId: selectedCommanderTask.id },
+                            )
+                          }
+                          onCancel={(delegationId) =>
+                            void runTaskAction(
+                              `agentcommander-delegation-cancel:${delegationId}`,
+                              async () => {
+                                await tasksApi.cancelDelegation(delegationId, 'AgentCommander 手动取消');
+                              },
+                              'delegation 已取消',
+                              { reloadDelegationsTaskId: selectedCommanderTask.id },
+                            )
+                          }
+                        />
+                      </>
+                    ) : (
+                      <div className="rounded-xl border border-border-subtle bg-white/5 p-4 text-xs text-slate-500">
+                        当前还没有可展示的 ProjectRoom 协作任务。请先在 Projects / ProjectRoom 里选中项目并创建真实 task/delegation。
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
           </div>
 
           {/* Composer */}
@@ -739,6 +1146,12 @@ const AgentCommander = ({
                         <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
                           <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">项目上下文</p>
                           <p className="text-xs text-slate-200 mt-1">{confirmCard.project}</p>
+                        </div>
+                        <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
+                          <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">关联任务</p>
+                          <p className="text-xs text-slate-200 mt-1 whitespace-pre-wrap">
+                            {confirmCard.taskContext.length > 0 ? confirmCard.taskContext.join('\n') : '当前未识别到关联中的任务'}
+                          </p>
                         </div>
                         <div className="p-4 bg-white/5 border border-border-subtle rounded-xl">
                           <p className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">预计完成</p>

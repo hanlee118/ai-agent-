@@ -25,6 +25,10 @@ import {
 import type { OpenClawAgentAttemptTrace } from "@occ/shared";
 import { prisma } from "../db.js";
 import {
+  buildTaskCollaboration,
+  hasBlockingDependencies
+} from "../services/task-collaboration.js";
+import {
   getRuntimeStatus,
   previewStageModelPlan,
   runStageAgent,
@@ -295,7 +299,7 @@ function isProjectWarmupEnabled() {
     return true;
   }
 
-  return process.env.NODE_ENV === "production";
+  return false;
 }
 
 function isRealModelGateEnabled() {
@@ -1469,7 +1473,7 @@ function containsAny(input: string, patterns: RegExp[]) {
 }
 
 function buildImplementationSummary(project: ProjectDetail) {
-  const doneTasks = project.tasks.filter((task) => task.status === "done").length;
+  const doneTasks = project.tasks.filter((task) => isCompletedTaskStatus(task.status)).length;
   const totalTasks = project.tasks.length;
   const deliverableNames = project.deliverables.map((item) => item.name).slice(0, 8).join("、");
   const stageSummary = `${STAGE_LABELS[project.currentStage]}阶段完成，项目进度 ${project.progress}%`;
@@ -1836,7 +1840,32 @@ async function loadProjectRecord(id: string) {
     where: { id },
     include: {
       stages: { orderBy: { sortOrder: "asc" } },
-      tasks: { orderBy: [{ stageType: "asc" }, { sortOrder: "asc" }] },
+      tasks: {
+        orderBy: [{ stageType: "asc" }, { sortOrder: "asc" }],
+        include: {
+          dependencies: {
+            include: {
+              dependsOnTask: {
+                select: {
+                  id: true,
+                  title: true,
+                  status: true,
+                  ownerAgentId: true
+                }
+              }
+            }
+          },
+          delegations: {
+            orderBy: [{ updatedAt: "desc" }],
+            take: 3
+          },
+          gitlabSyncBindings: {
+            where: { bindingType: "task" },
+            orderBy: [{ updatedAt: "desc" }],
+            take: 1
+          }
+        }
+      },
       deliverables: { orderBy: [{ updatedAt: "desc" }] },
       timeline: { orderBy: { timestamp: "desc" } }
     }
@@ -1847,9 +1876,25 @@ type ProjectRecord = NonNullable<Awaited<ReturnType<typeof loadProjectRecord>>>;
 
 function formatTaskStatusLabel(status: string) {
   if (status === "done") return "已完成";
+  if (status === "completed") return "已完成";
   if (status === "in_progress") return "进行中";
+  if (status === "assigned") return "已指派";
+  if (status === "pending_review") return "待审阅";
+  if (status === "pending_approval") return "待审批";
+  if (status === "ready") return "就绪";
+  if (status === "draft") return "草稿";
   if (status === "blocked") return "阻塞";
+  if (status === "rejected") return "已驳回";
+  if (status === "cancelled") return "已取消";
   return "待处理";
+}
+
+function isClosedTaskStatus(status: string) {
+  return ["done", "completed", "cancelled", "rejected"].includes(String(status || "").trim());
+}
+
+function isCompletedTaskStatus(status: string) {
+  return ["done", "completed"].includes(String(status || "").trim());
 }
 
 function normalizeDeliverableName(name: string) {
@@ -2305,6 +2350,53 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         summary: input.summary
       });
     }
+
+    if (strategy.mode === "direct_model") {
+      const executionProtocol = await getExecutionProtocolSettings();
+      let currentProject: ProjectDetail | undefined;
+      let body = String(run.body || "").trim();
+      const skillEvidenceRequiredForStage =
+        executionProtocol.requireSkillEvidence && STAGE_SKILL_EVIDENCE_REQUIRED_SET.has(input.stageType);
+
+      if (skillEvidenceRequiredForStage) {
+        let skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
+        if (!skillEvidence.ok) {
+          currentProject = currentProject ?? await findProject(input.projectId);
+          if (currentProject) {
+            body = appendSkillEvidenceBlock(
+              body,
+              buildSkillEvidenceFallback(currentProject, input.stageType, strategy.requiredSkills, body)
+            );
+            skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
+          }
+        }
+        run = {
+          ...run,
+          body,
+          skillEvidence: skillEvidence.parsedEvidence ?? undefined
+        };
+      }
+
+      if (executionProtocol.requireCollaborationHandoff) {
+        let collaborationEvidence = validateTerminalCollaborationEvidence(body);
+        if (!collaborationEvidence.ok) {
+          currentProject = currentProject ?? await findProject(input.projectId);
+          if (currentProject) {
+            body = appendCollaborationEvidenceBlock(
+              body,
+              buildCollaborationEvidenceFallback(currentProject, input.stageType, body)
+            );
+            collaborationEvidence = validateTerminalCollaborationEvidence(body);
+          }
+        }
+        run = {
+          ...run,
+          body,
+          collaborationEvidence: collaborationEvidence.parsedEvidence ?? undefined
+        };
+      }
+    }
+
     const runAttempts = Array.isArray((run as { attempts?: unknown }).attempts)
       ? ((run as { attempts: StageModelAttemptTrace[] }).attempts)
       : [];
@@ -2313,7 +2405,11 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       const executionProtocol = await getExecutionProtocolSettings();
       const provider = String(run.provider || "").trim().toLowerCase();
       const degraded = Boolean((run as { degraded?: boolean }).degraded);
-      if (provider === "scripted" || (executionProtocol.blockDegradedWrites && degraded)) {
+      const allowInitBootstrapWrite =
+        input.stageType === "INIT"
+        && strategy.mode === "direct_model"
+        && provider === "scripted";
+      if ((!allowInitBootstrapWrite && provider === "scripted") || (executionProtocol.blockDegradedWrites && degraded)) {
         const gateError = new Error("REAL_MODEL_GATE_FAILED: 当前阶段输出触发 scripted/degraded 降级，不允许写入为成功结果。") as Error & {
           attempts?: StageModelAttemptTrace[];
         };
@@ -2942,7 +3038,7 @@ export async function listAgents(): Promise<AgentProfile[]> {
     _count: true,
     where: {
       status: {
-        in: ["todo", "in_progress", "blocked"]
+        in: ["draft", "ready", "assigned", "todo", "in_progress", "blocked", "pending_review", "pending_approval"]
       }
     }
   });
@@ -2961,7 +3057,7 @@ export async function findAgent(roleId: RoleType): Promise<AgentProfile | undefi
     where: {
       assignee: roleId,
       status: {
-        in: ["todo", "in_progress", "blocked"]
+        in: ["draft", "ready", "assigned", "todo", "in_progress", "blocked", "pending_review", "pending_approval"]
       }
     }
   });
@@ -3135,11 +3231,17 @@ export async function createProject(
   enrichProjectWithRequirementContract(project, input.requirementContract);
 
   await persistProject(project);
-  const created = await findProject(id).then((value) => value as ProjectDetail);
-  if (isProjectWarmupEnabled()) {
-    void warmupProjectAfterCreate(created);
+  return findProject(id).then((value) => value as ProjectDetail);
+}
+
+export async function startProjectWarmupAfterCreate(projectOrId: ProjectDetail | string) {
+  const project = typeof projectOrId === "string"
+    ? await findProject(projectOrId)
+    : projectOrId;
+  if (!project) {
+    return;
   }
-  return created;
+  await warmupProjectAfterCreate(project);
 }
 
 async function warmupProjectAfterCreate(project: ProjectDetail) {
@@ -3881,7 +3983,7 @@ export async function closeProject(id: string): Promise<ProjectDetail | undefine
     await tx.task.updateMany({
       where: {
         projectId: id,
-        status: { in: ["todo", "in_progress", "blocked"] }
+        status: { in: ["draft", "ready", "assigned", "todo", "in_progress", "blocked", "pending_review", "pending_approval"] }
       },
       data: {
         status: "done"
@@ -4451,10 +4553,38 @@ export async function listProjectExecutions(
 export async function listProjectTasks(projectId?: string): Promise<Task[]> {
   const tasks = await prisma.task.findMany({
     where: projectId ? { projectId } : undefined,
-    orderBy: [{ updatedAt: "desc" }]
+    orderBy: [{ updatedAt: "desc" }],
+    include: {
+      project: {
+        select: {
+          pendingApproval: true
+        }
+      },
+      dependencies: {
+        include: {
+          dependsOnTask: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              ownerAgentId: true
+            }
+          }
+        }
+      },
+      delegations: {
+        orderBy: [{ updatedAt: "desc" }],
+        take: 3
+      },
+      gitlabSyncBindings: {
+        where: { bindingType: "task" },
+        orderBy: [{ updatedAt: "desc" }],
+        take: 1
+      }
+    }
   });
 
-  return tasks.map(toTask);
+  return tasks.map((task) => toTask(task, { projectPendingApproval: task.project.pendingApproval }));
 }
 
 export async function listTasks(): Promise<TaskBoardItem[]> {
@@ -4468,6 +4598,27 @@ export async function listTasks(): Promise<TaskBoardItem[]> {
           pendingApproval: true,
           updatedAt: true
         }
+      },
+      dependencies: {
+        include: {
+          dependsOnTask: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              ownerAgentId: true
+            }
+          }
+        }
+      },
+      delegations: {
+        orderBy: [{ updatedAt: "desc" }],
+        take: 3
+      },
+      gitlabSyncBindings: {
+        where: { bindingType: "task" },
+        orderBy: [{ updatedAt: "desc" }],
+        take: 1
       }
     }
   });
@@ -4476,9 +4627,59 @@ export async function listTasks(): Promise<TaskBoardItem[]> {
 }
 
 export async function updateTaskStatus(taskId: string, status: TaskStatus): Promise<Task | undefined> {
-  const task = await prisma.task.findUnique({ where: { id: taskId } });
+  const task = await prisma.task.findUnique({
+    where: { id: taskId },
+    include: {
+      project: {
+        select: {
+          pendingApproval: true
+        }
+      },
+      dependencies: {
+        include: {
+          dependsOnTask: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              ownerAgentId: true
+            }
+          }
+        }
+      },
+      delegations: {
+        orderBy: [{ updatedAt: "desc" }],
+        take: 3
+      },
+      gitlabSyncBindings: {
+        where: { bindingType: "task" },
+        orderBy: [{ updatedAt: "desc" }],
+        take: 1
+      }
+    }
+  });
   if (!task) {
     return undefined;
+  }
+  if (isCompletedTaskStatus(status) && task.pendingDelegationCount > 0) {
+    throw new Error("TASK_PENDING_DELEGATIONS");
+  }
+  const collaboration = buildTaskCollaboration({
+    status: task.status,
+    description: task.description,
+    syncPolicy: task.syncPolicy,
+    ownerAgentId: task.ownerAgentId,
+    reviewAgentId: task.reviewAgentId,
+    projectPendingApproval: task.project.pendingApproval,
+    dependencies: task.dependencies,
+    delegations: task.delegations,
+    gitlabBinding: task.gitlabSyncBindings?.[0] || null
+  });
+  if (
+    ["in_progress", "pending_review", "pending_approval", "done", "completed"].includes(status)
+    && hasBlockingDependencies(collaboration.dependencies)
+  ) {
+    throw new Error(`TASK_BLOCKED_BY_DEPENDENCIES:${collaboration.dependencies.find((item) => item.type === "blocks" && item.dependsOnTaskStatus && !isCompletedTaskStatus(item.dependsOnTaskStatus))?.dependsOnTaskId || ""}`);
   }
 
   const updated = await prisma.task.update({
@@ -4498,7 +4699,39 @@ export async function updateTaskStatus(taskId: string, status: TaskStatus): Prom
     }
   });
 
-  return toTask(updated);
+  const refreshed = await prisma.task.findUnique({
+    where: { id: taskId },
+    include: {
+      project: {
+        select: {
+          pendingApproval: true
+        }
+      },
+      dependencies: {
+        include: {
+          dependsOnTask: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              ownerAgentId: true
+            }
+          }
+        }
+      },
+      delegations: {
+        orderBy: [{ updatedAt: "desc" }],
+        take: 3
+      },
+      gitlabSyncBindings: {
+        where: { bindingType: "task" },
+        orderBy: [{ updatedAt: "desc" }],
+        take: 1
+      }
+    }
+  });
+
+  return refreshed ? toTask(refreshed, { projectPendingApproval: refreshed.project.pendingApproval }) : undefined;
 }
 
 export async function getSystemHealth(): Promise<SystemHealth> {
@@ -4668,7 +4901,7 @@ function toProjectSummary(project: {
     pendingApproval: project.pendingApproval,
     currentRole: project.currentRole as RoleType,
     summary: project.summary,
-    openTaskCount: project.tasks.filter((task) => task.status !== "done").length
+    openTaskCount: project.tasks.filter((task) => !isClosedTaskStatus(task.status)).length
   };
 }
 
@@ -4709,9 +4942,52 @@ function toProjectDetail(project: {
     title: string;
     description: string;
     assignee: string;
+    ownerAgentId: string | null;
+    reviewAgentId: string | null;
+    coordinationMode: string;
+    delegationPolicy: string;
+    syncPolicy: string;
+    contextScope: string | null;
+    parentTaskId: string | null;
+    pendingDelegationCount: number;
+    lastDelegatedAt: Date | null;
     status: string;
     priority: string;
     updatedAt: Date;
+    dependencies: Array<{
+      id: string;
+      projectId: string;
+      taskId: string;
+      dependsOnTaskId: string;
+      type: string;
+      createdAt: Date;
+      dependsOnTask: {
+        id: string;
+        title: string;
+        status: string;
+        ownerAgentId: string | null;
+      };
+    }>;
+    delegations: Array<{
+      id: string;
+      mode: string;
+      status: string;
+      targetAgentId: string | null;
+      outputSummary: string | null;
+      failureReason: string | null;
+      retryCount: number;
+      maxRetries: number;
+      startedAt: Date | null;
+      completedAt: Date | null;
+      expiredAt: Date | null;
+    }>;
+    gitlabSyncBindings: Array<{
+      gitlabProjectId: string;
+      issueIid: number | null;
+      bindingType: string;
+      lastSyncedAt: Date | null;
+      lastSyncHash: string | null;
+    }>;
   }>;
   deliverables: Array<{
     id: string;
@@ -4775,9 +5051,9 @@ function toProjectDetail(project: {
     status: project.status as ProjectStatus,
     pendingApproval: project.pendingApproval,
     summary: project.summary,
-    openTaskCount: project.tasks.filter((task) => task.status !== "done").length,
+    openTaskCount: project.tasks.filter((task) => !isClosedTaskStatus(task.status)).length,
     stages,
-    tasks: project.tasks.map(toTask),
+    tasks: project.tasks.map((task) => toTask(task, { projectPendingApproval: project.pendingApproval })),
     deliverables: latestDeliverables.map((deliverable) => {
       return {
         id: deliverable.id,
@@ -4836,10 +5112,65 @@ function toTask(task: {
   title: string;
   description: string;
   assignee: string;
+  ownerAgentId: string | null;
+  reviewAgentId: string | null;
+  coordinationMode: string;
+  delegationPolicy: string;
+  syncPolicy: string;
+  contextScope: string | null;
+  parentTaskId: string | null;
+  pendingDelegationCount: number;
+  lastDelegatedAt: Date | null;
   status: string;
   priority: string;
   updatedAt: Date;
+  dependencies?: Array<{
+    id: string;
+    projectId: string;
+    taskId: string;
+    dependsOnTaskId: string;
+    type: string;
+    createdAt: Date;
+    dependsOnTask?: {
+      title: string;
+      status: string;
+      ownerAgentId: string | null;
+    } | null;
+  }>;
+  delegations?: Array<{
+    id: string;
+    mode: string;
+    status: string;
+    targetAgentId: string | null;
+    outputSummary: string | null;
+    failureReason: string | null;
+    retryCount: number;
+    maxRetries: number;
+    startedAt: Date | null;
+    completedAt: Date | null;
+    expiredAt: Date | null;
+  }>;
+  gitlabSyncBindings?: Array<{
+    gitlabProjectId: string;
+    issueIid: number | null;
+    bindingType: string;
+    lastSyncedAt: Date | null;
+    lastSyncHash: string | null;
+  }>;
+}, options?: {
+  projectPendingApproval?: boolean;
 }): Task {
+  const collaboration = buildTaskCollaboration({
+    status: task.status,
+    description: task.description,
+    syncPolicy: task.syncPolicy,
+    ownerAgentId: task.ownerAgentId,
+    reviewAgentId: task.reviewAgentId,
+    projectPendingApproval: options?.projectPendingApproval,
+    dependencies: task.dependencies,
+    delegations: task.delegations,
+    gitlabBinding: task.gitlabSyncBindings?.[0] || null
+  });
   return {
     id: task.id,
     projectId: task.projectId,
@@ -4847,6 +5178,20 @@ function toTask(task: {
     title: task.title,
     description: task.description,
     assignee: task.assignee as RoleType,
+    ownerAgentId: task.ownerAgentId ?? undefined,
+    reviewAgentId: task.reviewAgentId ?? undefined,
+    coordinationMode: task.coordinationMode as Task["coordinationMode"],
+    delegationPolicy: task.delegationPolicy as Task["delegationPolicy"],
+    syncPolicy: task.syncPolicy as Task["syncPolicy"],
+    contextScope: (task.contextScope || undefined) as Task["contextScope"],
+    parentTaskId: task.parentTaskId ?? undefined,
+    pendingDelegationCount: task.pendingDelegationCount,
+    lastDelegatedAt: task.lastDelegatedAt?.toISOString(),
+    blockedReason: collaboration.blockedReason,
+    nextAction: collaboration.nextAction,
+    dependencies: collaboration.dependencies,
+    delegationSummary: collaboration.delegationSummary,
+    gitlab: collaboration.gitlab,
     status: task.status as TaskStatus,
     priority: task.priority as Task["priority"],
     updatedAt: task.updatedAt.toISOString()
@@ -4860,9 +5205,51 @@ function toTaskBoardItem(task: {
   title: string;
   description: string;
   assignee: string;
+  ownerAgentId: string | null;
+  reviewAgentId: string | null;
+  coordinationMode: string;
+  delegationPolicy: string;
+  syncPolicy: string;
+  contextScope: string | null;
+  parentTaskId: string | null;
+  pendingDelegationCount: number;
+  lastDelegatedAt: Date | null;
   status: string;
   priority: string;
   updatedAt: Date;
+  dependencies?: Array<{
+    id: string;
+    projectId: string;
+    taskId: string;
+    dependsOnTaskId: string;
+    type: string;
+    createdAt: Date;
+    dependsOnTask?: {
+      title: string;
+      status: string;
+      ownerAgentId: string | null;
+    } | null;
+  }>;
+  delegations?: Array<{
+    id: string;
+    mode: string;
+    status: string;
+    targetAgentId: string | null;
+    outputSummary: string | null;
+    failureReason: string | null;
+    retryCount: number;
+    maxRetries: number;
+    startedAt: Date | null;
+    completedAt: Date | null;
+    expiredAt: Date | null;
+  }>;
+  gitlabSyncBindings?: Array<{
+    gitlabProjectId: string;
+    issueIid: number | null;
+    bindingType: string;
+    lastSyncedAt: Date | null;
+    lastSyncHash: string | null;
+  }>;
   project: {
     name: string;
     status: string;
@@ -4872,7 +5259,7 @@ function toTaskBoardItem(task: {
   };
 }): TaskBoardItem {
   return {
-    ...toTask(task),
+    ...toTask(task, { projectPendingApproval: task.project.pendingApproval }),
     projectName: task.project.name,
     projectStatus: task.project.status as ProjectStatus,
     projectCurrentStage: task.project.currentStage as StageType,
@@ -4882,14 +5269,32 @@ function toTaskBoardItem(task: {
 }
 
 function compareTaskBoardItems(left: TaskBoardItem, right: TaskBoardItem) {
-  const statusRank: Record<TaskStatus, number> = {
-    blocked: 0,
-    in_progress: 1,
-    todo: 2,
-    done: 3
+  const statusRank = (status: string) => {
+    switch (status) {
+      case "blocked":
+        return 0;
+      case "in_progress":
+        return 1;
+      case "assigned":
+      case "pending_review":
+      case "pending_approval":
+        return 2;
+      case "ready":
+      case "draft":
+      case "todo":
+        return 3;
+      case "done":
+      case "completed":
+        return 4;
+      case "rejected":
+      case "cancelled":
+        return 5;
+      default:
+        return 3;
+    }
   };
   const priorityRank = { high: 0, normal: 1, low: 2 } as const;
-  const statusDelta = statusRank[left.status] - statusRank[right.status];
+  const statusDelta = statusRank(left.status) - statusRank(right.status);
 
   if (statusDelta !== 0) {
     return statusDelta;

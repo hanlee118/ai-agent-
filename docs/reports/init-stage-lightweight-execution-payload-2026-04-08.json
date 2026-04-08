@@ -1,0 +1,40 @@
+{
+  "issue_title": "收轻 INIT 阶段首轮推进执行路径，避免 buildAutoStageSubmissions 在立项阶段超时",
+  "issue_labels": ["execution", "hardening", "codex-ready", "qa", "projectroom", "agentcommander", "project-flow"],
+  "source_of_truth": {
+    "route_entry": [
+      "apps/api/src/system/project-stage-execution.ts",
+      "apps/api/src/data/repository.ts",
+      "apps/api/src/index.ts"
+    ],
+    "active_implementation": [
+      "apps/api/src/system/project-stage-execution.ts"
+    ],
+    "related_files": [
+      "apps/api/src/routes/projects.ts",
+      "docs/reports/qa-mainchain-hardening-2026-04-08.md"
+    ]
+  },
+  "validation_commands": [
+    { "command": "pnpm --filter @occ/api typecheck", "required": true },
+    { "command": "pnpm --filter @occ/api build", "required": true }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要扩展新的 AgentCommander 页面能力",
+      "不要修改 task/delegation 领域语义",
+      "不要进入 Prisma migrate deploy 稳定性专项",
+      "不要把本任务扩大成全阶段执行协议重构"
+    ],
+    "soft_stop": [
+      "不要顺手改造 ANALYSIS/DESIGN/DEV 的执行模式",
+      "不要做无关 UI 改动",
+      "不要修改无关 API 契约"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": false,
+    "rule": "本轮只允许调整 INIT 阶段执行策略，不引入新的兼容执行层或第二套推进状态"
+  },
+  "issue_body": "# 背景\n- 本轮主链 QA 已确认：项目创建已恢复到秒级，task 项目隔离也已恢复可信。\n- 当前剩余的 P0 是 INIT 阶段首次手动推进仍可能在 `buildAutoStageSubmissions` 上超时，导致项目创建后无法在演示节奏内进入“有交付物/待审批”的可见状态。\n- 代码事实显示，INIT 阶段的 `ROLE_PM` 当前仍走 terminal-agent 执行策略。对于立项阶段，这条路径的执行成本已经高于它带来的实际价值。\n\n# 当前判断\n优先把 INIT 阶段首轮推进收轻，避免立项阶段使用过重执行路径，让首次推进在合理时间内可见且可解释。\n\n# 本次目标\n- 收轻 INIT 阶段执行策略\n- 避免 `buildAutoStageSubmissions` 在立项阶段超时\n- 保持后续 ProjectRoom / AgentCommander 的 task/delegation 语义不变\n\n# 本次不做\n- 不重构整个阶段执行协议\n- 不改 ANALYSIS/DESIGN/DEV 的执行模式\n- 不扩展 UI 能力\n\n# 事实源文件\n- `apps/api/src/system/project-stage-execution.ts`\n- `apps/api/src/data/repository.ts`\n- `apps/api/src/index.ts`\n\n# 执行要求\n- 优先最小改动，只处理 INIT 阶段首轮推进超时\n- 如果 INIT 不需要 terminal-agent，则明确把它降为更轻执行路径\n- 不要影响后续阶段对真实模型/终端证据的要求\n- 修复后重新做一次创建 -> 首轮手动推进的最小 QA 复测\n\n# 验收标准\n- INIT 阶段首次手动推进不再稳定卡在 `buildAutoStageSubmissions` 超时\n- 项目创建到首轮推进的可见反馈更顺畅\n- `pnpm --filter @occ/api typecheck` 通过\n- `pnpm --filter @occ/api build` 通过\n\n# 交付要求\n最终结果必须明确给出：\n1. INIT 阶段最终采用什么执行策略\n2. 为什么这样调整不会破坏后续阶段约束\n3. 复测结果如何\n4. 还有哪些残留风险未处理"
+}

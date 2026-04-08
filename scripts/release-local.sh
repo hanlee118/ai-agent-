@@ -10,6 +10,16 @@ mkdir -p "$XDG_CACHE_HOME"
 
 API_PID=""
 
+gitlab_configured() {
+  if [ -n "${GITLAB_TOKEN:-}" ]; then
+    return 0
+  fi
+  if [ ! -f "apps/api/.env" ]; then
+    return 1
+  fi
+  grep -q '^GITLAB_TOKEN="*[^"]' apps/api/.env
+}
+
 cleanup() {
   if [ -n "$API_PID" ] && kill -0 "$API_PID" >/dev/null 2>&1; then
     kill "$API_PID" >/dev/null 2>&1 || true
@@ -61,6 +71,13 @@ else
 fi
 
 pnpm test:smoke
+
+if gitlab_configured; then
+  echo "[GitLab] Verifying webhook real-chain health"
+  pnpm gitlab:webhook:check
+else
+  echo "[GitLab] Skipping webhook health check (GITLAB_TOKEN not configured)"
+fi
 
 echo "Release artifacts ready"
 echo "Run: ./scripts/start-local-prod.sh"

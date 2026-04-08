@@ -53,8 +53,8 @@ const DELIVERY_PHASES = new Set<StageType>(["DESIGN", "DEV", "ACCEPT"]);
 
 const STAGE_CONTENT_RULES: Record<StageType, Array<{ key: string; label: string; patterns: RegExp[] }>> = {
   INIT: [
-    { key: "goal", label: "项目目标", patterns: [/项目目标|阶段目标|目标[:：]/i] },
-    { key: "scope", label: "范围边界", patterns: [/范围\s*\/\s*非范围|非范围|范围边界|范围说明|边界[:：]/i] },
+    { key: "goal", label: "项目目标", patterns: [/项目背景与目标|项目目标|阶段目标|目标[:：]/i] },
+    { key: "scope", label: "范围边界", patterns: [/范围定义（in scope \/ out of scope）|范围\s*\/\s*非范围|非范围|范围边界|范围说明|边界[:：]/i] },
     { key: "owner", label: "阶段负责人", patterns: [/阶段负责人|负责人|角色分工|owner|assignee/i] },
     { key: "open_questions", label: "待确认项", patterns: [/待确认|待澄清|待补充|openQuestions/i] }
   ],

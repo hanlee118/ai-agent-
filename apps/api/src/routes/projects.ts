@@ -27,12 +27,18 @@ import {
   rejectProjectStage,
   resumeProject,
   submitCurrentStage,
+  startProjectWarmupAfterCreate,
   updateTaskStatus
 } from "../data/repository.js";
 import { getRuntimeStatus } from "../agents/runtime.js";
+import { syncTaskStatus } from "../services/gitlab-sync-policy.js";
+import {
+  buildProjectIssueFirstMessage,
+  ensureProjectIssueFirst
+} from "../services/project-issue-first.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
-import { syncProjectGitLabHarness } from "./gitlab.js";
+import { publishTaskIssueNote, syncProjectGitLabHarness } from "./gitlab.js";
 
 function formatTerminalCollaborationViolation(message: string) {
   const normalized = String(message || "").trim();
@@ -923,7 +929,7 @@ const PROJECT_ADVANCE_STORM_THRESHOLD = Math.max(
 );
 const PROJECT_ADVANCE_STALE_JOB_MS = Math.max(
   30_000,
-  Number(process.env.PROJECT_ADVANCE_STALE_JOB_MS ?? 90_000)
+  Number(process.env.PROJECT_ADVANCE_STALE_JOB_MS ?? 45_000)
 );
 const PROJECT_ADVANCE_RECOVERY_COOLDOWN_MS = Math.max(
   20_000,
@@ -1529,7 +1535,20 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     resourceId: project.id,
     summary: `创建项目 ${project.name}`
   });
-  kickProjectAutomationTick();
+
+  const issueFirst = await ensureProjectIssueFirst({ projectId: project.id });
+  if (issueFirst.ok) {
+    void startProjectWarmupAfterCreate(project).catch((error) => {
+      console.warn(
+        `[project] async warmup after create failed for ${project.id}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    });
+    kickProjectAutomationTick();
+  } else {
+    console.warn(`[ProjectIssueFirst] project create gated for ${project.id}: ${issueFirst.code} ${issueFirst.message}`);
+  }
+
   res.status(201).json(project);
 }));
 
@@ -1572,6 +1591,19 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   if (project.status !== "active") {
     resetProjectAdvancePollHint(projectId);
     res.status(409).json({ message: "Project is not active" });
+    return;
+  }
+
+  const issueFirst = await ensureProjectIssueFirst({ projectId });
+  if (!issueFirst.ok) {
+    resetProjectAdvancePollHint(projectId);
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "PROJECT_ISSUE_FIRST_REQUIRED",
+        message: buildProjectIssueFirstMessage(issueFirst)
+      }
+    });
     return;
   }
 
@@ -2040,8 +2072,35 @@ router.get("/api/projects/:id/tasks", asyncRoute(async (req, res) => {
   res.json(await listProjectTasks(projectId));
 }));
 
-router.get("/api/tasks", asyncRoute(async (_req, res) => {
-  res.json(await listTasks());
+router.get("/api/tasks", asyncRoute(async (req, res) => {
+  const projectId = typeof req.query.projectId === "string" ? req.query.projectId.trim() : "";
+  const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+  const assignee = typeof req.query.assignee === "string" ? req.query.assignee.trim() : "";
+
+  if (projectId) {
+    const scopedTasks = await listProjectTasks(projectId);
+    res.json(scopedTasks.filter((task) => {
+      if (status && task.status !== status) {
+        return false;
+      }
+      if (assignee && task.assignee !== assignee) {
+        return false;
+      }
+      return true;
+    }));
+    return;
+  }
+
+  const tasks = await listTasks();
+  res.json(tasks.filter((task) => {
+    if (status && task.status !== status) {
+      return false;
+    }
+    if (assignee && task.assignee !== assignee) {
+      return false;
+    }
+    return true;
+  }));
 }));
 
 router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
@@ -2438,7 +2497,34 @@ router.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
     return;
   }
 
-  const task = await updateTaskStatus(taskId, status);
+  let task;
+  try {
+    task = await updateTaskStatus(taskId, status);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "task update failed";
+    if (message === "TASK_PENDING_DELEGATIONS") {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "TASK_PENDING_DELEGATIONS",
+          message: "当前任务仍有未完成 delegation，不能直接标记为完成。"
+        }
+      });
+      return;
+    }
+    if (message.startsWith("TASK_BLOCKED_BY_DEPENDENCIES:")) {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "TASK_BLOCKED_BY_DEPENDENCIES",
+          message: "当前任务仍受 blocks 依赖限制，需先完成依赖任务后再推进。",
+          dependsOnTaskId: message.replace("TASK_BLOCKED_BY_DEPENDENCIES:", "").trim() || undefined
+        }
+      });
+      return;
+    }
+    throw error;
+  }
 
   if (!task) {
     res.status(404).json({ message: "Task not found" });
@@ -2458,6 +2544,19 @@ router.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
     stageType: task.stageType,
     reason: "task.update"
   });
+  if (task.status === "pending_approval") {
+    void publishTaskIssueNote({
+      taskId: task.id,
+      body: "任务已进入待审批状态，等待人工审批/验收结果。"
+    }).catch(() => undefined);
+  }
+  if (task.status === "blocked" && task.blockedReason?.detail) {
+    void publishTaskIssueNote({
+      taskId: task.id,
+      body: `任务进入阻塞状态：${task.blockedReason.detail}`
+    }).catch(() => undefined);
+  }
+  void syncTaskStatus(task.id).catch(() => undefined);
   res.json(task);
 }));
 router.get("/api/projects/:id/live", asyncRoute(async (req, res) => {

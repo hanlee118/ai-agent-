@@ -164,6 +164,13 @@ export interface IssueRecord {
   soulRoleId: string;
   conflicts: IssueConflict[];
   questions: IssueQuestion[];
+  refinement?: {
+    problemStatement: string;
+    expectedOutcome: string;
+    inScopeDraft: string[];
+    outOfScopeDraft: string[];
+    acceptanceDraft: string[];
+  };
   contextAlignment?: IssueContextAlignment;
   designBlueprint?: IssueDesignBlueprint;
   suggestedAnswers?: IssueSuggestedAnswer[];
@@ -451,6 +458,7 @@ export async function createIssueDraft(input: {
   soulRoleId: string;
   conflicts: IssueConflict[];
   questions: IssueQuestion[];
+  refinement?: IssueRecord["refinement"];
   contextAlignment?: IssueContextAlignment;
   designBlueprint?: IssueDesignBlueprint;
   suggestedAnswers?: IssueSuggestedAnswer[];
@@ -477,6 +485,7 @@ export async function createIssueDraft(input: {
     soulRoleId: input.soulRoleId,
     conflicts: input.conflicts,
     questions: input.questions,
+    refinement: input.refinement,
     contextAlignment: input.contextAlignment,
     designBlueprint: input.designBlueprint,
     suggestedAnswers: input.suggestedAnswers,
