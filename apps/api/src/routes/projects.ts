@@ -39,10 +39,143 @@ import {
 } from "../services/project-issue-first.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
-import { publishTaskIssueNote, syncProjectGitLabHarness } from "./gitlab.js";
+import {
+  publishTaskIssueNote,
+  syncProjectGitLabHarness,
+  upsertQualityGateRepairIssue
+} from "./gitlab.js";
 
 const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
+const QUALITY_GATE_REPAIR_DEFAULT_LIMIT = 80;
+const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
+  INIT: "立项",
+  ANALYSIS: "分析",
+  DESIGN: "设计",
+  DEV: "开发",
+  ACCEPT: "验收"
+};
+const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
+  "pnpm --filter @occ/api typecheck",
+  "pnpm --filter @occ/web typecheck",
+  "pnpm --filter @occ/web build"
+];
+
+function normalizeStringArrayInput(input: unknown) {
+  if (!Array.isArray(input)) {
+    return [] as string[];
+  }
+  return input
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+}
+
+function normalizeStatusFilter(input: unknown) {
+  const allowed = new Set(["active", "paused", "blocked", "completed"]);
+  const values = normalizeStringArrayInput(input).map((item) => item.toLowerCase());
+  return new Set(values.filter((item) => allowed.has(item)));
+}
+
+function parseRepairLimit(input: unknown) {
+  const value = Number(input);
+  if (!Number.isFinite(value)) {
+    return QUALITY_GATE_REPAIR_DEFAULT_LIMIT;
+  }
+  return Math.max(1, Math.min(300, Math.floor(value)));
+}
+
+async function buildProjectQualityGateRepairResult(input: {
+  projectId: string;
+  dryRun: boolean;
+  projectPath?: string;
+  validationCommands: string[];
+}) {
+  const project = await findProject(input.projectId);
+  if (!project) {
+    return {
+      projectId: input.projectId,
+      status: "not_found" as const,
+      blockingStageCount: 0,
+      created: [] as Array<{ stageType: string; stageLabel: string; issueIid: number; issueUrl: string; marker: string }>,
+      reused: [] as Array<{ stageType: string; stageLabel: string; issueIid: number; issueUrl: string; marker: string }>,
+      failed: [] as Array<{ stageType: string; stageLabel: string; reason: string }>
+    };
+  }
+
+  const lifecycleAudit = await getProjectLifecycleQualityAudit(project.id);
+  if (!lifecycleAudit) {
+    return {
+      projectId: project.id,
+      projectName: project.name,
+      status: "audit_unavailable" as const,
+      blockingStageCount: 0,
+      created: [] as Array<{ stageType: string; stageLabel: string; issueIid: number; issueUrl: string; marker: string }>,
+      reused: [] as Array<{ stageType: string; stageLabel: string; issueIid: number; issueUrl: string; marker: string }>,
+      failed: [] as Array<{ stageType: string; stageLabel: string; reason: string }>
+    };
+  }
+
+  const blockingStages = lifecycleAudit.stageAudits.filter((stage) => !stage.pass);
+  const stagePlans = blockingStages.map((stage) => ({
+    stageType: stage.stageType,
+    stageLabel: QUALITY_GATE_REPAIR_STAGE_LABELS[stage.stageType] || stage.stageLabel || stage.stageType,
+    stageStatus: stage.stageStatus,
+    stageIssues: stage.issues || []
+  }));
+
+  const created: Array<{ stageType: string; stageLabel: string; issueIid: number; issueUrl: string; marker: string }> = [];
+  const reused: Array<{ stageType: string; stageLabel: string; issueIid: number; issueUrl: string; marker: string }> = [];
+  const failed: Array<{ stageType: string; stageLabel: string; reason: string }> = [];
+
+  if (!input.dryRun) {
+    for (const stage of stagePlans) {
+      const result = await upsertQualityGateRepairIssue({
+        projectId: project.id,
+        projectName: project.name,
+        stageType: stage.stageType,
+        stageLabel: stage.stageLabel,
+        stageStatus: stage.stageStatus,
+        currentStage: lifecycleAudit.currentStage,
+        stageIssues: stage.stageIssues,
+        validationCommands: input.validationCommands,
+        projectPath: input.projectPath
+      });
+      if (!result.ok) {
+        failed.push({
+          stageType: stage.stageType,
+          stageLabel: stage.stageLabel,
+          reason: result.message
+        });
+        continue;
+      }
+      const record = {
+        stageType: stage.stageType,
+        stageLabel: stage.stageLabel,
+        issueIid: result.data.issueIid,
+        issueUrl: result.data.issueUrl,
+        marker: result.data.marker
+      };
+      if (result.data.action === "created") {
+        created.push(record);
+      } else {
+        reused.push(record);
+      }
+    }
+  }
+
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    status: "ok" as const,
+    pass: lifecycleAudit.pass,
+    blockingStageCount: blockingStages.length,
+    blockingStages: stagePlans,
+    dryRun: input.dryRun,
+    created,
+    reused,
+    failed
+  };
+}
 
 function formatTerminalCollaborationViolation(message: string) {
   const normalized = String(message || "").trim();
@@ -1826,6 +1959,153 @@ router.get("/api/projects/:id/lifecycle-quality-audit", asyncRoute(async (req, r
     return;
   }
   res.json(audit);
+}));
+
+router.post("/api/projects/:id/quality-gate/repair-issues", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id || "").trim();
+  if (!projectId) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "project id is required"
+      }
+    });
+    return;
+  }
+
+  const dryRun = Boolean(req.body?.dryRun);
+  const projectPath = String(req.body?.projectPath || "").trim() || undefined;
+  const validationCommands = normalizeStringArrayInput(req.body?.validationCommands);
+  const result = await buildProjectQualityGateRepairResult({
+    projectId,
+    dryRun,
+    projectPath,
+    validationCommands: validationCommands.length > 0
+      ? validationCommands
+      : QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS
+  });
+
+  if (result.status === "not_found") {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: `Project not found: ${projectId}`
+      }
+    });
+    return;
+  }
+
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "project.quality_gate_repair_issues.generated",
+    resourceType: "project",
+    resourceId: projectId,
+    summary: dryRun
+      ? `质量门禁修复 issue 预览：${result.blockingStageCount} 个阻断阶段`
+      : `质量门禁修复 issue 执行：创建 ${result.created.length} / 复用 ${result.reused.length} / 失败 ${result.failed.length}`,
+    detail: `dryRun=${dryRun}; blockingStages=${result.blockingStageCount}`
+  });
+
+  res.json({
+    success: true,
+    data: result
+  });
+}));
+
+router.post("/api/projects/quality-gate/repair-issues", asyncRoute(async (req, res) => {
+  const dryRun = Boolean(req.body?.dryRun);
+  const projectPath = String(req.body?.projectPath || "").trim() || undefined;
+  const includeHistorical = req.body?.includeHistorical !== false;
+  const limit = parseRepairLimit(req.body?.limit);
+  const validationCommands = normalizeStringArrayInput(req.body?.validationCommands);
+  const selectedProjectIds = Array.from(new Set(normalizeStringArrayInput(req.body?.projectIds)));
+  const statusFilter = normalizeStatusFilter(req.body?.statuses);
+
+  const projects = await listProjects();
+  const summaryById = new Map(projects.map((item) => [item.id, item]));
+
+  let targetProjectIds: string[];
+  if (selectedProjectIds.length > 0) {
+    targetProjectIds = selectedProjectIds.filter((id) => summaryById.has(id));
+  } else {
+    const statusSet = statusFilter.size > 0
+      ? statusFilter
+      : includeHistorical
+        ? null
+        : new Set(["active", "blocked"]);
+    targetProjectIds = projects
+      .filter((item) => !statusSet || statusSet.has(item.status))
+      .map((item) => item.id);
+  }
+
+  if (targetProjectIds.length > limit) {
+    targetProjectIds = targetProjectIds.slice(0, limit);
+  }
+
+  const results: Array<Awaited<ReturnType<typeof buildProjectQualityGateRepairResult>>> = [];
+  for (const projectId of targetProjectIds) {
+    const item = await buildProjectQualityGateRepairResult({
+      projectId,
+      dryRun,
+      projectPath,
+      validationCommands: validationCommands.length > 0
+        ? validationCommands
+        : QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS
+    });
+    results.push(item);
+  }
+
+  const totals = results.reduce((acc, item) => {
+    acc.processed += 1;
+    acc.blockingStages += item.blockingStageCount;
+    acc.created += item.created.length;
+    acc.reused += item.reused.length;
+    acc.failed += item.failed.length;
+    if (item.status === "not_found" || item.status === "audit_unavailable") {
+      acc.skipped += 1;
+    } else if (item.blockingStageCount === 0) {
+      acc.noBlocking += 1;
+    } else {
+      acc.withBlocking += 1;
+    }
+    return acc;
+  }, {
+    processed: 0,
+    withBlocking: 0,
+    noBlocking: 0,
+    skipped: 0,
+    blockingStages: 0,
+    created: 0,
+    reused: 0,
+    failed: 0
+  });
+
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "project.quality_gate_repair_issues.batch_generated",
+    resourceType: "project",
+    summary: dryRun
+      ? `批量质量门禁修复 issue 预览：项目 ${totals.processed} 个，阻断阶段 ${totals.blockingStages} 个`
+      : `批量质量门禁修复 issue 执行：创建 ${totals.created} / 复用 ${totals.reused} / 失败 ${totals.failed}`,
+    detail: `dryRun=${dryRun}; includeHistorical=${includeHistorical}; requested=${targetProjectIds.length}; limit=${limit}`
+  });
+
+  res.json({
+    success: true,
+    data: {
+      dryRun,
+      includeHistorical,
+      limit,
+      requestedProjects: targetProjectIds.length,
+      processedProjects: totals.processed,
+      totals,
+      projects: results
+    }
+  });
 }));
 
 router.get("/api/projects/:id", asyncRoute(async (req, res) => {

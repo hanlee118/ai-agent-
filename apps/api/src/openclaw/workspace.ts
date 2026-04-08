@@ -2307,12 +2307,28 @@ async function buildAgent(
 
   const team = teamMap.get(agentConfig.id);
   const identity = parseIdentity(identityContent);
-  const title = managedConfig?.title || team?.title || deriveTitleFromSoul(soul.content) || humanizeAgentId(agentConfig.id);
-  const name = normalizeAgentDisplayName(
-    managedConfig?.displayName || identity.name || team?.name || agentConfig.name || "",
-    title,
+  const soulDerivedName = deriveNameFromSoul(soul.content);
+  const preferredDisplayName = pickPreferredAgentDisplayName(
+    [managedConfig?.displayName, identity.name, soulDerivedName, team?.name, agentConfig.name],
     agentConfig.id
   );
+  const soulDerivedTitle = deriveTitleFromSoul(soul.content, {
+    agentName: preferredDisplayName || managedConfig?.displayName || identity.name || soulDerivedName || team?.name || agentConfig.name || "",
+    agentId: agentConfig.id
+  });
+  const name = normalizeAgentDisplayName(
+    preferredDisplayName || managedConfig?.displayName || identity.name || soulDerivedName || team?.name || agentConfig.name || "",
+    team?.title || humanizeAgentId(agentConfig.id),
+    agentConfig.id
+  );
+  const title = resolveAgentTitle({
+    managedTitle: managedConfig?.title,
+    identityTitle: identity.title,
+    soulTitle: soulDerivedTitle,
+    teamTitle: team?.title,
+    agentName: name,
+    agentId: agentConfig.id
+  });
   const responsibility = managedConfig?.responsibility || team?.responsibility || buildSoulIntro(soul.content);
   const intro = managedConfig?.intro || buildAgentIntro(soul.content, responsibility);
   const lastActiveAt = sessions[0]?.updatedAt;
@@ -2819,12 +2835,14 @@ async function loadTeamMap() {
 
 function parseIdentity(content: string) {
   return {
-    name: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Name", "name"], /^#\s+(.+)$/m)),
+    name: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Name", "name", "名称", "昵称"], /^#\s+(.+)$/m)),
     emoji: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Emoji", "emoji"])),
     vibe: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Vibe", "vibe"])),
-    title: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Title", "title"])),
-    intro: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Intro", "intro"])),
-    agentId: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Agent ID", "agent_id"]))
+    title: sanitizeIdentityValue(
+      matchLooseIdentityValue(content, ["Title", "title", "职位", "职务", "核心角色", "角色", "Role", "role"])
+    ),
+    intro: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Intro", "intro", "简介", "定位", "说明"])),
+    agentId: sanitizeIdentityValue(matchLooseIdentityValue(content, ["Agent ID", "agent_id", "agentId", "编号"]))
   };
 }
 
@@ -2860,7 +2878,8 @@ function sanitizeIdentityValue(value: string) {
     !value ||
     value.includes("pick something you like") ||
     value.includes("pick one that feels right") ||
-    value.includes("Fill this in")
+    value.includes("Fill this in") ||
+    value.toLowerCase().includes("how do you come across")
   ) {
     return "";
   }
@@ -2868,26 +2887,195 @@ function sanitizeIdentityValue(value: string) {
   return value.replace(/^_+\(?/, "").replace(/\)?_+$/, "").trim();
 }
 
+function normalizeIdentityLine(value: string) {
+  return String(value || "")
+    .replace(/[`*_~]/g, "")
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/[“”"']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function cleanRoleCandidate(value: string) {
+  return normalizeIdentityLine(value)
+    .replace(/^(你是|我是|作为)\s*/u, "")
+    .replace(/^[：:\-—\s]+/u, "")
+    .replace(/[。；;，,：:]+$/u, "")
+    .trim();
+}
+
+function sameIdentityValue(left?: string, right?: string) {
+  return String(left || "").trim().toLowerCase() === String(right || "").trim().toLowerCase();
+}
+
+function isSuspiciousAgentTitle(title: string, context?: { agentName?: string; agentId?: string }) {
+  const normalized = normalizeIdentityLine(title);
+  if (!normalized) {
+    return true;
+  }
+  if (sameIdentityValue(normalized, context?.agentId) || sameIdentityValue(normalized, context?.agentName)) {
+    return true;
+  }
+  return /^(agent|unknown|未命名|待配置角色)$/iu.test(normalized);
+}
+
+function pickFirstNonEmptyLine(content: string) {
+  const lines = String(content || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines[0] || "";
+}
+
+function deriveTitleFromRoleSentence(line: string, context?: { agentName?: string; agentId?: string }) {
+  if (!line) {
+    return "";
+  }
+
+  const normalized = cleanRoleCandidate(line);
+  if (!normalized) {
+    return "";
+  }
+
+  const alt = normalized.match(/(?:一位|一个|一名)\s*([^，,。；;\n]+)/u)?.[1]?.trim() || "";
+  const altCandidate = cleanRoleCandidate(alt);
+  const firstClause = cleanRoleCandidate(normalized.split(/[，,。；;：:\n]/u)[0] || "");
+  if (altCandidate && /(?:一位|一个|一名)/u.test(normalized) && !isSuspiciousAgentTitle(altCandidate, context)) {
+    return altCandidate;
+  }
+  if (firstClause && !isSuspiciousAgentTitle(firstClause, context)) {
+    return firstClause;
+  }
+  if (altCandidate && !isSuspiciousAgentTitle(altCandidate, context)) {
+    return altCandidate;
+  }
+
+  return "";
+}
+
+function pickPreferredAgentDisplayName(candidates: Array<string | null | undefined>, agentId: string) {
+  const humanized = humanizeAgentId(agentId);
+  for (const item of candidates) {
+    const candidate = normalizeIdentityLine(item || "");
+    if (!candidate) {
+      continue;
+    }
+    if (sameIdentityValue(candidate, agentId) || sameIdentityValue(candidate, humanized)) {
+      continue;
+    }
+    if (/^(agent|unknown|未命名)$/iu.test(candidate)) {
+      continue;
+    }
+    return candidate;
+  }
+  return "";
+}
+
 function normalizeAgentDisplayName(rawName: string, title: string, agentId: string) {
   const cleaned = rawName.trim();
-  if (cleaned && cleaned !== agentId) {
+  if (cleaned && !sameIdentityValue(cleaned, agentId)) {
     return cleaned;
   }
 
-  if (title && title !== humanizeAgentId(agentId)) {
+  if (title && !sameIdentityValue(title, humanizeAgentId(agentId))) {
     return title;
   }
 
   return humanizeAgentId(agentId);
 }
 
-function deriveTitleFromSoul(content: string) {
-  const titleFromHeading = content.match(/^#\s+SOUL\.md\s*-\s*(.+)$/m)?.[1]?.trim();
-  if (titleFromHeading) {
-    return titleFromHeading;
+function deriveTitleFromSoul(content: string, context?: { agentName?: string; agentId?: string }) {
+  const lines = String(content || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const explicit = line.match(
+      /^(?:[-*]\s*)?(?:\*\*)?(职位|职务|岗位|头衔|title|Title|核心角色|角色定位|Role|role)(?:\*\*)?\s*[:：]\s*(.+)$/u
+    );
+    if (!explicit) {
+      continue;
+    }
+    const candidate = cleanRoleCandidate(explicit[2] || "");
+    if (candidate && !isSuspiciousAgentTitle(candidate, context)) {
+      return candidate;
+    }
   }
 
-  return content.match(/^##\s*角色\s*\n(.+)$/m)?.[1]?.trim() || "";
+  const roleSectionMatch = String(content || "").match(
+    /^##\s*(?:角色|Role)\s*[\r\n]+([\s\S]*?)(?:\n##\s+|\n---|\n$)/im
+  );
+  const roleLine = pickFirstNonEmptyLine(roleSectionMatch?.[1] || "");
+  const sentenceDerived = deriveTitleFromRoleSentence(roleLine, context);
+  if (sentenceDerived) {
+    return sentenceDerived;
+  }
+
+  const heading = cleanRoleCandidate(String(content || "").match(/^#\s+(.+)$/m)?.[1] || "");
+  if (
+    heading
+    && !/\bSOUL\b|SOUL\.md/iu.test(heading)
+    && !isSuspiciousAgentTitle(heading, context)
+  ) {
+    return heading;
+  }
+
+  return "";
+}
+
+function deriveNameFromSoul(content: string) {
+  const lines = String(content || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const explicit = line.match(/^(?:[-*]\s*)?(?:\*\*)?(名称|Name|name)(?:\*\*)?\s*[:：]\s*(.+)$/u);
+    if (!explicit) {
+      continue;
+    }
+    const candidate = cleanRoleCandidate(explicit[2] || "");
+    if (candidate && !/^(agent|unknown|未命名)$/iu.test(candidate)) {
+      return candidate;
+    }
+  }
+
+  const roleSectionMatch = String(content || "").match(
+    /^##\s*(?:角色|Role)\s*[\r\n]+([\s\S]*?)(?:\n##\s+|\n---|\n$)/im
+  );
+  const roleLine = pickFirstNonEmptyLine(roleSectionMatch?.[1] || "");
+  const alias = cleanRoleCandidate(roleLine.match(/你是\s*([^，,。；;\n]+)/u)?.[1] || "");
+  if (alias && !/^(agent|unknown|未命名)$/iu.test(alias)) {
+    return alias;
+  }
+
+  return "";
+}
+
+function resolveAgentTitle(input: {
+  managedTitle?: string | null;
+  identityTitle?: string;
+  soulTitle?: string;
+  teamTitle?: string;
+  agentName?: string;
+  agentId: string;
+}) {
+  const context = { agentName: input.agentName, agentId: input.agentId };
+  const orderedCandidates = [
+    String(input.managedTitle || "").trim(),
+    String(input.identityTitle || "").trim(),
+    String(input.soulTitle || "").trim(),
+    String(input.teamTitle || "").trim()
+  ];
+
+  for (const candidate of orderedCandidates) {
+    if (!isSuspiciousAgentTitle(candidate, context)) {
+      return candidate;
+    }
+  }
+
+  return humanizeAgentId(input.agentId);
 }
 
 function buildSoulIntro(content: string) {

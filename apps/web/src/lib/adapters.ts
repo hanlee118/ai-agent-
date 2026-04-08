@@ -442,6 +442,19 @@ function mapProjectOwner(project: OpenClawProjectDetail): string {
   return focusOwner || '未分配';
 }
 
+function normalizeAgentRoleLabel(agent: OpenClawAgentSummary): string {
+  const title = String(agent.title || '').trim();
+  if (title) {
+    return title;
+  }
+  const responsibility = String(agent.responsibility || '').trim();
+  const explicitRole = responsibility.match(/(?:职位|职务|核心角色|role|title)\s*[:：]\s*([^，,。；;\n]+)/i)?.[1]?.trim();
+  if (explicitRole) {
+    return explicitRole;
+  }
+  return 'OpenClaw Agent';
+}
+
 function mapAgent(agent: OpenClawAgentSummary): Agent {
   const load = clamp(agent.activeSessionCount * 35 + agent.taskCount * 12 + agent.blockedTaskCount * 8, 0, 100);
   const tokenLimit = agent.commander?.maxDailyTokens ?? agent.usage?.dailyLimit ?? 100000000;
@@ -450,7 +463,7 @@ function mapAgent(agent: OpenClawAgentSummary): Agent {
   return {
     id: agent.agentId,
     name: agent.name,
-    role: agent.title || agent.responsibility || 'OpenClaw Agent',
+    role: normalizeAgentRoleLabel(agent),
     status: mapAgentStatus(agent.status, agent.activeSessionCount, agent.taskCount),
     load,
     // Keep runtime model route string to avoid lossy m1/m2/m3 placeholders.

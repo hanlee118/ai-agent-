@@ -364,6 +364,59 @@ export type ProjectExecutionProtocolPrecheck = {
   }>;
 };
 
+export type ProjectQualityGateRepairResult = {
+  projectId: string;
+  projectName?: string;
+  status: 'ok' | 'not_found' | 'audit_unavailable';
+  pass?: boolean;
+  dryRun?: boolean;
+  blockingStageCount: number;
+  blockingStages?: Array<{
+    stageType: string;
+    stageLabel: string;
+    stageStatus?: string;
+    stageIssues: string[];
+  }>;
+  created: Array<{
+    stageType: string;
+    stageLabel: string;
+    issueIid: number;
+    issueUrl: string;
+    marker: string;
+  }>;
+  reused: Array<{
+    stageType: string;
+    stageLabel: string;
+    issueIid: number;
+    issueUrl: string;
+    marker: string;
+  }>;
+  failed: Array<{
+    stageType: string;
+    stageLabel: string;
+    reason: string;
+  }>;
+};
+
+export type ProjectBatchQualityGateRepairResult = {
+  dryRun: boolean;
+  includeHistorical: boolean;
+  limit: number;
+  requestedProjects: number;
+  processedProjects: number;
+  totals: {
+    processed: number;
+    withBlocking: number;
+    noBlocking: number;
+    skipped: number;
+    blockingStages: number;
+    created: number;
+    reused: number;
+    failed: number;
+  };
+  projects: ProjectQualityGateRepairResult[];
+};
+
 export const projectsApi = {
   async list(params?: { status?: string; page?: number; limit?: number }) {
     const searchParams = new URLSearchParams();
@@ -434,6 +487,35 @@ export const projectsApi = {
     }>('/projects/cleanup', {
       method: 'POST',
       body: JSON.stringify(input),
+    });
+  },
+
+  async generateQualityGateRepairIssues(
+    id: string,
+    input?: {
+      dryRun?: boolean;
+      projectPath?: string;
+      validationCommands?: string[];
+    },
+  ) {
+    return request<ProjectQualityGateRepairResult>(`/projects/${toProjectPathId(id)}/quality-gate/repair-issues`, {
+      method: 'POST',
+      body: JSON.stringify(input || {}),
+    });
+  },
+
+  async generateBatchQualityGateRepairIssues(input?: {
+    projectIds?: string[];
+    statuses?: Array<'active' | 'paused' | 'blocked' | 'completed'>;
+    includeHistorical?: boolean;
+    limit?: number;
+    dryRun?: boolean;
+    projectPath?: string;
+    validationCommands?: string[];
+  }) {
+    return request<ProjectBatchQualityGateRepairResult>('/projects/quality-gate/repair-issues', {
+      method: 'POST',
+      body: JSON.stringify(input || {}),
     });
   },
 

@@ -17,7 +17,16 @@ const GITLAB_DEFAULT_PROJECT = String(
 const HARNESS_PROJECT_MARKER = "OCC_PROJECT_ID";
 const HARNESS_TASK_MARKER = "OCC_TASK_ID";
 const HARNESS_PROJECT_MAIN_MARKER = "OCC_PROJECT_MAIN";
+const HARNESS_QG_REPAIR_MARKER = "OCC_QG_REPAIR";
 const HARNESS_LABEL = "occ-harness";
+const HARNESS_QUALITY_GATE_REPAIR_LABEL = "occ-quality-gate-repair";
+const STAGE_LABELS: Record<string, string> = {
+  INIT: "立项",
+  ANALYSIS: "分析",
+  DESIGN: "设计",
+  DEV: "开发",
+  ACCEPT: "验收"
+};
 
 function parseOptionalString(input: unknown) {
   const value = String(input ?? "").trim();
@@ -318,6 +327,10 @@ function buildHarnessTaskLabel(taskId: string) {
   return `occ-task-${sanitizeLabelFragment(taskId).slice(0, 24)}`;
 }
 
+function buildQualityGateRepairMarker(projectId: string, stageType: string) {
+  return `${HARNESS_QG_REPAIR_MARKER}:${projectId}:${stageType}`;
+}
+
 function buildHarnessIssueTitle(input: {
   projectId: string;
   taskTitle: string;
@@ -524,6 +537,245 @@ function extractHarnessMarker(source: string, marker: string) {
   const regex = new RegExp(`${marker}\\s*:\\s*([^\\s>]+)`, "i");
   const matched = source.match(regex);
   return matched ? String(matched[1] || "").trim() : "";
+}
+
+async function findIssueByMarker(projectPath: string, marker: string) {
+  const query = new URLSearchParams({
+    state: "all",
+    per_page: "40",
+    search: marker
+  });
+  const response = await requestGitLab(
+    `/projects/${encodeURIComponent(projectPath)}/issues?${query.toString()}`
+  );
+  if (!response.ok || !Array.isArray(response.payload)) {
+    return null;
+  }
+
+  for (const item of response.payload as Array<Record<string, unknown>>) {
+    const iid = Number(item.iid);
+    if (!Number.isInteger(iid) || iid <= 0) {
+      continue;
+    }
+    const title = String(item.title || "");
+    const description = String(item.description || "");
+    const markerSource = `${title}\n${description}`;
+    if (markerSource.includes(marker)) {
+      return {
+        iid,
+        state: String(item.state || "opened")
+      };
+    }
+  }
+
+  return null;
+}
+
+function buildQualityGateRepairIssueTitle(input: {
+  projectId: string;
+  projectName: string;
+  stageType: string;
+  stageLabel: string;
+}) {
+  return `[OCC][QG-REPAIR][${input.stageType}] 修复 ${input.projectName} 的${input.stageLabel}阶段质量门禁阻断 (${input.projectId})`;
+}
+
+function buildQualityGateRepairIssueDescription(input: {
+  projectId: string;
+  projectName: string;
+  stageType: string;
+  stageLabel: string;
+  stageStatus?: string;
+  currentStage?: string;
+  stageIssues: string[];
+  validationCommands: string[];
+  marker: string;
+}) {
+  const issueLines = input.stageIssues.length > 0
+    ? input.stageIssues.map((item) => `- ${item}`)
+    : ["- 该阶段被 lifecycle quality gate 标记为阻断，请核查交付物模板、执行记录与门禁状态。"];
+  const validations = input.validationCommands.length > 0
+    ? input.validationCommands.map((item) => `- ${item}`)
+    : [
+      "- pnpm --filter @occ/api typecheck",
+      "- pnpm --filter @occ/web typecheck",
+      "- pnpm --filter @occ/web build"
+    ];
+
+  return [
+    "# 背景",
+    `- 项目: ${input.projectName} (${input.projectId})`,
+    `- 当前阶段: ${input.currentStage || "unknown"}`,
+    `- 阻断阶段: ${input.stageType} (${input.stageLabel})`,
+    `- 阶段状态: ${input.stageStatus || "unknown"}`,
+    "- 来源: /api/projects/:id/lifecycle-quality-audit 的 stageAudits 阻断结果",
+    "",
+    "# 阻断项",
+    ...issueLines,
+    "",
+    "# 本次目标",
+    `- 修复 ${input.stageLabel} 阶段质量门禁阻断，恢复可验收状态`,
+    "- 保持 issue-first 与单一事实语义，不新增平行状态系统",
+    "",
+    "# 验证命令",
+    ...validations,
+    "",
+    "# Stop Conditions",
+    "- 不要扩展为无关重构",
+    "- 不要改动无关 API 契约",
+    "- 不要新增平行状态语义或并行流程",
+    "",
+    "# 交付要求",
+    "1. 明确修改文件与原因",
+    "2. 明确修复了哪些阻断项",
+    "3. 给出验证结果（命令+通过/失败）",
+    "4. 给出残留风险与 follow-up",
+    "",
+    "## 机器可读标记",
+    `<!-- ${HARNESS_PROJECT_MARKER}:${input.projectId} -->`,
+    `<!-- OCC_STAGE:${input.stageType} -->`,
+    `<!-- ${input.marker} -->`
+  ].join("\n");
+}
+
+export async function upsertQualityGateRepairIssue(input: {
+  projectId: string;
+  projectName: string;
+  stageType: string;
+  stageLabel?: string;
+  stageStatus?: string;
+  currentStage?: string;
+  stageIssues: string[];
+  validationCommands?: string[];
+  projectPath?: string;
+}) {
+  if (!GITLAB_TOKEN) {
+    return {
+      ok: false,
+      code: "SERVICE_UNAVAILABLE",
+      message: "GITLAB_TOKEN 未配置，无法创建质量门禁修复 issue"
+    } as const;
+  }
+
+  const projectPath = resolveProjectPath(input.projectPath);
+  if (!projectPath) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message: "GitLab projectPath 未配置（GITLAB_DEFAULT_PROJECT 或请求参数 projectPath）"
+    } as const;
+  }
+
+  const stageType = String(input.stageType || "").trim().toUpperCase();
+  if (!stageType) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message: "stageType is required"
+    } as const;
+  }
+  const stageLabel = String(input.stageLabel || STAGE_LABELS[stageType] || stageType).trim();
+  const marker = buildQualityGateRepairMarker(input.projectId, stageType);
+  const title = buildQualityGateRepairIssueTitle({
+    projectId: input.projectId,
+    projectName: input.projectName,
+    stageType,
+    stageLabel
+  });
+  const description = buildQualityGateRepairIssueDescription({
+    projectId: input.projectId,
+    projectName: input.projectName,
+    stageType,
+    stageLabel,
+    stageStatus: input.stageStatus,
+    currentStage: input.currentStage,
+    stageIssues: input.stageIssues,
+    validationCommands: input.validationCommands || [],
+    marker
+  });
+  const labels = [
+    HARNESS_LABEL,
+    HARNESS_QUALITY_GATE_REPAIR_LABEL,
+    buildHarnessProjectLabel(input.projectId),
+    buildHarnessStageLabel(stageType)
+  ].join(",");
+
+  const existing = await findIssueByMarker(projectPath, marker);
+  let issueIid: number;
+  let state = "opened";
+  let action: "created" | "reused" = "created";
+
+  if (!existing) {
+    const createResponse = await requestGitLab(
+      `/projects/${encodeURIComponent(projectPath)}/issues`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          description,
+          labels
+        })
+      }
+    );
+    if (!createResponse.ok) {
+      return {
+        ok: false,
+        code: resolveGitLabErrorCode(createResponse.status),
+        message: createResponse.errorText
+      } as const;
+    }
+    issueIid = Number((createResponse.payload as { iid?: unknown })?.iid);
+    state = String((createResponse.payload as { state?: unknown })?.state || "opened");
+  } else {
+    action = "reused";
+    issueIid = existing.iid;
+    const updateResponse = await requestGitLab(
+      `/projects/${encodeURIComponent(projectPath)}/issues/${encodeURIComponent(String(issueIid))}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          title,
+          description,
+          labels,
+          state_event: "reopen"
+        })
+      }
+    );
+    if (!updateResponse.ok) {
+      return {
+        ok: false,
+        code: resolveGitLabErrorCode(updateResponse.status),
+        message: updateResponse.errorText
+      } as const;
+    }
+    state = String((updateResponse.payload as { state?: unknown })?.state || "opened");
+  }
+
+  if (!Number.isInteger(issueIid) || issueIid <= 0) {
+    return {
+      ok: false,
+      code: "SERVICE_UNAVAILABLE",
+      message: "GitLab issue iid is invalid"
+    } as const;
+  }
+
+  await safeUpsertGitLabSync({
+    projectId: input.projectId,
+    issueIid,
+    projectPath,
+    status: state
+  });
+
+  return {
+    ok: true,
+    data: {
+      action,
+      issueIid,
+      projectPath,
+      issueUrl: `${GITLAB_BASE_URL}/${projectPath}/-/issues/${issueIid}`,
+      marker
+    }
+  } as const;
 }
 
 function desiredIssueStateEvent(taskStatus: string) {

@@ -31,6 +31,7 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
   const [isCleanupCenterOpen, setIsCleanupCenterOpen] = useState(false);
   const [cleanupLoading, setCleanupLoading] = useState(false);
   const [cleanupRunning, setCleanupRunning] = useState(false);
+  const [repairIssueRunning, setRepairIssueRunning] = useState(false);
   const [cleanupCandidates, setCleanupCandidates] = useState<ProjectCleanupCandidate[]>([]);
   const [selectedCleanupIds, setSelectedCleanupIds] = useState<string[]>([]);
   const [cleanupMode, setCleanupMode] = useState<'candidates' | 'all'>('candidates');
@@ -238,6 +239,56 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
       addToast(error instanceof Error ? error.message : '执行项目清理失败', 'error');
     } finally {
       setCleanupRunning(false);
+    }
+  };
+
+  const runQualityGateRepairIssueGeneration = async (dryRun: boolean) => {
+    if (selectedCleanupIds.length === 0) {
+      addToast('请先选择要处理的项目', 'info');
+      return;
+    }
+
+    const confirmed = dryRun || window.confirm(
+      `将为选中的 ${selectedCleanupIds.length} 个项目按阻断阶段生成修复 issue，是否继续？`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setRepairIssueRunning(true);
+    try {
+      const result = await projectsApi.generateBatchQualityGateRepairIssues({
+        projectIds: selectedCleanupIds,
+        includeHistorical: true,
+        dryRun,
+        limit: selectedCleanupIds.length,
+      });
+      const { totals } = result;
+      if (dryRun) {
+        addToast(
+          `预览完成：${totals.withBlocking} 个项目存在阻断，合计 ${totals.blockingStages} 个阻断阶段`,
+          'info',
+        );
+      } else {
+        addToast(
+          `修复 issue 生成完成：创建 ${totals.created}，复用 ${totals.reused}，失败 ${totals.failed}`,
+          totals.failed > 0 ? 'error' : 'success',
+        );
+      }
+      if (totals.failed > 0) {
+        const failedProjects = result.projects
+          .filter((item) => item.failed.length > 0)
+          .slice(0, 2)
+          .map((item) => `${item.projectName || item.projectId} 失败 ${item.failed.length} 项`)
+          .join('；');
+        if (failedProjects) {
+          addToast(`失败项目：${failedProjects}`, 'error');
+        }
+      }
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '生成质量门禁修复 issue 失败', 'error');
+    } finally {
+      setRepairIssueRunning(false);
     }
   };
 
@@ -544,6 +595,7 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
           <div className="rounded-xl border border-border-subtle bg-white/5 p-4 text-xs text-slate-300 space-y-1">
             <p>模式A：候选清理（系统推荐：已暂停 / 测试验证命名 / 重复旧版本）。</p>
             <p>模式B：全部项目（你可任意多选并删除）。删除后不可恢复。</p>
+            <p>批量修复入口：可对选中项目按 qualityGate 阻断阶段一键拆单生成修复 issue（含历史项目）。</p>
           </div>
 
           <div className="flex items-center gap-2">
@@ -688,8 +740,24 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
             </button>
             <button
               type="button"
+              onClick={() => void runQualityGateRepairIssueGeneration(true)}
+              disabled={repairIssueRunning || selectedCleanupIds.length === 0}
+              className="px-4 py-2 rounded-lg border border-amber-500/30 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 text-sm font-semibold disabled:opacity-60"
+            >
+              {repairIssueRunning ? '处理中...' : '预览修复 Issue'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void runQualityGateRepairIssueGeneration(false)}
+              disabled={repairIssueRunning || selectedCleanupIds.length === 0}
+              className="px-4 py-2 rounded-lg border border-primary/30 bg-primary/15 text-primary hover:bg-primary/25 text-sm font-semibold disabled:opacity-60"
+            >
+              {repairIssueRunning ? '处理中...' : `生成修复 Issue (${selectedCleanupIds.length})`}
+            </button>
+            <button
+              type="button"
               onClick={() => void runCleanup()}
-              disabled={cleanupRunning || selectedCleanupIds.length === 0}
+              disabled={cleanupRunning || repairIssueRunning || selectedCleanupIds.length === 0}
               className="px-4 py-2 rounded-lg border border-rose-500/30 bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 text-sm font-semibold disabled:opacity-60"
             >
               {cleanupRunning ? '清理中...' : `删除所选 (${selectedCleanupIds.length})`}

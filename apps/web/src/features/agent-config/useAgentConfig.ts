@@ -130,7 +130,7 @@ export function useAgentConfig({
 
           setConfigSource('openclaw');
           setAgentName(detail.name || fallbackAgent.name);
-          setAgentRole(detail.title || detail.responsibility || fallbackAgent.role);
+          setAgentRole(detail.title || fallbackAgent.role);
           setSelectedModelId(resolveModelOptionId(detailModelId));
           setLoadedModelRoute(resolveModelRoute(detailModelId));
           setSoulInput(detailSoul);
