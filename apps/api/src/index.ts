@@ -59,7 +59,13 @@ import {
   submitCurrentStage,
   updateTaskStatus
 } from "./data/repository.js";
-import { getRuntimeStatus, getStageModelPolicy, previewStageModelPlan, getStageModelUsage } from "./agents/runtime.js";
+import {
+  getRuntimeStatus,
+  getStageModelPolicy,
+  previewStageModelPlan,
+  getStageModelUsage,
+  resolveStageTimeoutMs
+} from "./agents/runtime.js";
 import {
   getRuntimeSettings,
   validateRuntimeSettings,
@@ -79,6 +85,7 @@ import {
 } from "./system/deliverable-templates.js";
 import {
   buildRequirementAwareDesignSections,
+  buildRequirementAwareVisualPreviewHtml,
   evaluateVisualDesignRequirementAlignment,
   resolveDesignRequirementProfile
 } from "./system/design-preview.js";
@@ -263,6 +270,10 @@ const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
   Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 60_000)
 );
+const MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS = Math.max(
+  10_000,
+  Number(process.env.MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS ?? 90_000)
+);
 const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
   900,
   Number(process.env.MANUAL_ADVANCE_BACKOFF_BASE_MS ?? 1_200)
@@ -291,6 +302,17 @@ function computeAdvanceBackoffMs(attempt: number, recovering = false) {
   const base = Math.min(22_000, MANUAL_ADVANCE_BACKOFF_BASE_MS * (2 ** (normalizedAttempt - 1)));
   const jitter = Math.round(base * (recovering ? 0.3 : 0.2) * Math.random());
   return Math.min(28_000, base + jitter + (recovering ? 450 : 180));
+}
+
+function resolveManualAdvanceBuildTimeoutMs(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  const stageBudgetMs = resolveStageTimeoutMs(
+    project.currentStage as StageType,
+    project.currentRole as RoleType
+  );
+  return Math.max(
+    MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+    stageBudgetMs + MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS
+  );
 }
 
 function isTransientAdvanceErrorMessage(message: string) {
@@ -418,6 +440,7 @@ async function executeManualAdvanceCycle(projectId: string) {
       }
 
       try {
+        const buildTimeoutMs = resolveManualAdvanceBuildTimeoutMs(current);
         const submissions = await withTimeout(
           buildAutoStageSubmissions(current, {
             action: "stage.auto_submission.manual_advance",
@@ -426,8 +449,8 @@ async function executeManualAdvanceCycle(projectId: string) {
               manualAdvanceMaxAttempts: MANUAL_ADVANCE_MAX_ATTEMPTS
             }
           }),
-          MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
-          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
+          buildTimeoutMs,
+          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${buildTimeoutMs}ms`
         );
         if (!(await canContinueProjectAdvance(projectId))) {
           return;
@@ -548,12 +571,36 @@ function buildDesignRequiredSections(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   title: string
 ) {
-  return buildRequirementAwareDesignSections({
+  const sections = buildRequirementAwareDesignSections({
     projectName: project.name,
     projectDescription: project.description,
     keywords: project.parsedIntent.keywords,
     title
   });
+
+  if (!isVisualMockupDeliverableTitle(title)) {
+    return sections;
+  }
+
+  const previewHtml = buildRequirementAwareVisualPreviewHtml({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords
+  });
+
+  return [
+    sections,
+    "",
+    "## 单页预览代码（HTML）",
+    "```html",
+    previewHtml,
+    "```",
+    "",
+    "## 交互与状态说明",
+    "- 主 CTA、次 CTA、告警提示需在视觉稿中可识别。",
+    "- 需覆盖默认态、加载态、异常态至少三类关键状态。",
+    "- 交付文案需与当前业务关键词保持一致，避免泛化模板语义。"
+  ].join("\n");
 }
 
 function isVisualMockupDeliverableTitle(title: string) {
@@ -671,7 +718,7 @@ function buildDeliverableSpecificSections(
     ...project.parsedIntent.risks.slice(0, 3),
     ...project.parsedIntent.constraints.slice(0, 2)
   ].filter(Boolean);
-  return [
+  const baseSections = [
     "## 专业模板约束",
     ...buildDeliverableTemplatePromptBlock(title, stageType, project.parsedIntent.keywords).map((line) => (line.startsWith("- ") ? line : `- ${line}`)),
     "",
@@ -683,6 +730,43 @@ function buildDeliverableSpecificSections(
     ...(pendingItems.length > 0
       ? pendingItems.map((item) => `- ${item}`)
       : ["- 当前暂无新增待确认项，若后续出现边界变化请在本节持续补充。"])
+  ];
+
+  if (stageType !== "ANALYSIS") {
+    return baseSections;
+  }
+
+  const analysisConstraints = project.parsedIntent.constraints.slice(0, 4);
+  const analysisRisks = project.parsedIntent.risks.slice(0, 4);
+  const analysisTasks = project.tasks
+    .filter((task) => task.stageType === "ANALYSIS")
+    .slice(0, 4)
+    .map((task) => task.title);
+
+  return [
+    ...baseSections,
+    "",
+    "## 范围与边界",
+    "- In Scope: 验证 INIT 自动推进链路在真实模型模式下不会被预算提前打断，并可进入可审批状态。",
+    "- Out of Scope: 多用户协同、平台级预算体系重构、与当前主链无关的 UI 改版。",
+    ...(analysisTasks.length > 0
+      ? [`- 当前分析阶段任务边界: ${analysisTasks.join("、")}`]
+      : ["- 当前分析阶段任务边界: 以项目任务清单中的 ANALYSIS 任务为准。"]),
+    "",
+    "## 约束条件",
+    ...(analysisConstraints.length > 0
+      ? analysisConstraints.map((item) => `- ${item}`)
+      : ["- 默认约束：按单用户 MVP 范围推进，不扩展到平行能力建设。"]),
+    "",
+    "## 风险清单",
+    ...(analysisRisks.length > 0
+      ? analysisRisks.map((item) => `- ${item}`)
+      : ["- 当前未识别新的高风险项，需在评审前再次确认模型执行稳定性与审批口径一致性。"]),
+    "",
+    "## 验收标准",
+    "- 能从最新分析交付中清晰识别范围与边界、约束条件、风险清单三类信息。",
+    "- 交付物可直接支持 ANALYSIS 阶段进入审批，不再因协议关键词缺失被门禁阻断。",
+    "- 下一阶段输入清晰，且不引入与当前需求无关的扩展范围。"
   ];
 }
 

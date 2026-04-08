@@ -105,6 +105,7 @@ const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
 };
 const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true").trim().toLowerCase() !== "false";
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
+const PM_STAGE_GATE_ALL_STAGES = String(process.env.PM_STAGE_GATE_ALL_STAGES ?? "false").trim().toLowerCase() === "true";
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
 const STAGE_SKILL_EVIDENCE_REQUIRED_SET = new Set<StageType>(["DESIGN", "DEV", "ACCEPT"]);
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
@@ -447,7 +448,7 @@ function matchesModelGateAlias(actualModel: string | null | undefined, expectedM
 export function evaluateStageBestModelGate(input: {
   stageType: StageType;
   currentRole: RoleType;
-  stageExecutions: Array<{ role: string; model?: string | null | undefined }>;
+  stageExecutions: Array<{ role: string; model?: string | null | undefined; metadata?: unknown }>;
   includePmGate?: boolean;
 }) {
   const rolesToCheck = new Set<RoleType>([
@@ -473,6 +474,10 @@ export function evaluateStageBestModelGate(input: {
     if (matchesModelGateAlias(latestSuccess.model, bestModel)) {
       continue;
     }
+    // 若最佳模型已经尝试但因通道/账户可用性失败，则允许当前成功模型作为降级通过。
+    if (isBestModelUnavailableForLatestSuccess(latestSuccess, bestModel)) {
+      continue;
+    }
 
     const roleLabel = ROLE_LABELS[role] || role;
     const actualModel = normalizeModelForGate(latestSuccess.model) || "unknown";
@@ -485,6 +490,44 @@ export function evaluateStageBestModelGate(input: {
     passed: issues.length === 0,
     issues
   };
+}
+
+function isBestModelUnavailableForLatestSuccess(
+  latestSuccess: { metadata?: unknown },
+  bestModel: string
+) {
+  const metadata = latestSuccess.metadata;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  const attemptsRaw = (metadata as { modelAttempts?: unknown }).modelAttempts;
+  if (!Array.isArray(attemptsRaw)) {
+    return false;
+  }
+
+  return attemptsRaw.some((attempt) => {
+    if (!attempt || typeof attempt !== "object" || Array.isArray(attempt)) {
+      return false;
+    }
+    const record = attempt as Record<string, unknown>;
+    const attemptedModel = String(record.selectedModel ?? record.requestedModel ?? record.model ?? "").trim();
+    if (!attemptedModel || !matchesModelGateAlias(attemptedModel, bestModel)) {
+      return false;
+    }
+    if (String(record.status ?? "").trim().toLowerCase() !== "failed") {
+      return false;
+    }
+    const error = String(record.error ?? "").toUpperCase();
+    if (!error) {
+      return false;
+    }
+    return error.includes("NO AVAILABLE ACCOUNTS")
+      || error.includes("HTTP_503")
+      || error.includes("ROUTE_COOLDOWN")
+      || error.includes("REQUEST_TIMEOUT")
+      || error.includes("ETIMEDOUT")
+      || error.includes("ECONNRESET");
+  });
 }
 
 function readRoleAllowlistFromEnv(role: RoleType) {
@@ -501,6 +544,10 @@ function assertPmExecutionGate(
   if (!PM_STAGE_GATE_ENABLED) {
     return;
   }
+  // 默认仅对 INIT 阶段强制 PM 执行证据；其他阶段由各阶段角色门禁约束。
+  if (!PM_STAGE_GATE_ALL_STAGES && project.currentStage !== "INIT") {
+    return;
+  }
   const pmSuccessCount = stageExecutions.filter((row) => row.role === "ROLE_PM").length;
   if (pmSuccessCount < PM_STAGE_GATE_MIN_SUCCESS) {
     throw new Error(
@@ -513,7 +560,12 @@ async function assertStageRoleModelWhitelistGate(
   project: ProjectDetail,
   stageExecutions: Array<{ role: string; model?: string | null | undefined }>
 ) {
-  const targetRoles = getStageRealModelGateRoles(project.currentStage);
+  const observedSuccessRoles = new Set(stageExecutions.map((row) => row.role as RoleType));
+  const configuredRoles = getStageRealModelGateRoles(project.currentStage);
+  const targetRoles = Array.from(new Set<RoleType>([
+    project.currentRole as RoleType,
+    ...configuredRoles.filter((role) => observedSuccessRoles.has(role))
+  ]));
   if (targetRoles.length === 0) {
     return;
   }
@@ -577,7 +629,7 @@ async function assertStageRoleModelWhitelistGate(
 
 function assertStageBestModelGate(
   project: ProjectDetail,
-  stageExecutions: Array<{ role: string; model?: string | null | undefined }>
+  stageExecutions: Array<{ role: string; model?: string | null | undefined; metadata?: unknown }>
 ) {
   const gate = evaluateStageBestModelGate({
     stageType: project.currentStage,
@@ -2065,6 +2117,24 @@ function composeExecutionMetadata(
   };
 }
 
+function isTerminalInfrastructureFailure(message: string) {
+  const normalized = String(message || "").toUpperCase();
+  if (!normalized) {
+    return false;
+  }
+  return normalized.includes("OPENCLAW COMMAND RETURNED NO JSON PAYLOAD")
+    || normalized.includes("OPENCLAW RETURNED INTERRUPTED RESULT")
+    || normalized.includes("STOPREASON=ERROR")
+    || normalized.includes("SESSION FILE LOCKED")
+    || normalized.includes("ALLOWLIST CONTAINS UNKNOWN ENTRIES")
+    || normalized.includes("FAILOVERERROR")
+    || normalized.includes("LIVE LOCK")
+    || normalized.includes("EPIPE")
+    || normalized.includes("ECONNRESET")
+    || normalized.includes("ETIMEDOUT")
+    || normalized.includes("REQUEST_TIMEOUT");
+}
+
 function buildTerminalStageAttemptRecords(input: {
   stageType: StageType;
   role: RoleType;
@@ -2328,7 +2398,11 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         run = await runTerminalProjectStageAgent(input);
       } catch (terminalError) {
         terminalFallbackReason = terminalError instanceof Error ? terminalError.message : String(terminalError);
-        if (!strategy.allowDirectModelFallback || runtime.requestedMode !== "openai-compatible") {
+        const allowInfraFallback = isTerminalInfrastructureFailure(terminalFallbackReason);
+        if (
+          runtime.requestedMode !== "openai-compatible"
+          || (!strategy.allowDirectModelFallback && !allowInfraFallback)
+        ) {
           throw terminalError;
         }
         run = await runStageAgent({
@@ -2351,7 +2425,8 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       });
     }
 
-    if (strategy.mode === "direct_model") {
+    const usedDirectModelExecution = strategy.mode === "direct_model" || Boolean(terminalFallbackReason);
+    if (usedDirectModelExecution) {
       const executionProtocol = await getExecutionProtocolSettings();
       let currentProject: ProjectDetail | undefined;
       let body = String(run.body || "").trim();

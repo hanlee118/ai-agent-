@@ -1,0 +1,59 @@
+{
+  "issue_title": "验证并硬化 ANALYSIS -> ACCEPT 长链主流程，确认混合架构跨阶段推进是否真实可用",
+  "issue_labels": ["execution", "hardening", "codex-ready", "qa", "longchain", "projectroom", "agentcommander"],
+  "source_of_truth": {
+    "route_entry": [
+      "apps/api/src/routes/projects.ts",
+      "apps/api/src/index.ts"
+    ],
+    "active_implementation": [
+      "apps/api/src/data/repository.ts",
+      "apps/api/src/system/project-stage-execution.ts",
+      "apps/web/src/pages/ProjectRoomPage.impl.tsx",
+      "apps/web/src/pages/AgentCommanderPage.tsx"
+    ],
+    "related_files": [
+      "apps/api/src/system/stage-protocol-gates.ts",
+      "apps/api/src/routes/tasks.ts",
+      "apps/api/src/services/task-coordination.ts",
+      "docs/reports/qa-mainchain-hardening-2026-04-08.md"
+    ]
+  },
+  "validation_commands": [
+    {
+      "command": "pnpm --filter @occ/api typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/api build",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/web typecheck",
+      "required": true
+    },
+    {
+      "command": "pnpm --filter @occ/web build",
+      "required": true
+    }
+  ],
+  "stop_conditions": {
+    "hard_stop": [
+      "不要回退已经完成的 ProjectRoom 单事实实现",
+      "不要让 AgentCommander 长出第二套 task/delegation 状态语义",
+      "不要为了通过 QA 直接整体关闭后续阶段真实模型 / 协议门禁",
+      "不要把本任务扩大成无关 UI 重构"
+    ],
+    "soft_stop": [
+      "不要顺手扩大为 Prisma migrate deploy 稳定性专项",
+      "不要新增大型页面体系",
+      "不要做与主流程无关的美化"
+    ]
+  },
+  "compatibility_policy": {
+    "allow_compat_layer": true,
+    "rule": "允许做最小协议/提示/恢复链路收口，但不得引入新的平行审批状态或并行领域模型"
+  },
+  "issue_body": "# 背景\n- 当前 ProjectRoom 单事实实现、AgentCommander 复用语义、INIT 首轮推进已经收口到演示可信级。\n- 最新主链证据表明：项目创建已恢复秒级，INIT 在 35 秒内可进入 `pendingApproval=true`，`项目章程.md` 自动质检已通过。\n- 当前剩余未验证的大头不再是 INIT，而是 `ANALYSIS -> DESIGN -> DEV -> ACCEPT` 这条长链是否也能在真实主流程中持续推进。\n- 如果长链不能稳定推进，那么当前混合架构仍只能算“首段主链可用”，不能算跨阶段真实可用。\n\n# 当前判断\n下一阶段应优先做 `ANALYSIS -> ACCEPT` 长链 QA，而不是继续补 INIT 或继续扩 UI。目标是确认审批、阶段切换、交付物、协议门禁、task/delegation 语义和结果可见性在后续阶段是否一致。\n\n# 本次目标\n- 用真实项目把 `INIT -> ANALYSIS -> DESIGN -> DEV -> ACCEPT` 主流程尽可能跑通\n- 识别并收口影响长链推进的最高优先级阻塞点\n- 确认 ProjectRoom / AgentCommander 所依赖的 task/delegation 主语义在跨阶段推进中不漂移\n\n# 本次不做\n- 不扩展 AgentCommander 新功能\n- 不做无关 UI 重构\n- 不进入 Prisma migrate deploy 稳定性专项\n- 不为了通过 QA 整体关闭后续阶段真实模型或协议门禁\n\n# 事实源文件\n## 路由入口\n- `apps/api/src/routes/projects.ts`\n- `apps/api/src/index.ts`\n\n## 当前事实实现\n- `apps/api/src/data/repository.ts`\n- `apps/api/src/system/project-stage-execution.ts`\n- `apps/web/src/pages/ProjectRoomPage.impl.tsx`\n- `apps/web/src/pages/AgentCommanderPage.tsx`\n\n## 相关文件\n- `apps/api/src/system/stage-protocol-gates.ts`\n- `apps/api/src/routes/tasks.ts`\n- `apps/api/src/services/task-coordination.ts`\n- `docs/reports/qa-mainchain-hardening-2026-04-08.md`\n\n# 执行要求\n- 先用真实接口做长链回归，优先看真实阻塞点，不要先猜\n- 如果发现新 blocker，优先最小闭环修复，不做无关扩展\n- 保持 issue-first 记录与 QA 结论同步\n- 若代码事实与既有结论不一致，以代码事实为准，但必须在结果中明确说明\n\n# 验收标准\n- 至少明确跑到哪个阶段、在哪里阻塞、阻塞根因是什么\n- 若阻塞点可最小收口，则完成修复并重新复测\n- ProjectRoom / AgentCommander 继续复用既有 task/delegation 语义，不出现平行状态模型\n- `pnpm --filter @occ/api typecheck` 通过\n- `pnpm --filter @occ/api build` 通过\n- `pnpm --filter @occ/web typecheck` 通过\n- `pnpm --filter @occ/web build` 通过\n\n# 风险提醒\n- 不要为了让长链看起来通过而静默放宽关键门禁\n- 不要把 scripted 本地演示口径误报成全生产稳定结论\n- 不要让长链修复反向破坏 INIT 已收口结果\n\n# 交付要求\n最终结果必须明确给出：\n1. 长链实际跑到了哪一阶段\n2. 遇到的 blocker 及其根因\n3. 修改了哪些文件，以及各自修改原因\n4. 复测结果如何\n5. 还有哪些残留风险未处理",
+  "codex_prompt": "你现在要执行一个长链 QA 收口任务，请严格按范围执行，不要自行扩展。任务标题：验证并硬化 ANALYSIS -> ACCEPT 长链主流程，确认混合架构跨阶段推进是否真实可用。任务背景：当前 INIT 主链已经收口，但 ANALYSIS -> ACCEPT 还没有做同等级真实回归。本次目标：1. 用真实项目把 INIT -> ANALYSIS -> DESIGN -> DEV -> ACCEPT 主流程尽可能跑通；2. 识别并收口最高优先级 blocker；3. 确认 ProjectRoom / AgentCommander 所依赖的 task/delegation 语义在跨阶段推进中不漂移。明确不做：不扩展 AgentCommander 新功能；不做无关 UI 重构；不整体关闭后续阶段真实模型或协议门禁。必须先核对的事实源文件：`apps/api/src/routes/projects.ts`、`apps/api/src/index.ts`、`apps/api/src/data/repository.ts`、`apps/api/src/system/project-stage-execution.ts`、`apps/web/src/pages/ProjectRoomPage.impl.tsx`、`apps/web/src/pages/AgentCommanderPage.tsx`。执行要求：先跑真实接口长链回归；若发现 blocker，优先最小闭环修复并复测；保持 issue-first 同步。完成后输出：长链跑到哪、blocker 根因、修改文件、复测结果、残留风险。"
+}

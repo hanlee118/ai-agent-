@@ -1138,7 +1138,7 @@ function normalizeErrorMessage(error: unknown) {
   return normalized.length > 260 ? `${normalized.slice(0, 260)}...` : normalized;
 }
 
-function resolveStageTimeoutMs(stageType: StageType, role?: RoleType) {
+export function resolveStageTimeoutMs(stageType: StageType, role?: RoleType) {
   if (role) {
     const roleStageSpecific = Number(process.env[`STAGE_AGENT_TOTAL_TIMEOUT_${stageType}_${role}_MS`]);
     if (Number.isFinite(roleStageSpecific) && roleStageSpecific > 0) {
