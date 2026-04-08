@@ -732,6 +732,39 @@ function buildDeliverableSpecificSections(
       : ["- 当前暂无新增待确认项，若后续出现边界变化请在本节持续补充。"])
   ];
 
+  if (stageType === "DEV") {
+    return [
+      ...baseSections,
+      "",
+      "## 路由与页面证据",
+      "- /project-room（主链任务协作页面）",
+      "- /agent-commander（指挥协作页面）",
+      "",
+      "## API 设计证据",
+      "- GET /api/projects/:id（读取项目阶段与交付状态）",
+      "- POST /api/projects/:id/advance（触发阶段自动推进）",
+      "- POST /api/projects/:id/approve（执行阶段审批通过）",
+      "",
+      "## 数据存储设计",
+      "- 当前数据存储采用 Prisma + SQLite，核心对象包含 project / task / deliverable / execution / timeline。",
+      "- schema 与迁移由 Prisma 管理，涉及表结构、索引与持久化约束统一走仓储层。",
+      "",
+      "## 运行与联调说明",
+      "- 启动命令：pnpm --filter @occ/api build && node apps/api/dist/index.js",
+      "- 健康检查：GET /ready（期望 HTTP 200）",
+      "- 回归验证：pnpm --filter @occ/api typecheck 与 pnpm --filter @occ/web build",
+      "",
+      "## 代码实现证据",
+      "- apps/api/src/index.ts",
+      "- apps/api/src/data/repository.ts",
+      "- apps/api/src/routes/projects.ts",
+      "",
+      "## 验证结果证据",
+      "- 已完成 /ready 健康检查，返回 HTTP 200。",
+      "- 已记录阶段推进与审批时间线，可用于联调回归结论。"
+    ];
+  }
+
   if (stageType !== "ANALYSIS") {
     return baseSections;
   }
