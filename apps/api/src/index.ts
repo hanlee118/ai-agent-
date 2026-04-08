@@ -1696,7 +1696,26 @@ type ProjectAcceptanceReport = {
     };
     warnings: string[];
   };
+  qualityGate: {
+    source: "lifecycle_audit" | "report_only";
+    pass: boolean;
+    blockingStageCount: number;
+    blockingStages: string[];
+    blockingIssues: string[];
+  };
   recommendations: string[];
+};
+
+type AcceptanceLifecycleAuditSummary = {
+  pass: boolean;
+  blockingStageCount: number;
+  blockingStages: string[];
+  stageAudits?: Array<{
+    stageType: string;
+    stageLabel: string;
+    pass: boolean;
+    issues: string[];
+  }>;
 };
 
 type FinalArtifactRecord = {
@@ -2657,6 +2676,7 @@ function buildProjectAcceptanceReport(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
   options?: {
     executions?: AcceptanceExecutionRecord[];
+    lifecycleAudit?: AcceptanceLifecycleAuditSummary;
   }
 ): ProjectAcceptanceReport {
   const now = new Date().toISOString();
@@ -2787,6 +2807,29 @@ function buildProjectAcceptanceReport(
     qualityWarnings.push("执行记录中无成功项，请优先核查运行链路与模型输出。");
   }
 
+  const lifecycleAuditBlockingIssues = (options?.lifecycleAudit?.stageAudits || [])
+    .filter((item) => !item.pass)
+    .flatMap((item) => item.issues.slice(0, 3).map((issue) => `${item.stageLabel}: ${issue}`))
+    .slice(0, 20);
+  const qualityGate = options?.lifecycleAudit
+    ? {
+      source: "lifecycle_audit" as const,
+      pass: options.lifecycleAudit.pass,
+      blockingStageCount: options.lifecycleAudit.blockingStageCount,
+      blockingStages: options.lifecycleAudit.blockingStages,
+      blockingIssues: lifecycleAuditBlockingIssues
+    }
+    : {
+      source: "report_only" as const,
+      pass: qualityWarnings.length === 0,
+      blockingStageCount: qualityWarnings.length > 0 ? 1 : 0,
+      blockingStages: qualityWarnings.length > 0 ? [project.currentStage] : [],
+      blockingIssues: qualityWarnings.slice(0, 10)
+    };
+  if (!qualityGate.pass) {
+    qualityWarnings.push("生命周期质量门禁未通过，当前报告仅可作为整改输入，不能直接作为通过验收依据。");
+  }
+
   const recommendations: string[] = [];
   if (project.pendingApproval) {
     recommendations.push("当前阶段存在待审批交付物，请尽快执行通过/驳回决策。");
@@ -2800,10 +2843,13 @@ function buildProjectAcceptanceReport(
   if (executionSummary.success === 0) {
     recommendations.push("请补齐至少一条成功执行记录（模型/Agent + 输出证据）后再做验收结论。");
   }
+  if (!qualityGate.pass) {
+    recommendations.push("请先清零质量门禁阻断项，再执行归档或对外交付。");
+  }
   if (project.status !== "completed" && approvedDeliverables < project.deliverables.length) {
     recommendations.push("项目尚未完全收敛，建议在验收前确认各阶段交付物状态。");
   }
-  if (project.status === "completed" && recommendations.length === 0) {
+  if (project.status === "completed" && recommendations.length === 0 && qualityGate.pass) {
     recommendations.push("项目已完成，可归档并回填产品说明文档。");
   }
   if (recommendations.length === 0) {
@@ -2871,6 +2917,7 @@ function buildProjectAcceptanceReport(
       },
       warnings: qualityWarnings
     },
+    qualityGate,
     recommendations
   };
 }
@@ -2917,6 +2964,13 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
     `- 可疑交付物: ${report.dataQuality.deliverables.suspiciousCount} / ${report.dataQuality.deliverables.total}`
   ];
   const qualityWarningLines = report.dataQuality.warnings.map((item) => `- ${item}`);
+  const qualityGateLines = [
+    `- 门禁来源: ${report.qualityGate.source === "lifecycle_audit" ? "lifecycle-audit" : "report-only"}`,
+    `- 门禁状态: ${report.qualityGate.pass ? "passed" : "blocked"}`,
+    `- 阻断阶段数: ${report.qualityGate.blockingStageCount}`,
+    `- 阻断阶段: ${report.qualityGate.blockingStages.join("、") || "无"}`
+  ];
+  const qualityGateBlockingLines = report.qualityGate.blockingIssues.map((item) => `- ${item}`);
 
   return [
     `# 项目阶段验收报告`,
@@ -2948,6 +3002,12 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
     ``,
     `## 数据质量审计`,
     ...qualityLines,
+    "",
+    `### 质量门禁`,
+    ...qualityGateLines,
+    ...(qualityGateBlockingLines.length > 0
+      ? ["", `### 门禁阻断项`, ...qualityGateBlockingLines]
+      : []),
     ...(qualityWarningLines.length > 0
       ? ["", `### 质量告警`, ...qualityWarningLines]
       : []),

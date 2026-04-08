@@ -180,6 +180,14 @@ export default function AcceptanceReportModal({
 
             <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-2">
               <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">报告数据质量</h4>
+              <div className="flex items-center gap-2">
+                <Badge variant={acceptanceReport.qualityGate.pass ? 'primary' : 'danger'}>
+                  {acceptanceReport.qualityGate.pass ? '质量门禁通过' : `质量门禁阻断 ${acceptanceReport.qualityGate.blockingStageCount} 项`}
+                </Badge>
+                <p className="text-[11px] text-slate-500">
+                  来源: {acceptanceReport.qualityGate.source === 'lifecycle_audit' ? '生命周期审计' : '报告内校验'}
+                </p>
+              </div>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
                 <p className="text-slate-300">
                   时间线证据: {acceptanceReport.dataQuality.timeline.evidenceEvents}/{acceptanceReport.dataQuality.timeline.totalEvents}
@@ -191,6 +199,13 @@ export default function AcceptanceReportModal({
                   可疑交付物: {acceptanceReport.dataQuality.deliverables.suspiciousCount}/{acceptanceReport.dataQuality.deliverables.total}
                 </p>
               </div>
+              {!acceptanceReport.qualityGate.pass && acceptanceReport.qualityGate.blockingIssues.length > 0 ? (
+                <div className="rounded-lg border border-danger/40 bg-danger/10 p-3 text-xs text-danger space-y-1">
+                  {acceptanceReport.qualityGate.blockingIssues.slice(0, 6).map((item) => (
+                    <p key={item}>- {item}</p>
+                  ))}
+                </div>
+              ) : null}
               {acceptanceReport.dataQuality.warnings.length > 0 ? (
                 <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning space-y-1">
                   {acceptanceReport.dataQuality.warnings.map((item) => (

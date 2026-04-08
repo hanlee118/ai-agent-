@@ -840,6 +840,17 @@ interface CreateProjectsRouterOptions {
         createdAt: string;
         updatedAt: string;
       }>;
+      lifecycleAudit?: {
+        pass: boolean;
+        blockingStageCount: number;
+        blockingStages: string[];
+        stageAudits?: Array<{
+          stageType: string;
+          stageLabel: string;
+          pass: boolean;
+          issues: string[];
+        }>;
+      };
     }
   ) => any;
   renderAcceptanceReportMarkdown: (report: any) => string;
@@ -1872,7 +1883,8 @@ router.get("/api/projects/:id/acceptance-report", asyncRoute(async (req, res) =>
   }
 
   const executions = await listProjectExecutions(projectId, 200);
-  const report = buildProjectAcceptanceReport(project, { executions });
+  const lifecycleAudit = await getProjectLifecycleQualityAudit(projectId);
+  const report = buildProjectAcceptanceReport(project, { executions, lifecycleAudit });
   res.json({
     success: true,
     data: report
@@ -1889,7 +1901,8 @@ router.get("/api/projects/:id/acceptance-report.md", asyncRoute(async (req, res)
   }
 
   const executions = await listProjectExecutions(projectId, 200);
-  const report = buildProjectAcceptanceReport(project, { executions });
+  const lifecycleAudit = await getProjectLifecycleQualityAudit(projectId);
+  const report = buildProjectAcceptanceReport(project, { executions, lifecycleAudit });
   const markdown = renderAcceptanceReportMarkdown(report);
 
   res.setHeader("Content-Type", "text/markdown; charset=utf-8");
@@ -1916,7 +1929,8 @@ router.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req
   }
 
   const executions = await listProjectExecutions(projectId, 200);
-  const report = buildProjectAcceptanceReport(project, { executions });
+  const lifecycleAudit = await getProjectLifecycleQualityAudit(projectId);
+  const report = buildProjectAcceptanceReport(project, { executions, lifecycleAudit });
   const markdown = renderAcceptanceReportMarkdown(report);
   const title = String(req.body?.title ?? "").trim() || undefined;
   const updated = await archiveProjectAcceptanceReport(projectId, markdown, title);

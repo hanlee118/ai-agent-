@@ -132,6 +132,13 @@ export type ProjectAcceptanceReport = {
     };
     warnings: string[];
   };
+  qualityGate: {
+    source: 'lifecycle_audit' | 'report_only';
+    pass: boolean;
+    blockingStageCount: number;
+    blockingStages: string[];
+    blockingIssues: string[];
+  };
   recommendations: string[];
 };
 
