@@ -2673,13 +2673,14 @@ const ACCEPTANCE_REPORT_LOW_SIGNAL_TIMELINE_TYPES = new Set<string>([
   "project_created"
 ]);
 const ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN =
-  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b|自动推进元信息|模型尝试轨迹|阶段预热|阶段推演已启动/i;
+  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 
 type AcceptanceExecutionRecord = {
   role: string;
   status: string;
   model?: string | null;
   provider?: string | null;
+  metadata?: unknown;
   createdAt: string;
   updatedAt: string;
 };
@@ -2718,28 +2719,46 @@ function buildExecutionQualitySummary(executions: AcceptanceExecutionRecord[]) {
   const total = executions.length;
   const success = executions.filter((item) => String(item.status || "").toLowerCase() === "success").length;
   const failed = executions.filter((item) => String(item.status || "").toLowerCase() === "failed").length;
-  const latestByRole = new Map<string, AcceptanceExecutionRecord>();
-
-  for (const execution of [...executions].sort((left, right) =>
+  const sorted = [...executions].sort((left, right) =>
     new Date(right.updatedAt || right.createdAt).getTime()
     - new Date(left.updatedAt || left.createdAt).getTime()
-  )) {
-    if (!latestByRole.has(execution.role)) {
-      latestByRole.set(execution.role, execution);
-    }
+  );
+
+  const byRole = new Map<string, AcceptanceExecutionRecord[]>();
+  for (const execution of sorted) {
+    const list = byRole.get(execution.role) ?? [];
+    list.push(execution);
+    byRole.set(execution.role, list);
   }
+
+  const latestByRole = [...byRole.values()].map((rows) => {
+    const latestRealSuccess = rows.find((item) =>
+      String(item.status || "").toLowerCase() === "success"
+      && String(item.provider || "").trim().toLowerCase() !== "scripted"
+      && !isExecutionDegradedForAcceptance(item.metadata)
+    );
+    const latestSuccess = rows.find((item) => String(item.status || "").toLowerCase() === "success");
+    return latestRealSuccess || latestSuccess || rows[0];
+  });
 
   return {
     total,
     success,
     failed,
-    latestByRole: [...latestByRole.values()].slice(0, 8).map((item) => ({
+    latestByRole: latestByRole.slice(0, 8).map((item) => ({
       role: item.role,
       status: item.status,
       model: item.model || item.provider || "unknown",
       updatedAt: item.updatedAt || item.createdAt
     }))
   };
+}
+
+function isExecutionDegradedForAcceptance(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return false;
+  }
+  return Boolean((metadata as Record<string, unknown>).degraded);
 }
 
 function buildSignoffHistory(

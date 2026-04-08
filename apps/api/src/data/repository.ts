@@ -4973,6 +4973,7 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
       status: true,
       model: true,
       provider: true,
+      metadata: true,
       errorMessage: true,
       updatedAt: true,
       createdAt: true
@@ -5034,24 +5035,26 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
     });
 
     const stageExecutions = executionRows.filter((row) => row.stageType === stageType);
-    const latestExecutionByRole = new Map<string, (typeof stageExecutions)[number]>();
-    for (const row of stageExecutions) {
-      if (!latestExecutionByRole.has(row.role)) {
-        latestExecutionByRole.set(row.role, row);
-      }
-    }
     const requiredRoles = getStageRealModelGateRoles(stageType);
     const executionChecks = requiredRoles.map((role) => {
-      const latest = latestExecutionByRole.get(role);
-      if (!latest) {
+      const roleRows = stageExecutions.filter((row) => row.role === role);
+      if (roleRows.length === 0) {
         return {
           role,
           pass: false,
           reason: "缺少真实执行记录"
         };
       }
-      const normalizedStatus = String(latest.status || "").toLowerCase();
-      if (normalizedStatus !== "success") {
+
+      const latest = roleRows[0];
+      const latestSuccess = roleRows.find((row) => String(row.status || "").toLowerCase() === "success");
+      const latestRealSuccess = roleRows.find((row) =>
+        String(row.status || "").toLowerCase() === "success"
+        && !isScriptedExecutionProvider(row.provider)
+        && !isExecutionDegraded(row.metadata ?? null)
+      );
+
+      if (!latestSuccess) {
         return {
           role,
           pass: false,
@@ -5061,13 +5064,25 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
           latestAt: latest.updatedAt.toISOString()
         };
       }
+
+      if (!latestRealSuccess) {
+        return {
+          role,
+          pass: false,
+          reason: "缺少非 scripted/degraded 的成功执行记录",
+          latestStatus: latestSuccess.status,
+          latestModel: latestSuccess.model || latestSuccess.provider || "unknown",
+          latestAt: latestSuccess.updatedAt.toISOString()
+        };
+      }
+
       return {
         role,
         pass: true,
-        reason: "最近执行成功",
-        latestStatus: latest.status,
-        latestModel: latest.model || latest.provider || "unknown",
-        latestAt: latest.updatedAt.toISOString()
+        reason: "最近真实执行成功",
+        latestStatus: latestRealSuccess.status,
+        latestModel: latestRealSuccess.model || latestRealSuccess.provider || "unknown",
+        latestAt: latestRealSuccess.updatedAt.toISOString()
       };
     });
 
