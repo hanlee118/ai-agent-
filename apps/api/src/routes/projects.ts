@@ -40,6 +40,8 @@ import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import { publishTaskIssueNote, syncProjectGitLabHarness } from "./gitlab.js";
 
+const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
+
 function formatTerminalCollaborationViolation(message: string) {
   const normalized = String(message || "").trim();
   const match = normalized.match(/TERMINAL_COLLAB_PROTOCOL_VIOLATION:\s*missing_fields=([^;]+);\s*section=([a-z]+)/i);
@@ -1510,6 +1512,17 @@ router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
 }));
 
 router.post("/api/projects", asyncRoute(async (req, res) => {
+  if (!PROJECT_DIRECT_CREATE_ENABLED) {
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "PROJECT_ISSUE_FIRST_REQUIRED",
+        message: "当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。"
+      }
+    });
+    return;
+  }
+
   const description = String(req.body?.description ?? "").trim();
 
   if (!description) {
