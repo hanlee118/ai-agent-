@@ -4330,6 +4330,7 @@ export async function submitCurrentStage(
   input: StageSubmissionInput,
   options?: {
     finalizeApproval?: boolean;
+    persistDraftOnTemplateFailure?: boolean;
   }
 ): Promise<ProjectDetail | undefined> {
   const project = await findProject(id);
@@ -4380,6 +4381,68 @@ export async function submitCurrentStage(
     keywords: project.parsedIntent.keywords
   });
   if (!templateGate.passed) {
+    if (options?.persistDraftOnTemplateFailure) {
+      const draftContent = [
+        submittedContent,
+        "",
+        "## 模板门禁结果",
+        "- 当前状态: 未通过",
+        ...templateGate.issues.map((item) => `- ${item}`)
+      ].join("\n");
+      const now = new Date();
+      const currentStageRecord = project.stages.find((item) => item.type === currentStageType);
+      const nextProgress = Math.max(18, Math.min(92, Number(currentStageRecord?.progress || 18)));
+
+      await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        await tx.deliverable.create({
+          data: {
+            projectId: id,
+            stageType: currentStageType,
+            name: deliverableName,
+            type: "markdown",
+            content: draftContent,
+            version: nextVersion,
+            status: "draft",
+            createdBy: currentRole,
+            updatedAt: now
+          }
+        });
+
+        await tx.stage.update({
+          where: { projectId_type: { projectId: id, type: currentStageType } },
+          data: {
+            status: "active",
+            progress: nextProgress
+          }
+        });
+
+        await tx.project.update({
+          where: { id },
+          data: {
+            pendingApproval: false,
+            summary: `${stageLabel}阶段已生成草稿，但未通过模板门禁，需继续补齐后再进入审批。`,
+            liveTitle: `${ROLE_LABELS[currentRole]}已生成${stageLabel}阶段草稿`,
+            liveBody: draftContent,
+            liveProvider: project.liveSession.provider,
+            liveStartedAt: now
+          }
+        });
+
+        await tx.timelineEvent.create({
+          data: {
+            projectId: id,
+            timestamp: now,
+            agentId: currentRole,
+            type: "system",
+            title: `${stageLabel}阶段草稿待补齐`,
+            content: `${deliverableName} 已保存为草稿，但未通过模板门禁：${templateGate.issues.slice(0, 4).join("；")}`,
+            priority: "normal"
+          }
+        });
+      });
+
+      return findProject(id);
+    }
     throw new Error(`STAGE_TEMPLATE_VALIDATION_FAILED: ${deliverableName} 未通过模板校验（${templateGate.issues.join("；")}）`);
   }
   const requestedFinalizeApproval = options?.finalizeApproval !== false;

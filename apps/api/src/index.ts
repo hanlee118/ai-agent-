@@ -714,6 +714,7 @@ function buildDeliverableSpecificSections(
   title: string,
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ) {
+  const template = resolveDeliverableTemplate(title, stageType);
   const pendingItems = [
     ...project.parsedIntent.risks.slice(0, 3),
     ...project.parsedIntent.constraints.slice(0, 2)
@@ -776,6 +777,52 @@ function buildDeliverableSpecificSections(
     .slice(0, 4)
     .map((task) => task.title);
 
+  const analysisRequirementEvidenceSections = [
+    "",
+    "## 事实依据与来源（Source of Truth）",
+    "| 来源 | 类型 | 当前结论 |",
+    "| --- | --- | --- |",
+    `| 原始需求 | 用户输入 | ${project.name} |`,
+    `| 项目描述 | 需求摘要 | ${project.parsedIntent.summary || project.description.slice(0, 60)} |`,
+    `| 阶段任务 | ANALYSIS | ${analysisTasks.join("、") || "待补充任务"} |`,
+    "",
+    "## 需求追踪矩阵（目标-功能-验收）",
+    "| 目标 | 对应功能/任务 | 验收方式 |",
+    "| --- | --- | --- |",
+    `| ${project.parsedIntent.keywords[0] || "明确 MVP 目标"} | ${analysisTasks[0] || "提炼目标与边界"} | 评审通过后进入下一阶段 |`,
+    `| ${project.parsedIntent.keywords[1] || "收敛需求范围"} | ${analysisTasks[1] || "输出项目排期"} | 需求、排期、风险可回溯 |`,
+    `| ${project.parsedIntent.keywords[2] || "建立审批基线"} | ${analysisTasks[2] || "形成审批版分析稿"} | 存在清晰验收与待确认项 |`,
+    "",
+    "## 决策记录（Decision Log）",
+    "| 决策主题 | 当前结论 | 影响 |",
+    "| --- | --- | --- |",
+    `| MVP 范围 | ${project.parsedIntent.constraints[0] || "按当前需求约束推进"} | 避免范围膨胀 |`,
+    `| 风险处理 | ${project.parsedIntent.risks[0] || "先暴露阻断项再推进"} | 降低返工概率 |`,
+    `| 审批前置 | ${pendingItems[0] || "待确认项闭合后再进入审批"} | 保持阶段门禁一致 |`
+  ];
+
+  const analysisScheduleSections = [
+    "",
+    "## 里程碑基线（日期 / Owner / Exit Criteria）",
+    "| 里程碑 | Owner | Exit Criteria |",
+    "| --- | --- | --- |",
+    `| 分析稿完成 | ${ROLE_LABELS.ROLE_ANALYST} | 需求分析文档与项目排期方案齐备 |`,
+    `| 分析评审完成 | ${ROLE_LABELS.ROLE_PM} | 风险、约束、验收标准可审批 |`,
+    `| 进入设计阶段 | ${ROLE_LABELS.ROLE_PRODUCT} | 上一阶段审批通过并形成设计输入 |`,
+    "",
+    "## 关键路径与依赖矩阵",
+    "| 当前任务 | 前置依赖 | 输出 |",
+    "| --- | --- | --- |",
+    `| ${analysisTasks[0] || "提炼目标与边界"} | 需求确认单、原始需求 | 范围与边界基线 |`,
+    `| ${analysisTasks[1] || "输出项目排期"} | 范围边界、资源角色 | 里程碑与 Owner |`,
+    `| ${analysisTasks[2] || "形成审批版分析稿"} | 范围、排期、风险清单 | 审批输入材料 |`,
+    "",
+    "## 变更控制与升级机制",
+    "- 若出现新增范围，必须先回写需求边界与影响说明，再更新排期。",
+    "- 若模型执行或交付模板门禁失败，先记录阻断原因，再触发补齐或重试。",
+    "- 若关键待确认项未闭合，当前阶段不得直接进入审批。"
+  ];
+
   return [
     ...baseSections,
     "",
@@ -800,6 +847,9 @@ function buildDeliverableSpecificSections(
     "- 能从最新分析交付中清晰识别范围与边界、约束条件、风险清单三类信息。",
     "- 交付物可直接支持 ANALYSIS 阶段进入审批，不再因协议关键词缺失被门禁阻断。",
     "- 下一阶段输入清晰，且不引入与当前需求无关的扩展范围。"
+    ,
+    ...(template.kind === "requirements_prd" ? analysisRequirementEvidenceSections : []),
+    ...(template.kind === "schedule" ? analysisScheduleSections : [])
   ];
 }
 
@@ -1374,7 +1424,8 @@ async function submitStageSubmissionBundle(
     const submission = submissions[index].submission;
     const isLast = index === submissions.length - 1;
     await submitCurrentStage(projectId, submission, {
-      finalizeApproval: isLast
+      finalizeApproval: isLast,
+      persistDraftOnTemplateFailure: true
     });
   }
 }
@@ -1423,7 +1474,7 @@ async function handleProjectCreatedIssueFirst(projectId: string) {
       error instanceof Error ? error.message : String(error)
     );
   });
-  kickProjectAutomationTick({ force: true });
+  void ensureManualAdvanceJob(projectId);
   return issueFirst;
 }
 

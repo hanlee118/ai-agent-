@@ -1726,7 +1726,7 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
         error instanceof Error ? error.message : String(error)
       );
     });
-    kickProjectAutomationTick({ force: true });
+    void ensureManualAdvanceJob(project.id);
   } else {
     console.warn(`[ProjectIssueFirst] project create gated for ${project.id}: ${issueFirst.code} ${issueFirst.message}`);
   }
@@ -2572,7 +2572,7 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     closeOnComplete: project.status === "completed",
     reason: "project.approve"
   });
-  kickProjectAutomationTick({ force: true });
+  void ensureManualAdvanceJob(project.id);
   res.json(project);
 }));
 
@@ -2683,7 +2683,7 @@ router.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
     resourceId: project.id,
     summary: `项目 ${project.id} 已恢复执行`
   });
-  kickProjectAutomationTick({ force: true });
+  void ensureManualAdvanceJob(project.id);
   void trySyncGitLabHarness({
     projectId: project.id,
     stageType: project.currentStage,
