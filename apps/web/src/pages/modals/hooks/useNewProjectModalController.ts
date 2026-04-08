@@ -237,6 +237,7 @@ export function useNewProjectModalController({
             discussion: Array.isArray(result.discussion) ? result.discussion : prev.discussion,
             discussionDraft: Array.isArray(result.discussionDraft) ? result.discussionDraft : prev.discussionDraft,
             debate: result.debate ?? prev.debate ?? null,
+            contentProvenance: result.contentProvenance ?? prev.contentProvenance,
             analysisGate: result.analysisGate ?? prev.analysisGate,
             debateTask: result.taskId
               ? {

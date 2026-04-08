@@ -8,6 +8,28 @@ type Props = {
   controller: NewProjectModalController;
 };
 
+type ContentSource = 'model_debate' | 'rule_draft' | 'fallback';
+
+function sourceBadgeVariant(source: ContentSource): 'primary' | 'warning' | 'accent' {
+  if (source === 'model_debate') {
+    return 'primary';
+  }
+  if (source === 'fallback') {
+    return 'warning';
+  }
+  return 'accent';
+}
+
+function sourceBadgeLabel(source: ContentSource) {
+  if (source === 'model_debate') {
+    return '模型正式结论';
+  }
+  if (source === 'fallback') {
+    return '降级结果';
+  }
+  return '规则草稿';
+}
+
 export default function IssueAnalysisPanel({ controller }: Props) {
   const {
     parsedProject,
@@ -46,6 +68,7 @@ export default function IssueAnalysisPanel({ controller }: Props) {
   const discussionDraft = issuePreview?.discussionDraft || [];
   const analysisGate = issuePreview?.analysisGate;
   const primaryAnalysisBlocker = analysisGate?.blockers?.[0] || '';
+  const contentProvenance = issuePreview?.contentProvenance;
 
   return (
     <div className="space-y-5 p-5 bg-surface-soft border border-primary/20 rounded-2xl">
@@ -64,7 +87,7 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           <Badge variant="warning">非静态预览页</Badge>
         </div>
         <p className="text-xs leading-6 text-slate-300">
-          这里展示的是当前新建项目流程中的实时分析草稿。上面的使命锚点、目标对齐、原则对齐、需求确认单都可以直接编辑并继续提交。
+          这里展示的是实时分析结果。仅当来源标记为“模型正式结论”时，才可作为正式推进依据；“规则草稿/降级结果”仅用于参考。
         </p>
         <p className="text-[11px] leading-5 text-slate-400">
           若你另开到 <span className="font-semibold text-white">`/generated/*.html`</span>、`4173` 或其他静态页面，
@@ -85,8 +108,27 @@ export default function IssueAnalysisPanel({ controller }: Props) {
 
       {issuePreview && (
         <>
+          {contentProvenance && (
+            <div className={cn(
+              'rounded-xl border p-3 space-y-1',
+              contentProvenance.formalReady ? 'border-primary/30 bg-primary/10' : 'border-warning/30 bg-warning/10',
+            )}>
+              <Badge variant={contentProvenance.formalReady ? 'primary' : sourceBadgeVariant(contentProvenance.summary)}>
+                {contentProvenance.formalReady ? '正式结果可推进' : sourceBadgeLabel(contentProvenance.summary)}
+              </Badge>
+              <p className="text-[11px] text-slate-300 leading-relaxed">{contentProvenance.note}</p>
+            </div>
+          )}
+
           <div className="space-y-3">
-            <p className="text-xs text-slate-400">Issue 理解摘要</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-400">Issue 理解摘要</p>
+              {contentProvenance && (
+                <Badge variant={sourceBadgeVariant(contentProvenance.summary)}>
+                  {sourceBadgeLabel(contentProvenance.summary)}
+                </Badge>
+              )}
+            </div>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-1">
               <p className="text-sm font-bold text-white">{issuePreview.title}</p>
               <textarea
@@ -99,7 +141,14 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           </div>
 
           <div className="space-y-3">
-            <p className="text-xs text-slate-400">需求细化草案（Agent 初步理解）</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-400">需求细化草案（Agent 初步理解）</p>
+              {contentProvenance && (
+                <Badge variant={sourceBadgeVariant(contentProvenance.refinement)}>
+                  {sourceBadgeLabel(contentProvenance.refinement)}
+                </Badge>
+              )}
+            </div>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-2">
               <div className="space-y-1">
                 <p className="text-slate-400 text-xs">问题定义</p>
@@ -152,16 +201,23 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-3">
               <p className="text-xs text-slate-400">与产品说明文档的对齐结论</p>
-              <button
-                onClick={() => void handleSaveAlignmentToMemory()}
-                disabled={isSavingAlignment}
-                className={cn(
-                  'text-[10px] font-bold uppercase tracking-widest transition-colors',
-                  isSavingAlignment ? 'text-slate-500 cursor-not-allowed' : 'text-primary hover:underline',
+              <div className="flex items-center gap-2">
+                {contentProvenance && (
+                  <Badge variant={sourceBadgeVariant(contentProvenance.contextAlignment)}>
+                    {sourceBadgeLabel(contentProvenance.contextAlignment)}
+                  </Badge>
                 )}
-              >
-                {isSavingAlignment ? '保存中...' : '保存三项到长期记忆'}
-              </button>
+                <button
+                  onClick={() => void handleSaveAlignmentToMemory()}
+                  disabled={isSavingAlignment}
+                  className={cn(
+                    'text-[10px] font-bold uppercase tracking-widest transition-colors',
+                    isSavingAlignment ? 'text-slate-500 cursor-not-allowed' : 'text-primary hover:underline',
+                  )}
+                >
+                  {isSavingAlignment ? '保存中...' : '保存三项到长期记忆'}
+                </button>
+              </div>
             </div>
             <p className="text-[10px] text-slate-500">可保存：使命锚点 / 目标对齐 / 原则对齐</p>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-2">
@@ -209,7 +265,14 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           </div>
 
           <div className="space-y-3">
-            <p className="text-xs text-slate-400">产品设计草案（基于上下文自动完善）</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-400">产品设计草案（基于上下文自动完善）</p>
+              {contentProvenance && (
+                <Badge variant={sourceBadgeVariant(contentProvenance.designBlueprint)}>
+                  {sourceBadgeLabel(contentProvenance.designBlueprint)}
+                </Badge>
+              )}
+            </div>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-2">
               <div className="space-y-1">
                 <p className="text-slate-400 text-xs">设计主题</p>
@@ -277,7 +340,14 @@ export default function IssueAnalysisPanel({ controller }: Props) {
           )}
 
           <div className="space-y-3">
-            <p className="text-xs text-slate-400">需求确认单草案（可追溯）</p>
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-400">需求确认单草案（可追溯）</p>
+              {contentProvenance && (
+                <Badge variant={sourceBadgeVariant(contentProvenance.requirementContract)}>
+                  {sourceBadgeLabel(contentProvenance.requirementContract)}
+                </Badge>
+              )}
+            </div>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-2">
               <div className="space-y-1">
                 <p className="text-slate-400 text-xs">目标</p>
@@ -323,6 +393,11 @@ export default function IssueAnalysisPanel({ controller }: Props) {
               <div className="flex items-center justify-between gap-3">
                 <p className="text-xs text-slate-400">基于 Issue 的多角色讨论</p>
                 <div className="flex items-center gap-2">
+                  {contentProvenance && (
+                    <Badge variant={sourceBadgeVariant(contentProvenance.discussion)}>
+                      {sourceBadgeLabel(contentProvenance.discussion)}
+                    </Badge>
+                  )}
                   {issuePreview.debateTask && (
                     <Badge variant={debateTaskStatus === 'failed' ? 'danger' : debateTaskStatus === 'completed' ? 'primary' : 'accent'}>
                       {debateTaskStatus === 'queued'
@@ -571,14 +646,21 @@ export default function IssueAnalysisPanel({ controller }: Props) {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-slate-400">需求细化必答（3 题）</p>
-                {issuePreview.suggestedAnswers.length > 0 && (
-                  <button
-                    onClick={() => setIssueAnswers(applySuggestedAnswers(issuePreview.questions, issuePreview.suggestedAnswers))}
-                    className="text-[10px] font-bold text-primary hover:underline"
-                  >
-                    一键应用建议答案
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {contentProvenance && (
+                    <Badge variant={sourceBadgeVariant(contentProvenance.suggestedAnswers)}>
+                      {sourceBadgeLabel(contentProvenance.suggestedAnswers)}
+                    </Badge>
+                  )}
+                  {issuePreview.suggestedAnswers.length > 0 && (
+                    <button
+                      onClick={() => setIssueAnswers(applySuggestedAnswers(issuePreview.questions, issuePreview.suggestedAnswers))}
+                      className="text-[10px] font-bold text-primary hover:underline"
+                    >
+                      一键应用建议答案
+                    </button>
+                  )}
+                </div>
               </div>
               {issuePreview.suggestedAnswers.length > 0 && (
                 <div className="p-2 rounded-lg bg-white/5 border border-border-subtle">

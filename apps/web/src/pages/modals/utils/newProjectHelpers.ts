@@ -604,6 +604,18 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
     discussion: [],
     discussionDraft: localDiscussion,
     debate: null,
+    contentProvenance: {
+      formalReady: false,
+      note: '当前为本地规则草稿，需等待真实模型多角色讨论完成后再作为正式结论使用。',
+      summary: 'rule_draft',
+      refinement: 'rule_draft',
+      contextAlignment: 'rule_draft',
+      designBlueprint: 'rule_draft',
+      suggestedAnswers: 'rule_draft',
+      requirementContract: 'rule_draft',
+      discussion: 'rule_draft',
+      discussionDraft: 'rule_draft',
+    },
     analysisGate: {
       canProceed: false,
       blockers: [

@@ -130,8 +130,23 @@ interface DebateTaskState {
   error?: string;
 }
 
+type IssueContentSource = "model_debate" | "rule_draft" | "fallback";
+
+interface IssueContentProvenance {
+  formalReady: boolean;
+  note: string;
+  summary: IssueContentSource;
+  refinement: IssueContentSource;
+  contextAlignment: IssueContentSource;
+  designBlueprint: IssueContentSource;
+  suggestedAnswers: IssueContentSource;
+  requirementContract: IssueContentSource;
+  discussion: IssueContentSource;
+  discussionDraft: IssueContentSource;
+}
+
 const ISSUE_DEBATE_POLL_AFTER_MS = Math.max(800, Number(process.env.ISSUE_DEBATE_POLL_MS ?? 1500));
-const ISSUE_DEBATE_STALE_TIMEOUT_MS = Math.max(45_000, Number(process.env.ISSUE_DEBATE_STALE_TIMEOUT_MS ?? 180_000));
+const ISSUE_DEBATE_STALE_TIMEOUT_MS = Math.max(60_000, Number(process.env.ISSUE_DEBATE_STALE_TIMEOUT_MS ?? 90_000));
 const issueDebateTaskStore = new Map<string, DebateTaskState>();
 const issueLatestDebateTask = new Map<string, string>();
 
@@ -163,6 +178,187 @@ function toDiscussionFromDebate(
     concern: item.concern,
     proposal: item.proposal
   }));
+}
+
+function trimInline(value: string) {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function buildPendingSummary(rawInput: string, fallback: string) {
+  const normalized = trimInline(rawInput);
+  if (!normalized) {
+    return fallback;
+  }
+  if (normalized.length <= 120) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 120)}...`;
+}
+
+function buildIssueContentProvenance(input: {
+  status: IssueDebateTaskStatus;
+  debate: { mode?: string | null } | null;
+}): IssueContentProvenance {
+  const modelReady = input.status === "completed" && input.debate?.mode === "model";
+  if (modelReady) {
+    return {
+      formalReady: true,
+      note: "正式分析结论已由真实模型多角色讨论产出。",
+      summary: "model_debate",
+      refinement: "model_debate",
+      contextAlignment: "model_debate",
+      designBlueprint: "model_debate",
+      suggestedAnswers: "model_debate",
+      requirementContract: "model_debate",
+      discussion: "model_debate",
+      discussionDraft: "rule_draft"
+    };
+  }
+
+  const fallbackCompleted = input.status === "completed" && input.debate?.mode === "fallback";
+  if (fallbackCompleted) {
+    return {
+      formalReady: false,
+      note: "当前仅有降级/fallback 结果，不可作为正式推进依据。",
+      summary: "fallback",
+      refinement: "fallback",
+      contextAlignment: "fallback",
+      designBlueprint: "fallback",
+      suggestedAnswers: "fallback",
+      requirementContract: "fallback",
+      discussion: "fallback",
+      discussionDraft: "rule_draft"
+    };
+  }
+
+  return {
+    formalReady: false,
+    note: "真实模型多角色讨论尚未完成，当前仅提供规则草稿占位。",
+    summary: "rule_draft",
+    refinement: "rule_draft",
+    contextAlignment: "rule_draft",
+    designBlueprint: "rule_draft",
+    suggestedAnswers: "rule_draft",
+    requirementContract: "rule_draft",
+    discussion: "rule_draft",
+    discussionDraft: "rule_draft"
+  };
+}
+
+function resolveIssuePublicContent(input: {
+  rawInput: string;
+  fallbackSummary: string;
+  refinement: {
+    problemStatement: string;
+    expectedOutcome: string;
+    inScopeDraft: string[];
+    outOfScopeDraft: string[];
+    acceptanceDraft: string[];
+  } | null | undefined;
+  contextAlignment: {
+    productName: string;
+    missionAnchor: string;
+    matchedGoals: string[];
+    matchedPrinciples: string[];
+    contextNotes: string[];
+  } | null | undefined;
+  designBlueprint: {
+    designTheme: string;
+    valueNarrative: string;
+    targetUsers: string[];
+    coreScenarios: string[];
+    proposedMilestones: string[];
+  } | null | undefined;
+  suggestedAnswers: Array<{
+    questionId: string;
+    answer: string;
+    reason: string;
+  }> | null | undefined;
+  requirementContract: {
+    objective: string;
+    inScope: string[];
+    outOfScope: string[];
+    acceptanceCriteria: string[];
+    artifacts: string[];
+    designTheme?: string;
+    valueNarrative?: string;
+  } | null | undefined;
+  discussion: IssueDiscussionItem[];
+  discussionDraft: IssueDiscussionItem[];
+  provenance: IssueContentProvenance;
+}) {
+  if (input.provenance.formalReady) {
+    return {
+      summary: input.fallbackSummary,
+      refinement: input.refinement ?? {
+        problemStatement: "",
+        expectedOutcome: "",
+        inScopeDraft: [],
+        outOfScopeDraft: [],
+        acceptanceDraft: []
+      },
+      contextAlignment: input.contextAlignment ?? {
+        productName: "",
+        missionAnchor: "",
+        matchedGoals: [],
+        matchedPrinciples: [],
+        contextNotes: []
+      },
+      designBlueprint: input.designBlueprint ?? {
+        designTheme: "",
+        valueNarrative: "",
+        targetUsers: [],
+        coreScenarios: [],
+        proposedMilestones: []
+      },
+      suggestedAnswers: input.suggestedAnswers ?? [],
+      requirementContract: input.requirementContract ?? {
+        objective: "",
+        inScope: [],
+        outOfScope: [],
+        acceptanceCriteria: [],
+        artifacts: []
+      },
+      discussion: input.discussion,
+      discussionDraft: input.discussionDraft
+    };
+  }
+
+  const pendingMessage = input.provenance.note;
+  return {
+    summary: buildPendingSummary(input.rawInput, input.fallbackSummary),
+    refinement: {
+      problemStatement: pendingMessage,
+      expectedOutcome: pendingMessage,
+      inScopeDraft: [],
+      outOfScopeDraft: [],
+      acceptanceDraft: []
+    },
+    contextAlignment: {
+      productName: input.contextAlignment?.productName ?? "",
+      missionAnchor: pendingMessage,
+      matchedGoals: [],
+      matchedPrinciples: [],
+      contextNotes: [pendingMessage]
+    },
+    designBlueprint: {
+      designTheme: "待模型正式结论",
+      valueNarrative: pendingMessage,
+      targetUsers: [],
+      coreScenarios: [],
+      proposedMilestones: []
+    },
+    suggestedAnswers: [],
+    requirementContract: {
+      objective: pendingMessage,
+      inScope: [],
+      outOfScope: [],
+      acceptanceCriteria: [],
+      artifacts: input.requirementContract?.artifacts ?? []
+    },
+    discussion: [],
+    discussionDraft: []
+  };
 }
 
 function buildIssueAnalysisGate(input: {
@@ -418,12 +614,13 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       debate,
       shouldCreateDebateTask: Boolean(issue.debateTaskId)
     });
-
-    sendSuccess(res, {
-      issueId,
-      taskId: taskId || null,
+    const contentProvenance = buildIssueContentProvenance({
       status,
-      summary: issue.summary,
+      debate
+    });
+    const publicContent = resolveIssuePublicContent({
+      rawInput: issue.rawInput,
+      fallbackSummary: issue.summary,
       refinement: issue.refinement ?? null,
       contextAlignment: issue.contextAlignment ?? null,
       designBlueprint: issue.designBlueprint ?? null,
@@ -431,7 +628,23 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       requirementContract: issue.requirementContract ?? null,
       discussion,
       discussionDraft,
+      provenance: contentProvenance
+    });
+
+    sendSuccess(res, {
+      issueId,
+      taskId: taskId || null,
+      status,
+      summary: publicContent.summary,
+      refinement: publicContent.refinement,
+      contextAlignment: publicContent.contextAlignment,
+      designBlueprint: publicContent.designBlueprint,
+      suggestedAnswers: publicContent.suggestedAnswers,
+      requirementContract: publicContent.requirementContract,
+      discussion: publicContent.discussion,
+      discussionDraft: publicContent.discussionDraft,
       debate,
+      contentProvenance,
       analysisGate,
       error: error || null,
       updatedAt: task?.updatedAt || issue.debateUpdatedAt || issue.updatedAt,
@@ -561,24 +774,40 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         fallbackDiscussion: ruleDiscussion
       });
     }
+    const contentProvenance = buildIssueContentProvenance({
+      status: debateStatus,
+      debate: null
+    });
+    const publicContent = resolveIssuePublicContent({
+      rawInput: input,
+      fallbackSummary: issue.summary,
+      refinement: issue.refinement ?? null,
+      contextAlignment: issue.contextAlignment ?? null,
+      designBlueprint: issue.designBlueprint ?? null,
+      suggestedAnswers: issue.suggestedAnswers ?? [],
+      requirementContract: issue.requirementContract ?? null,
+      discussion: [],
+      discussionDraft: discussion,
+      provenance: contentProvenance
+    });
 
     sendSuccess(res, {
       issueId: issue.id,
       title: issue.title,
-      summary: issue.summary,
+      summary: publicContent.summary,
       industryCode: issue.industryCode,
       recommendedRoleIds: issue.recommendedRoleIds,
       soulRoleId: issue.soulRoleId,
       conflicts: issue.conflicts,
       questions: issue.questions,
-      contextAlignment,
-      designBlueprint,
-      suggestedAnswers,
+      contextAlignment: publicContent.contextAlignment,
+      designBlueprint: publicContent.designBlueprint,
+      suggestedAnswers: publicContent.suggestedAnswers,
       relatedHistory,
-      requirementContract,
-      refinement,
-      discussion: [],
-      discussionDraft: discussion,
+      requirementContract: publicContent.requirementContract,
+      refinement: publicContent.refinement,
+      discussion: publicContent.discussion,
+      discussionDraft: publicContent.discussionDraft,
       debate: null,
       debateTask: activeDebateTaskId
         ? {
@@ -587,6 +816,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
             pollAfterMs: ISSUE_DEBATE_POLL_AFTER_MS
           }
         : null,
+      contentProvenance,
       analysisGate,
       expectedArtifacts,
       workflow: config.workflows.find((item) => item.isDefault) ?? config.workflows[0] ?? null

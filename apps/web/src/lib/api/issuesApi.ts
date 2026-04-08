@@ -9,6 +9,7 @@ export type IssueSourceType =
   | 'prd';
 export type ConflictSeverity = 'critical' | 'warning' | 'info';
 export type IssueDebateTaskStatus = 'queued' | 'running' | 'completed' | 'failed';
+export type IssueContentSource = 'model_debate' | 'rule_draft' | 'fallback';
 
 export interface IssueAnalysisGate {
   canProceed: boolean;
@@ -46,6 +47,19 @@ export interface IssueQuestion {
   question: string;
   required: boolean;
   placeholder?: string;
+}
+
+export interface IssueContentProvenance {
+  formalReady: boolean;
+  note: string;
+  summary: IssueContentSource;
+  refinement: IssueContentSource;
+  contextAlignment: IssueContentSource;
+  designBlueprint: IssueContentSource;
+  suggestedAnswers: IssueContentSource;
+  requirementContract: IssueContentSource;
+  discussion: IssueContentSource;
+  discussionDraft: IssueContentSource;
 }
 
 export interface IssuePreview {
@@ -144,6 +158,7 @@ export interface IssuePreview {
     pollAfterMs?: number;
   } | null;
   analysisGate: IssueAnalysisGate;
+  contentProvenance: IssueContentProvenance;
   expectedArtifacts: Array<{
     id: string;
     name: string;
@@ -177,6 +192,7 @@ export interface IssueDebatePollingResult {
   discussion: IssuePreview['discussion'];
   discussionDraft: IssuePreview['discussionDraft'];
   debate: IssuePreview['debate'];
+  contentProvenance: IssueContentProvenance;
   analysisGate: IssuePreview['analysisGate'];
   error?: string | null;
   updatedAt: string;

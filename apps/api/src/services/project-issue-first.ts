@@ -42,31 +42,31 @@ export async function ensureProjectIssueFirst(input: {
   projectId: string;
   projectPath?: string;
 }) {
+  const gitlabIssueFirstEnabled = Boolean(ISSUE_FIRST_GITLAB_TOKEN && ISSUE_FIRST_GITLAB_PROJECT);
   const localIssue = ISSUE_FIRST_LOCAL_ENFORCED
     ? await getIssueByProjectId(input.projectId)
     : null;
   const localIssueReady = Boolean(localIssue?.id && localIssue?.status === "confirmed");
 
-  if (localIssueReady) {
+  if (ISSUE_FIRST_LOCAL_ENFORCED && !localIssueReady) {
     return {
-      ok: true,
+      ok: false,
       enforced: true,
-      data: {
-        projectId: input.projectId,
-        issueId: localIssue?.id,
-        source: "local_issue_store"
-      }
+      code: "LOCAL_ISSUE_REQUIRED",
+      message: "当前项目未绑定需求 Issue。请先通过 New Project Issue 流程确认需求后再推进。"
     } as const;
   }
 
-  const gitlabIssueFirstEnabled = Boolean(ISSUE_FIRST_GITLAB_TOKEN && ISSUE_FIRST_GITLAB_PROJECT);
   if (!gitlabIssueFirstEnabled) {
-    if (ISSUE_FIRST_LOCAL_ENFORCED) {
+    if (localIssueReady) {
       return {
-        ok: false,
+        ok: true,
         enforced: true,
-        code: "LOCAL_ISSUE_REQUIRED",
-        message: "当前项目未绑定需求 Issue。请先通过 New Project Issue 流程确认需求后再推进。"
+        data: {
+          projectId: input.projectId,
+          issueId: localIssue?.id,
+          source: "local_issue_store"
+        }
       } as const;
     }
     return {
@@ -85,6 +85,7 @@ export async function ensureProjectIssueFirst(input: {
         projectId: input.projectId,
         projectPath: binding.gitlabProjectId,
         issueIid: binding.issueIid,
+        issueId: localIssue?.id,
         source: "binding"
       }
     } as const;
@@ -108,6 +109,7 @@ export async function ensureProjectIssueFirst(input: {
     enforced: true,
     data: {
       ...ensured.data,
+      issueId: localIssue?.id,
       source: "gitlab_sync"
     }
   } as const;
