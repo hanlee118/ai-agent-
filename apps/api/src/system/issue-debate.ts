@@ -525,7 +525,8 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
     };
   });
   const realModelCount = opinions.filter((item) => item.mode === "model").length;
-  const hasRealModel = realModelCount >= Math.min(2, selectedRoles.length);
+  // Require full real-model completion for issue debate to avoid partial fallback passing as formal output.
+  const hasRealModel = realModelCount === selectedRoles.length;
   const derived = toConsensusAndDivergences(opinions);
 
   return {

@@ -82,6 +82,8 @@ function resolveOpenClawBin(): string {
   const candidates = [
     path.resolve(OPENCLAW_ROOT, "node_modules/.bin/openclaw"),
     path.resolve(process.cwd(), "node_modules/.bin/openclaw"),
+    path.resolve(path.dirname(process.execPath), "openclaw"),
+    "/Users/dalongxia/.nvm/versions/node/v24.14.0/bin/openclaw",
     "/opt/homebrew/bin/openclaw",
     "/usr/local/bin/openclaw",
     "/usr/bin/openclaw"
@@ -1793,12 +1795,19 @@ export async function sendOpenClawAgentMessage(
       });
       break;
     } catch (error) {
-      const detail =
-        error instanceof Error && "stderr" in error && typeof error.stderr === "string"
-          ? error.stderr.trim()
-          : error instanceof Error
-            ? error.message
-            : "OpenClaw agent command failed";
+      const stderrText =
+        error && typeof error === "object" && "stderr" in error && typeof (error as { stderr?: unknown }).stderr === "string"
+          ? ((error as { stderr: string }).stderr || "").trim()
+          : "";
+      const stdoutText =
+        error && typeof error === "object" && "stdout" in error && typeof (error as { stdout?: unknown }).stdout === "string"
+          ? ((error as { stdout: string }).stdout || "").trim()
+          : "";
+      const messageText = error instanceof Error ? String(error.message || "").trim() : String(error || "").trim();
+      const detail = [stderrText, stdoutText, messageText]
+        .filter(Boolean)
+        .join("\n")
+        .slice(0, 1500);
       finalError = detail || "OpenClaw agent command failed";
 
       await prisma.agentUsageLog.create({

@@ -25,3 +25,7 @@ site/generated/
 # Local QA / healthcheck artifacts should not enter version history
 docs/reports/qa-auth-backup-*.json
 docs/reports/system-health-check-*.json
+
+# Local development probes/logs
+.oc_write_probe
+apps/api/.dev-*.log

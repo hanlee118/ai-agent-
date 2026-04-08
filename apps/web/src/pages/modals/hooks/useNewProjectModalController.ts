@@ -248,6 +248,42 @@ export function useNewProjectModalController({
         });
 
         if (result.status === 'completed') {
+          setEditableDraft((prev) => {
+            const pendingMarker = '真实模型多角色讨论尚未完成';
+            const hasPlaceholder = !prev
+              || [
+                prev.summary,
+                prev.problemStatement,
+                prev.expectedOutcome,
+                prev.missionAnchor,
+                prev.valueNarrative,
+                prev.contractObjective,
+              ].some((item) => String(item || '').includes(pendingMarker));
+            if (!hasPlaceholder) {
+              return prev;
+            }
+
+            return {
+              summary: result.summary || prev?.summary || '',
+              problemStatement: result.refinement?.problemStatement || '',
+              expectedOutcome: result.refinement?.expectedOutcome || '',
+              inScopeDraft: toMultilineText(result.refinement?.inScopeDraft || []),
+              outOfScopeDraft: toMultilineText(result.refinement?.outOfScopeDraft || []),
+              acceptanceDraft: toMultilineText(result.refinement?.acceptanceDraft || []),
+              missionAnchor: result.contextAlignment?.missionAnchor || '',
+              matchedGoals: toMultilineText(result.contextAlignment?.matchedGoals || []),
+              matchedPrinciples: toMultilineText(result.contextAlignment?.matchedPrinciples || []),
+              contextNotes: toMultilineText(result.contextAlignment?.contextNotes || []),
+              designTheme: result.designBlueprint?.designTheme || '',
+              valueNarrative: result.designBlueprint?.valueNarrative || '',
+              targetUsers: toMultilineText(result.designBlueprint?.targetUsers || []),
+              coreScenarios: toMultilineText(result.designBlueprint?.coreScenarios || []),
+              contractObjective: result.requirementContract?.objective || '',
+              contractInScope: toMultilineText(result.requirementContract?.inScope || []),
+              contractOutOfScope: toMultilineText(result.requirementContract?.outOfScope || []),
+              contractAcceptance: toMultilineText(result.requirementContract?.acceptanceCriteria || []),
+            };
+          });
           setIsPollingDebate(false);
           setDiscussionAcknowledged(false);
           addToast('真实多角色讨论已完成，请确认正式讨论结论', 'success');

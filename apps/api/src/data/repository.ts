@@ -2726,6 +2726,15 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
     const errorAttempts = Array.isArray((error as { attempts?: unknown })?.attempts)
       ? ((error as { attempts: StageModelAttemptTrace[] }).attempts)
       : [];
+    const lastAttemptModel = errorAttempts.length > 0
+      ? String(
+        errorAttempts[errorAttempts.length - 1]?.executedModel
+        || errorAttempts[errorAttempts.length - 1]?.selectedModel
+        || errorAttempts[errorAttempts.length - 1]?.model
+        || ""
+      ).trim()
+      : "";
+
     await persistProjectExecutionSafe({
       projectId: input.projectId,
       stageType: input.stageType,
@@ -2733,7 +2742,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       action: input.action,
       status: "failed",
       provider: runtime.mode,
-      model: runtime.modelName,
+      model: lastAttemptModel || strategy.preferredModels[0] || runtime.modelName,
       requestedMode: strategy.mode === "terminal_agent" ? "openai-compatible" : runtime.requestedMode,
       runtimeMode: strategy.mode === "terminal_agent" ? "openai-compatible" : runtime.mode,
       promptSummary: input.summary || null,
@@ -2747,7 +2756,8 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         preferredModels: strategy.preferredModels,
         requiredSkills: strategy.requiredSkills,
         skillProtocol: strategy.skillProtocol,
-        modelAttempts: errorAttempts.length > 0 ? (errorAttempts as unknown as Prisma.InputJsonValue) : undefined
+        modelAttempts: errorAttempts.length > 0 ? (errorAttempts as unknown as Prisma.InputJsonValue) : undefined,
+        failedOnModel: lastAttemptModel || undefined
       })
     });
 
@@ -2866,14 +2876,9 @@ function needsDeliverableAgentUpgrade(input: {
 }
 
 function sanitizeDeliverablePlaceholders(content: string) {
-  return String(content ?? "")
-    .replace(/客户化数据占位/gi, "客户化数据映射")
-    .replace(/占位(词|符)?/gi, "映射说明")
-    .replace(/待补充/gi, "已补充")
-    .replace(/\bTODO\b/gi, "已落实")
-    .replace(/\bTBD\b/gi, "已明确")
-    .replace(/lorem ipsum/gi, "已填充说明")
-    .replace(/\bxxx\b/gi, "具体值");
+  // Strict mode: do not mutate generated content to fake template pass.
+  // Surface real model output quality issues instead of force-fixing placeholders.
+  return String(content ?? "");
 }
 
 function buildDeliverableBackfillContent(project: ProjectRecord, deliverable: ProjectRecord["deliverables"][number]) {
@@ -3049,11 +3054,9 @@ async function buildDeliverableBackfillContentWithAgent(
       if (isVisualMockup) {
         throw error;
       }
-      console.warn(
-        `[deliverable.backfill] fallback to deterministic template for ${project.id}/${deliverable.name}:`,
-        error instanceof Error ? error.message : String(error)
-      );
-      return buildDeliverableBackfillContent(project, deliverable);
+      // Strict runtime mode: do not fall back to deterministic scaffolds when real model generation fails.
+      // Let callers surface the real failure so the pipeline remains truthful and debuggable.
+      throw error;
     }
     stageRunCache.set(runCacheKey, run);
   }

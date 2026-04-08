@@ -198,7 +198,17 @@ interface IssueContentProvenance {
 }
 
 const ISSUE_DEBATE_POLL_AFTER_MS = Math.max(800, Number(process.env.ISSUE_DEBATE_POLL_MS ?? 1500));
-const ISSUE_DEBATE_STALE_TIMEOUT_MS = Math.max(60_000, Number(process.env.ISSUE_DEBATE_STALE_TIMEOUT_MS ?? 90_000));
+// Keep stale timeout aligned with the async debate execution budget.
+// Otherwise long-running real-model debates can be incorrectly marked as failed while still executing.
+const ISSUE_DEBATE_ROLE_TIMEOUT_MS = Math.max(60_000, Number(process.env.ISSUE_DEBATE_ROLE_TIMEOUT_MS ?? 130_000));
+const ISSUE_DEBATE_MAX_ROLES = Math.max(4, Number(process.env.ISSUE_DEBATE_MAX_ROLES ?? 6));
+const ISSUE_DEBATE_CONCURRENCY = Math.max(1, Number(process.env.ISSUE_DEBATE_CONCURRENCY ?? 2));
+const ISSUE_DEBATE_EXPECTED_MAX_MS = Math.ceil(ISSUE_DEBATE_MAX_ROLES / ISSUE_DEBATE_CONCURRENCY) * ISSUE_DEBATE_ROLE_TIMEOUT_MS;
+const ISSUE_DEBATE_STALE_TIMEOUT_MS = Math.max(
+  90_000,
+  ISSUE_DEBATE_EXPECTED_MAX_MS + 60_000,
+  Number(process.env.ISSUE_DEBATE_STALE_TIMEOUT_MS ?? 0)
+);
 const issueDebateTaskStore = new Map<string, DebateTaskState>();
 const issueLatestDebateTask = new Map<string, string>();
 
