@@ -1423,7 +1423,7 @@ async function handleProjectCreatedIssueFirst(projectId: string) {
       error instanceof Error ? error.message : String(error)
     );
   });
-  kickProjectAutomationTick();
+  kickProjectAutomationTick({ force: true });
   return issueFirst;
 }
 
@@ -1528,8 +1528,9 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
   }
 }
 
-function kickProjectAutomationTick() {
-  if (!projectAutomationState.enabled) {
+function kickProjectAutomationTick(options?: { force?: boolean }) {
+  const force = options?.force === true;
+  if (!projectAutomationState.enabled && !force) {
     return;
   }
 
@@ -1539,7 +1540,7 @@ function kickProjectAutomationTick() {
 
   projectAutomationKickTimer = setTimeout(() => {
     projectAutomationKickTimer = null;
-    void runProjectAutomationTick();
+    void runProjectAutomationTick(force ? { force: true } : undefined);
   }, 150);
 }
 

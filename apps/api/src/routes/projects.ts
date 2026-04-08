@@ -953,7 +953,7 @@ interface CreateProjectsRouterOptions {
   projectAutomationState: ProjectAutomationState;
   restartProjectAutomationTicker: () => void;
   runProjectAutomationTick: (options?: { force?: boolean }) => Promise<void>;
-  kickProjectAutomationTick: () => void;
+  kickProjectAutomationTick: (options?: { force?: boolean }) => void;
   projectAdvanceLocks: Set<string>;
   projectAdvanceJobs: Map<string, Promise<void>>;
   projectAdvanceJobErrors: Map<string, { message: string; at: string }>;
@@ -1726,7 +1726,7 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
         error instanceof Error ? error.message : String(error)
       );
     });
-    kickProjectAutomationTick();
+    kickProjectAutomationTick({ force: true });
   } else {
     console.warn(`[ProjectIssueFirst] project create gated for ${project.id}: ${issueFirst.code} ${issueFirst.message}`);
   }
@@ -2572,6 +2572,7 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
     closeOnComplete: project.status === "completed",
     reason: "project.approve"
   });
+  kickProjectAutomationTick({ force: true });
   res.json(project);
 }));
 
@@ -2682,7 +2683,7 @@ router.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
     resourceId: project.id,
     summary: `项目 ${project.id} 已恢复执行`
   });
-  kickProjectAutomationTick();
+  kickProjectAutomationTick({ force: true });
   void trySyncGitLabHarness({
     projectId: project.id,
     stageType: project.currentStage,
