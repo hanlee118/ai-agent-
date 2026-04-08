@@ -65,6 +65,7 @@ import {
 import {
   buildTerminalStageExecutionMessage,
   getBestStageModel,
+  getPreferredStageModels,
   getStageCompanionRoles,
   getStageRealModelGateRoles,
   getProjectStageExecutionStrategy,
@@ -323,6 +324,70 @@ function isExecutionDegraded(metadata: Prisma.JsonValue | null) {
   return Boolean((metadata as Record<string, unknown>).degraded);
 }
 
+function isScriptedExecutionProvider(provider: string | null | undefined) {
+  return String(provider || "").trim().toLowerCase() === "scripted";
+}
+
+function assertStageScriptedExecutionGate(
+  project: ProjectDetail,
+  stageExecutions: StageAgentExecutionRecord[]
+) {
+  const criticalRoles = new Set<RoleType>([
+    project.currentRole as RoleType,
+    ...getStageRealModelGateRoles(project.currentStage)
+  ]);
+  if (PM_STAGE_GATE_ENABLED) {
+    criticalRoles.add("ROLE_PM");
+  }
+
+  const blockedRoles: RoleType[] = [];
+  for (const role of criticalRoles) {
+    const rows = stageExecutions.filter((row) => row.role === role);
+    if (rows.length === 0) {
+      continue;
+    }
+    const hasNonScriptedEvidence = rows.some((row) => !isScriptedExecutionProvider(row.provider));
+    if (!hasNonScriptedEvidence) {
+      blockedRoles.push(role);
+    }
+  }
+
+  if (blockedRoles.length > 0) {
+    const labels = blockedRoles.map((role) => ROLE_LABELS[role] || role).join("、");
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段关键角色仅存在 scripted 输出（${labels}）。`);
+  }
+}
+
+function assertStageDegradedExecutionGate(
+  project: ProjectDetail,
+  stageExecutions: StageAgentExecutionRecord[]
+) {
+  const criticalRoles = new Set<RoleType>([
+    project.currentRole as RoleType,
+    ...getStageRealModelGateRoles(project.currentStage)
+  ]);
+  if (PM_STAGE_GATE_ENABLED) {
+    criticalRoles.add("ROLE_PM");
+  }
+
+  const blockedRoles: RoleType[] = [];
+  for (const role of criticalRoles) {
+    const rows = stageExecutions.filter((row) => row.role === role);
+    if (rows.length === 0) {
+      continue;
+    }
+    const hasNonDegradedEvidence = rows.some((row) => !isExecutionDegraded(row.metadata ?? null));
+    if (!hasNonDegradedEvidence) {
+      blockedRoles.push(role);
+    }
+  }
+
+  if (blockedRoles.length > 0) {
+    const labels = blockedRoles.map((role) => ROLE_LABELS[role] || role).join("、");
+    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段关键角色仅存在 degraded 降级输出（${labels}）。`);
+  }
+}
+
 function isTerminalExecutionMetadata(metadata: Prisma.JsonValue | null) {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return false;
@@ -396,15 +461,11 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
     await assertRealModelRuntimeReadyForGate();
   }
 
-  const scriptedRows = normalizedStageExecutions.filter((row) => String(row.provider || "").trim().toLowerCase() === "scripted");
-  if (scriptedRows.length > 0) {
-    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 scripted 输出，禁止通过验收。`);
-  }
+  assertStageScriptedExecutionGate(project, normalizedStageExecutions);
 
   const protocolSettings = await getExecutionProtocolSettings();
-  const degradedRows = normalizedStageExecutions.filter((row) => isExecutionDegraded(row.metadata ?? null));
-  if (protocolSettings.blockDegradedWrites && degradedRows.length > 0) {
-    throw new Error(`REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段存在 degraded 降级输出，禁止通过验收。`);
+  if (protocolSettings.blockDegradedWrites) {
+    assertStageDegradedExecutionGate(project, normalizedStageExecutions);
   }
 
   assertPmExecutionGate(project, normalizedStageExecutions);
@@ -450,7 +511,7 @@ function matchesModelGateAlias(actualModel: string | null | undefined, expectedM
 export function evaluateStageBestModelGate(input: {
   stageType: StageType;
   currentRole: RoleType;
-  stageExecutions: Array<{ role: string; model?: string | null | undefined; metadata?: unknown }>;
+  stageExecutions: Array<{ role: string; model?: string | null | undefined; provider?: string | null | undefined; metadata?: unknown }>;
   includePmGate?: boolean;
 }) {
   const rolesToCheck = new Set<RoleType>([
@@ -463,17 +524,23 @@ export function evaluateStageBestModelGate(input: {
 
   const issues: string[] = [];
   for (const role of rolesToCheck) {
-    const latestSuccess = input.stageExecutions.find((row) => row.role === role);
+    const roleRows = input.stageExecutions.filter((row) => row.role === role);
+    if (roleRows.length === 0) {
+      continue;
+    }
+    const latestSuccess = roleRows.find((row) => !isScriptedExecutionProvider(row.provider)) ?? roleRows[0];
     if (!latestSuccess) {
       continue;
     }
 
-    const bestModel = getBestStageModel(input.stageType, role);
-    if (!bestModel) {
+    const preferredModels = getPreferredStageModels(input.stageType, role);
+    if (preferredModels.length === 0) {
       continue;
     }
+    const bestModel = preferredModels[0] ?? getBestStageModel(input.stageType, role);
+    const hitPreferredModel = preferredModels.some((model) => matchesModelGateAlias(latestSuccess.model, model));
 
-    if (matchesModelGateAlias(latestSuccess.model, bestModel)) {
+    if (hitPreferredModel) {
       continue;
     }
     // 若最佳模型已经尝试但因通道/账户可用性失败，则允许当前成功模型作为降级通过。
@@ -484,7 +551,7 @@ export function evaluateStageBestModelGate(input: {
     const roleLabel = ROLE_LABELS[role] || role;
     const actualModel = normalizeModelForGate(latestSuccess.model) || "unknown";
     issues.push(
-      `${STAGE_LABELS[input.stageType]}阶段 ${roleLabel} 最新成功执行未命中最佳模型（要求 ${bestModel}，实际 ${actualModel}）。`
+      `${STAGE_LABELS[input.stageType]}阶段 ${roleLabel} 最新成功执行未命中偏好模型池（允许 ${preferredModels.join(" / ")}，实际 ${actualModel}）。`
     );
   }
 
@@ -631,7 +698,7 @@ async function assertStageRoleModelWhitelistGate(
 
 function assertStageBestModelGate(
   project: ProjectDetail,
-  stageExecutions: Array<{ role: string; model?: string | null | undefined; metadata?: unknown }>
+  stageExecutions: Array<{ role: string; model?: string | null | undefined; provider?: string | null | undefined; metadata?: unknown }>
 ) {
   const gate = evaluateStageBestModelGate({
     stageType: project.currentStage,

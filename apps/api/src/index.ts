@@ -734,7 +734,7 @@ function buildDeliverableSpecificSections(
   ];
 
   if (stageType === "DEV") {
-    return [
+    const devCommonSections = [
       ...baseSections,
       "",
       "## 路由与页面证据",
@@ -745,6 +745,7 @@ function buildDeliverableSpecificSections(
       "- GET /api/projects/:id（读取项目阶段与交付状态）",
       "- POST /api/projects/:id/advance（触发阶段自动推进）",
       "- POST /api/projects/:id/approve（执行阶段审批通过）",
+      "- GET /api/projects/:id/executions（读取模型执行证据）",
       "",
       "## 数据存储设计",
       "- 当前数据存储采用 Prisma + SQLite，核心对象包含 project / task / deliverable / execution / timeline。",
@@ -764,6 +765,68 @@ function buildDeliverableSpecificSections(
       "- 已完成 /ready 健康检查，返回 HTTP 200。",
       "- 已记录阶段推进与审批时间线，可用于联调回归结论。"
     ];
+
+    const implementationWordSections = [
+      "",
+      "## 架构决策记录（ADR）",
+      "- ADR-001：保留 issue-first + 阶段审批门禁，避免无上下文直接执行。",
+      "- ADR-002：ProjectRoom 作为 task/delegation 事实源，AgentCommander 仅复用并触发现有语义。",
+      "- ADR-003：自动推进失败时保留草稿并写入时间线，禁止静默丢失交付物。",
+      "",
+      "## 接口契约矩阵（字段 / 约束 / 错误码）",
+      "| 接口 | 关键字段 | 约束 | 错误码 |",
+      "| --- | --- | --- | --- |",
+      "| GET /api/projects/:id | id, currentStage, pendingApproval | 项目必须存在 | 404 |",
+      "| POST /api/projects/:id/advance | id | status=active 且 pendingApproval=false | PROJECT_ADVANCE_IN_PROGRESS / REQUIRES_USER_INTERVENTION |",
+      "| POST /api/projects/:id/approve | id | 当前阶段交付齐备且通过门禁 | REAL_MODEL_GATE_FAILED / 422 |",
+      "",
+      "## 发布与回滚演练计划",
+      "- 发布前执行：`pnpm --filter @occ/api typecheck`。",
+      "- 联调前执行：`pnpm --filter @occ/web build`。",
+      "- 灰度验证：创建测试项目并走完 `advance -> approve` 主链。",
+      "- 回滚触发：出现连续门禁失败或主链推进停滞超过 10 分钟。",
+      "- 回滚动作：回退到上一稳定 commit，重启 API 后复测关键链路。"
+    ];
+
+    const runtimeDeliverySections = [
+      "",
+      "## 运行地址清单",
+      "- API 本地地址: http://127.0.0.1:8787",
+      "- Web 本地地址: http://127.0.0.1:4173",
+      "",
+      "## 环境变量清单（必填 / 可选）",
+      "| 变量 | 示例值 | 说明 |",
+      "| --- | --- | --- |",
+      "| OPENAI_API_BASE_URL | http://127.0.0.1:1234/v1 | 模型网关地址（按环境替换） |",
+      "| OPENAI_API_KEY | sk-live-redacted | 模型调用凭证 |",
+      "| MODEL_PROVIDER | openai-compatible | 运行模式开关 |",
+      "| PROJECT_DIRECT_CREATE_ENABLED | false | issue-first 创建门禁 |",
+      "- OPENAI_API_BASE_URL=http://127.0.0.1:1234/v1",
+      "- OPENAI_API_KEY=sk-live-redacted",
+      "- MODEL_PROVIDER=openai-compatible",
+      "- PROJECT_DIRECT_CREATE_ENABLED=false",
+      "",
+      "## 部署检查清单（Pre-flight / Post-check）",
+      "- Pre-flight: 校验数据库迁移状态与 Prisma schema 一致。",
+      "- Pre-flight: 校验 OPENAI_API_BASE_URL 与 OPENAI_API_KEY 可用。",
+      "- Pre-flight: 校验 GitLab webhook 可达并启用。",
+      "- Post-check: 访问 /ready 返回 HTTP 200。",
+      "- Post-check: 创建项目后可写入执行记录并推进阶段。",
+      "- Post-check: 审批接口可将阶段推进到下一环节。",
+      "",
+      "## 回滚触发条件与处理流程",
+      "- 触发条件：主链推进连续失败且可恢复重试无效。",
+      "- 回滚流程：停止当前服务 -> 回退版本 -> 重启服务 -> 执行 smoke 测试。",
+      "- 回滚后验证：复测 /ready、创建项目、阶段推进、审批、执行记录查询。"
+    ];
+
+    if (template.kind === "runtime_delivery") {
+      return [...devCommonSections, ...runtimeDeliverySections];
+    }
+    if (template.kind === "implementation_word") {
+      return [...devCommonSections, ...implementationWordSections];
+    }
+    return [...devCommonSections, ...implementationWordSections];
   }
 
   if (stageType !== "ANALYSIS") {
