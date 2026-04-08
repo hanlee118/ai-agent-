@@ -1,4 +1,4 @@
-import type { RoleType } from "@occ/shared";
+import type { ParsedIntent, RoleType } from "@occ/shared";
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { getRuntimeStatus } from "../agents/runtime.js";
@@ -112,6 +112,58 @@ function normalizeStringMap(input: unknown) {
     }
     return acc;
   }, {});
+}
+
+function buildParsedIntentFromIssue(input: {
+  issue: Awaited<ReturnType<typeof getIssue>>;
+  selectedRoleIds: RoleType[];
+  clarificationAnswers: Record<string, string>;
+  conflictResolution?: string;
+}): ParsedIntent {
+  const issue = input.issue;
+  const keywords = Array.from(
+    new Set(
+      [
+        issue?.industryCode || "",
+        issue?.title || "",
+        ...(issue?.refinement?.inScopeDraft || []),
+        ...(issue?.designBlueprint?.coreScenarios || [])
+      ]
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 8);
+
+  const constraints = Array.from(
+    new Set(
+      [
+        ...(issue?.refinement?.outOfScopeDraft || []),
+        ...(issue?.contextAlignment?.contextNotes || []),
+        ...(input.conflictResolution ? [`冲突解决说明: ${input.conflictResolution}`] : [])
+      ]
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 6);
+
+  const risks = Array.from(
+    new Set(
+      [
+        ...(issue?.conflicts || []).map((conflict) => `${conflict.severity}: ${conflict.title}`),
+        ...(issue?.debate?.divergences || [])
+      ]
+        .map((item) => String(item || "").trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 6);
+
+  return {
+    keywords: keywords.length > 0 ? keywords : [issue?.title || "需求事项"],
+    constraints: constraints.length > 0 ? constraints : ["按已确认需求范围推进，不引入平行语义"],
+    risks: risks.length > 0 ? risks : ["若需求上下文变更，需重新发起 issue 分析并确认"],
+    suggestedTeam: input.selectedRoleIds,
+    summary: String(input.clarificationAnswers.goal || issue?.summary || issue?.rawInput || "").trim()
+  };
 }
 
 interface CreateIssuesRouterOptions {
@@ -931,13 +983,20 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       `- 产出: ${(confirmedContract.artifacts || []).join("、") || "信息未提供"}`
     ].join("\n");
     const finalProjectDescription = `${projectDescription}\n\n${requirementContractBlock}`;
+    const parsedIntent = buildParsedIntentFromIssue({
+      issue,
+      selectedRoleIds: constrainedRoleIds,
+      clarificationAnswers,
+      conflictResolution
+    });
 
     const project = await createProject(
       {
         name: finalName,
         description: finalProjectDescription,
         team: constrainedRoleIds,
-        requirementContract: confirmedContract
+        requirementContract: confirmedContract,
+        parsedIntent
       },
       runtime.mode
     );

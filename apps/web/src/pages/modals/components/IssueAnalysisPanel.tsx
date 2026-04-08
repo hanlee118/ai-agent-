@@ -82,12 +82,14 @@ export default function IssueAnalysisPanel({ controller }: Props) {
 
       <div className="rounded-xl border border-primary/20 bg-primary/8 p-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="primary">5173 实时弹窗</Badge>
-          <Badge variant="accent">8787 实时接口</Badge>
-          <Badge variant="warning">非静态预览页</Badge>
+          <Badge variant="primary">Issue-first</Badge>
+          <Badge variant={analysisGate?.canProceed ? 'primary' : 'warning'}>
+            {analysisGate?.canProceed ? '模型正式结论' : '等待模型结论'}
+          </Badge>
+          {analysisGate?.runtimeMode ? <Badge variant="accent">runtime: {analysisGate.runtimeMode}</Badge> : null}
         </div>
         <p className="text-xs leading-6 text-slate-300">
-          这里展示的是实时分析结果。仅当来源标记为“模型正式结论”时，才可作为正式推进依据；“规则草稿/降级结果”仅用于参考。
+          新建流程默认不使用模拟数据。只有“模型正式结论”才可推进创建；草稿与降级结果会被明确标记并阻断推进。
         </p>
         <p className="text-[11px] leading-5 text-slate-400">
           若你另开到 <span className="font-semibold text-white">`/generated/*.html`</span>、`4173` 或其他静态页面，

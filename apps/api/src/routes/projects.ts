@@ -41,6 +41,7 @@ import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import { publishTaskIssueNote, syncProjectGitLabHarness } from "./gitlab.js";
 
 const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
+const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
 
 function formatTerminalCollaborationViolation(message: string) {
   const normalized = String(message || "").trim();
@@ -1255,6 +1256,17 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
 
   const router = express.Router();
 router.post("/api/projects/parse", asyncRoute(async (req, res) => {
+  if (!PROJECT_PARSE_LEGACY_ENABLED) {
+    res.status(410).json({
+      success: false,
+      error: {
+        code: "PROJECT_PARSE_LEGACY_DISABLED",
+        message: "自然语言规则解析已停用。请通过 /api/issues/preview 获取真实模型讨论后的正式结论。"
+      }
+    });
+    return;
+  }
+
   const input = String(req.body?.input ?? req.body?.description ?? "").trim();
 
   if (!input) {

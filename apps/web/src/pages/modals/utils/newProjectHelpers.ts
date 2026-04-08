@@ -274,6 +274,67 @@ export const buildAgentRecommendations = (
   return fallback.slice(0, 5);
 };
 
+export const buildRoleBasedAgentRecommendations = (
+  suggestedRoles: string[] = [],
+  options?: {
+    allowedRoleIds?: string[];
+    mustHaveSoulRole?: boolean;
+    soulRoleId?: string;
+  },
+) => {
+  const allowedRoleSet = new Set((options?.allowedRoleIds || []).map((role) => normalizeRoleId(role)));
+  const normalizedRoles = Array.from(new Set(
+    suggestedRoles
+      .map((role) => normalizeRoleId(role))
+      .filter(Boolean),
+  ));
+
+  const roleQueue = [...normalizedRoles];
+  if (options?.mustHaveSoulRole && options.soulRoleId) {
+    const soulRole = normalizeRoleId(options.soulRoleId);
+    if (!roleQueue.includes(soulRole)) {
+      roleQueue.unshift(soulRole);
+    }
+  }
+
+  const constrainedRoles = allowedRoleSet.size > 0
+    ? roleQueue.filter((role) => allowedRoleSet.has(role))
+    : roleQueue;
+
+  const recommendations: AgentRecommendation[] = constrainedRoles
+    .map((roleId, index) => {
+      const matched = agents.find((agent) => normalizeRoleId(getAgentRoleId(agent)) === roleId);
+      if (!matched) {
+        return null;
+      }
+      return {
+        agentId: matched.id,
+        roleId,
+        name: matched.name,
+        role: matched.role,
+        score: Math.max(1, 100 - index),
+        reason: `来自 Issue 结论的角色映射：${roleLabel(roleId)}`,
+      } as AgentRecommendation;
+    })
+    .filter(Boolean) as AgentRecommendation[];
+
+  if (recommendations.length > 0) {
+    return recommendations.slice(0, 5);
+  }
+
+  const fallbackPool = allowedRoleSet.size > 0
+    ? agents.filter((agent) => allowedRoleSet.has(normalizeRoleId(getAgentRoleId(agent))))
+    : agents;
+  return fallbackPool.slice(0, 3).map((agent) => ({
+    agentId: agent.id,
+    roleId: normalizeRoleId(getAgentRoleId(agent)),
+    name: agent.name,
+    role: agent.role,
+    score: 1,
+    reason: '等待 Issue 正式结论后再确认角色映射',
+  }));
+};
+
 export const resolveTimelineLabel = (clarification: ClarificationAnswers) => {
   if (!clarification.timeline) {
     return '';

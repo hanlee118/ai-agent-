@@ -3,14 +3,12 @@ import {
   ApiRequestError,
   issuesApi,
   productContextApi,
-  projectsApi,
   roleSetsApi,
   type IssueDebateTaskStatus,
   type IssuePreview,
   type IssueSourceType,
   type IndustryRoleSetSummary,
   type IndustryTeamConfig,
-  type ParsedProjectIntent,
 } from '../../../lib/api';
 import { sendBatchAgentMessage } from '../../../lib/adapters';
 import { agents } from '../../../lib/runtimeCollections';
@@ -26,7 +24,7 @@ import type {
 import {
   INITIAL_CLARIFICATION,
   applySuggestedAnswers,
-  buildAgentRecommendations,
+  buildRoleBasedAgentRecommendations,
   buildEditableDraftFromPreview,
   detectDomains,
   fallbackSuggestName,
@@ -405,7 +403,7 @@ export function useNewProjectModalController({
       const constrainedRoleIds = allowedRoleIds.length > 0
         ? refreshedRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
         : refreshedRoleIds;
-      const refreshedRecommendations = buildAgentRecommendations(input, constrainedRoleIds, {
+      const refreshedRecommendations = buildRoleBasedAgentRecommendations(constrainedRoleIds, {
         allowedRoleIds,
         mustHaveSoulRole: requiresSoulRole,
         soulRoleId,
@@ -465,37 +463,21 @@ export function useNewProjectModalController({
         sourceType: issueSourceType,
       });
 
-      let parsedIntent: ParsedProjectIntent;
-      try {
-        parsedIntent = await projectsApi.parse(input);
-      } catch {
-        parsedIntent = {
-          name: preview.title || fallbackSuggestName(input) || '新项目',
-          description: preview.summary || input,
-          phase: '规划中',
-          agents: [],
-          team: preview.recommendedRoleIds || [],
-          priority: inferPriorityFromText(input),
-        };
-      }
-
-      const parsedTeamRoleIds = (preview?.recommendedRoleIds || parsedIntent.team || []).map((role) => normalizeRoleId(role));
+      const parsedTeamRoleIds = (preview?.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
       const constrainedTeamRoleIds = allowedRoleIds.length > 0
         ? parsedTeamRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
         : parsedTeamRoleIds;
 
-      const recommendations = buildAgentRecommendations(input, constrainedTeamRoleIds, {
+      const recommendations = buildRoleBasedAgentRecommendations(constrainedTeamRoleIds, {
         allowedRoleIds,
         mustHaveSoulRole: requiresSoulRole,
         soulRoleId,
       });
       const recommendedNames = recommendations.map((item) => item.name);
       const recommendationRoleIds = Array.from(new Set(recommendations.map((item) => normalizeRoleId(item.roleId))));
-      const priority = parsedIntent.priority || inferPriorityFromText(input);
+      const priority = inferPriorityFromText(input);
       const domains = detectDomains(input);
-
-      const parsedDescription = String(parsedIntent.description || '').trim();
-      const fullDescription = parsedDescription.length > input.length ? parsedDescription : input;
+      const fullDescription = input;
 
       setIssuePreview(preview);
       setDebateTaskId(preview.debateTask?.taskId ?? null);
@@ -517,9 +499,9 @@ export function useNewProjectModalController({
       setAnalysisRecommendations(recommendations);
       setClarification(INITIAL_CLARIFICATION);
       setParsedProject({
-        name: parsedIntent.name || preview.title || fallbackSuggestName(input) || '新项目',
+        name: preview.title || fallbackSuggestName(input) || '新项目',
         description: fullDescription,
-        phase: parsedIntent.phase || '规划中',
+        phase: '规划中',
         agents: recommendedNames,
         priority,
         team: recommendationRoleIds,

@@ -3194,10 +3194,10 @@ export async function archiveProjectAcceptanceReport(
 }
 
 export async function createProject(
-  input: CreateProjectInput & { requirementContract?: RequirementContract },
+  input: CreateProjectInput & { requirementContract?: RequirementContract; parsedIntent?: ParsedIntent },
   runtimeMode: RuntimeMode
 ): Promise<ProjectDetail> {
-  const parsedIntent = previewRequirement(input.description);
+  const parsedIntent = input.parsedIntent ?? previewRequirement(input.description);
   const id = await nextProjectId();
   const currentStage: StageType = "INIT";
   const currentRole = stageAssignees[currentStage];
