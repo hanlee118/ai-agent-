@@ -209,17 +209,21 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                 )}
                 <button
                   onClick={() => void handleSaveAlignmentToMemory()}
-                  disabled={isSavingAlignment}
+                  disabled={isSavingAlignment || !contentProvenance?.formalReady}
                   className={cn(
                     'text-[10px] font-bold uppercase tracking-widest transition-colors',
-                    isSavingAlignment ? 'text-slate-500 cursor-not-allowed' : 'text-primary hover:underline',
+                    (isSavingAlignment || !contentProvenance?.formalReady) ? 'text-slate-500 cursor-not-allowed' : 'text-primary hover:underline',
                   )}
                 >
-                  {isSavingAlignment ? '保存中...' : '保存三项到长期记忆'}
+                  {isSavingAlignment ? '保存中...' : (contentProvenance?.formalReady ? '保存三项到长期记忆' : '等待正式结论后可保存')}
                 </button>
               </div>
             </div>
-            <p className="text-[10px] text-slate-500">可保存：使命锚点 / 目标对齐 / 原则对齐</p>
+            <p className="text-[10px] text-slate-500">
+              {contentProvenance?.formalReady
+                ? '可保存：使命锚点 / 目标对齐 / 原则对齐'
+                : '当前为草稿阶段，暂不写入长期记忆，避免污染事实上下文'}
+            </p>
             <div className="p-3 rounded-xl bg-white/5 border border-border-subtle space-y-2">
               <p className="text-xs text-slate-200">
                 <span className="text-slate-400">产品：</span>

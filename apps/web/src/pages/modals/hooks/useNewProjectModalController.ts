@@ -1024,6 +1024,10 @@ export function useNewProjectModalController({
       addToast('请先完成需求分析后再保存对齐修正', 'error');
       return;
     }
+    if (!issuePreview.contentProvenance?.formalReady) {
+      addToast('当前仍是规则草稿/降级结果，请等待真实模型正式结论后再写入长期记忆', 'info');
+      return;
+    }
 
     const nextMission = String(editableDraft?.missionAnchor ?? issuePreview.contextAlignment.missionAnchor ?? '').trim();
     const nextGoals = parseMultiline(
