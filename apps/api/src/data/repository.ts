@@ -55,7 +55,9 @@ import {
 import { previewRequirement } from "../utils/project-parser.js";
 import {
   buildDeliverableTemplatePromptBlock,
-  resolveDeliverableTemplate
+  resolveDeliverableProfessionalFormatRule,
+  resolveDeliverableTemplate,
+  type DeliverableProfessionalFormatRule
 } from "../system/deliverable-templates.js";
 import {
   evaluateVisualDesignRequirementAlignment
@@ -947,6 +949,115 @@ function evaluateDevImplementationRequirementAlignment(input: {
   };
 }
 
+type DeliverableProfessionalCheck = {
+  key: string;
+  label: string;
+  passed: boolean;
+  detail: string;
+  hits: number;
+  expectedMinHits: number;
+};
+
+type DeliverableTemplateGateResult = {
+  template: ReturnType<typeof resolveDeliverableTemplate>;
+  passed: boolean;
+  issues: string[];
+  missingSections: string[];
+  missingChecklist: string[];
+  hasChecklistHeading: boolean;
+  contentLength: number;
+  professionalSectionsMissing: string[];
+  professionalChecks: DeliverableProfessionalCheck[];
+  professionalRuleEnabled: boolean;
+};
+
+function countMarkdownBullets(content: string) {
+  return String(content || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => /^[-*]\s+/.test(line)).length;
+}
+
+function hasMarkdownTable(content: string) {
+  const lines = String(content || "")
+    .split("\n")
+    .map((line) => line.trim());
+  for (let index = 0; index < lines.length - 1; index += 1) {
+    const current = lines[index];
+    const next = lines[index + 1];
+    if (
+      /\|/.test(current)
+      && /^\|?\s*[-:]{3,}\s*(\|\s*[-:]{3,}\s*)+\|?$/.test(next)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function evaluateDeliverableProfessionalFormat(input: {
+  content: string;
+  professionalRule: DeliverableProfessionalFormatRule | null;
+}) {
+  const normalized = String(input.content || "").trim();
+  const rule = input.professionalRule;
+  const issues: string[] = [];
+  const professionalChecks: DeliverableProfessionalCheck[] = [];
+  const professionalSectionsMissing: string[] = [];
+
+  if (!rule || !normalized) {
+    return {
+      issues,
+      professionalChecks,
+      professionalSectionsMissing
+    };
+  }
+
+  for (const section of rule.requiredSections) {
+    if (!normalized.includes(section)) {
+      professionalSectionsMissing.push(section);
+    }
+  }
+  if (professionalSectionsMissing.length > 0) {
+    issues.push(`缺少专业章节: ${professionalSectionsMissing.slice(0, 4).join("、")}${professionalSectionsMissing.length > 4 ? "..." : ""}`);
+  }
+
+  const bulletCount = countMarkdownBullets(normalized);
+  if (rule.minBulletCount && bulletCount < rule.minBulletCount) {
+    issues.push(`条目化颗粒度不足（当前 ${bulletCount} 条，要求至少 ${rule.minBulletCount} 条）`);
+  }
+
+  if (rule.requireMarkdownTable && !hasMarkdownTable(normalized)) {
+    issues.push("缺少 Markdown 矩阵表格（用于追踪/映射/清单）");
+  }
+
+  for (const evidenceRule of rule.evidenceRules) {
+    const matches = Array.from(normalized.matchAll(evidenceRule.pattern)).filter((match) => Boolean(match[0]));
+    const expectedMinHits = Math.max(1, Number(evidenceRule.minMatches || 1));
+    const hits = matches.length;
+    const passed = hits >= expectedMinHits;
+    if (!passed) {
+      issues.push(`缺少证据项: ${evidenceRule.label}${expectedMinHits > 1 ? `（至少 ${expectedMinHits} 处）` : ""}`);
+    }
+    professionalChecks.push({
+      key: evidenceRule.key,
+      label: evidenceRule.label,
+      passed,
+      detail: passed
+        ? `已命中 ${hits} 处`
+        : `命中 ${hits} 处，要求至少 ${expectedMinHits} 处`,
+      hits,
+      expectedMinHits
+    });
+  }
+
+  return {
+    issues,
+    professionalChecks,
+    professionalSectionsMissing
+  };
+}
+
 function normalizeDeliverableToken(value: string) {
   return String(value || "")
     .trim()
@@ -1035,24 +1146,32 @@ function validateDeliverableTemplateGate(input: {
   projectName?: string;
   projectDescription?: string;
   keywords?: string[];
-}) {
+}): DeliverableTemplateGateResult {
   const normalized = String(input.content || "").trim();
   const template = resolveDeliverableTemplate(input.deliverableName, input.stageType);
   const issues: string[] = [];
+  const missingSections = template.requiredSections.filter((section) => !normalized.includes(section));
+  const hasChecklistHeading = normalized.includes("## 验收检查清单");
+  const missingChecklist = hasChecklistHeading
+    ? template.acceptanceChecklist.filter((item) => !normalized.includes(item))
+    : [];
+  const professionalRule = resolveDeliverableProfessionalFormatRule(input.deliverableName, input.stageType);
+  const professionalGate = evaluateDeliverableProfessionalFormat({
+    content: normalized,
+    professionalRule
+  });
 
   if (normalized.length < MIN_DELIVERABLE_CONTENT_LENGTH) {
     issues.push(`正文长度不足（至少 ${MIN_DELIVERABLE_CONTENT_LENGTH} 字）`);
   }
 
-  const missingSections = template.requiredSections.filter((section) => !normalized.includes(section));
   if (missingSections.length > 0) {
     issues.push(`缺少模板章节: ${missingSections.slice(0, 6).join("、")}${missingSections.length > 6 ? "..." : ""}`);
   }
 
-  if (!normalized.includes("## 验收检查清单")) {
+  if (!hasChecklistHeading) {
     issues.push("缺少“## 验收检查清单”章节");
   } else {
-    const missingChecklist = template.acceptanceChecklist.filter((item) => !normalized.includes(item));
     if (missingChecklist.length > 0) {
       issues.push(`验收检查清单未命中: ${missingChecklist.slice(0, 4).join("、")}${missingChecklist.length > 4 ? "..." : ""}`);
     }
@@ -1099,8 +1218,19 @@ function validateDeliverableTemplateGate(input: {
     }
   }
 
+  if (professionalGate.issues.length > 0) {
+    issues.push(...professionalGate.issues);
+  }
+
   return {
     template,
+    missingSections,
+    missingChecklist,
+    hasChecklistHeading,
+    contentLength: normalized.length,
+    professionalSectionsMissing: professionalGate.professionalSectionsMissing,
+    professionalChecks: professionalGate.professionalChecks,
+    professionalRuleEnabled: Boolean(professionalRule),
     passed: issues.length === 0,
     issues
   };
@@ -1431,23 +1561,48 @@ export async function getProjectTemplateGatePrecheck(projectId: string) {
   const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
   const stageDeliverables = project.deliverables.filter((item) => item.stageType === stageType);
 
-  const checks = expectedNames.map((expectedName) => {
-    const matched = stageDeliverables
-      .filter((item) => isSameCoreDeliverable(item.name, expectedName, stageType))
+  const scoreMatch = (deliverableName: string, expectedName: string) => {
+    const expectedToken = normalizeDeliverableToken(expectedName);
+    const candidateToken = normalizeDeliverableToken(deliverableName);
+    if (expectedToken === candidateToken) {
+      return 100;
+    }
+    const expectedKind = detectDeliverableTemplateKindFromTitle(expectedName, stageType);
+    const candidateKind = detectDeliverableTemplateKindFromTitle(deliverableName, stageType);
+    if (expectedKind !== "generic" && expectedKind === candidateKind) {
+      return 70;
+    }
+    if (candidateToken.includes(expectedToken) || expectedToken.includes(candidateToken)) {
+      return 40;
+    }
+    return 0;
+  };
+
+  const items = expectedNames.map((expectedName) => {
+    const candidates = stageDeliverables
+      .map((item) => ({
+        item,
+        matchScore: scoreMatch(item.name, expectedName)
+      }))
+      .filter((entry) => entry.matchScore > 0)
       .sort((left, right) => {
-        const versionDelta = (right.version || 0) - (left.version || 0);
+        if (right.matchScore !== left.matchScore) {
+          return right.matchScore - left.matchScore;
+        }
+        const versionDelta = (right.item.version || 0) - (left.item.version || 0);
         if (versionDelta !== 0) {
           return versionDelta;
         }
-        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-      })[0];
+        return new Date(right.item.updatedAt).getTime() - new Date(left.item.updatedAt).getTime();
+      });
+    const matched = candidates[0]?.item;
 
     if (!matched) {
       return {
         expectedName,
-        matchedName: null,
-        passed: false,
-        issues: [`缺少核心交付物: ${expectedName}`]
+        pass: false,
+        reason: `缺少核心交付物: ${expectedName}`,
+        candidates: []
       };
     }
 
@@ -1463,25 +1618,69 @@ export async function getProjectTemplateGatePrecheck(projectId: string) {
       projectDescription: project.description,
       keywords: project.parsedIntent.keywords
     });
+    const issues = [...statusIssues, ...gate.issues];
 
     return {
       expectedName,
-      matchedName: matched.name,
-      passed: statusIssues.length === 0 && gate.passed,
-      issues: [...statusIssues, ...gate.issues]
+      pass: issues.length === 0,
+      reason: issues.length > 0 ? issues.join("；") : "已满足模板门禁与专业格式校验",
+      matched: {
+        id: matched.id,
+        name: matched.name,
+        stageType: matched.stageType,
+        version: matched.version || 1,
+        status: matched.status,
+        createdBy: matched.createdBy,
+        updatedAt: matched.updatedAt,
+        matchScore: candidates[0]?.matchScore || 0
+      },
+      gate: {
+        templateKind: gate.template.kind,
+        templateLabel: gate.template.label,
+        pass: gate.passed,
+        issues: gate.issues,
+        missingSections: gate.missingSections,
+        missingChecklist: gate.missingChecklist,
+        hasChecklistHeading: gate.hasChecklistHeading,
+        contentLength: gate.contentLength,
+        professionalRuleEnabled: gate.professionalRuleEnabled,
+        professionalSectionsMissing: gate.professionalSectionsMissing,
+        professionalChecks: gate.professionalChecks
+      },
+      candidates: candidates.slice(0, 3).map((entry) => ({
+        id: entry.item.id,
+        name: entry.item.name,
+        stageType: entry.item.stageType,
+        version: entry.item.version || 1,
+        status: entry.item.status,
+        updatedAt: entry.item.updatedAt,
+        matchScore: entry.matchScore
+      }))
     };
   });
 
   const missingExpected = expectedNames.filter((expectedName) =>
-    !checks.some((item) => item.expectedName === expectedName && item.passed)
+    !items.some((item) => item.expectedName === expectedName && item.pass)
   );
+
+  const checks = items.map((item) => ({
+    expectedName: item.expectedName,
+    matchedName: item.matched?.name || null,
+    passed: item.pass,
+    issues: item.pass ? [] : [item.reason]
+  }));
 
   return {
     projectId: project.id,
     stageType,
+    stageLabel: STAGE_LABELS[stageType],
+    generatedAt: new Date().toISOString(),
+    expectedNames,
+    items,
+    pass: items.every((item) => item.pass),
     expectedCount: expectedNames.length,
     deliverableCount: stageDeliverables.length,
-    passed: checks.every((item) => item.passed),
+    passed: items.every((item) => item.pass),
     missingExpected,
     checks
   };
@@ -4623,6 +4822,150 @@ export async function listProjectExecutions(
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString()
   }));
+}
+
+export async function getProjectLifecycleQualityAudit(projectId: string) {
+  const project = await findProject(projectId);
+  if (!project) {
+    return undefined;
+  }
+
+  const executionRows = await prisma.projectExecution.findMany({
+    where: { projectId },
+    orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+    take: 600,
+    select: {
+      stageType: true,
+      role: true,
+      status: true,
+      model: true,
+      provider: true,
+      errorMessage: true,
+      updatedAt: true,
+      createdAt: true
+    }
+  });
+
+  const stageAudits = stageOrder.map((stageType) => {
+    const stageLabel = STAGE_LABELS[stageType];
+    const stageInfo = project.stages.find((stage) => stage.type === stageType);
+    const expectedDeliverables = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
+    const stageDeliverables = project.deliverables.filter((item) => item.stageType === stageType);
+    const deliverableChecks = expectedDeliverables.map((expectedName) => {
+      const matched = stageDeliverables
+        .filter((item) => isSameCoreDeliverable(item.name, expectedName, stageType))
+        .sort((left, right) => {
+          const versionDelta = (right.version || 0) - (left.version || 0);
+          if (versionDelta !== 0) {
+            return versionDelta;
+          }
+          return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+        })[0];
+
+      if (!matched) {
+        return {
+          expectedName,
+          pass: false,
+          status: "missing",
+          issues: [`缺少核心交付物: ${expectedName}`]
+        };
+      }
+
+      const statusIssues =
+        matched.status === "submitted" || matched.status === "approved"
+          ? []
+          : [`交付物状态为 ${matched.status}，未达到可审批状态`];
+      const gate = validateDeliverableTemplateGate({
+        stageType,
+        deliverableName: matched.name,
+        content: String(matched.content || ""),
+        projectName: project.name,
+        projectDescription: project.description,
+        keywords: project.parsedIntent.keywords
+      });
+      const issues = [...statusIssues, ...gate.issues];
+      return {
+        expectedName,
+        pass: issues.length === 0,
+        status: matched.status,
+        matchedName: matched.name,
+        matchedVersion: matched.version || 1,
+        issues,
+        gate: {
+          templateKind: gate.template.kind,
+          templateLabel: gate.template.label,
+          professionalRuleEnabled: gate.professionalRuleEnabled,
+          professionalChecks: gate.professionalChecks
+        }
+      };
+    });
+
+    const stageExecutions = executionRows.filter((row) => row.stageType === stageType);
+    const latestExecutionByRole = new Map<string, (typeof stageExecutions)[number]>();
+    for (const row of stageExecutions) {
+      if (!latestExecutionByRole.has(row.role)) {
+        latestExecutionByRole.set(row.role, row);
+      }
+    }
+    const requiredRoles = getStageRealModelGateRoles(stageType);
+    const executionChecks = requiredRoles.map((role) => {
+      const latest = latestExecutionByRole.get(role);
+      if (!latest) {
+        return {
+          role,
+          pass: false,
+          reason: "缺少真实执行记录"
+        };
+      }
+      const normalizedStatus = String(latest.status || "").toLowerCase();
+      if (normalizedStatus !== "success") {
+        return {
+          role,
+          pass: false,
+          reason: latest.errorMessage || `最新执行状态为 ${latest.status}`,
+          latestStatus: latest.status,
+          latestModel: latest.model || latest.provider || "unknown",
+          latestAt: latest.updatedAt.toISOString()
+        };
+      }
+      return {
+        role,
+        pass: true,
+        reason: "最近执行成功",
+        latestStatus: latest.status,
+        latestModel: latest.model || latest.provider || "unknown",
+        latestAt: latest.updatedAt.toISOString()
+      };
+    });
+
+    const stageIssues = [
+      ...deliverableChecks.filter((item) => !item.pass).flatMap((item) => item.issues.map((issue) => `${item.expectedName}: ${issue}`)),
+      ...executionChecks.filter((item) => !item.pass).map((item) => `${ROLE_LABELS[item.role as RoleType] || item.role}: ${item.reason}`)
+    ];
+
+    return {
+      stageType,
+      stageLabel,
+      stageStatus: stageInfo?.status || "pending",
+      stageProgress: stageInfo?.progress || 0,
+      deliverableChecks,
+      executionChecks,
+      pass: stageIssues.length === 0,
+      issues: stageIssues
+    };
+  });
+
+  const blockingStages = stageAudits.filter((stage) => !stage.pass);
+  return {
+    projectId: project.id,
+    projectName: project.name,
+    currentStage: project.currentStage,
+    generatedAt: new Date().toISOString(),
+    pass: blockingStages.length === 0,
+    blockingStageCount: blockingStages.length,
+    blockingStages: blockingStages.map((stage) => stage.stageType),
+    stageAudits
+  };
 }
 
 export async function listProjectTasks(projectId?: string): Promise<Task[]> {

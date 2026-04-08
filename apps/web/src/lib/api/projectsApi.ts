@@ -226,6 +226,16 @@ export type ProjectTemplateGatePrecheck = {
       missingChecklist: string[];
       hasChecklistHeading: boolean;
       contentLength: number;
+      professionalRuleEnabled?: boolean;
+      professionalSectionsMissing?: string[];
+      professionalChecks?: Array<{
+        key: string;
+        label: string;
+        passed: boolean;
+        detail: string;
+        hits: number;
+        expectedMinHits: number;
+      }>;
     };
     candidates: Array<{
       id: string;
@@ -235,6 +245,53 @@ export type ProjectTemplateGatePrecheck = {
       status: string;
       updatedAt: string;
       matchScore: number;
+    }>;
+  }>;
+};
+
+export type ProjectLifecycleQualityAudit = {
+  projectId: string;
+  projectName: string;
+  currentStage: string;
+  generatedAt: string;
+  pass: boolean;
+  blockingStageCount: number;
+  blockingStages: string[];
+  stageAudits: Array<{
+    stageType: string;
+    stageLabel: string;
+    stageStatus: string;
+    stageProgress: number;
+    pass: boolean;
+    issues: string[];
+    deliverableChecks: Array<{
+      expectedName: string;
+      pass: boolean;
+      status: string;
+      matchedName?: string;
+      matchedVersion?: number;
+      issues: string[];
+      gate?: {
+        templateKind: string;
+        templateLabel: string;
+        professionalRuleEnabled: boolean;
+        professionalChecks: Array<{
+          key: string;
+          label: string;
+          passed: boolean;
+          detail: string;
+          hits: number;
+          expectedMinHits: number;
+        }>;
+      };
+    }>;
+    executionChecks: Array<{
+      role: string;
+      pass: boolean;
+      reason: string;
+      latestStatus?: string;
+      latestModel?: string;
+      latestAt?: string;
     }>;
   }>;
 };
@@ -319,6 +376,10 @@ export const projectsApi = {
 
   async getExecutionProtocolPrecheck(id: string) {
     return request<ProjectExecutionProtocolPrecheck>(`/projects/${toProjectPathId(id)}/execution-protocol-precheck`);
+  },
+
+  async getLifecycleQualityAudit(id: string) {
+    return request<ProjectLifecycleQualityAudit>(`/projects/${toProjectPathId(id)}/lifecycle-quality-audit`);
   },
 
   async getCleanupCandidates() {

@@ -24,6 +24,20 @@ export type DeliverableTemplate = {
   authoringRules: string[];
 };
 
+export type DeliverableProfessionalEvidenceRule = {
+  key: string;
+  label: string;
+  pattern: RegExp;
+  minMatches?: number;
+};
+
+export type DeliverableProfessionalFormatRule = {
+  requiredSections: string[];
+  evidenceRules: DeliverableProfessionalEvidenceRule[];
+  minBulletCount?: number;
+  requireMarkdownTable?: boolean;
+};
+
 const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
   charter: {
     kind: "charter",
@@ -365,6 +379,244 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
   }
 };
 
+const PROFESSIONAL_FORMAT_RULES: Partial<Record<DeliverableTemplateKind, DeliverableProfessionalFormatRule>> = {
+  requirements_prd: {
+    requiredSections: [
+      "## 事实依据与来源（Source of Truth）",
+      "## 需求追踪矩阵（目标-功能-验收）",
+      "## 决策记录（Decision Log）"
+    ],
+    evidenceRules: [
+      {
+        key: "sot_evidence",
+        label: "事实依据与引用",
+        pattern: /(source[_\s-]?of[_\s-]?truth|事实源|`[^`]+\.(?:ts|tsx|js|jsx|md|sql|prisma)`|\/api\/)/gi
+      },
+      {
+        key: "metric_definition",
+        label: "可量化验收指标",
+        pattern: /(kpi|sla|metric|指标|成功标准|验收标准)/gi
+      },
+      {
+        key: "non_goal_boundary",
+        label: "非目标边界",
+        pattern: /(非目标|out\s+of\s+scope|不做)/gi
+      }
+    ],
+    minBulletCount: 12,
+    requireMarkdownTable: true
+  },
+  schedule: {
+    requiredSections: [
+      "## 里程碑基线（日期 / Owner / Exit Criteria）",
+      "## 关键路径与依赖矩阵",
+      "## 变更控制与升级机制"
+    ],
+    evidenceRules: [
+      {
+        key: "milestone_date",
+        label: "里程碑日期",
+        pattern: /(20\d{2}[-/年]\d{1,2}[-/月]\d{1,2}|Q[1-4])/gi
+      },
+      {
+        key: "owner_signal",
+        label: "Owner/RACI 责任归属",
+        pattern: /(owner|负责人|责任人|raci)/gi
+      },
+      {
+        key: "risk_gate",
+        label: "延期/阻断升级规则",
+        pattern: /(风险闸门|升级|阻断|应急|fallback)/gi
+      }
+    ],
+    minBulletCount: 10,
+    requireMarkdownTable: true
+  },
+  design_review: {
+    requiredSections: [
+      "## 设计决策记录",
+      "## 可访问性检查结果（WCAG）",
+      "## 审查结论与整改项"
+    ],
+    evidenceRules: [
+      {
+        key: "wcag_signal",
+        label: "可访问性证据",
+        pattern: /(wcag|对比度|键盘可达|语义标签|屏幕阅读器|可访问)/gi
+      },
+      {
+        key: "review_result",
+        label: "审查结论",
+        pattern: /(审查结论|通过|驳回|整改)/gi
+      },
+      {
+        key: "preview_reference",
+        label: "视觉证据（Figma/预览）",
+        pattern: /(figma\.com|```html|!\[[^\]]*]\((?:https?:\/\/|data:image\/))/gi
+      }
+    ],
+    minBulletCount: 8,
+    requireMarkdownTable: true
+  },
+  visual_mockup: {
+    requiredSections: [
+      "## 设计 Token 映射（色彩 / 字体 / 间距）",
+      "## 状态反馈矩阵（默认 / 悬停 / 禁用 / 错误）",
+      "## 响应式断点策略"
+    ],
+    evidenceRules: [
+      {
+        key: "token_signal",
+        label: "Token 设计说明",
+        pattern: /(token|--[a-z0-9-]+|色彩|字体|间距|spacing)/gi
+      },
+      {
+        key: "state_matrix",
+        label: "状态反馈定义",
+        pattern: /(默认|悬停|hover|禁用|disabled|错误|error|loading)/gi
+      },
+      {
+        key: "renderable_preview",
+        label: "可渲染单页预览",
+        pattern: /(```html|<!doctype html|<html[\s>])/gi
+      }
+    ],
+    minBulletCount: 8,
+    requireMarkdownTable: true
+  },
+  implementation_word: {
+    requiredSections: [
+      "## 架构决策记录（ADR）",
+      "## 接口契约矩阵（字段 / 约束 / 错误码）",
+      "## 发布与回滚演练计划"
+    ],
+    evidenceRules: [
+      {
+        key: "api_contract",
+        label: "接口契约证据",
+        pattern: /((?:get|post|put|patch|delete)\s+\/[a-z0-9_:/?&=\-]+|\/api\/[a-z0-9_:/?&=\-]+)/gi
+      },
+      {
+        key: "data_model",
+        label: "数据结构证据",
+        pattern: /(schema|表结构|字段|migration|索引|prisma)/gi
+      },
+      {
+        key: "rollback_plan",
+        label: "发布回滚策略",
+        pattern: /(回滚|rollback|灰度|发布窗口|回退)/gi
+      }
+    ],
+    minBulletCount: 10,
+    requireMarkdownTable: true
+  },
+  implementation_result: {
+    requiredSections: [
+      "## 变更证据（Commit / 文件）",
+      "## 验证命令与结果",
+      "## 风险回归与残留问题"
+    ],
+    evidenceRules: [
+      {
+        key: "code_change_evidence",
+        label: "代码变更证据",
+        pattern: /((?:apps?|src|packages|server|client|web|api)\/[a-z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sql|prisma|yml|yaml|sh))/gi,
+        minMatches: 2
+      },
+      {
+        key: "command_result",
+        label: "验证命令与结论",
+        pattern: /((?:pnpm|npm|yarn)\s+[^\n]+|typecheck|build|test|通过|失败|exit code)/gi
+      },
+      {
+        key: "change_trace",
+        label: "版本追踪",
+        pattern: /(\b[0-9a-f]{7,40}\b|merge request|pull request|mr\s*#?\d+)/gi
+      }
+    ],
+    minBulletCount: 10,
+    requireMarkdownTable: false
+  },
+  runtime_delivery: {
+    requiredSections: [
+      "## 环境变量清单（必填 / 可选）",
+      "## 部署检查清单（Pre-flight / Post-check）",
+      "## 回滚触发条件与处理流程"
+    ],
+    evidenceRules: [
+      {
+        key: "runtime_url",
+        label: "运行地址证据",
+        pattern: /(https?:\/\/[^\s)]+|localhost:\d+)/gi
+      },
+      {
+        key: "env_vars",
+        label: "环境变量证据",
+        pattern: /\b[A-Z][A-Z0-9_]{2,}\s*=/g
+      },
+      {
+        key: "deployment_commands",
+        label: "部署命令证据",
+        pattern: /((?:docker|kubectl|pnpm|npm|yarn)\s+[^\n]+)/gi
+      }
+    ],
+    minBulletCount: 8,
+    requireMarkdownTable: true
+  },
+  test_report: {
+    requiredSections: [
+      "## 测试覆盖矩阵（需求 / 用例 / 结果）",
+      "## 缺陷分级与处置",
+      "## 发布建议与风险签收"
+    ],
+    evidenceRules: [
+      {
+        key: "case_signal",
+        label: "测试用例编号",
+        pattern: /(tc[-_ ]?\d+|test case|用例)/gi
+      },
+      {
+        key: "severity_signal",
+        label: "缺陷分级",
+        pattern: /(p0|p1|p2|严重|高|中|低)/gi
+      },
+      {
+        key: "result_signal",
+        label: "测试结果统计",
+        pattern: /(通过|失败|阻塞|pass|fail|blocked)/gi
+      }
+    ],
+    minBulletCount: 8,
+    requireMarkdownTable: true
+  },
+  product_backfill: {
+    requiredSections: [
+      "## 需求-交付映射表",
+      "## 版本变更记录",
+      "## 已确认事实与待决策项"
+    ],
+    evidenceRules: [
+      {
+        key: "mapping_signal",
+        label: "需求映射证据",
+        pattern: /(需求|目标|交付|验收|映射)/gi
+      },
+      {
+        key: "version_signal",
+        label: "版本记录",
+        pattern: /(v\d+\.\d+(?:\.\d+)?|版本|20\d{2}[-/年]\d{1,2}[-/月]\d{1,2})/gi
+      },
+      {
+        key: "decision_signal",
+        label: "待决策风险项",
+        pattern: /(待决策|冲突|风险|决策)/gi
+      }
+    ],
+    minBulletCount: 6,
+    requireMarkdownTable: true
+  }
+};
+
 export function resolveDeliverableTemplate(title: string, stageType: StageType): DeliverableTemplate {
   const normalized = String(title || "").toLowerCase();
 
@@ -423,9 +675,36 @@ export function resolveDeliverableTemplate(title: string, stageType: StageType):
   return TEMPLATE_LIBRARY.generic;
 }
 
+export function resolveDeliverableProfessionalFormatRule(
+  title: string,
+  stageType: StageType
+): DeliverableProfessionalFormatRule | null {
+  const template = resolveDeliverableTemplate(title, stageType);
+  return PROFESSIONAL_FORMAT_RULES[template.kind] || null;
+}
+
+function formatEvidenceRule(evidenceRule: DeliverableProfessionalEvidenceRule) {
+  const suffix = evidenceRule.minMatches && evidenceRule.minMatches > 1
+    ? `（至少命中 ${evidenceRule.minMatches} 次）`
+    : "";
+  return `${evidenceRule.label}${suffix}`;
+}
+
 export function buildDeliverableTemplatePromptBlock(title: string, stageType: StageType, keywords: string[] = []) {
   const template = resolveDeliverableTemplate(title, stageType);
+  const professionalRule = resolveDeliverableProfessionalFormatRule(title, stageType);
   const keywordLine = keywords.slice(0, 6).join(" / ") || "无";
+  const professionalLines = professionalRule
+    ? [
+      "专业格式硬要求:",
+      ...professionalRule.requiredSections.map((section) => `- 必须包含: ${section}`),
+      ...(professionalRule.requireMarkdownTable ? ["- 必须至少包含 1 个 Markdown 表格用于矩阵/清单信息。"] : []),
+      ...(professionalRule.minBulletCount
+        ? [`- 条目化信息不少于 ${professionalRule.minBulletCount} 条（以 “- ” 开头）。`]
+        : []),
+      ...professionalRule.evidenceRules.map((item) => `- 必须提供证据: ${formatEvidenceRule(item)}`)
+    ]
+    : [];
   return [
     `交付模板类型: ${template.label}`,
     `关键词上下文: ${keywordLine}`,
@@ -434,6 +713,7 @@ export function buildDeliverableTemplatePromptBlock(title: string, stageType: St
     "写作规则:",
     ...template.authoringRules.map((rule) => `- ${rule}`),
     "验收关注点:",
-    ...template.acceptanceChecklist.map((item) => `- ${item}`)
+    ...template.acceptanceChecklist.map((item) => `- ${item}`),
+    ...professionalLines
   ];
 }

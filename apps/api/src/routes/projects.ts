@@ -16,6 +16,7 @@ import {
   findProject,
   getDesignInterventionSignal,
   getProjectExecutionProtocolPrecheck,
+  getProjectLifecycleQualityAudit,
   interveneProject,
   listProjectExecutions,
   listProjectTasks,
@@ -1792,6 +1793,16 @@ router.get("/api/projects/:id/execution-protocol-precheck", asyncRoute(async (re
     return;
   }
   res.json(precheck);
+}));
+
+router.get("/api/projects/:id/lifecycle-quality-audit", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const audit = await getProjectLifecycleQualityAudit(projectId);
+  if (!audit) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  res.json(audit);
 }));
 
 router.get("/api/projects/:id", asyncRoute(async (req, res) => {

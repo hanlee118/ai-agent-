@@ -1240,7 +1240,29 @@ export default function StageExecutionTemplateCard({
                       </Badge>
                     </div>
                     {!item.pass ? (
-                      <p className="mt-2 text-[11px] leading-5 text-amber-100/90">{item.reason}</p>
+                      <div className="mt-2 space-y-2">
+                        <p className="text-[11px] leading-5 text-amber-100/90">{item.reason}</p>
+                        {item.gate?.issues?.length ? (
+                          <ul className="space-y-1 text-[11px] text-amber-100/90">
+                            {item.gate.issues.slice(0, 4).map((issue, issueIndex) => (
+                              <li key={`${item.expectedName}-issue-${issueIndex}`} className="leading-5">
+                                - {issue}
+                              </li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {item.gate?.professionalRuleEnabled ? (
+                      <div className="mt-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <p className="text-[11px] font-medium text-slate-200">专业格式校验</p>
+                        <p className="mt-1 text-[11px] text-slate-400">
+                          {item.gate.professionalChecks?.filter((check) => check.passed).length || 0}
+                          /
+                          {item.gate.professionalChecks?.length || 0}
+                          {' '}项证据已命中
+                        </p>
+                      </div>
                     ) : null}
                   </div>
                 ))}
