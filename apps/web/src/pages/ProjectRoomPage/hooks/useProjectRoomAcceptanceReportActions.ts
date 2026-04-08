@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { projectsApi, type ProjectAcceptanceReport } from '../../../lib/api';
+import { ApiRequestError, projectsApi, type ProjectAcceptanceReport } from '../../../lib/api';
 
 export function useProjectRoomAcceptanceReportActions({
   projectId,
@@ -60,7 +60,19 @@ export function useProjectRoomAcceptanceReportActions({
       ]);
       setAcceptanceReport(report);
     } catch (error) {
-      addToast(`归档验收报告失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      if (error instanceof ApiRequestError && error.code === 'ACCEPTANCE_QUALITY_GATE_BLOCKED') {
+        const rawGate = (error.details as { error?: { qualityGate?: { blockingIssues?: string[] } } } | undefined)
+          ?.error?.qualityGate;
+        const blockingText = (rawGate?.blockingIssues || []).slice(0, 2).join('；');
+        addToast(
+          blockingText
+            ? `归档已阻断：${blockingText}`
+            : `归档已阻断：${error.message}`,
+          'error',
+        );
+      } else {
+        addToast(`归档验收报告失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
     } finally {
       setIsArchivingAcceptanceReport(false);
     }

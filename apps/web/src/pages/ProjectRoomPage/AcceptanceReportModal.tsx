@@ -116,7 +116,7 @@ export default function AcceptanceReportModal({
             <button
               type="button"
               onClick={onArchive}
-              disabled={isArchivingAcceptanceReport || !acceptanceReport}
+              disabled={isArchivingAcceptanceReport || !acceptanceReport || !acceptanceReport.qualityGate.pass}
               className="px-3 py-1.5 rounded-lg bg-accent text-slate-950 hover:bg-accent/90 text-xs font-semibold disabled:opacity-60"
             >
               {isArchivingAcceptanceReport ? '归档中...' : '归档到交付物'}
@@ -205,6 +205,11 @@ export default function AcceptanceReportModal({
                     <p key={item}>- {item}</p>
                   ))}
                 </div>
+              ) : null}
+              {!acceptanceReport.qualityGate.pass ? (
+                <p className="text-[11px] text-slate-400">
+                  当前门禁未通过，已自动禁用“归档到交付物”。
+                </p>
               ) : null}
               {acceptanceReport.dataQuality.warnings.length > 0 ? (
                 <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning space-y-1">

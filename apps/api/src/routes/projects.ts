@@ -1931,6 +1931,18 @@ router.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req
   const executions = await listProjectExecutions(projectId, 200);
   const lifecycleAudit = await getProjectLifecycleQualityAudit(projectId);
   const report = buildProjectAcceptanceReport(project, { executions, lifecycleAudit });
+  const force = Boolean(req.body?.force);
+  if (!force && report.qualityGate && !report.qualityGate.pass) {
+    res.status(422).json({
+      success: false,
+      error: {
+        code: "ACCEPTANCE_QUALITY_GATE_BLOCKED",
+        message: `验收报告质量门禁未通过（阻断阶段 ${report.qualityGate.blockingStageCount} 项），禁止归档。`,
+        qualityGate: report.qualityGate
+      }
+    });
+    return;
+  }
   const markdown = renderAcceptanceReportMarkdown(report);
   const title = String(req.body?.title ?? "").trim() || undefined;
   const updated = await archiveProjectAcceptanceReport(projectId, markdown, title);

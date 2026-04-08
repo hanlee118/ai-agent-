@@ -441,14 +441,14 @@ export const projectsApi = {
     return request<string>(`/projects/${toProjectPathId(id)}/acceptance-report.md`);
   },
 
-  async archiveAcceptanceReport(id: string, title?: string) {
+  async archiveAcceptanceReport(id: string, title?: string, force = false) {
     return request<{
       projectId: string;
       archived: boolean;
       deliverableName: string;
     }>(`/projects/${toProjectPathId(id)}/acceptance-report/archive`, {
       method: 'POST',
-      body: JSON.stringify({ title }),
+      body: JSON.stringify({ title, force }),
     });
   },
 
