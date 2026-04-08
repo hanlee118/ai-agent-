@@ -235,7 +235,7 @@ export const buildAgentRecommendations = (
         if (soulAgent) {
           enforced.unshift({
             ...soulAgent,
-            reason: `灵魂角色必选：${roleLabel(soulRoleId)}（需求理解与边界识别）`,
+            reason: `灵魂角色必选：${roleLabel(soulRoleId)}（项目统筹与跨角色协同）`,
             score: Math.max(soulAgent.score, 100),
           });
         }
@@ -265,7 +265,7 @@ export const buildAgentRecommendations = (
           name: soulAgent.name,
           role: soulAgent.role,
           score: 100,
-          reason: `灵魂角色必选：${roleLabel(soulRoleId)}（需求理解与边界识别）`,
+          reason: `灵魂角色必选：${roleLabel(soulRoleId)}（项目统筹与跨角色协同）`,
         });
       }
     }
@@ -512,7 +512,7 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
     summary: buildIssueSummaryDraft(input),
     industryCode,
     recommendedRoleIds: roleIds,
-    soulRoleId: 'ROLE_ANALYST',
+    soulRoleId: 'ROLE_PM',
     conflicts: localConflicts,
     questions: [
       {

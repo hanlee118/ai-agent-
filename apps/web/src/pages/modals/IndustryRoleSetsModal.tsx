@@ -40,8 +40,8 @@ const ROLE_OPTIONS: Array<{ id: RoleId; label: string }> = [
 const EMPTY_FORM: FormState = {
   industryCode: '',
   industryName: '',
-  roleIds: ['ROLE_ANALYST', 'ROLE_PRODUCT', 'ROLE_DESIGN', 'ROLE_DEV', 'ROLE_QA'],
-  defaultSoulRoleId: 'ROLE_ANALYST',
+  roleIds: ['ROLE_PM', 'ROLE_ANALYST', 'ROLE_PRODUCT', 'ROLE_DESIGN', 'ROLE_DEV', 'ROLE_QA'],
+  defaultSoulRoleId: 'ROLE_PM',
   status: 'active',
 };
 
@@ -114,7 +114,7 @@ export default function IndustryRoleSetsModal({ isOpen, onClose, addToast, onUpd
       const nextRoleIds = checked
         ? Array.from(new Set([...prev.roleIds, roleId]))
         : prev.roleIds.filter((item) => item !== roleId);
-      const nextSoul = nextRoleIds.includes(prev.defaultSoulRoleId) ? prev.defaultSoulRoleId : (nextRoleIds[0] || 'ROLE_ANALYST');
+      const nextSoul = nextRoleIds.includes(prev.defaultSoulRoleId) ? prev.defaultSoulRoleId : (nextRoleIds[0] || 'ROLE_PM');
       return {
         ...prev,
         roleIds: nextRoleIds,
@@ -431,4 +431,3 @@ export default function IndustryRoleSetsModal({ isOpen, onClose, addToast, onUpd
     </SurfaceModal>
   );
 }
-
