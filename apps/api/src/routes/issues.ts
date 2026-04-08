@@ -131,11 +131,20 @@ interface DebateTaskState {
 }
 
 const ISSUE_DEBATE_POLL_AFTER_MS = Math.max(800, Number(process.env.ISSUE_DEBATE_POLL_MS ?? 1500));
+const ISSUE_DEBATE_STALE_TIMEOUT_MS = Math.max(45_000, Number(process.env.ISSUE_DEBATE_STALE_TIMEOUT_MS ?? 180_000));
 const issueDebateTaskStore = new Map<string, DebateTaskState>();
 const issueLatestDebateTask = new Map<string, string>();
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function isDebateTaskStale(task: DebateTaskState) {
+  const updatedAtMs = Date.parse(task.updatedAt || task.createdAt);
+  if (!Number.isFinite(updatedAtMs)) {
+    return false;
+  }
+  return (Date.now() - updatedAtMs) > ISSUE_DEBATE_STALE_TIMEOUT_MS;
 }
 
 function toDiscussionFromDebate(
@@ -370,10 +379,29 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
 
     const requestedTaskId = String(req.query.taskId ?? "").trim();
     const taskId = requestedTaskId || issueLatestDebateTask.get(issueId) || issue.debateTaskId || "";
-    const task = taskId ? issueDebateTaskStore.get(taskId) : null;
+    let task = taskId ? issueDebateTaskStore.get(taskId) : null;
     if (task && task.issueId !== issueId) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId does not belong to the issue");
       return;
+    }
+
+    if (task && (task.status === "queued" || task.status === "running") && isDebateTaskStale(task)) {
+      const failedAt = nowIso();
+      const timeoutMessage = "真实多角色讨论任务长时间未完成，已自动标记超时失败，请重新发起讨论。";
+      task = {
+        ...task,
+        status: "failed",
+        updatedAt: failedAt,
+        error: timeoutMessage
+      };
+      issueDebateTaskStore.set(taskId, task);
+      await updateIssue(issueId, (current) => ({
+        ...current,
+        debateStatus: "failed",
+        debateTaskId: taskId,
+        debateError: timeoutMessage,
+        debateUpdatedAt: failedAt
+      }));
     }
 
     const status: IssueDebateTaskStatus = task?.status
