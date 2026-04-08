@@ -1663,7 +1663,39 @@ type ProjectAcceptanceReport = {
     version: number;
     createdBy: string;
     updatedAt: string;
+    suspicious?: boolean;
+    suspicionReasons?: string[];
   }>;
+  dataQuality: {
+    timeline: {
+      totalEvents: number;
+      evidenceEvents: number;
+      omittedLowSignalEvents: number;
+      highSignalTypes: string[];
+    };
+    executions: {
+      total: number;
+      success: number;
+      failed: number;
+      latestByRole: Array<{
+        role: string;
+        status: string;
+        model: string;
+        updatedAt: string;
+      }>;
+    };
+    deliverables: {
+      total: number;
+      suspiciousCount: number;
+      suspiciousItems: Array<{
+        id: string;
+        name: string;
+        stageType: string;
+        reasons: string[];
+      }>;
+    };
+    warnings: string[];
+  };
   recommendations: string[];
 };
 
@@ -2491,6 +2523,91 @@ function inferStageTypeFromEventText(text: string): string | undefined {
   return undefined;
 }
 
+const ACCEPTANCE_REPORT_HIGH_SIGNAL_TIMELINE_TYPES = new Set<string>([
+  "deliverable_submitted",
+  "approval_done",
+  "approval_rejected",
+  "approval_required",
+  "intervention",
+  "message",
+  "resume"
+]);
+const ACCEPTANCE_REPORT_LOW_SIGNAL_TIMELINE_TYPES = new Set<string>([
+  "thinking",
+  "system",
+  "stage_started",
+  "project_created"
+]);
+const ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN =
+  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b|自动推进元信息|模型尝试轨迹|阶段预热|阶段推演已启动/i;
+
+type AcceptanceExecutionRecord = {
+  role: string;
+  status: string;
+  model?: string | null;
+  provider?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function isHighSignalTimelineEvent(event: { type: string }) {
+  const type = String(event.type || "");
+  return ACCEPTANCE_REPORT_HIGH_SIGNAL_TIMELINE_TYPES.has(type) || type.startsWith("task_");
+}
+
+function sortTimelineDesc<T extends { timestamp: string }>(timeline: T[]) {
+  return [...timeline].sort((left, right) =>
+    new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime()
+  );
+}
+
+function detectSuspiciousDeliverableReasons(content: string) {
+  const normalized = String(content || "").trim();
+  const reasons: string[] = [];
+  if (!normalized) {
+    reasons.push("正文为空");
+    return reasons;
+  }
+  if (normalized.length < 180) {
+    reasons.push("正文长度过短（小于 180 字）");
+  }
+  if (ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN.test(normalized)) {
+    reasons.push("命中模板/占位/自动补齐特征");
+  }
+  if (!normalized.includes("## 验收检查清单")) {
+    reasons.push("缺少“## 验收检查清单”章节");
+  }
+  return reasons;
+}
+
+function buildExecutionQualitySummary(executions: AcceptanceExecutionRecord[]) {
+  const total = executions.length;
+  const success = executions.filter((item) => String(item.status || "").toLowerCase() === "success").length;
+  const failed = executions.filter((item) => String(item.status || "").toLowerCase() === "failed").length;
+  const latestByRole = new Map<string, AcceptanceExecutionRecord>();
+
+  for (const execution of [...executions].sort((left, right) =>
+    new Date(right.updatedAt || right.createdAt).getTime()
+    - new Date(left.updatedAt || left.createdAt).getTime()
+  )) {
+    if (!latestByRole.has(execution.role)) {
+      latestByRole.set(execution.role, execution);
+    }
+  }
+
+  return {
+    total,
+    success,
+    failed,
+    latestByRole: [...latestByRole.values()].slice(0, 8).map((item) => ({
+      role: item.role,
+      status: item.status,
+      model: item.model || item.provider || "unknown",
+      updatedAt: item.updatedAt || item.createdAt
+    }))
+  };
+}
+
 function buildSignoffHistory(
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>
 ): AcceptanceSignoffRecord[] {
@@ -2537,7 +2654,10 @@ function summarizeLatestSignoff(signoffHistory: AcceptanceSignoffRecord[]) {
 }
 
 function buildProjectAcceptanceReport(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    executions?: AcceptanceExecutionRecord[];
+  }
 ): ProjectAcceptanceReport {
   const now = new Date().toISOString();
   const stages = project.stages.map((stage) => {
@@ -2584,6 +2704,7 @@ function buildProjectAcceptanceReport(
   const signoffApproved = signoffSummary.approved;
   const signoffRejected = signoffSummary.rejected;
   const signoffPending = signoffSummary.pending;
+  const executionSummary = buildExecutionQualitySummary(options?.executions || []);
   const archivedReportDeliverables = project.deliverables
     .filter((item) => item.stageType === "ACCEPT" && item.name.startsWith("阶段验收报告"))
     .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
@@ -2634,12 +2755,50 @@ function buildProjectAcceptanceReport(
       } satisfies AcceptanceReportComparison
     : undefined;
 
+  const sortedTimeline = sortTimelineDesc(project.timeline);
+  const evidenceTimeline = sortedTimeline.filter((item) => isHighSignalTimelineEvent(item));
+  const omittedLowSignalEvents = sortedTimeline.filter((item) =>
+    ACCEPTANCE_REPORT_LOW_SIGNAL_TIMELINE_TYPES.has(String(item.type || ""))
+  ).length;
+  const timelineHighSignalTypes = [...new Set(evidenceTimeline.map((item) => String(item.type || "")))];
+
+  const deliverablesSorted = [...project.deliverables].sort((left, right) =>
+    new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime()
+  );
+  const suspiciousDeliverables = deliverablesSorted
+    .map((item) => ({
+      id: item.id,
+      name: item.name,
+      stageType: item.stageType,
+      reasons: detectSuspiciousDeliverableReasons(String(item.content || ""))
+    }))
+    .filter((item) => item.reasons.length > 0);
+
+  const qualityWarnings: string[] = [];
+  if (suspiciousDeliverables.length > 0) {
+    qualityWarnings.push(`检测到 ${suspiciousDeliverables.length} 份可疑交付物（模板痕迹/占位词/缺验收清单）。`);
+  }
+  if (evidenceTimeline.length < Math.min(6, Math.max(3, Math.floor(sortedTimeline.length / 2)))) {
+    qualityWarnings.push("高信号时间线事件偏少，当前报告更多来自系统预热/状态日志。");
+  }
+  if (executionSummary.total === 0) {
+    qualityWarnings.push("未找到模型/Agent 执行记录，验收结论可信度较低。");
+  } else if (executionSummary.success === 0) {
+    qualityWarnings.push("执行记录中无成功项，请优先核查运行链路与模型输出。");
+  }
+
   const recommendations: string[] = [];
   if (project.pendingApproval) {
     recommendations.push("当前阶段存在待审批交付物，请尽快执行通过/驳回决策。");
   }
   if (blockedTasks > 0) {
     recommendations.push(`当前存在 ${blockedTasks} 个阻塞任务，建议优先人工干预并分配补救动作。`);
+  }
+  if (suspiciousDeliverables.length > 0) {
+    recommendations.push("请先修复可疑交付物，再执行最终验收归档，避免模板文本被误判为真实产出。");
+  }
+  if (executionSummary.success === 0) {
+    recommendations.push("请补齐至少一条成功执行记录（模型/Agent + 输出证据）后再做验收结论。");
   }
   if (project.status !== "completed" && approvedDeliverables < project.deliverables.length) {
     recommendations.push("项目尚未完全收敛，建议在验收前确认各阶段交付物状态。");
@@ -2674,7 +2833,7 @@ function buildProjectAcceptanceReport(
     signoffHistory,
     archivedReports,
     comparison,
-    recentTimeline: project.timeline.slice(0, 20).map((item) => ({
+    recentTimeline: evidenceTimeline.slice(0, 20).map((item) => ({
       id: item.id,
       timestamp: item.timestamp,
       type: item.type,
@@ -2683,15 +2842,35 @@ function buildProjectAcceptanceReport(
       priority: item.priority,
       agentId: item.agentId
     })),
-    recentDeliverables: project.deliverables.slice(0, 20).map((item) => ({
-      id: item.id,
-      stageType: item.stageType,
-      name: item.name,
-      status: item.status,
-      version: item.version,
-      createdBy: item.createdBy,
-      updatedAt: item.updatedAt
-    })),
+    recentDeliverables: deliverablesSorted.slice(0, 20).map((item) => {
+      const suspicionReasons = detectSuspiciousDeliverableReasons(String(item.content || ""));
+      return {
+        id: item.id,
+        stageType: item.stageType,
+        name: item.name,
+        status: item.status,
+        version: item.version,
+        createdBy: item.createdBy,
+        updatedAt: item.updatedAt,
+        suspicious: suspicionReasons.length > 0,
+        suspicionReasons: suspicionReasons.length > 0 ? suspicionReasons : undefined
+      };
+    }),
+    dataQuality: {
+      timeline: {
+        totalEvents: sortedTimeline.length,
+        evidenceEvents: evidenceTimeline.length,
+        omittedLowSignalEvents,
+        highSignalTypes: timelineHighSignalTypes
+      },
+      executions: executionSummary,
+      deliverables: {
+        total: project.deliverables.length,
+        suspiciousCount: suspiciousDeliverables.length,
+        suspiciousItems: suspiciousDeliverables.slice(0, 12)
+      },
+      warnings: qualityWarnings
+    },
     recommendations
   };
 }
@@ -2712,7 +2891,7 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
     `- [${item.timestamp}] ${item.title} (${item.type} / ${item.priority})`
   );
   const deliverableLines = report.recentDeliverables.slice(0, 10).map((item) =>
-    `- ${item.name} (${item.stageType} / v${item.version} / ${item.status} / ${item.updatedAt})`
+    `- ${item.name} (${item.stageType} / v${item.version} / ${item.status} / ${item.updatedAt})${item.suspicious ? ` [可疑: ${(item.suspicionReasons || []).join("；")}]` : ""}`
   );
   const signoffLines = report.signoffHistory.slice(0, 12).map((item) =>
     `- [${item.timestamp}] ${item.stageLabel} / ${item.decision} / ${item.actor}：${item.reason}`
@@ -2729,6 +2908,15 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
         `- 说明: ${report.comparison.note}`
       ]
     : ["- 暂无可对比基线（请至少归档一次验收报告）。"];
+  const qualityLines = [
+    `- 时间线总事件: ${report.dataQuality.timeline.totalEvents}`,
+    `- 高信号事件: ${report.dataQuality.timeline.evidenceEvents}`,
+    `- 已忽略低信号事件: ${report.dataQuality.timeline.omittedLowSignalEvents}`,
+    `- 高信号类型: ${report.dataQuality.timeline.highSignalTypes.join("、") || "无"}`,
+    `- 执行记录: 总计 ${report.dataQuality.executions.total} / 成功 ${report.dataQuality.executions.success} / 失败 ${report.dataQuality.executions.failed}`,
+    `- 可疑交付物: ${report.dataQuality.deliverables.suspiciousCount} / ${report.dataQuality.deliverables.total}`
+  ];
+  const qualityWarningLines = report.dataQuality.warnings.map((item) => `- ${item}`);
 
   return [
     `# 项目阶段验收报告`,
@@ -2757,6 +2945,12 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
     ``,
     `## 最近交付物`,
     ...(deliverableLines.length > 0 ? deliverableLines : ["- 暂无"]),
+    ``,
+    `## 数据质量审计`,
+    ...qualityLines,
+    ...(qualityWarningLines.length > 0
+      ? ["", `### 质量告警`, ...qualityWarningLines]
+      : []),
     ``,
     `## 最近时间线`,
     ...(timelineLines.length > 0 ? timelineLines : ["- 暂无"]),

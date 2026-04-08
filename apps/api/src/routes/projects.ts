@@ -829,7 +829,19 @@ interface CreateProjectsRouterOptions {
   ensureManualAdvanceJob: (projectId: string) => void;
   buildProjectRequiredActions: (project: any, runtime: any) => ProjectRequiredAction[];
   formatRequiredActionsMessage: (actions: ProjectRequiredAction[]) => string;
-  buildProjectAcceptanceReport: (project: any) => any;
+  buildProjectAcceptanceReport: (
+    project: any,
+    options?: {
+      executions?: Array<{
+        role: string;
+        status: string;
+        model?: string | null;
+        provider?: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }>;
+    }
+  ) => any;
   renderAcceptanceReportMarkdown: (report: any) => string;
   getLatestFinalArtifactsJob: (projectId: string) => any;
   startFinalArtifactsGenerationJob: (projectId: string, options?: { force?: boolean }) => any;
@@ -1859,7 +1871,8 @@ router.get("/api/projects/:id/acceptance-report", asyncRoute(async (req, res) =>
     return;
   }
 
-  const report = buildProjectAcceptanceReport(project);
+  const executions = await listProjectExecutions(projectId, 200);
+  const report = buildProjectAcceptanceReport(project, { executions });
   res.json({
     success: true,
     data: report
@@ -1875,7 +1888,8 @@ router.get("/api/projects/:id/acceptance-report.md", asyncRoute(async (req, res)
     return;
   }
 
-  const report = buildProjectAcceptanceReport(project);
+  const executions = await listProjectExecutions(projectId, 200);
+  const report = buildProjectAcceptanceReport(project, { executions });
   const markdown = renderAcceptanceReportMarkdown(report);
 
   res.setHeader("Content-Type", "text/markdown; charset=utf-8");
@@ -1901,7 +1915,8 @@ router.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req
     return;
   }
 
-  const report = buildProjectAcceptanceReport(project);
+  const executions = await listProjectExecutions(projectId, 200);
+  const report = buildProjectAcceptanceReport(project, { executions });
   const markdown = renderAcceptanceReportMarkdown(report);
   const title = String(req.body?.title ?? "").trim() || undefined;
   const updated = await archiveProjectAcceptanceReport(projectId, markdown, title);

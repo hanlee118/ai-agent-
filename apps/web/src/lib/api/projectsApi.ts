@@ -99,7 +99,39 @@ export type ProjectAcceptanceReport = {
     version: number;
     createdBy: string;
     updatedAt: string;
+    suspicious?: boolean;
+    suspicionReasons?: string[];
   }>;
+  dataQuality: {
+    timeline: {
+      totalEvents: number;
+      evidenceEvents: number;
+      omittedLowSignalEvents: number;
+      highSignalTypes: string[];
+    };
+    executions: {
+      total: number;
+      success: number;
+      failed: number;
+      latestByRole: Array<{
+        role: string;
+        status: string;
+        model: string;
+        updatedAt: string;
+      }>;
+    };
+    deliverables: {
+      total: number;
+      suspiciousCount: number;
+      suspiciousItems: Array<{
+        id: string;
+        name: string;
+        stageType: string;
+        reasons: string[];
+      }>;
+    };
+    warnings: string[];
+  };
   recommendations: string[];
 };
 

@@ -178,6 +178,30 @@ export default function AcceptanceReportModal({
               </div>
             </div>
 
+            <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-2">
+              <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">报告数据质量</h4>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-2 text-xs">
+                <p className="text-slate-300">
+                  时间线证据: {acceptanceReport.dataQuality.timeline.evidenceEvents}/{acceptanceReport.dataQuality.timeline.totalEvents}
+                </p>
+                <p className="text-slate-300">
+                  执行记录: 成功 {acceptanceReport.dataQuality.executions.success} / 失败 {acceptanceReport.dataQuality.executions.failed}
+                </p>
+                <p className="text-slate-300">
+                  可疑交付物: {acceptanceReport.dataQuality.deliverables.suspiciousCount}/{acceptanceReport.dataQuality.deliverables.total}
+                </p>
+              </div>
+              {acceptanceReport.dataQuality.warnings.length > 0 ? (
+                <div className="rounded-lg border border-warning/40 bg-warning/10 p-3 text-xs text-warning space-y-1">
+                  {acceptanceReport.dataQuality.warnings.map((item) => (
+                    <p key={item}>- {item}</p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-primary">未发现明显数据质量异常。</p>
+              )}
+            </div>
+
             <div className="space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">最终验收成果（可直接查阅）</h4>
@@ -491,9 +515,14 @@ export default function AcceptanceReportModal({
                 <h4 className="text-xs font-bold text-slate-500 uppercase tracking-widest">最近交付物</h4>
                 <div className="space-y-1.5 max-h-44 overflow-y-auto">
                   {acceptanceReport.recentDeliverables.slice(0, 8).map((item) => (
-                    <p key={item.id} className="text-xs text-slate-300">
-                      {item.name} · {item.stageType} · v{item.version} · {item.status}
-                    </p>
+                    <div key={item.id} className="text-xs">
+                      <p className={cn('text-slate-300', item.suspicious ? 'text-warning' : '')}>
+                        {item.name} · {item.stageType} · v{item.version} · {item.status}
+                      </p>
+                      {item.suspicious && item.suspicionReasons?.length ? (
+                        <p className="text-[11px] text-warning">可疑原因：{item.suspicionReasons.join('；')}</p>
+                      ) : null}
+                    </div>
                   ))}
                   {acceptanceReport.recentDeliverables.length === 0 ? <p className="text-xs text-slate-500">暂无</p> : null}
                 </div>
