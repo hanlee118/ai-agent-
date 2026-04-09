@@ -444,25 +444,39 @@ async function executeManualAdvanceCycle(projectId: string) {
 
       try {
         const buildTimeoutMs = resolveManualAdvanceBuildTimeoutMs(current);
-        const submissions = await withTimeout(
-          buildAutoStageSubmissions(current, {
-            action: "stage.auto_submission.manual_advance",
-            metadata: {
-              manualAdvanceAttempt: attempt,
-              manualAdvanceMaxAttempts: MANUAL_ADVANCE_MAX_ATTEMPTS
-            }
-          }),
-          buildTimeoutMs,
-          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${buildTimeoutMs}ms`
-        );
-        if (!(await canContinueProjectAdvance(projectId))) {
-          return;
+        if (current.currentStage === "ACCEPT") {
+          await withTimeout(
+            runAcceptStageTwoStepSubmissions(current, {
+              action: "stage.auto_submission.manual_advance",
+              metadata: {
+                manualAdvanceAttempt: attempt,
+                manualAdvanceMaxAttempts: MANUAL_ADVANCE_MAX_ATTEMPTS
+              }
+            }),
+            Math.max(buildTimeoutMs, MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS),
+            `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} ACCEPT two-step submission exceeded ${Math.max(buildTimeoutMs, MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS)}ms`
+          );
+        } else {
+          const submissions = await withTimeout(
+            buildAutoStageSubmissions(current, {
+              action: "stage.auto_submission.manual_advance",
+              metadata: {
+                manualAdvanceAttempt: attempt,
+                manualAdvanceMaxAttempts: MANUAL_ADVANCE_MAX_ATTEMPTS
+              }
+            }),
+            buildTimeoutMs,
+            `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} buildAutoStageSubmissions exceeded ${buildTimeoutMs}ms`
+          );
+          if (!(await canContinueProjectAdvance(projectId))) {
+            return;
+          }
+          await withTimeout(
+            submitStageSubmissionBundle(projectId, submissions),
+            MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+            `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} submitStageSubmissionBundle exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
+          );
         }
-        await withTimeout(
-          submitStageSubmissionBundle(projectId, submissions),
-          MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
-          `MANUAL_ADVANCE_ATTEMPT_TIMEOUT: round=${attempt} submitStageSubmissionBundle exceeded ${MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS}ms`
-        );
         return;
       } catch (error) {
         lastError = error;
@@ -1339,9 +1353,21 @@ async function buildAutoStageSubmissions(
   options?: {
     action?: string;
     metadata?: Prisma.InputJsonValue;
+    targetTitles?: string[];
   }
 ): Promise<AutoStageSubmission[]> {
-  const titles = STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage] || [buildAutoStageTitle(project)];
+  const stageDefaultTitles = STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage] || [buildAutoStageTitle(project)];
+  const targetTitles = Array.isArray(options?.targetTitles)
+    ? options?.targetTitles
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+    : [];
+  const titles = targetTitles.length > 0
+    ? stageDefaultTitles.filter((title) => targetTitles.includes(title))
+    : stageDefaultTitles;
+  if (titles.length === 0) {
+    return [];
+  }
   const submissions: AutoStageSubmission[] = [];
   const templateGuidance = titles.flatMap((title) => {
     const template = resolveDeliverableTemplate(title, project.currentStage as StageType);
@@ -1488,20 +1514,104 @@ async function buildAutoStageSubmission(
 
 async function submitStageSubmissionBundle(
   projectId: string,
-  submissions: AutoStageSubmission[]
+  submissions: AutoStageSubmission[],
+  options?: {
+    finalizeLastSubmission?: boolean;
+  }
 ) {
   if (submissions.length === 0) {
     return;
   }
 
+  const finalizeLastSubmission = options?.finalizeLastSubmission !== false;
   for (let index = 0; index < submissions.length; index += 1) {
     const submission = submissions[index].submission;
-    const isLast = index === submissions.length - 1;
+    const isLast = finalizeLastSubmission && index === submissions.length - 1;
     await submitCurrentStage(projectId, submission, {
       finalizeApproval: isLast,
       persistDraftOnTemplateFailure: true
     });
   }
+}
+
+function hasReadyStageCoreDeliverable(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  stageType: StageType,
+  expectedName: string
+) {
+  const normalizeName = (value: string) => String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+  const expectedToken = normalizeName(expectedName);
+  const candidate = project.deliverables
+    .filter((item) => item.stageType === stageType && normalizeName(item.name) === expectedToken)
+    .sort((left, right) => {
+      const versionDelta = (right.version || 0) - (left.version || 0);
+      if (versionDelta !== 0) {
+        return versionDelta;
+      }
+      return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    })[0];
+
+  if (!candidate) {
+    return false;
+  }
+  if (candidate.status !== "submitted" && candidate.status !== "approved") {
+    return false;
+  }
+
+  const content = String(candidate.content || "");
+  if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(content)) {
+    return false;
+  }
+  if (/自动质检结论:\s*未通过/.test(content)) {
+    return false;
+  }
+  return true;
+}
+
+async function runAcceptStageTwoStepSubmissions(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  options?: {
+    action?: string;
+    metadata?: Prisma.InputJsonValue;
+  }
+) {
+  const [testReportTitle, backfillTitle] = STAGE_AUTO_DELIVERABLE_TITLES.ACCEPT;
+  const submitted: AutoStageSubmission[] = [];
+
+  const testReportSubmissions = await buildAutoStageSubmissions(project, {
+    action: options?.action,
+    metadata: options?.metadata,
+    targetTitles: [testReportTitle]
+  });
+  await submitStageSubmissionBundle(project.id, testReportSubmissions, {
+    finalizeLastSubmission: false
+  });
+  submitted.push(...testReportSubmissions);
+
+  const refreshed = await findProject(project.id);
+  if (
+    !refreshed
+    || refreshed.status !== "active"
+    || refreshed.currentStage !== "ACCEPT"
+    || refreshed.pendingApproval
+  ) {
+    return submitted;
+  }
+
+  if (!hasReadyStageCoreDeliverable(refreshed, "ACCEPT", testReportTitle)) {
+    return submitted;
+  }
+
+  const backfillSubmissions = await buildAutoStageSubmissions(refreshed, {
+    action: options?.action,
+    metadata: options?.metadata,
+    targetTitles: [backfillTitle]
+  });
+  await submitStageSubmissionBundle(project.id, backfillSubmissions, {
+    finalizeLastSubmission: true
+  });
+  submitted.push(...backfillSubmissions);
+  return submitted;
 }
 
 async function trySyncGitLabHarnessForProject(
@@ -1643,10 +1753,17 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
             return;
           }
 
-          const submissions = await buildAutoStageSubmissions(project, {
-            action: "stage.auto_submission.automation"
-          });
-          await submitStageSubmissionBundle(project.id, submissions);
+          const submissions = project.currentStage === "ACCEPT"
+            ? await runAcceptStageTwoStepSubmissions(project, {
+              action: "stage.auto_submission.automation"
+            })
+            : await (async () => {
+              const built = await buildAutoStageSubmissions(project, {
+                action: "stage.auto_submission.automation"
+              });
+              await submitStageSubmissionBundle(project.id, built);
+              return built;
+            })();
 
           const refreshed = await findProject(project.id);
           if (refreshed) {
