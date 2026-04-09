@@ -16,6 +16,7 @@ type Props = {
 
 type AutomationState = {
   enabled: boolean;
+  autoApproveWhenReady: boolean;
   intervalMs: number;
   running: boolean;
   lastRunAt: string | null;
@@ -130,9 +131,19 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
     }
     setAutomationLoading(true);
     try {
-      const updated = await projectsApi.setAutomation({ enabled: !automation.enabled });
+      const nextEnabled = !automation.enabled;
+      const updated = await projectsApi.setAutomation({
+        enabled: nextEnabled,
+        // 自动推进开启时默认同步开启自动审批，避免停在 pendingApproval。
+        autoApproveWhenReady: nextEnabled ? true : automation.autoApproveWhenReady,
+      });
       setAutomation(updated);
-      addToast(updated.enabled ? '已开启自动推进' : '已关闭自动推进', 'info');
+      addToast(
+        updated.enabled
+          ? `已开启自动推进${updated.autoApproveWhenReady ? '（含自动审批）' : ''}`
+          : '已关闭自动推进',
+        'info',
+      );
       await onRefreshData();
     } catch (error) {
       addToast(error instanceof Error ? error.message : '自动推进设置失败', 'error');
@@ -146,8 +157,15 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
     try {
       const updated = await projectsApi.runAutomationOnce();
       setAutomation(updated);
-      addToast(`已执行一轮自动推进: ${updated.lastSummary || '完成'}`, 'info');
-      await onRefreshData();
+      addToast(
+        updated.message
+          || (updated.accepted === false ? '当前已有自动推进在运行，本次未重复触发' : '已触发一轮自动推进，请稍后查看结果'),
+        'info',
+      );
+      // 后端为异步触发，延迟刷新两次，避免前端看到“尚未执行”的瞬时旧态。
+      void onRefreshData();
+      window.setTimeout(() => { void onRefreshData(); }, 2000);
+      window.setTimeout(() => { void onRefreshData(); }, 12000);
     } catch (error) {
       addToast(error instanceof Error ? error.message : '手动推进执行失败', 'error');
     } finally {
@@ -420,6 +438,9 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
             <span className="text-slate-400">执行摘要: {automation.lastSummary || '暂无'}</span>
             <span className={cn('font-medium', automation.lastError ? 'text-danger' : 'text-emerald-300')}>
               {automation.lastError ? `最近错误: ${automation.lastError}` : '最近执行无错误'}
+            </span>
+            <span className="text-slate-400">
+              自动审批: {automation.autoApproveWhenReady ? '开启' : '关闭'}
             </span>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3">

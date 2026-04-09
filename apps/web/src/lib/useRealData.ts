@@ -103,25 +103,27 @@ export function useRealData(): RealDataState {
         fetchCoreProjectData(),
       ]);
 
-      if (openClawResult.status === 'rejected') {
-        throw toDataLoadError(openClawResult.reason);
+      const managedAgents = managedAgentsResult.status === 'fulfilled' ? managedAgentsResult.value : [];
+      if (coreDataResult.status === 'rejected') {
+        throw toDataLoadError(coreDataResult.reason);
       }
 
-      const data = openClawResult.value;
-      const managedAgents =
-        managedAgentsResult.status === 'fulfilled' ? managedAgentsResult.value : [];
-      const coreData =
-        coreDataResult.status === 'fulfilled'
-          ? coreDataResult.value
-          : { projects: [], tasks: [], sessions: [] };
+      const coreData = coreDataResult.value;
+      const openClawData = openClawResult.status === 'fulfilled' ? openClawResult.value : null;
+      const mergedAgents = mergeAgents(managedAgents, openClawData?.agents ?? []);
 
-      setAgents(mergeAgents(managedAgents, data.agents));
+      setAgents(mergedAgents.length > 0 ? mergedAgents : managedAgents);
       // 项目主数据仅以 core API 为准，避免回退到 OpenClaw 工作区样例项目。
       setProjects(coreData.projects);
       setTasks(coreData.tasks);
       setSessions(coreData.sessions);
-      setWorkspace(data.workspace);
-      setRuntime(data.runtime);
+      setWorkspace(openClawData?.workspace ?? null);
+      setRuntime(openClawData?.runtime ?? null);
+
+      if (openClawResult.status === 'rejected') {
+        const normalizedError = toDataLoadError(openClawResult.reason);
+        setError(`OpenClaw 辅助数据暂不可用，已回退到核心项目数据: ${normalizedError.message}`);
+      }
     } catch (err) {
       const normalizedError = toDataLoadError(err);
       const message = normalizedError.message;

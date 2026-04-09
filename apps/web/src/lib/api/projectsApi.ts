@@ -640,6 +640,7 @@ export const projectsApi = {
   async getAutomation() {
     return request<{
       enabled: boolean;
+      autoApproveWhenReady: boolean;
       intervalMs: number;
       running: boolean;
       lastRunAt: string | null;
@@ -648,9 +649,10 @@ export const projectsApi = {
     }>('/projects/automation');
   },
 
-  async setAutomation(data: { enabled: boolean; intervalMs?: number }) {
+  async setAutomation(data: { enabled: boolean; autoApproveWhenReady?: boolean; intervalMs?: number }) {
     return request<{
       enabled: boolean;
+      autoApproveWhenReady: boolean;
       intervalMs: number;
       running: boolean;
       lastRunAt: string | null;
@@ -665,11 +667,14 @@ export const projectsApi = {
   async runAutomationOnce() {
     return request<{
       enabled: boolean;
+      autoApproveWhenReady: boolean;
       intervalMs: number;
       running: boolean;
       lastRunAt: string | null;
       lastError: string | null;
       lastSummary: string;
+      accepted?: boolean;
+      message?: string;
     }>('/projects/automation/run', {
       method: 'POST',
     });
