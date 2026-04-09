@@ -64,6 +64,7 @@ import {
 } from "../system/design-preview.js";
 import {
   buildTerminalStageExecutionMessage,
+  getDesignStitchMode,
   getBestStageModel,
   getPreferredStageModels,
   getStageCompanionRoles,
@@ -74,6 +75,7 @@ import {
   validateTerminalCollaborationEvidence,
   validateTerminalSkillEvidence
 } from "../system/project-stage-execution.js";
+import { generateStitchDesignArtifact } from "../integrations/stitch-runtime.js";
 import { getExecutionProtocolSettings } from "../system/execution-protocol.js";
 import { evaluateStageExecutionProtocolGate } from "../system/stage-protocol-gates.js";
 import {
@@ -251,6 +253,43 @@ function appendSkillEvidenceBlock(
     `verification: ${evidence.verification}`
   ].join("\n");
 
+  return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
+}
+
+function appendStitchArtifactBlock(
+  body: string,
+  artifact: {
+    provider: string;
+    generatedAt: string;
+    projectId: string;
+    screenId: string;
+    htmlUrl: string;
+    imageUrl: string;
+    prompt: string;
+  }
+) {
+  const normalizedBody = String(body || "").trim();
+  const lines = [
+    "## Stitch 设计产物",
+    `provider: ${artifact.provider}`,
+    `generatedAt: ${artifact.generatedAt}`,
+    `stitchProjectId: ${artifact.projectId}`,
+    `stitchScreenId: ${artifact.screenId}`,
+    artifact.htmlUrl ? `stitchHtmlUrl: ${artifact.htmlUrl}` : "",
+    artifact.imageUrl ? `stitchImageUrl: ${artifact.imageUrl}` : "",
+    `stitchPrompt: ${artifact.prompt}`
+  ].filter(Boolean);
+  const section = lines.join("\n");
+  return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
+}
+
+function appendStitchFailureNote(body: string, reason: string) {
+  const normalizedBody = String(body || "").trim();
+  const section = [
+    "## Stitch 设计产物",
+    `stitchStatus: degraded`,
+    `stitchError: ${reason}`
+  ].join("\n");
   return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
 }
 export type DesignInterventionSignal = {
@@ -2755,6 +2794,38 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         role: input.role,
         summary: input.summary
       }));
+    }
+
+    const stitchMode = getDesignStitchMode();
+    const shouldUseStitch = (input.stageType === "DESIGN" || input.role === "ROLE_DESIGN") && stitchMode !== "off";
+    if (shouldUseStitch) {
+      try {
+        const stitchArtifact = await runWithRemainingTimeout(
+          generateStitchDesignArtifact({
+            projectId: input.projectId,
+            projectName: input.projectName,
+            projectDescription: input.projectDescription,
+            parsedIntent: input.parsedIntent,
+            stageType: input.stageType,
+            role: input.role,
+            summary: input.summary
+          }),
+          Math.max(20_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.35))
+        );
+        run = {
+          ...run,
+          body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
+        };
+      } catch (stitchError) {
+        const stitchMessage = stitchError instanceof Error ? stitchError.message : String(stitchError);
+        if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
+          throw new Error(`DESIGN_STITCH_RUNTIME_FAILED: ${stitchMessage}`);
+        }
+        run = {
+          ...run,
+          body: appendStitchFailureNote(String(run.body || ""), stitchMessage)
+        };
+      }
     }
 
     const usedDirectModelExecution = forceDirectModel || strategy.mode === "direct_model" || Boolean(terminalFallbackReason);

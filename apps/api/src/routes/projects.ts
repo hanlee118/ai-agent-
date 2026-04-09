@@ -2536,6 +2536,12 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
       });
       return;
     }
+    if (message.startsWith("DESIGN_STITCH_RUNTIME_FAILED:")) {
+      res.status(422).json({
+        message: `设计阶段调用 Stitch 失败：${message.replace("DESIGN_STITCH_RUNTIME_FAILED:", "").trim()}`
+      });
+      return;
+    }
     if (message.startsWith("STAGE_TEMPLATE_VALIDATION_FAILED:")) {
       const templateGatePrecheck = await getProjectTemplateGatePrecheck(projectId);
       const autoReconcileEnabled = process.env.NODE_ENV !== "test";
@@ -2806,6 +2812,12 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
     if (message.startsWith("DESIGN_STITCH_EVIDENCE_REQUIRED:")) {
       res.status(422).json({
         message: "设计阶段已启用 Stitch 硬门禁，当前输出缺少 Stitch 产物证据（链接/导出物）。"
+      });
+      return;
+    }
+    if (message.startsWith("DESIGN_STITCH_RUNTIME_FAILED:")) {
+      res.status(422).json({
+        message: `设计阶段调用 Stitch 失败：${message.replace("DESIGN_STITCH_RUNTIME_FAILED:", "").trim()}`
       });
       return;
     }

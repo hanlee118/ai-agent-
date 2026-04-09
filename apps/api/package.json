@@ -16,6 +16,7 @@
     "db:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@google/stitch-sdk": "^0.1.0",
     "@occ/shared": "workspace:*",
     "@prisma/client": "^6.6.0",
     "cors": "^2.8.5",
