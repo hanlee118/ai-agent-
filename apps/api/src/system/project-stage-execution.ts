@@ -49,6 +49,15 @@ export type TerminalCollaborationValidation = {
   parsedEvidence: TerminalCollaborationEvidence | null;
 };
 
+export type DesignStitchMode = "off" | "preferred" | "required";
+export type DesignStitchEvidenceValidation = {
+  ok: boolean;
+  mode: DesignStitchMode;
+  hasSection: boolean;
+  hasReference: boolean;
+  missing: string[];
+};
+
 export type ProjectStageExecutionStrategy = {
   mode: ProjectStageExecutionMode;
   reason: string;
@@ -102,6 +111,9 @@ const TERMINAL_COLLABORATION_FIELDS: TerminalCollaborationField[] = [
   "handoff",
   "openQuestions"
 ];
+const DESIGN_STITCH_OUTPUT_SECTION = "## Stitch 设计产物";
+const DESIGN_STITCH_REFERENCE_PATTERN = /(https?:\/\/[^\s)]+|!\[[^\]]*]\((?:https?:\/\/|data:image\/)[^)]+\)|`[^`]+\.(?:png|jpg|jpeg|webp|fig|html|pdf|svg)`)/i;
+const DESIGN_STITCH_HINT_PATTERN = /(stitch|stitch\.withgoogle|figma)/i;
 
 const TERMINAL_STAGE_ROLE_SET = new Set<string>([
   "ANALYSIS:ROLE_ANALYST",
@@ -222,8 +234,13 @@ export function getStageRealModelGateRoles(stageType: StageType) {
 }
 
 function getStageRequiredSkills(stageType: StageType, role: RoleType) {
+  const stitchMode = getDesignStitchMode();
   if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
-    return ["design-to-code", "frontend-design", "frontend-design-pro"];
+    const baseSkills = ["design-to-code", "frontend-design", "frontend-design-pro"];
+    if (stitchMode === "required") {
+      return [...baseSkills, "stitch"];
+    }
+    return baseSkills;
   }
 
   if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
@@ -234,6 +251,7 @@ function getStageRequiredSkills(stageType: StageType, role: RoleType) {
 }
 
 function getStageSkillProtocol(stageType: StageType, role: RoleType) {
+  const stitchMode = getDesignStitchMode();
   if (stageType === "ANALYSIS" || role === "ROLE_ANALYST" || role === "ROLE_PRODUCT") {
     return [
       "先基于当前项目做需求澄清、边界判断与价值取舍，再输出阶段结论",
@@ -243,11 +261,24 @@ function getStageSkillProtocol(stageType: StageType, role: RoleType) {
   }
 
   if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
-    return [
+    const protocol = [
       "先读取全部 requiredSkills，再开始设计分析与输出",
       "先用技能完成风格探索、结构拆解与可落地界面方案，再产出最终结论",
       "如果任一 requiredSkills 缺失，必须显式报告缺失项，不允许退化为普通模型模板直答"
     ];
+
+    if (stitchMode !== "off") {
+      protocol.push(
+        "优先使用 stitch 进行 UI 设计探索与方案定稿，并把关键结果写入输出正文",
+        `输出中必须包含 ${DESIGN_STITCH_OUTPUT_SECTION}，并给出至少 1 条可访问链接或导出产物路径`
+      );
+    }
+
+    if (stitchMode === "required") {
+      protocol.push("当前环境要求 stitch 硬门禁；若无法提供 stitch 产物证据，必须直接报告阻塞，不允许假写已完成。");
+    }
+
+    return protocol;
   }
 
   if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
@@ -378,6 +409,9 @@ export function buildTerminalStageExecutionMessage(input: {
   const stageTasks = sanitizeTerminalSegment((input.stageTaskTitles ?? []).join("、") || "未提供", 220);
   const deliverables = sanitizeTerminalSegment((input.expectedDeliverables ?? []).join("、") || "未提供", 220);
   const requiresToolDrivenDelivery = input.stageType === "DEV" || input.role === "ROLE_ARCH" || input.role === "ROLE_DEV";
+  const stitchMode = getDesignStitchMode();
+  const stitchRequiredForThisRun = (input.stageType === "DESIGN" || input.role === "ROLE_DESIGN") && stitchMode !== "off";
+  const stitchHardRequired = stitchRequiredForThisRun && stitchMode === "required";
 
   return [
     "请只基于当前项目执行阶段任务，允许参考长期记忆用于学习与复用经验",
@@ -412,8 +446,67 @@ export function buildTerminalStageExecutionMessage(input: {
     "如果当前是 INIT 或项目经理角色，handoff 默认写给分析阶段，openQuestions 默认列出待澄清问题与需要继续验证事项",
     "输出末尾必须追加结构化技能证据区块，字段名必须保持原样",
     "证据区块格式为 技能执行记录；skillsUsed: 实际使用的技能列表；reasoningBasis: 本次判断依据；artifactsProduced: 已产出的页面、代码、文档或命令结果；verification: 已完成的检查、测试或人工校验",
+    ...(stitchRequiredForThisRun
+      ? [
+          `如果当前阶段涉及设计，必须追加 ${DESIGN_STITCH_OUTPUT_SECTION} 小节`,
+          "Stitch 小节至少包含 1 条可访问链接或导出物路径，并说明该产物对应的页面范围与状态",
+          ...(stitchHardRequired
+            ? ["Stitch 证据为硬门禁，禁止仅描述想法而不提供真实设计产物引用"]
+            : [])
+        ]
+      : []),
     "要求 先独立思考再输出，给出真实判断依据、方案取舍、可交付结果与下一步，不允许复用旧项目风格或套用模板腔调"
   ].join("。");
+}
+
+export function getDesignStitchMode(): DesignStitchMode {
+  const raw = String(process.env.DESIGN_STITCH_MODE ?? "").trim().toLowerCase();
+  if (raw === "required" || raw === "strict" || raw === "hard") {
+    return "required";
+  }
+  if (raw === "preferred" || raw === "on" || raw === "true" || raw === "1") {
+    return "preferred";
+  }
+  return "off";
+}
+
+export function isDesignStitchEvidenceRequired(stageType: StageType, role: RoleType) {
+  const mode = getDesignStitchMode();
+  return mode === "required" && (stageType === "DESIGN" || role === "ROLE_DESIGN");
+}
+
+export function validateDesignStitchEvidence(output: string): DesignStitchEvidenceValidation {
+  const mode = getDesignStitchMode();
+  const source = String(output ?? "");
+  const hasSection = new RegExp(DESIGN_STITCH_OUTPUT_SECTION.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i")
+    .test(source);
+  const hasReference = DESIGN_STITCH_REFERENCE_PATTERN.test(source) && DESIGN_STITCH_HINT_PATTERN.test(source);
+  const missing: string[] = [];
+
+  if (!hasSection) {
+    missing.push("missing_stitch_section");
+  }
+  if (!hasReference) {
+    missing.push("missing_stitch_reference");
+  }
+
+  if (mode !== "required") {
+    return {
+      ok: true,
+      mode,
+      hasSection,
+      hasReference,
+      missing
+    };
+  }
+
+  return {
+    ok: missing.length === 0,
+    mode,
+    hasSection,
+    hasReference,
+    missing
+  };
 }
 
 function extractStructuredEvidenceField(output: string, field: TerminalSkillEvidenceField) {

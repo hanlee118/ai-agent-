@@ -452,7 +452,7 @@ const PROFESSIONAL_FORMAT_RULES: Partial<Record<DeliverableTemplateKind, Deliver
       {
         key: "preview_reference",
         label: "视觉证据（Figma/预览）",
-        pattern: /(figma\.com|```html|!\[[^\]]*]\((?:https?:\/\/|data:image\/))/gi
+        pattern: /(figma\.com|stitch|```html|!\[[^\]]*]\((?:https?:\/\/|data:image\/))/gi
       }
     ],
     minBulletCount: 8,

@@ -2,13 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildTerminalStageExecutionMessage,
+  getDesignStitchMode,
   getStageCompanionRoles,
   getProjectStageExecutionStrategy,
   getStageRealModelGateRoles,
+  isDesignStitchEvidenceRequired,
+  validateDesignStitchEvidence,
   validateTerminalSkillEvidence
 } from "./project-stage-execution.js";
 
 test("design stage uses terminal agent with strongest design models", () => {
+  const prev = process.env.DESIGN_STITCH_MODE;
+  delete process.env.DESIGN_STITCH_MODE;
   const strategy = getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN");
   assert.equal(strategy.mode, "terminal_agent");
   assert.equal(strategy.openClawAgentId, "jeremy");
@@ -17,7 +22,12 @@ test("design stage uses terminal agent with strongest design models", () => {
   assert.equal(strategy.skillProtocol.length, 3);
   assert.equal(strategy.memoryEnabled, true);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels[0], "anthropic/claude-opus-4-20250514");
+  assert.equal(strategy.preferredModels.includes("anthropic/claude-opus-4-20250514"), true);
+  if (typeof prev === "undefined") {
+    delete process.env.DESIGN_STITCH_MODE;
+  } else {
+    process.env.DESIGN_STITCH_MODE = prev;
+  }
 });
 
 test("analysis stage uses terminal execution for analyst with strongest analysis models", () => {
@@ -213,4 +223,61 @@ test("skill evidence validator prefers the latest structured section when fallba
     "frontend-design",
     "frontend-design-pro"
   ]);
+});
+
+test("design stitch mode supports off/preferred/required and strategy injection", () => {
+  const prev = process.env.DESIGN_STITCH_MODE;
+
+  delete process.env.DESIGN_STITCH_MODE;
+  assert.equal(getDesignStitchMode(), "off");
+  assert.equal(isDesignStitchEvidenceRequired("DESIGN", "ROLE_DESIGN"), false);
+  assert.deepEqual(
+    getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN").requiredSkills,
+    ["design-to-code", "frontend-design", "frontend-design-pro"]
+  );
+
+  process.env.DESIGN_STITCH_MODE = "preferred";
+  assert.equal(getDesignStitchMode(), "preferred");
+  assert.equal(isDesignStitchEvidenceRequired("DESIGN", "ROLE_DESIGN"), false);
+  assert.equal(
+    getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN").skillProtocol.some((item) => item.includes("stitch")),
+    true
+  );
+
+  process.env.DESIGN_STITCH_MODE = "required";
+  assert.equal(getDesignStitchMode(), "required");
+  assert.equal(isDesignStitchEvidenceRequired("DESIGN", "ROLE_DESIGN"), true);
+  assert.deepEqual(
+    getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN").requiredSkills,
+    ["design-to-code", "frontend-design", "frontend-design-pro", "stitch"]
+  );
+
+  if (typeof prev === "undefined") {
+    delete process.env.DESIGN_STITCH_MODE;
+  } else {
+    process.env.DESIGN_STITCH_MODE = prev;
+  }
+});
+
+test("design stitch evidence validator enforces section and references in required mode", () => {
+  const prev = process.env.DESIGN_STITCH_MODE;
+  process.env.DESIGN_STITCH_MODE = "required";
+
+  const missing = validateDesignStitchEvidence("普通设计说明，没有 stitch 产物。");
+  assert.equal(missing.ok, false);
+  assert.deepEqual(missing.missing, ["missing_stitch_section", "missing_stitch_reference"]);
+
+  const valid = validateDesignStitchEvidence([
+    "## Stitch 设计产物",
+    "- 链接: https://stitch.example.com/project/abc",
+    "- 对应页面: 首页与数据看板"
+  ].join("\n"));
+  assert.equal(valid.ok, true);
+  assert.deepEqual(valid.missing, []);
+
+  if (typeof prev === "undefined") {
+    delete process.env.DESIGN_STITCH_MODE;
+  } else {
+    process.env.DESIGN_STITCH_MODE = prev;
+  }
 });

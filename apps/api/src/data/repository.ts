@@ -69,6 +69,8 @@ import {
   getStageCompanionRoles,
   getStageRealModelGateRoles,
   getProjectStageExecutionStrategy,
+  isDesignStitchEvidenceRequired,
+  validateDesignStitchEvidence,
   validateTerminalCollaborationEvidence,
   validateTerminalSkillEvidence
 } from "../system/project-stage-execution.js";
@@ -2647,6 +2649,16 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       protocolError.attempts = attempts;
       throw protocolError;
     }
+    if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
+      const stitchEvidence = validateDesignStitchEvidence(body);
+      if (!stitchEvidence.ok) {
+        const stitchError = new Error(
+          `DESIGN_STITCH_EVIDENCE_REQUIRED: missing=${stitchEvidence.missing.join(",") || "unknown"}`
+        ) as Error & { attempts?: StageModelAttemptTrace[] };
+        stitchError.attempts = attempts;
+        throw stitchError;
+      }
+    }
 
     return {
       provider: "openai-compatible",
@@ -2789,6 +2801,13 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
           body,
           collaborationEvidence: collaborationEvidence.parsedEvidence ?? undefined
         };
+      }
+
+      if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
+        const stitchEvidence = validateDesignStitchEvidence(body);
+        if (!stitchEvidence.ok) {
+          throw new Error(`DESIGN_STITCH_EVIDENCE_REQUIRED: missing=${stitchEvidence.missing.join(",") || "unknown"}`);
+        }
       }
     }
 

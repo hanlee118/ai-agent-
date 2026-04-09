@@ -251,6 +251,10 @@ function buildSystemPrompt(context: AgentRunContext) {
 }
 
 function buildOutputGuidance(context: AgentRunContext) {
+  const designStitchMode = String(process.env.DESIGN_STITCH_MODE ?? "").trim().toLowerCase();
+  const stitchEnabled = ["preferred", "required", "strict", "hard", "on", "true", "1"].includes(designStitchMode);
+  const stitchHardRequired = ["required", "strict", "hard"].includes(designStitchMode);
+
   if (context.promptMode === "issue_debate") {
     return [
       "请严格使用以下结构：",
@@ -323,6 +327,15 @@ function buildOutputGuidance(context: AgentRunContext) {
       "- UX 原则（3条）",
       "- 可访问性检查清单（至少3条）",
       "- 审查结论（通过/不通过）",
+      ...(stitchEnabled
+        ? [
+            "## Stitch 设计产物",
+            "- 至少提供 1 条 Stitch 相关链接或导出物路径（并说明对应页面范围）",
+            ...(stitchHardRequired
+              ? ["- Stitch 证据为硬门禁，禁止只给文字描述而没有真实产物引用"]
+              : [])
+          ]
+        : []),
       "## 下一步",
       "- 2 到 3 条可执行动作"
     ];
