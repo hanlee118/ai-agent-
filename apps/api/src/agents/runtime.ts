@@ -50,7 +50,7 @@ const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_DESIGN: 360000, // 设计任务内容重，3分钟
   ROLE_ARCH: 160000,
   ROLE_DEV: 180000,
-  ROLE_QA: 120000
+  ROLE_QA: 180000
 };
 
 const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
@@ -60,7 +60,7 @@ const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_DESIGN: 300000, // 设计任务需要更长单次生成时间，5分钟
   ROLE_ARCH: 100000,
   ROLE_DEV: 120000,
-  ROLE_QA: 90000
+  ROLE_QA: 140000
 };
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {

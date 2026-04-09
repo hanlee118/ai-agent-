@@ -110,7 +110,7 @@ const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true"
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
 const PM_STAGE_GATE_ALL_STAGES = String(process.env.PM_STAGE_GATE_ALL_STAGES ?? "false").trim().toLowerCase() === "true";
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
-const PROJECT_STAGE_AGENT_TIMEOUT_MS = Math.max(60_000, Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 120_000));
+const PROJECT_STAGE_AGENT_TIMEOUT_MS = Math.max(60_000, Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 240_000));
 const STAGE_SKILL_EVIDENCE_REQUIRED_SET = new Set<StageType>(["DESIGN", "DEV", "ACCEPT"]);
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =

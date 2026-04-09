@@ -189,6 +189,7 @@ const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
+const STAGE_AUTO_REAL_MODEL_REQUIRED = new Set<StageType>(["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]);
 
 type StageRunAttempt = {
   stageType: StageType;
@@ -1366,6 +1367,14 @@ async function buildAutoStageSubmissions(
       ...templateGuidance
     ].join("\n")
   });
+  if (
+    STAGE_AUTO_REAL_MODEL_REQUIRED.has(project.currentStage as StageType)
+    && (run.provider === "scripted" || Boolean((run as StageRunSnapshot).degraded))
+  ) {
+    throw new Error(
+      `REAL_MODEL_GATE_FAILED: ${project.currentStage} 阶段自动推进禁止使用 scripted 降级结果，请恢复真实模型后重试。`
+    );
+  }
   const stageTaskEvidence = buildStageTaskEvidence(project);
   const attemptsSummary = summarizeModelAttempts(run as StageRunSnapshot);
   const runGeneratedAt = new Date().toISOString();

@@ -1671,7 +1671,8 @@ router.put("/api/projects/automation", asyncRoute(async (req, res) => {
 }));
 
 router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
-  await runProjectAutomationTick({ force: true });
+  const wasRunning = projectAutomationState.running;
+  void runProjectAutomationTick({ force: true });
 
   await safeAudit(req, res, {
     actorType: "admin",
@@ -1681,14 +1682,16 @@ router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
     summary: "手动触发自动推进执行一轮"
   });
 
-  res.json({
+  res.status(202).json({
     enabled: projectAutomationState.enabled,
     autoApproveWhenReady: projectAutomationState.autoApproveWhenReady,
     intervalMs: projectAutomationState.intervalMs,
     running: projectAutomationState.running,
     lastRunAt: projectAutomationState.lastRunAt,
     lastError: projectAutomationState.lastError,
-    lastSummary: projectAutomationState.lastSummary
+    lastSummary: projectAutomationState.lastSummary,
+    accepted: !wasRunning,
+    message: wasRunning ? "当前已有自动推进任务在运行，本次请求已忽略重复触发。" : "已触发一轮自动推进，请稍后刷新状态。"
   });
 }));
 

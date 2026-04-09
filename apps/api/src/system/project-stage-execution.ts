@@ -155,9 +155,9 @@ const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
     "anthropic/claude-sonnet-4-20250514"
   ],
   ROLE_DESIGN: [
-    "anthropic/claude-opus-4-20250514",
-    "anthropic/claude-sonnet-4-20250514",
-    "openai/gpt-5.4"
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex",
+    "anthropic/claude-sonnet-4-20250514"
   ],
   ROLE_ARCH: [
     "openai/gpt-5.4",
