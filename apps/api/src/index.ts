@@ -155,6 +155,7 @@ const GITLAB_HARNESS_SYNC_STAGES = new Set<StageType>(["DEV", "ACCEPT"]);
 
 const projectAutomationState: {
   enabled: boolean;
+  autoApproveWhenReady: boolean;
   intervalMs: number;
   running: boolean;
   lastRunAt: string | null;
@@ -162,6 +163,7 @@ const projectAutomationState: {
   lastSummary: string;
 } = {
   enabled: process.env.PROJECT_AUTO_ADVANCE === "true",
+  autoApproveWhenReady: process.env.PROJECT_AUTO_APPROVE_WHEN_READY === "true",
   intervalMs: projectAutoAdvanceIntervalMs,
   running: false,
   lastRunAt: null,
@@ -1562,6 +1564,35 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
     let awaitingConfirmation = 0;
     let firstError: string | null = null;
 
+    const tryAutoApprovePendingProject = async (projectId: string, fallbackMessage: string) => {
+      if (!projectAutomationState.autoApproveWhenReady) {
+        awaitingConfirmation += 1;
+        firstError = firstError ?? fallbackMessage;
+        return false;
+      }
+
+      try {
+        const approvedProject = await approveProject(projectId);
+        const refreshed = approvedProject ?? await findProject(projectId);
+        if (refreshed && !refreshed.pendingApproval) {
+          approved += 1;
+          await trySyncGitLabHarnessForProject(refreshed, {
+            reason: "project.automation_tick.auto_approve"
+          });
+          return true;
+        }
+
+        awaitingConfirmation += 1;
+        firstError = firstError ?? `project ${projectId} auto-approve attempted but still pending confirmation`;
+        return false;
+      } catch (error) {
+        awaitingConfirmation += 1;
+        const message = error instanceof Error ? error.message : String(error);
+        firstError = firstError ?? `project ${projectId} auto-approve failed: ${message}`;
+        return false;
+      }
+    };
+
     for (const summary of activeProjects) {
       if (projectAdvanceLocks.has(summary.id)) {
         skipped += 1;
@@ -1584,16 +1615,22 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
           }
 
           if (project.pendingApproval) {
-            skipped += 1;
-            awaitingConfirmation += 1;
-            firstError = firstError ?? `project ${project.id} pending user confirmation`;
+            const approvedByAutomation = await tryAutoApprovePendingProject(
+              project.id,
+              `project ${project.id} pending user confirmation`
+            );
+            if (!approvedByAutomation) {
+              skipped += 1;
+            }
             return;
           }
 
           const readyPending = await markCurrentStagePendingApprovalIfReady(project.id);
           if (readyPending?.pendingApproval) {
-            awaitingConfirmation += 1;
-            firstError = firstError ?? `project ${project.id} is waiting for manual stage confirmation`;
+            await tryAutoApprovePendingProject(
+              project.id,
+              `project ${project.id} is waiting for manual stage confirmation`
+            );
             return;
           }
 
@@ -1609,13 +1646,13 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
             });
           }
           if (refreshed?.pendingApproval) {
-            awaitingConfirmation += 1;
             const qualityPass = submissions.every((item) => item.quality.pass);
-            if (!qualityPass) {
-              firstError = firstError ?? `project ${project.id} has pending quality issues, waiting for manual confirmation`;
-            } else {
-              firstError = firstError ?? `project ${project.id} is waiting for manual stage confirmation`;
-            }
+            await tryAutoApprovePendingProject(
+              project.id,
+              qualityPass
+                ? `project ${project.id} is waiting for manual stage confirmation`
+                : `project ${project.id} has pending quality issues, waiting for manual confirmation`
+            );
           }
           advanced += 1;
         });

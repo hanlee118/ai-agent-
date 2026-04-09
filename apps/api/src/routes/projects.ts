@@ -907,6 +907,7 @@ type ProjectRecord = NonNullable<Awaited<ReturnType<typeof findProject>>>;
 
 type ProjectAutomationState = {
   enabled: boolean;
+  autoApproveWhenReady: boolean;
   intervalMs: number;
   running: boolean;
   lastRunAt: string | null;
@@ -1617,6 +1618,7 @@ router.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
 router.get("/api/projects/automation", asyncRoute(async (_req, res) => {
   res.json({
     enabled: projectAutomationState.enabled,
+    autoApproveWhenReady: projectAutomationState.autoApproveWhenReady,
     intervalMs: projectAutomationState.intervalMs,
     running: projectAutomationState.running,
     lastRunAt: projectAutomationState.lastRunAt,
@@ -1627,14 +1629,22 @@ router.get("/api/projects/automation", asyncRoute(async (_req, res) => {
 
 router.put("/api/projects/automation", asyncRoute(async (req, res) => {
   const enabled = req.body?.enabled;
+  const autoApproveWhenReady = req.body?.autoApproveWhenReady;
   const intervalMsInput = Number(req.body?.intervalMs ?? projectAutomationState.intervalMs);
 
   if (typeof enabled !== "boolean") {
     res.status(400).json({ message: "enabled must be boolean" });
     return;
   }
+  if (autoApproveWhenReady !== undefined && typeof autoApproveWhenReady !== "boolean") {
+    res.status(400).json({ message: "autoApproveWhenReady must be boolean when provided" });
+    return;
+  }
 
   projectAutomationState.enabled = enabled;
+  if (typeof autoApproveWhenReady === "boolean") {
+    projectAutomationState.autoApproveWhenReady = autoApproveWhenReady;
+  }
   projectAutomationState.intervalMs = Number.isFinite(intervalMsInput)
     ? Math.max(5000, Math.round(intervalMsInput))
     : projectAutomationState.intervalMs;
@@ -1646,11 +1656,12 @@ router.put("/api/projects/automation", asyncRoute(async (req, res) => {
     action: "project.automation.updated",
     resourceType: "project",
     summary: `自动推进已${enabled ? "开启" : "关闭"}`,
-    detail: `intervalMs=${projectAutomationState.intervalMs}`
+    detail: `intervalMs=${projectAutomationState.intervalMs}; autoApproveWhenReady=${projectAutomationState.autoApproveWhenReady}`
   });
 
   res.json({
     enabled: projectAutomationState.enabled,
+    autoApproveWhenReady: projectAutomationState.autoApproveWhenReady,
     intervalMs: projectAutomationState.intervalMs,
     running: projectAutomationState.running,
     lastRunAt: projectAutomationState.lastRunAt,
@@ -1672,6 +1683,7 @@ router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
 
   res.json({
     enabled: projectAutomationState.enabled,
+    autoApproveWhenReady: projectAutomationState.autoApproveWhenReady,
     intervalMs: projectAutomationState.intervalMs,
     running: projectAutomationState.running,
     lastRunAt: projectAutomationState.lastRunAt,

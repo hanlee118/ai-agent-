@@ -110,6 +110,7 @@ const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true"
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
 const PM_STAGE_GATE_ALL_STAGES = String(process.env.PM_STAGE_GATE_ALL_STAGES ?? "false").trim().toLowerCase() === "true";
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
+const PROJECT_STAGE_AGENT_TIMEOUT_MS = Math.max(60_000, Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 120_000));
 const STAGE_SKILL_EVIDENCE_REQUIRED_SET = new Set<StageType>(["DESIGN", "DEV", "ACCEPT"]);
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
@@ -126,6 +127,31 @@ function pickProtocolHints(items: string[], limit: number) {
   return items
     .filter((item, index, list) => list.indexOf(item) === index)
     .slice(0, limit);
+}
+
+async function withProjectStageAgentTimeout<T>(
+  promise: Promise<T>,
+  input: { stageType: StageType; role: RoleType },
+  timeoutMs = PROJECT_STAGE_AGENT_TIMEOUT_MS
+) {
+  const effectiveTimeoutMs = Math.max(1_000, Math.round(timeoutMs));
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(
+        new Error(
+          `PROJECT_STAGE_AGENT_TIMEOUT: ${input.stageType}/${input.role} 执行超过 ${effectiveTimeoutMs}ms，已终止本轮自动推进。`
+        )
+      );
+    }, effectiveTimeoutMs);
+
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }).catch((error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
 }
 
 function buildCollaborationEvidenceFallback(project: ProjectDetail, stageType: StageType, body: string) {
@@ -2392,6 +2418,7 @@ function isTerminalInfrastructureFailure(message: string) {
     || normalized.includes("OPENCLAW RETURNED INTERRUPTED RESULT")
     || normalized.includes("STOPREASON=ERROR")
     || normalized.includes("SESSION FILE LOCKED")
+    || normalized.includes("PROJECT_STAGE_AGENT_TIMEOUT")
     || normalized.includes("ALLOWLIST CONTAINS UNKNOWN ENTRIES")
     || normalized.includes("FAILOVERERROR")
     || normalized.includes("LIVE LOCK")
@@ -2652,16 +2679,43 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
 
 export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   const startedAt = Date.now();
+  const stageDeadlineAt = Date.now() + PROJECT_STAGE_AGENT_TIMEOUT_MS;
+  const automationAction = input.action.startsWith("stage.auto_submission.automation");
+  const automationDirectModelFirst = automationAction
+    && String(process.env.PROJECT_AUTOMATION_DIRECT_MODEL_FIRST ?? "true").trim().toLowerCase() !== "false";
+  const terminalPrimaryBudgetMs = automationAction
+    ? Math.max(12_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.15))
+    : Math.max(30_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.6));
   const runtime = await getRuntimeStatus();
   const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
 
   try {
     let run: StageAgentRunResult;
     let terminalFallbackReason: string | undefined;
+    const forceDirectModel = strategy.mode === "terminal_agent" && automationDirectModelFirst;
+    const runWithRemainingTimeout = async <T>(promise: Promise<T>, maxTimeoutMs?: number) => {
+      const remainingMs = stageDeadlineAt - Date.now();
+      const budgetMs = typeof maxTimeoutMs === "number"
+        ? Math.min(remainingMs, Math.max(1_000, Math.round(maxTimeoutMs)))
+        : remainingMs;
+      if (budgetMs <= 0) {
+        throw new Error(
+          `PROJECT_STAGE_AGENT_TIMEOUT: ${input.stageType}/${input.role} 执行超过 ${PROJECT_STAGE_AGENT_TIMEOUT_MS}ms，已终止本轮自动推进。`
+        );
+      }
+      return await withProjectStageAgentTimeout(
+        promise,
+        { stageType: input.stageType, role: input.role },
+        budgetMs
+      );
+    };
 
-    if (strategy.mode === "terminal_agent") {
+    if (strategy.mode === "terminal_agent" && !forceDirectModel) {
       try {
-        run = await runTerminalProjectStageAgent(input);
+        run = await runWithRemainingTimeout(
+          runTerminalProjectStageAgent(input),
+          terminalPrimaryBudgetMs
+        );
       } catch (terminalError) {
         terminalFallbackReason = terminalError instanceof Error ? terminalError.message : String(terminalError);
         const allowInfraFallback = isTerminalInfrastructureFailure(terminalFallbackReason);
@@ -2671,27 +2725,27 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         ) {
           throw terminalError;
         }
-        run = await runStageAgent({
+        run = await runWithRemainingTimeout(runStageAgent({
           projectName: input.projectName,
           projectDescription: input.projectDescription,
           parsedIntent: input.parsedIntent,
           stageType: input.stageType,
           role: input.role,
           summary: input.summary
-        });
+        }));
       }
     } else {
-      run = await runStageAgent({
+      run = await runWithRemainingTimeout(runStageAgent({
         projectName: input.projectName,
         projectDescription: input.projectDescription,
         parsedIntent: input.parsedIntent,
         stageType: input.stageType,
         role: input.role,
         summary: input.summary
-      });
+      }));
     }
 
-    const usedDirectModelExecution = strategy.mode === "direct_model" || Boolean(terminalFallbackReason);
+    const usedDirectModelExecution = forceDirectModel || strategy.mode === "direct_model" || Boolean(terminalFallbackReason);
     if (usedDirectModelExecution) {
       const executionProtocol = await getExecutionProtocolSettings();
       let currentProject: ProjectDetail | undefined;
