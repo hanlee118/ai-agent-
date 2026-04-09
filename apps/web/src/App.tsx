@@ -51,6 +51,16 @@ const APP_TABS = [
 
 const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
   Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
+const PROJECT_ROOM_URL_KEYS = [
+  'project_id',
+  'signoff_project_id',
+  'pr_tab',
+  'pr_modal',
+  'signoff_stage',
+  'signoff_decision',
+  'signoff_time',
+  'signoff_keyword',
+] as const;
 
 const AUTH_CACHE_KEY = 'occ-auth-bootstrap';
 const AUTH_BYPASS_IN_DEV =
@@ -347,6 +357,61 @@ export default function App() {
       deepLinkRouteHandledRef.current = routeKey;
     }
   }, [isLoggedIn, urlSearch]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !isLoggedIn) {
+      return;
+    }
+
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    let changed = false;
+
+    const setParam = (key: string, value: string) => {
+      if (params.get(key) === value) {
+        return;
+      }
+      params.set(key, value);
+      changed = true;
+    };
+
+    const deleteParam = (key: string) => {
+      if (!params.has(key)) {
+        return;
+      }
+      params.delete(key);
+      changed = true;
+    };
+
+    if (isAppTab(activeTab)) {
+      setParam('app_tab', activeTab);
+    }
+
+    if (activeTab === 'project-room') {
+      if (selectedProjectId) {
+        setParam('project_id', selectedProjectId);
+      }
+    } else {
+      PROJECT_ROOM_URL_KEYS.forEach((key) => deleteParam(key));
+    }
+
+    if (activeTab === 'agent-commander') {
+      if (selectedAgentId) {
+        setParam('agent_id', selectedAgentId);
+      }
+    } else {
+      deleteParam('agent_id');
+    }
+
+    if (!changed) {
+      return;
+    }
+
+    const nextSearch = params.toString();
+    const nextUrl = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`;
+    window.history.replaceState(window.history.state, '', nextUrl);
+    setUrlSearch(window.location.search);
+  }, [activeTab, isLoggedIn, selectedAgentId, selectedProjectId]);
 
   const loadManagedModels = useCallback(async () => {
     try {
