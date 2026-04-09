@@ -8,8 +8,8 @@ import {
 } from "./design-model-policy.js";
 
 test("design model policy prefers claude opus first", () => {
-  assert.equal(DESIGN_MODEL_PRIMARY, "anthropic/claude-opus-4-20250514");
-  assert.equal(DESIGN_MODEL_FALLBACKS[0], "anthropic/claude-sonnet-4-20250514");
+  assert.equal(DESIGN_MODEL_PRIMARY, "anthropic/claude-opus-4-6");
+  assert.equal(DESIGN_MODEL_FALLBACKS[0], "anthropic/claude-sonnet-4-6");
   assert.equal(DESIGN_MODEL_FALLBACKS.includes("openai/gpt-5.4"), true);
 });
 
@@ -20,7 +20,7 @@ test("design model policy chain excludes weak legacy design fallbacks", () => {
 });
 
 test("design preferred helper recognizes primary model", () => {
-  assert.equal(isDesignModelPreferred("anthropic/claude-opus-4-20250514"), true);
-  assert.equal(isDesignModelPreferred("claude-opus-4-20250514"), true);
+  assert.equal(isDesignModelPreferred("anthropic/claude-opus-4-6"), true);
+  assert.equal(isDesignModelPreferred("claude-opus-4-6"), true);
   assert.equal(isDesignModelPreferred("openai/gpt-5.4"), false);
 });

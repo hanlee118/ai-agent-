@@ -58,7 +58,7 @@ test("ignores already-compatible openai completions config", () => {
 
 test("prioritizes openai family for generic fallback chains", () => {
   const result = prioritizeFallbackModels([
-    "anthropic/claude-sonnet-4-20250514",
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.3-codex",
     "minima/MiniMax-M2.7-highspeed",
     "openai/gpt-5.4"
@@ -67,7 +67,7 @@ test("prioritizes openai family for generic fallback chains", () => {
   assert.deepEqual(result, [
     "openai/gpt-5.4",
     "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514",
+    "anthropic/claude-sonnet-4-6",
     "minima/MiniMax-M2.7-highspeed"
   ]);
 });
@@ -85,9 +85,9 @@ test("classifies model unavailability and transport failures for retry decisions
 
 test("prefers non-anthropic fallback when claude_code channel is unavailable", () => {
   const next = selectOpenClawFallbackModel({
-    activeModel: "anthropic/claude-sonnet-4-20250514",
+    activeModel: "anthropic/claude-sonnet-4-6",
     fallbackQueue: [
-      "anthropic/claude-opus-4-20250514",
+      "anthropic/claude-opus-4-6",
       "openai/gpt-5.4",
       "openai/gpt-5.3-codex"
     ],
@@ -106,7 +106,7 @@ test("synchronizes agent main session runtime model with provider-qualified targ
       sessionId: "abc"
     },
     "agent:requirements_analyst:feishu:chat-1": {
-      model: "claude-opus-4-20250514",
+      model: "claude-opus-4-6",
       modelProvider: "anthropic"
     }
   }, {
@@ -119,7 +119,7 @@ test("synchronizes agent main session runtime model with provider-qualified targ
   assert.equal(result.sessionStore["agent:requirements_analyst:main"]?.modelProvider, "openai");
   assert.equal(result.sessionStore["agent:requirements_analyst:main"]?.modelOverride, "gpt-5.4");
   assert.equal(result.sessionStore["agent:requirements_analyst:main"]?.providerOverride, "openai");
-  assert.equal(result.sessionStore["agent:requirements_analyst:feishu:chat-1"]?.model, "claude-opus-4-20250514");
+  assert.equal(result.sessionStore["agent:requirements_analyst:feishu:chat-1"]?.model, "claude-opus-4-6");
   assert.equal(result.sessionStore["agent:requirements_analyst:feishu:chat-1"]?.modelProvider, "anthropic");
 });
 
@@ -131,12 +131,12 @@ test("builds scoped config for process-local agent model override", () => {
           id: "requirements_analyst",
           model: {
             primary: "openai/gpt-5.3-codex",
-            fallbacks: ["anthropic/claude-sonnet-4-20250514"]
+            fallbacks: ["anthropic/claude-sonnet-4-6"]
           }
         },
         {
           id: "jeremy",
-          model: "anthropic/claude-opus-4-20250514"
+          model: "anthropic/claude-opus-4-6"
         }
       ]
     }
@@ -152,10 +152,10 @@ test("builds scoped config for process-local agent model override", () => {
     primary: "openai/gpt-5.4",
     fallbacks: []
   });
-  assert.equal(result.agents?.list?.[1]?.model, "anthropic/claude-opus-4-20250514");
+  assert.equal(result.agents?.list?.[1]?.model, "anthropic/claude-opus-4-6");
   assert.deepEqual(input.agents.list[0]?.model, {
     primary: "openai/gpt-5.3-codex",
-    fallbacks: ["anthropic/claude-sonnet-4-20250514"]
+    fallbacks: ["anthropic/claude-sonnet-4-6"]
   });
 });
 

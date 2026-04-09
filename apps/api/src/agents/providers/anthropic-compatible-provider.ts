@@ -12,7 +12,11 @@ export async function runAnthropicCompatibleAgent(
   config: AnthropicCompatibleConfig,
   context: AgentRunContext
 ): Promise<AgentRunResult> {
-  const requestTimeoutMs = Math.max(8000, Number(process.env.ANTHROPIC_REQUEST_TIMEOUT_MS ?? process.env.MODEL_REQUEST_TIMEOUT_MS ?? 18000));
+  const baseRequestTimeoutMs = Math.max(
+    12000,
+    Number(process.env.ANTHROPIC_REQUEST_TIMEOUT_MS ?? process.env.MODEL_REQUEST_TIMEOUT_MS ?? 35000)
+  );
+  const requestTimeoutMs = resolveRequestTimeoutMs(context, config.model, baseRequestTimeoutMs);
   const maxAttempts = Math.max(1, Number(process.env.ANTHROPIC_REQUEST_MAX_ATTEMPTS ?? process.env.MODEL_REQUEST_MAX_ATTEMPTS ?? 2));
   let lastError: unknown;
 
@@ -186,9 +190,21 @@ function deriveThinkingSummary(content: string) {
 function resolveMaxTokens(context: AgentRunContext, attempt: number) {
   const designMode = context.role === "ROLE_DESIGN" || context.stageType === "DESIGN";
   if (designMode) {
-    return attempt > 1 ? 7000 : 5000;
+    return attempt > 1 ? 2400 : 1800;
   }
-  return attempt > 1 ? 4200 : 3200;
+  return attempt > 1 ? 1600 : 1200;
+}
+
+function resolveRequestTimeoutMs(context: AgentRunContext, model: string, baseTimeoutMs: number) {
+  const normalized = normalizeAnthropicModelId(model).toLowerCase();
+  const designMode = context.role === "ROLE_DESIGN" || context.stageType === "DESIGN";
+  if (normalized.includes("opus")) {
+    return Math.max(baseTimeoutMs, designMode ? 90000 : 65000);
+  }
+  if (normalized.includes("sonnet")) {
+    return Math.max(baseTimeoutMs, designMode ? 70000 : 50000);
+  }
+  return baseTimeoutMs;
 }
 
 function isLikelyTruncatedHtml(content: string | undefined, stopReason?: string) {

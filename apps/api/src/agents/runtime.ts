@@ -64,36 +64,40 @@ const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
 };
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
-  INIT: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex"],
-  ANALYSIS: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "anthropic/claude-sonnet-4-20250514", "kimi-k2.5"],
-  DESIGN: ["anthropic/claude-opus-4-20250514", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
-  DEV: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "anthropic/claude-sonnet-4-20250514", "qwen3-coder-plus"],
-  ACCEPT: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-20250514", "openai/gpt-5.3-codex"]
+  INIT: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
+  ANALYSIS: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex", "kimi-k2.5"],
+  DESIGN: ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
+  DEV: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-6", "openai/gpt-5.3-codex", "qwen3-coder-plus"],
+  ACCEPT: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex"]
 };
 
-// Issue 讨论必须优先走高能力模型，避免中等模型先耗尽预算导致讨论任务超时失败。
-const ISSUE_DEBATE_MODEL_PREFERENCES = ["openai/gpt-5.4", "openai/gpt-5.3-codex"] as const;
+// Issue 讨论优先走高能力模型，并补充 Claude 作为高可用兜底，避免单一网关波动导致讨论超时。
+const ISSUE_DEBATE_MODEL_PREFERENCES = [
+  "openai/gpt-5.4",
+  "anthropic/claude-sonnet-4-6",
+  "openai/gpt-5.3-codex"
+] as const;
 
 const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: string }> = {
   INIT: {
     objective: "快速理解需求与项目初始化。",
-    bestFit: "openai/gpt-5.4（首选） -> anthropic/claude-sonnet-4-20250514（复杂语义补位）"
+    bestFit: "anthropic/claude-sonnet-4-6（首选） -> openai/gpt-5.4（高推理补位）"
   },
   ANALYSIS: {
     objective: "抽取约束/风险/验收标准，形成可执行分析。",
-    bestFit: "openai/gpt-5.4（首选） -> openai/gpt-5.3-codex（次选） -> anthropic/claude-sonnet-4-20250514（补位）"
+    bestFit: "anthropic/claude-sonnet-4-6（首选） -> openai/gpt-5.4（次选） -> openai/gpt-5.3-codex（补位）"
   },
   DESIGN: {
     objective: "输出高质量视觉与交互策略，避免模板化设计。",
-    bestFit: "anthropic/claude-opus-4-20250514（设计首选） -> anthropic/claude-sonnet-4-20250514 -> openai/gpt-5.4"
+    bestFit: "anthropic/claude-opus-4-6（设计首选） -> anthropic/claude-sonnet-4-6 -> openai/gpt-5.4"
   },
   DEV: {
     objective: "面向实现落地，强调代码可执行性和稳定性。",
-    bestFit: "openai/gpt-5.4（实现质量首选） -> openai/gpt-5.3-codex（编码补位） -> anthropic/claude-sonnet-4-20250514"
+    bestFit: "openai/gpt-5.4（实现质量首选） -> anthropic/claude-sonnet-4-6（稳定补位） -> openai/gpt-5.3-codex"
   },
   ACCEPT: {
     objective: "验收复盘与质量关口确认。",
-    bestFit: "openai/gpt-5.4（总结评审） -> anthropic/claude-sonnet-4-20250514（质量复核）"
+    bestFit: "anthropic/claude-sonnet-4-6（质量复核） -> openai/gpt-5.4（总结评审）"
   }
 };
 
@@ -920,20 +924,20 @@ async function resolveRoleModelPlan(
   // 1) 角色专属配置优先，显式 Agent 模型选择不应被阶段默认策略覆盖。
   push(managedSelectedModel);
 
-  // 2) Issue 真实讨论优先模型能力：gpt-5.4 > gpt-5.3-codex。
+  // 2) 运行时显式模型优先，避免被阶段默认策略截断后无法尝试到真实可用模型。
+  push(runtimeModel);
+
+  // 3) Issue 真实讨论优先模型能力：gpt-5.4 > claude-sonnet-4-6 > gpt-5.3-codex。
   if (promptMode === "issue_debate") {
     for (const preferredModel of ISSUE_DEBATE_MODEL_PREFERENCES) {
       push(preferredModel);
     }
   }
 
-  // 3) 阶段级策略作为补位，确保没有显式角色配置时仍命中更适配的模型。
+  // 4) 阶段级策略作为补位，确保没有显式角色配置时仍命中更适配的模型。
   for (const preferredModel of STAGE_MODEL_PREFERENCES[stageType] || []) {
     push(preferredModel);
   }
-
-  // 4) 运行时模型作为补位，避免完全丢失用户/环境层的显式配置。
-  push(runtimeModel);
 
   if (role === "ROLE_DESIGN") {
     push(process.env.DESIGN_MODEL || DESIGN_MODEL_PRIMARY);

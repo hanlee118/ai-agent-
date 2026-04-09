@@ -239,7 +239,7 @@ const MODEL_ROUTING_PLACEHOLDERS = new Set(["runtime", "unknown", "default", "au
 const HARD_FALLBACK_MODELS = [
   "openai/gpt-5.4",
   "openai/gpt-5.3-codex",
-  "anthropic/claude-sonnet-4-20250514",
+  "anthropic/claude-sonnet-4-6",
   "minima/MiniMax-M2.7-highspeed"
 ];
 let statusCache: { expiresAt: number; value: OpenClawStatusSummary } | null = null;
@@ -3935,7 +3935,7 @@ function recommendModelsByFamily(currentModel: string) {
   }
 
   if (normalized.includes("claude")) {
-    return ["claude-sonnet-4-20250514", "claude-opus-4-20250514", "claude-3-5-haiku-20241022"];
+    return ["claude-sonnet-4-6", "claude-opus-4-6", "claude-3-5-haiku-20241022"];
   }
 
   if (normalized.includes("gpt") || normalized.includes("o3") || normalized.includes("o4")) {
@@ -4054,8 +4054,8 @@ function listGroupFallbackModels(errorText: string) {
   if (/group\s+claude_code/i.test(errorText)) {
     return dedupeStrings([
       ...parseCsvModels(process.env.OPENCLAW_CLAUDE_CODE_DEV_MODELS),
-      "anthropic/claude-sonnet-4-20250514",
-      "claude-sonnet-4-20250514",
+      "anthropic/claude-sonnet-4-6",
+      "claude-sonnet-4-6",
       "claude-3-5-haiku-20241022",
     ].map((item) => normalizeModelForRouting(item)).filter((item): item is string => Boolean(item)));
   }

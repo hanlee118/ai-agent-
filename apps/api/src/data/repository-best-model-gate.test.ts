@@ -69,9 +69,9 @@ test("best-model gate uses role-specific top model for design roles", () => {
     stageType: "DESIGN",
     currentRole: "ROLE_DESIGN",
     stageExecutions: [
-      { role: "ROLE_PM", model: "anthropic/claude-opus-4-20250514" },
+      { role: "ROLE_PM", model: "anthropic/claude-opus-4-6" },
       { role: "ROLE_PRODUCT", model: "openai/gpt-5.4" },
-      { role: "ROLE_DESIGN", model: "anthropic/claude-opus-4-20250514" }
+      { role: "ROLE_DESIGN", model: "anthropic/claude-opus-4-6" }
     ]
   });
 

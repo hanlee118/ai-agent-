@@ -126,60 +126,60 @@ const TERMINAL_STAGE_ROLE_SET = new Set<string>([
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   INIT: [
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-20250514",
     "openai/gpt-5.3-codex"
   ],
   ANALYSIS: [
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
     "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514",
     "kimi-k2.5"
   ],
   DESIGN: [
-    "anthropic/claude-opus-4-20250514",
-    "anthropic/claude-sonnet-4-20250514",
+    "anthropic/claude-opus-4-6",
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
     "openai/gpt-5.3-codex"
   ],
   DEV: [
     "openai/gpt-5.4",
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514",
     "qwen3-coder-plus"
   ],
   ACCEPT: [
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-20250514",
     "openai/gpt-5.3-codex"
   ]
 };
 
 const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
   ROLE_ANALYST: [
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514"
+    "openai/gpt-5.3-codex"
   ],
   ROLE_PRODUCT: [
+    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514"
+    "openai/gpt-5.3-codex"
   ],
   ROLE_DESIGN: [
-    "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514"
+    "anthropic/claude-opus-4-6",
+    "anthropic/claude-sonnet-4-6",
+    "openai/gpt-5.4"
   ],
   ROLE_ARCH: [
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514"
+    "anthropic/claude-sonnet-4-6",
+    "openai/gpt-5.3-codex"
   ],
   ROLE_DEV: [
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "anthropic/claude-sonnet-4-20250514"
+    "anthropic/claude-sonnet-4-6",
+    "openai/gpt-5.3-codex"
   ]
 };
 

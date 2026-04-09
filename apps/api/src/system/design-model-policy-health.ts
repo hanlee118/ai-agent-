@@ -141,7 +141,7 @@ export async function getDesignModelPolicyHealth() {
     issues.push(`运行时通道不可用：${runtimeChannel.reason || "请检查 /api/system/runtime/config"}`);
   }
   if (!primaryHealthy) {
-    issues.push("主模型 gpt-5.4 当前不可用。");
+    issues.push(`主模型 ${DESIGN_MODEL_PRIMARY} 当前不可用。`);
   }
   if (!fallbackReady) {
     issues.push("备选模型链全部不可用，降级策略无法执行。");
@@ -152,10 +152,10 @@ export async function getDesignModelPolicyHealth() {
 
   const recommendations: string[] = [];
   if (!primaryHealthy) {
-    recommendations.push("优先修复 gpt-5.4 通道；若网关要求 stream 模式，确认网关已放行。");
+    recommendations.push(`优先修复主模型 ${DESIGN_MODEL_PRIMARY} 通道；若网关要求 stream 模式，确认网关已放行。`);
   }
   if (!fallbackReady) {
-    recommendations.push("至少保证 gpt-5.3-codex 或 kimi-k2.5 可用，以满足故障自动降级。");
+    recommendations.push(`至少保证 ${DESIGN_MODEL_FALLBACKS[0] ?? "第一备选模型"} 可用，并准备第二备选模型以满足故障自动降级。`);
   }
   if (!selectedAligned || !fallbackAligned) {
     recommendations.push(`将 ${DESIGN_AGENT_ID} 设置为 selected=${DESIGN_SELECTED_TARGET}，fallback=${DESIGN_FALLBACK_TARGET}。`);
@@ -516,8 +516,8 @@ function normalizeModel(value: string | null | undefined) {
 
 function normalizeProbeModel(model: string) {
   const normalized = String(model ?? "").trim();
-  if (normalized.startsWith("openai/")) {
-    return normalized.slice("openai/".length);
+  if (normalized.includes("/")) {
+    return normalized.slice(normalized.indexOf("/") + 1);
   }
   return normalized;
 }

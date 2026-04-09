@@ -22,7 +22,7 @@ test("design stage uses terminal agent with strongest design models", () => {
   assert.equal(strategy.skillProtocol.length, 3);
   assert.equal(strategy.memoryEnabled, true);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels.includes("anthropic/claude-opus-4-20250514"), true);
+  assert.equal(strategy.preferredModels.includes("anthropic/claude-opus-4-6"), true);
   if (typeof prev === "undefined") {
     delete process.env.DESIGN_STITCH_MODE;
   } else {
@@ -37,8 +37,8 @@ test("analysis stage uses terminal execution for analyst with strongest analysis
   assert.equal(strategy.allowDirectModelFallback, false);
   assert.deepEqual(strategy.requiredSkills, []);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels[0], "openai/gpt-5.4");
-  assert.equal(strategy.preferredModels[1], "openai/gpt-5.3-codex");
+  assert.equal(strategy.preferredModels[0], "anthropic/claude-sonnet-4-6");
+  assert.equal(strategy.preferredModels[1], "openai/gpt-5.4");
 });
 
 test("pm still stays on direct model execution during analysis stage", () => {
