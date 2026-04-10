@@ -7,20 +7,27 @@ import {
   isDesignModelPreferred
 } from "./design-model-policy.js";
 
-test("design model policy prefers claude opus first", () => {
-  assert.equal(DESIGN_MODEL_PRIMARY, "anthropic/claude-opus-4-6");
-  assert.equal(DESIGN_MODEL_FALLBACKS[0], "anthropic/claude-sonnet-4-6");
-  assert.equal(DESIGN_MODEL_FALLBACKS.includes("openai/gpt-5.4"), true);
+test("design model policy prefers gpt chain first", () => {
+  assert.equal(DESIGN_MODEL_PRIMARY, "openai/gpt-5.4");
+  assert.equal(DESIGN_MODEL_FALLBACKS[0], "openai/gpt-5.3-codex");
+  assert.equal(DESIGN_MODEL_FALLBACKS.includes("qwen3-max-2026-01-23"), true);
+  assert.equal(DESIGN_MODEL_FALLBACKS.includes("qwen3.5-plus"), true);
+  assert.equal(DESIGN_MODEL_FALLBACKS.includes("qwen3-coder-plus"), true);
+  assert.equal(DESIGN_MODEL_FALLBACKS.includes("kimi-k2.5"), true);
+  assert.equal(DESIGN_MODEL_FALLBACKS.includes("minima/MiniMax-M2.7-highspeed"), true);
 });
 
-test("design model policy chain excludes weak legacy design fallbacks", () => {
+test("design model policy chain exposes expanded candidates for design fallback", () => {
   const joined = DESIGN_MODEL_POLICY_CHAIN.join(" ");
-  assert.equal(/kimi-k2\.5/i.test(joined), false);
-  assert.equal(/minimax|minimax-m2\.7-highspeed/i.test(joined), false);
+  assert.equal(/kimi-k2\.5/i.test(joined), true);
+  assert.equal(/minimax|minimax-m2\.7-highspeed/i.test(joined), true);
+  assert.equal(/openai\/gpt-5\.4/i.test(joined), true);
+  assert.equal(/openai\/gpt-5\.3-codex/i.test(joined), true);
 });
 
 test("design preferred helper recognizes primary model", () => {
-  assert.equal(isDesignModelPreferred("anthropic/claude-opus-4-6"), true);
-  assert.equal(isDesignModelPreferred("claude-opus-4-6"), true);
-  assert.equal(isDesignModelPreferred("openai/gpt-5.4"), false);
+  assert.equal(isDesignModelPreferred("openai/gpt-5.4"), true);
+  assert.equal(isDesignModelPreferred("gpt-5.4"), true);
+  assert.equal(isDesignModelPreferred("qwen3-max-2026-01-23"), false);
+  assert.equal(isDesignModelPreferred("qwen3-coder-plus"), false);
 });

@@ -9,6 +9,7 @@ const ISSUE_FIRST_GITLAB_PROJECT = String(
 ).trim();
 const ISSUE_FIRST_GITLAB_TOKEN = String(process.env.GITLAB_TOKEN || "").trim();
 const ISSUE_FIRST_LOCAL_ENFORCED = process.env.PROJECT_ISSUE_FIRST_LOCAL_ENFORCED !== "false";
+const DIRECT_PROJECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
 
 function isMissingGitLabSyncBindingTableError(error: unknown) {
   if (!error || typeof error !== "object") {
@@ -49,6 +50,13 @@ export async function ensureProjectIssueFirst(input: {
   const localIssueReady = Boolean(localIssue?.id && localIssue?.status === "confirmed");
 
   if (ISSUE_FIRST_LOCAL_ENFORCED && !localIssueReady) {
+    if (DIRECT_PROJECT_CREATE_ENABLED) {
+      return {
+        ok: true,
+        enforced: false,
+        reason: "direct_project_creation_enabled_without_local_issue"
+      } as const;
+    }
     return {
       ok: false,
       enforced: true,

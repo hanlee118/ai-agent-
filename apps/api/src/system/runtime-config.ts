@@ -9,6 +9,7 @@ import type {
 import { prisma } from "../db.js";
 import { decryptSecret, encryptSecret } from "../security/secret-store.js";
 import { URL } from "node:url";
+import { buildOpenAiCompatibleHeaders } from "../utils/openai-compatible-headers.js";
 
 const SYSTEM_CONFIG_ID = "default";
 
@@ -228,26 +229,28 @@ async function toRuntimeStatus(config: SystemConfigRecord): Promise<RuntimeStatu
 
 async function probeModelEndpoint(config: SystemConfigRecord) {
   const apiKey = await decryptSecret(config.apiKey);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const apiBaseUrl = sanitizeUrl(config.apiBaseUrl);
+  const modelName = String(config.modelName ?? "").trim();
 
-  try {
-    const response = await fetch(buildModelsUrl(config.apiBaseUrl), {
-      method: "GET",
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${apiKey}`
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`模型服务返回 ${response.status}，请检查地址、密钥和网关配置。`);
-    }
-
-    await response.text();
-  } finally {
-    clearTimeout(timeout);
+  const modelsProbe = await probeModelsEndpoint(apiBaseUrl, apiKey);
+  if (modelsProbe.ok) {
+    return;
   }
+
+  // 某些 OpenAI 兼容网关不提供 /models，改用最小 chat/completions 探针兜底。
+  if ((modelsProbe.reason === "network" || modelsProbe.reason === "unsupported") && modelName) {
+    const chatProbe = await probeChatCompletionsEndpoint({
+      apiBaseUrl,
+      apiKey,
+      modelName
+    });
+    if (chatProbe.ok) {
+      return;
+    }
+    throw new Error(chatProbe.error);
+  }
+
+  throw new Error(modelsProbe.error);
 }
 
 function buildModelsUrl(apiBaseUrl: string) {
@@ -256,6 +259,217 @@ function buildModelsUrl(apiBaseUrl: string) {
     throw new Error("API Base URL 不能为空");
   }
   return `${sanitizedBaseUrl}/models`;
+}
+
+function buildModelsProbeUrls(apiBaseUrl: string) {
+  const sanitizedBaseUrl = sanitizeUrl(apiBaseUrl);
+  if (!sanitizedBaseUrl) {
+    throw new Error("API Base URL 不能为空");
+  }
+  const candidates = [buildModelsUrl(sanitizedBaseUrl)];
+  if (!/\/v\d+$/i.test(sanitizedBaseUrl)) {
+    candidates.push(`${sanitizedBaseUrl}/v1/models`);
+  }
+  return [...new Set(candidates)];
+}
+
+function buildChatCompletionsUrl(apiBaseUrl: string) {
+  const sanitizedBaseUrl = sanitizeUrl(apiBaseUrl);
+  if (!sanitizedBaseUrl) {
+    throw new Error("API Base URL 不能为空");
+  }
+  if (/\/chat\/completions$/i.test(sanitizedBaseUrl)) {
+    return sanitizedBaseUrl;
+  }
+  return `${sanitizedBaseUrl}/chat/completions`;
+}
+
+function normalizeProbeModelName(name: string) {
+  const normalized = String(name ?? "").trim();
+  if (normalized.startsWith("openai/")) {
+    return normalized.slice("openai/".length);
+  }
+  return normalized;
+}
+
+function requiresStreamProbe(model: string) {
+  const normalized = String(model ?? "").trim().toLowerCase();
+  return normalized.startsWith("openai/gpt-5.4")
+    || normalized.startsWith("gpt-5.4")
+    || normalized.startsWith("openai/gpt-5.3-codex")
+    || normalized.startsWith("gpt-5.3-codex");
+}
+
+async function readProbeError(response: Response) {
+  const raw = await response.text();
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: string };
+      message?: string;
+    };
+    return String(parsed.error?.message ?? parsed.message ?? raw).trim();
+  } catch {
+    return String(raw).trim();
+  }
+}
+
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`请求超时（>${timeoutMs}ms）`);
+    }
+    if (error instanceof Error) {
+      throw new Error(error.message || "网络请求失败");
+    }
+    throw new Error("网络请求失败");
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function probeModelsEndpoint(apiBaseUrl: string, apiKey: string) {
+  const urls = buildModelsProbeUrls(apiBaseUrl);
+  const retryDelays = [0, 400, 900];
+  let lastNetworkError = "";
+  let unsupported = false;
+
+  for (const url of urls) {
+    for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+      if (attempt > 0) {
+        await sleep(retryDelays[attempt]);
+      }
+      try {
+        const response = await fetchWithTimeout(url, {
+          method: "GET",
+          headers: buildOpenAiCompatibleHeaders({
+            apiBaseUrl,
+            apiKey
+          })
+        }, 10_000);
+
+        if (response.ok) {
+          await response.text();
+          return { ok: true as const, reason: "ok" as const, error: "" };
+        }
+
+        const message = await readProbeError(response);
+        if (response.status === 401 || response.status === 403) {
+          return {
+            ok: false as const,
+            reason: "auth" as const,
+            error: `模型服务鉴权失败（${response.status}）：${message || "请检查 API Key 与网关权限"}`
+          };
+        }
+        if (response.status === 404 || response.status === 405 || response.status === 501) {
+          unsupported = true;
+          continue;
+        }
+        return {
+          ok: false as const,
+          reason: "upstream" as const,
+          error: `模型服务返回 ${response.status}：${message || "请检查地址、密钥和网关配置"}`
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lastNetworkError = message || "网络请求失败";
+      }
+    }
+  }
+
+  if (lastNetworkError) {
+    return {
+      ok: false as const,
+      reason: "network" as const,
+      error: `模型服务连通性检查失败：${lastNetworkError}`
+    };
+  }
+
+  if (unsupported) {
+    return {
+      ok: false as const,
+      reason: "unsupported" as const,
+      error: "当前网关不支持 /models 探针，已尝试候选地址。"
+    };
+  }
+
+  return {
+    ok: false as const,
+    reason: "unknown" as const,
+    error: "模型服务校验失败，请检查网关配置。"
+  };
+}
+
+async function probeChatCompletionsEndpoint(input: {
+  apiBaseUrl: string;
+  apiKey: string;
+  modelName: string;
+}) {
+  const endpoint = buildChatCompletionsUrl(input.apiBaseUrl);
+  const request = async (stream: boolean) => {
+    const response = await fetchWithTimeout(endpoint, {
+      method: "POST",
+      headers: buildOpenAiCompatibleHeaders({
+        apiBaseUrl: input.apiBaseUrl,
+        apiKey: input.apiKey,
+        json: true
+      }),
+      body: JSON.stringify({
+        model: normalizeProbeModelName(input.modelName),
+        temperature: 0,
+        max_tokens: 16,
+        stream,
+        messages: [{ role: "user", content: "Reply with OK only." }]
+      })
+    }, 12_000);
+    return response;
+  };
+
+  try {
+    let stream = requiresStreamProbe(input.modelName);
+    let response = await request(stream);
+    if (!response.ok) {
+      const message = await readProbeError(response);
+      if (!stream && /stream must be set to true/i.test(message)) {
+        stream = true;
+        response = await request(stream);
+      } else if (stream && /stream/i.test(message)) {
+        stream = false;
+        response = await request(stream);
+      } else {
+        return {
+          ok: false as const,
+          error: `模型服务校验失败（chat/completions ${response.status}）：${message || "请求失败"}`
+        };
+      }
+    }
+
+    if (!response.ok) {
+      const message = await readProbeError(response);
+      return {
+        ok: false as const,
+        error: `模型服务校验失败（chat/completions ${response.status}）：${message || "请求失败"}`
+      };
+    }
+
+    await response.text();
+    return { ok: true as const, error: "" };
+  } catch (error) {
+    return {
+      ok: false as const,
+      error: `模型服务连通性检查失败：${error instanceof Error ? error.message : String(error)}`
+    };
+  }
 }
 
 function sanitizeUrl(value: string) {

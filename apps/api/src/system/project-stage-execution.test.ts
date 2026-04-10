@@ -19,15 +19,24 @@ test("design stage uses terminal agent with strongest design models", () => {
   assert.equal(strategy.openClawAgentId, "jeremy");
   assert.equal(strategy.allowDirectModelFallback, false);
   assert.deepEqual(strategy.requiredSkills, ["design-to-code", "frontend-design", "frontend-design-pro"]);
-  assert.equal(strategy.skillProtocol.length, 3);
+  assert.equal(strategy.skillProtocol.length >= 4, true);
   assert.equal(strategy.memoryEnabled, true);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels.includes("anthropic/claude-opus-4-6"), true);
+  assert.equal(strategy.preferredModels[0], "qwen3-max-2026-01-23");
+  assert.equal(strategy.preferredModels[1], "qwen3.5-plus");
   if (typeof prev === "undefined") {
     delete process.env.DESIGN_STITCH_MODE;
   } else {
     process.env.DESIGN_STITCH_MODE = prev;
   }
+});
+
+test("design stage preferred models exclude blocked claude-opus-4-6 route", () => {
+  const strategy = getProjectStageExecutionStrategy("DESIGN", "ROLE_DESIGN");
+  assert.equal(
+    strategy.preferredModels.some((item) => /(^|[/:])claude-opus-4-6($|[\s@])/i.test(item)),
+    false
+  );
 });
 
 test("analysis stage uses terminal execution for analyst with strongest analysis models", () => {
@@ -37,8 +46,8 @@ test("analysis stage uses terminal execution for analyst with strongest analysis
   assert.equal(strategy.allowDirectModelFallback, false);
   assert.deepEqual(strategy.requiredSkills, []);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels[0], "anthropic/claude-sonnet-4-6");
-  assert.equal(strategy.preferredModels[1], "openai/gpt-5.4");
+  assert.equal(strategy.preferredModels[0], "qwen3-max-2026-01-23");
+  assert.equal(strategy.preferredModels[1], "qwen3.5-plus");
 });
 
 test("pm still stays on direct model execution during analysis stage", () => {

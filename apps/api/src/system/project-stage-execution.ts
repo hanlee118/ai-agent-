@@ -5,6 +5,11 @@ import {
   type RoleType,
   type StageType
 } from "@occ/shared";
+import {
+  DESIGN_MODEL_FALLBACKS,
+  DESIGN_MODEL_POLICY_CHAIN,
+  DESIGN_MODEL_PRIMARY
+} from "../agents/design-model-policy.js";
 
 export type ProjectStageExecutionMode = "direct_model" | "terminal_agent";
 export type TerminalSkillEvidenceField =
@@ -126,62 +131,98 @@ const TERMINAL_STAGE_ROLE_SET = new Set<string>([
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   INIT: [
-    "anthropic/claude-sonnet-4-6",
-    "openai/gpt-5.4",
-    "openai/gpt-5.3-codex"
-  ],
-  ANALYSIS: [
-    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
     "openai/gpt-5.3-codex",
-    "kimi-k2.5"
-  ],
-  DESIGN: [
-    "anthropic/claude-opus-4-6",
-    "anthropic/claude-sonnet-4-6",
-    "openai/gpt-5.4",
-    "openai/gpt-5.3-codex"
-  ],
-  DEV: [
-    "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-6",
-    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
     "qwen3-coder-plus"
   ],
-  ACCEPT: [
-    "anthropic/claude-sonnet-4-6",
+  ANALYSIS: [
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex"
+    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "qwen3-coder-plus",
+    "glm-5"
+  ],
+  DESIGN: [
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "qwen3-coder-plus"
+  ],
+  DEV: [
+    "openai/gpt-5.3-codex",
+    "openai/gpt-5.4",
+    "qwen3-coder-plus",
+    "qwen3-coder-next",
+    "qwen3-max-2026-01-23",
+    "glm-5"
+  ],
+  ACCEPT: [
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "glm-5"
   ]
 };
 
 const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
   ROLE_ANALYST: [
-    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex"
+    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "glm-5"
   ],
   ROLE_PRODUCT: [
-    "anthropic/claude-sonnet-4-6",
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex"
+    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "glm-5"
   ],
   ROLE_DESIGN: [
-    "anthropic/claude-opus-4-6",
-    "anthropic/claude-sonnet-4-6",
-    "openai/gpt-5.4"
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex",
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "qwen3-coder-plus"
   ],
   ROLE_ARCH: [
+    "openai/gpt-5.3-codex",
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-6",
-    "openai/gpt-5.3-codex"
+    "qwen3-coder-plus",
+    "qwen3-coder-next",
+    "qwen3-max-2026-01-23"
   ],
   ROLE_DEV: [
+    "openai/gpt-5.3-codex",
     "openai/gpt-5.4",
-    "anthropic/claude-sonnet-4-6",
-    "openai/gpt-5.3-codex"
+    "qwen3-coder-plus",
+    "qwen3-coder-next",
+    "qwen3-max-2026-01-23"
   ]
 };
+
+const DESIGN_STRONG_MODEL_FALLBACKS = [
+  "openai/gpt-5.4",
+  "openai/gpt-5.3-codex",
+  "qwen3-max-2026-01-23",
+  "qwen3.5-plus",
+  "qwen3-coder-plus",
+  "glm-5"
+];
+
+function isDesignDisallowedModel(model: string) {
+  const normalized = String(model || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  return /(^|[/:])claude-opus-4-6($|[\s@])/.test(normalized);
+}
 
 function dedupe(values: Array<string | null | undefined>) {
   const seen = new Set<string>();
@@ -215,6 +256,17 @@ function sanitizeTerminalSegment(input: string, maxLength: number) {
 }
 
 export function getPreferredStageModels(stageType: StageType, role: RoleType) {
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
+    return dedupe([
+      DESIGN_MODEL_PRIMARY,
+      ...DESIGN_MODEL_POLICY_CHAIN,
+      ...DESIGN_MODEL_FALLBACKS,
+      ...(ROLE_MODEL_OVERRIDES[role] ?? []),
+      ...(STAGE_MODEL_PREFERENCES.DESIGN ?? []),
+      ...DESIGN_STRONG_MODEL_FALLBACKS
+    ]).filter((model) => !isDesignDisallowedModel(model));
+  }
+
   return dedupe([
     ...(ROLE_MODEL_OVERRIDES[role] ?? []),
     ...(STAGE_MODEL_PREFERENCES[stageType] ?? [])
@@ -264,7 +316,8 @@ function getStageSkillProtocol(stageType: StageType, role: RoleType) {
     const protocol = [
       "先读取全部 requiredSkills，再开始设计分析与输出",
       "先用技能完成风格探索、结构拆解与可落地界面方案，再产出最终结论",
-      "如果任一 requiredSkills 缺失，必须显式报告缺失项，不允许退化为普通模型模板直答"
+      "如果任一 requiredSkills 缺失，必须显式报告缺失项，不允许退化为普通模型模板直答",
+      "若 stitch 调用失败或受限，必须继续按 preferredModels 顺序降级到可用设计模型完成方案，不允许伪造 stitch 结果或切到弱模型链"
     ];
 
     if (stitchMode !== "off") {

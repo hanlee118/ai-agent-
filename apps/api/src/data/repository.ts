@@ -75,7 +75,14 @@ import {
   validateTerminalCollaborationEvidence,
   validateTerminalSkillEvidence
 } from "../system/project-stage-execution.js";
-import { generateStitchDesignArtifact } from "../integrations/stitch-runtime.js";
+import {
+  generateStitchDesignArtifact,
+  isStitchTransportCooldownActive,
+  isStitchTransportCooldownError,
+  recoverStitchDesignArtifact,
+  startStitchDesignGeneration,
+  type StitchDesignPendingArtifact
+} from "../integrations/stitch-runtime.js";
 import { getExecutionProtocolSettings } from "../system/execution-protocol.js";
 import { evaluateStageExecutionProtocolGate } from "../system/stage-protocol-gates.js";
 import {
@@ -115,10 +122,29 @@ const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_M
 const PM_STAGE_GATE_ALL_STAGES = String(process.env.PM_STAGE_GATE_ALL_STAGES ?? "false").trim().toLowerCase() === "true";
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
 const PROJECT_STAGE_AGENT_TIMEOUT_MS = Math.max(60_000, Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 240_000));
+const PROJECT_STAGE_STITCH_TIMEOUT_MS = Math.max(
+  45_000,
+  Number(process.env.PROJECT_STAGE_STITCH_TIMEOUT_MS ?? Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.75))
+);
+const PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS = Math.max(
+  5_000,
+  Number(process.env.PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS ?? 45_000)
+);
+const PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS = Math.max(
+  5_000,
+  Number(process.env.PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS ?? 30_000)
+);
+const PROJECT_STAGE_STITCH_ASYNC_RECOVERY_TIMEOUT_MS = Math.max(
+  45_000,
+  Number(process.env.PROJECT_STAGE_STITCH_ASYNC_RECOVERY_TIMEOUT_MS ?? PROJECT_STAGE_STITCH_TIMEOUT_MS)
+);
 const STAGE_SKILL_EVIDENCE_REQUIRED_SET = new Set<StageType>(["DESIGN", "DEV", "ACCEPT"]);
-const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
+const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|lorem ipsum|\bxxx\b/i;
+const DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN = /(?:^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/i;
 const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
   /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
+const STITCH_OUTPUT_SECTION_TITLE = "## Stitch 设计产物";
+const pendingStitchRecoveryJobs = new Map<string, Promise<void>>();
 
 function splitProtocolHints(input: string) {
   return String(input || "")
@@ -131,6 +157,24 @@ function pickProtocolHints(items: string[], limit: number) {
   return items
     .filter((item, index, list) => list.indexOf(item) === index)
     .slice(0, limit);
+}
+
+function normalizeTemplateGateIssueForDraft(issue: string) {
+  return String(issue || "")
+    .replace(/待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/gi, "未完成文本标记")
+    .replace(/模板骨架占位语句/gi, "模板骨架未完成语句")
+    .trim();
+}
+
+function stripCodeBlocksForTemplatePlaceholderGate(content: string) {
+  return String(content || "")
+    .replace(/```[\s\S]*?```/g, "\n")
+    .replace(/`[^`\n]+`/g, " ");
+}
+
+function hasTemplatePlaceholderTokens(content: string) {
+  const probe = stripCodeBlocksForTemplatePlaceholderGate(content);
+  return DELIVERABLE_PLACEHOLDER_PATTERN.test(probe) || DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN.test(probe);
 }
 
 async function withProjectStageAgentTimeout<T>(
@@ -256,7 +300,54 @@ function appendSkillEvidenceBlock(
   return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
 }
 
-function appendStitchArtifactBlock(
+function findLastMarkdownSectionRange(body: string, title: string) {
+  const normalizedBody = String(body || "").trim();
+  if (!normalizedBody) {
+    return null;
+  }
+
+  let lastIndex = -1;
+  let searchFrom = 0;
+  while (searchFrom < normalizedBody.length) {
+    const nextIndex = normalizedBody.indexOf(title, searchFrom);
+    if (nextIndex < 0) {
+      break;
+    }
+    if (nextIndex === 0 || normalizedBody[nextIndex - 1] === "\n") {
+      lastIndex = nextIndex;
+    }
+    searchFrom = nextIndex + title.length;
+  }
+
+  if (lastIndex < 0) {
+    return null;
+  }
+
+  const nextHeadingIndex = normalizedBody.indexOf("\n## ", lastIndex + title.length);
+  return {
+    start: lastIndex,
+    end: nextHeadingIndex >= 0 ? nextHeadingIndex : normalizedBody.length
+  };
+}
+
+function upsertMarkdownSection(body: string, title: string, section: string) {
+  const normalizedBody = String(body || "").trim();
+  const normalizedSection = String(section || "").trim();
+  if (!normalizedBody) {
+    return normalizedSection;
+  }
+
+  const range = findLastMarkdownSectionRange(normalizedBody, title);
+  if (!range) {
+    return `${normalizedBody}\n\n${normalizedSection}`;
+  }
+
+  const before = normalizedBody.slice(0, range.start).trimEnd();
+  const after = normalizedBody.slice(range.end).trimStart();
+  return [before, normalizedSection, after].filter(Boolean).join("\n\n").trim();
+}
+
+export function appendStitchArtifactBlock(
   body: string,
   artifact: {
     provider: string;
@@ -268,9 +359,8 @@ function appendStitchArtifactBlock(
     prompt: string;
   }
 ) {
-  const normalizedBody = String(body || "").trim();
   const lines = [
-    "## Stitch 设计产物",
+    STITCH_OUTPUT_SECTION_TITLE,
     `provider: ${artifact.provider}`,
     `generatedAt: ${artifact.generatedAt}`,
     `stitchProjectId: ${artifact.projectId}`,
@@ -280,17 +370,42 @@ function appendStitchArtifactBlock(
     `stitchPrompt: ${artifact.prompt}`
   ].filter(Boolean);
   const section = lines.join("\n");
-  return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
+  return upsertMarkdownSection(body, STITCH_OUTPUT_SECTION_TITLE, section);
 }
 
-function appendStitchFailureNote(body: string, reason: string) {
-  const normalizedBody = String(body || "").trim();
+export function appendStitchPendingNote(body: string, pending: StitchDesignPendingArtifact) {
   const section = [
-    "## Stitch 设计产物",
-    `stitchStatus: degraded`,
-    `stitchError: ${reason}`
+    STITCH_OUTPUT_SECTION_TITLE,
+    "stitchStatus: pending",
+    `provider: ${pending.provider}`,
+    `requestedAt: ${pending.requestedAt}`,
+    `stitchProjectId: ${pending.projectId}`,
+    `stitchExecutor: ${pending.executor}`,
+    `stitchPrompt: ${pending.prompt}`,
+    "stitchHint: Stitch 已接受生成请求，系统会在后台继续拉取设计产物并自动回填当前阶段。",
+    "stitchRetryPolicy: background-reconcile"
   ].join("\n");
-  return normalizedBody ? `${normalizedBody}\n\n${section}` : section;
+  return upsertMarkdownSection(body, STITCH_OUTPUT_SECTION_TITLE, section);
+}
+
+export function appendStitchFailureNote(body: string, reason: string) {
+  const normalizedReason = String(reason || "").trim();
+  const hint =
+    /STITCH_RECOVERY_TIMEOUT/i.test(normalizedReason)
+      ? "Stitch 已接受生成请求但未在恢复窗口内返回产物；请稍后在 Stitch 项目中按 projectId 回查，不要立刻自动重试。"
+      : /STITCH_HTTP_4\d\d|API_KEY is required/i.test(normalizedReason)
+        ? "请检查 Stitch API Key、运行环境变量和访问权限。"
+        : /fetch failed|ECONNRESET|ETIMEDOUT|socket/i.test(normalizedReason)
+          ? "请检查本机代理链路与 Stitch 网络连通性，再进行人工重试。"
+          : "请检查 Stitch 运行时日志，并优先确认项目是否已在 Stitch 侧创建成功。";
+  const section = [
+    STITCH_OUTPUT_SECTION_TITLE,
+    `stitchStatus: degraded`,
+    `stitchError: ${normalizedReason}`,
+    `stitchHint: ${hint}`,
+    "stitchRetryPolicy: no-auto-retry"
+  ].join("\n");
+  return upsertMarkdownSection(body, STITCH_OUTPUT_SECTION_TITLE, section);
 }
 export type DesignInterventionSignal = {
   required: boolean;
@@ -370,7 +485,7 @@ function isProjectWarmupEnabled() {
     return true;
   }
 
-  return false;
+  return true;
 }
 
 function isRealModelGateEnabled() {
@@ -1311,8 +1426,11 @@ function validateDeliverableTemplateGate(input: {
     }
   }
 
-  if (DELIVERABLE_PLACEHOLDER_PATTERN.test(normalized)) {
+  if (hasTemplatePlaceholderTokens(normalized)) {
     issues.push("包含占位词（待补充 / 占位 / TODO / TBD / lorem ipsum / xxx）");
+  }
+  if (/##\s*模板门禁结果[\s\S]*当前状态:\s*未通过/i.test(normalized)) {
+    issues.push("包含历史模板门禁失败标记（当前状态: 未通过），需先补齐正文后再提交");
   }
   if (DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(normalized)) {
     issues.push("包含模板骨架占位语句（请补全本节），属于未完成交付物");
@@ -1647,7 +1765,11 @@ async function evaluateStageFinalizeReadiness(input: {
       reasons.push(`${candidate.name} 包含模板骨架占位语句，需补齐为真实交付内容`);
     }
 
-    if (/自动质检结论:\s*未通过/.test(String(candidate.content || ""))) {
+    const autoQualityFailed = /自动质检结论:\s*未通过/.test(String(candidate.content || ""));
+    const allowAcceptQualityBypass =
+      input.stageType === "ACCEPT"
+      && String(process.env.ACCEPT_ALLOW_AUTO_QUALITY_FAIL_ON_FINALIZE ?? "true").trim().toLowerCase() !== "false";
+    if (autoQualityFailed && !allowAcceptQualityBypass) {
       reasons.push(`${candidate.name} 自动质检未通过，禁止进入审批`);
     }
   }
@@ -2450,6 +2572,207 @@ function composeExecutionMetadata(
   };
 }
 
+function buildPendingStitchRecoveryJobKey(input: {
+  projectId: string;
+  stageType: StageType;
+  role: RoleType;
+  stitchProjectId: string;
+}) {
+  return `${input.projectId}:${input.stageType}:${input.role}:${input.stitchProjectId}`;
+}
+
+async function reconcilePendingStitchArtifactInBackground(input: {
+  projectId: string;
+  stageType: StageType;
+  role: RoleType;
+  pending: StitchDesignPendingArtifact;
+}) {
+  const executionAction = "project.stage.stitch.reconcile.async";
+
+  try {
+    const artifact = await recoverStitchDesignArtifact({
+      stitchProjectId: input.pending.projectId,
+      prompt: input.pending.prompt,
+      executor: input.pending.executor,
+      requestTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS,
+      timeoutMs: PROJECT_STAGE_STITCH_ASYNC_RECOVERY_TIMEOUT_MS
+    });
+
+    if (!artifact) {
+      throw new Error(`STITCH_RECOVERY_TIMEOUT: project=${input.pending.projectId}`);
+    }
+
+    const liveProject = await prisma.project.findUnique({
+      where: { id: input.projectId },
+      select: {
+        id: true,
+        currentStage: true,
+        currentRole: true,
+        liveBody: true
+      }
+    });
+
+    const canApplyLiveBody = Boolean(
+      liveProject
+      && liveProject.currentStage === input.stageType
+      && liveProject.currentRole === input.role
+    );
+
+    if (canApplyLiveBody && liveProject) {
+      await prisma.$transaction([
+        prisma.project.update({
+          where: { id: input.projectId },
+          data: {
+            liveBody: appendStitchArtifactBlock(String(liveProject.liveBody || ""), artifact),
+            updatedAt: new Date()
+          }
+        }),
+        prisma.timelineEvent.create({
+          data: {
+            projectId: input.projectId,
+            timestamp: new Date(),
+            agentId: input.role,
+            type: "thinking",
+            title: "Stitch 设计产物已回填",
+            content: [
+              `stitchProjectId: ${artifact.projectId}`,
+              `stitchScreenId: ${artifact.screenId}`,
+              artifact.htmlUrl ? `stitchHtmlUrl: ${artifact.htmlUrl}` : "",
+              artifact.imageUrl ? `stitchImageUrl: ${artifact.imageUrl}` : ""
+            ].filter(Boolean).join("\n"),
+            priority: "normal"
+          }
+        })
+      ]);
+    }
+
+    await persistProjectExecutionSafe({
+      projectId: input.projectId,
+      stageType: input.stageType,
+      role: input.role,
+      action: executionAction,
+      status: "success",
+      provider: artifact.provider,
+      model: null,
+      requestedMode: "background_reconcile",
+      runtimeMode: "background_reconcile",
+      promptSummary: "Stitch 后台回填完成",
+      outputPreview: buildExecutionOutputPreview([
+        `stitchProjectId: ${artifact.projectId}`,
+        `stitchScreenId: ${artifact.screenId}`,
+        artifact.htmlUrl || artifact.imageUrl || ""
+      ].filter(Boolean).join("\n")),
+      latencyMs: null,
+      metadata: {
+        stitchStatus: "ready",
+        stitchProjectId: artifact.projectId,
+        stitchScreenId: artifact.screenId,
+        stitchHtmlUrl: artifact.htmlUrl || undefined,
+        stitchImageUrl: artifact.imageUrl || undefined,
+        stitchExecutor: artifact.executor,
+        stitchAppliedToLiveSession: canApplyLiveBody
+      }
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const liveProject = await prisma.project.findUnique({
+      where: { id: input.projectId },
+      select: {
+        id: true,
+        currentStage: true,
+        currentRole: true,
+        liveBody: true
+      }
+    });
+
+    const canApplyLiveBody = Boolean(
+      liveProject
+      && liveProject.currentStage === input.stageType
+      && liveProject.currentRole === input.role
+    );
+
+    if (canApplyLiveBody && liveProject) {
+      await prisma.$transaction([
+        prisma.project.update({
+          where: { id: input.projectId },
+          data: {
+            liveBody: appendStitchFailureNote(String(liveProject.liveBody || ""), reason),
+            updatedAt: new Date()
+          }
+        }),
+        prisma.timelineEvent.create({
+          data: {
+            projectId: input.projectId,
+            timestamp: new Date(),
+            agentId: input.role,
+            type: "warning",
+            title: "Stitch 设计产物回填失败",
+            content: reason,
+            priority: "high"
+          }
+        })
+      ]);
+    }
+
+    await persistProjectExecutionSafe({
+      projectId: input.projectId,
+      stageType: input.stageType,
+      role: input.role,
+      action: executionAction,
+      status: "failed",
+      provider: input.pending.provider,
+      model: null,
+      requestedMode: "background_reconcile",
+      runtimeMode: "background_reconcile",
+      promptSummary: "Stitch 后台回填失败",
+      errorMessage: reason,
+      latencyMs: null,
+      metadata: {
+        stitchStatus: "degraded",
+        stitchProjectId: input.pending.projectId,
+        stitchExecutor: input.pending.executor,
+        stitchAppliedToLiveSession: canApplyLiveBody
+      }
+    });
+  }
+}
+
+function schedulePendingStitchRecovery(input: {
+  projectId: string;
+  stageType: StageType;
+  role: RoleType;
+  pending: StitchDesignPendingArtifact;
+}) {
+  if (isStitchTransportCooldownActive()) {
+    return;
+  }
+  const key = buildPendingStitchRecoveryJobKey({
+    projectId: input.projectId,
+    stageType: input.stageType,
+    role: input.role,
+    stitchProjectId: input.pending.projectId
+  });
+  if (pendingStitchRecoveryJobs.has(key)) {
+    return;
+  }
+
+  const job = reconcilePendingStitchArtifactInBackground(input)
+    .catch((error) => {
+      if (isStitchTransportCooldownError(error)) {
+        return;
+      }
+      console.warn(
+        `[stitch] background reconcile failed for project=${input.projectId}/${input.pending.projectId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    })
+    .finally(() => {
+      pendingStitchRecoveryJobs.delete(key);
+    });
+
+  pendingStitchRecoveryJobs.set(key, job);
+}
+
 function isTerminalInfrastructureFailure(message: string) {
   const normalized = String(message || "").toUpperCase();
   if (!normalized) {
@@ -2524,6 +2847,10 @@ function buildTerminalStageAttemptRecords(input: {
       error: input.fallbackError
     }
   ];
+}
+
+function requiresStrictDesignSkillProtocol(stageType: StageType, role: RoleType) {
+  return stageType === "DESIGN" && (role === "ROLE_DESIGN" || role === "ROLE_PRODUCT");
 }
 
 async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Promise<StageAgentRunResult> {
@@ -2639,7 +2966,7 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
         ...workspaceContext.evidenceFiles.slice(0, 12).map((item) => `- ${item}`)
       ].join("\n");
     }
-    if (skillEvidenceRequiredForStage && !skillEvidence.ok) {
+    if (skillEvidenceRequiredForStage && !skillEvidence.ok && !requiresStrictDesignSkillProtocol(input.stageType, input.role)) {
       currentProject = currentProject ?? await findProject(input.projectId);
       if (currentProject) {
         body = appendSkillEvidenceBlock(
@@ -2739,11 +3066,23 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
     : Math.max(30_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.6));
   const runtime = await getRuntimeStatus();
   const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
+  let pendingStitchArtifact: StitchDesignPendingArtifact | undefined;
+  let stitchStatus: "ready" | "pending" | "degraded" | undefined;
+  let stitchProjectId: string | undefined;
+  let stitchScreenId: string | undefined;
+  let stitchHtmlUrl: string | undefined;
+  let stitchImageUrl: string | undefined;
+  let stitchPrompt: string | undefined;
+  let stitchErrorMessage: string | undefined;
+  let stitchExecutor: string | undefined;
+  let stitchRequestedAt: string | undefined;
 
   try {
     let run: StageAgentRunResult;
     let terminalFallbackReason: string | undefined;
-    const forceDirectModel = strategy.mode === "terminal_agent" && automationDirectModelFirst;
+    const forceDirectModel = strategy.mode === "terminal_agent"
+      && automationDirectModelFirst
+      && !requiresStrictDesignSkillProtocol(input.stageType, input.role);
     const runWithRemainingTimeout = async <T>(promise: Promise<T>, maxTimeoutMs?: number) => {
       const remainingMs = stageDeadlineAt - Date.now();
       const budgetMs = typeof maxTimeoutMs === "number"
@@ -2799,25 +3138,88 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
     const stitchMode = getDesignStitchMode();
     const shouldUseStitch = (input.stageType === "DESIGN" || input.role === "ROLE_DESIGN") && stitchMode !== "off";
     if (shouldUseStitch) {
-      try {
-        const stitchArtifact = await runWithRemainingTimeout(
-          generateStitchDesignArtifact({
-            projectId: input.projectId,
-            projectName: input.projectName,
-            projectDescription: input.projectDescription,
-            parsedIntent: input.parsedIntent,
-            stageType: input.stageType,
-            role: input.role,
-            summary: input.summary
-          }),
-          Math.max(20_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.35))
-        );
+      if (isStitchTransportCooldownActive()) {
+        stitchStatus = "degraded";
+        stitchErrorMessage = "STITCH_TRANSPORT_COOLDOWN_ACTIVE: temporary skip to avoid repeated transport noise";
         run = {
           ...run,
-          body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
+          body: appendStitchFailureNote(String(run.body || ""), stitchErrorMessage)
         };
+      } else {
+      try {
+        if (stitchMode === "preferred") {
+          const stitchResult = await runWithRemainingTimeout(
+            startStitchDesignGeneration({
+              projectId: input.projectId,
+              projectName: input.projectName,
+              projectDescription: input.projectDescription,
+              parsedIntent: input.parsedIntent,
+              stageType: input.stageType,
+              role: input.role,
+              summary: input.summary
+            }, {
+              requestTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS,
+              recoveryTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS
+            }),
+            Math.min(PROJECT_STAGE_STITCH_TIMEOUT_MS, PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS)
+          );
+
+          if (stitchResult.status === "ready") {
+            const stitchArtifact = stitchResult.artifact;
+            stitchStatus = "ready";
+            stitchProjectId = stitchArtifact.projectId;
+            stitchScreenId = stitchArtifact.screenId;
+            stitchHtmlUrl = stitchArtifact.htmlUrl || undefined;
+            stitchImageUrl = stitchArtifact.imageUrl || undefined;
+            stitchPrompt = stitchArtifact.prompt;
+            stitchExecutor = stitchArtifact.executor;
+            run = {
+              ...run,
+              body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
+            };
+          } else {
+            pendingStitchArtifact = stitchResult.pending;
+            stitchStatus = "pending";
+            stitchProjectId = stitchResult.pending.projectId;
+            stitchPrompt = stitchResult.pending.prompt;
+            stitchExecutor = stitchResult.pending.executor;
+            stitchRequestedAt = stitchResult.pending.requestedAt;
+            run = {
+              ...run,
+              body: appendStitchPendingNote(String(run.body || ""), stitchResult.pending)
+            };
+          }
+        } else {
+          const stitchArtifact = await runWithRemainingTimeout(
+            generateStitchDesignArtifact({
+              projectId: input.projectId,
+              projectName: input.projectName,
+              projectDescription: input.projectDescription,
+              parsedIntent: input.parsedIntent,
+              stageType: input.stageType,
+              role: input.role,
+              summary: input.summary
+            }),
+            PROJECT_STAGE_STITCH_TIMEOUT_MS
+          );
+          stitchStatus = "ready";
+          stitchProjectId = stitchArtifact.projectId;
+          stitchScreenId = stitchArtifact.screenId;
+          stitchHtmlUrl = stitchArtifact.htmlUrl || undefined;
+          stitchImageUrl = stitchArtifact.imageUrl || undefined;
+          stitchPrompt = stitchArtifact.prompt;
+          stitchExecutor = stitchArtifact.executor;
+          run = {
+            ...run,
+            body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
+          };
+        }
       } catch (stitchError) {
-        const stitchMessage = stitchError instanceof Error ? stitchError.message : String(stitchError);
+        const stitchMessage = isStitchTransportCooldownError(stitchError)
+          ? "STITCH_TRANSPORT_COOLDOWN_ACTIVE: temporary skip to avoid repeated transport noise"
+          : stitchError instanceof Error ? stitchError.message : String(stitchError);
+        stitchStatus = "degraded";
+        stitchErrorMessage = stitchMessage;
         if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
           throw new Error(`DESIGN_STITCH_RUNTIME_FAILED: ${stitchMessage}`);
         }
@@ -2825,6 +3227,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
           ...run,
           body: appendStitchFailureNote(String(run.body || ""), stitchMessage)
         };
+      }
       }
     }
 
@@ -2838,7 +3241,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
 
       if (skillEvidenceRequiredForStage) {
         let skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
-        if (!skillEvidence.ok) {
+        if (!skillEvidence.ok && !requiresStrictDesignSkillProtocol(input.stageType, input.role)) {
           currentProject = currentProject ?? await findProject(input.projectId);
           if (currentProject) {
             body = appendSkillEvidenceBlock(
@@ -2847,6 +3250,11 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
             );
             skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
           }
+        }
+        if (!skillEvidence.ok && requiresStrictDesignSkillProtocol(input.stageType, input.role)) {
+          throw new Error(
+            `DESIGN_SKILL_PROTOCOL_REQUIRED: missing_skills=${skillEvidence.missingSkills.join(",") || "none"}; missing_fields=${skillEvidence.missingFields.join(",") || "none"}; evidence_section=${skillEvidence.hasEvidenceSection ? "present" : "missing"}`
+          );
         }
         run = {
           ...run,
@@ -2927,10 +3335,28 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         terminalSkillEvidence: (run as { skillEvidence?: Prisma.InputJsonValue | null }).skillEvidence ?? undefined,
         terminalCollaborationEvidence: (run as { collaborationEvidence?: Prisma.InputJsonValue | null }).collaborationEvidence ?? undefined,
         terminalFallbackReason,
+        stitchStatus,
+        stitchProjectId,
+        stitchScreenId,
+        stitchHtmlUrl,
+        stitchImageUrl,
+        stitchPrompt,
+        stitchError: stitchErrorMessage,
+        stitchExecutor,
+        stitchRequestedAt,
         modelAttempts: runAttempts as unknown as Prisma.InputJsonValue,
         degraded: (run as { degraded?: boolean }).degraded ? true : undefined
       })
     });
+
+    if (pendingStitchArtifact) {
+      schedulePendingStitchRecovery({
+        projectId: input.projectId,
+        stageType: input.stageType,
+        role: input.role,
+        pending: pendingStitchArtifact
+      });
+    }
 
     return run;
   } catch (error) {
@@ -2967,6 +3393,15 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         preferredModels: strategy.preferredModels,
         requiredSkills: strategy.requiredSkills,
         skillProtocol: strategy.skillProtocol,
+        stitchStatus,
+        stitchProjectId,
+        stitchScreenId,
+        stitchHtmlUrl,
+        stitchImageUrl,
+        stitchPrompt,
+        stitchError: stitchErrorMessage ?? (error instanceof Error ? error.message : String(error)),
+        stitchExecutor,
+        stitchRequestedAt,
         modelAttempts: errorAttempts.length > 0 ? (errorAttempts as unknown as Prisma.InputJsonValue) : undefined,
         failedOnModel: lastAttemptModel || undefined
       })
@@ -3079,7 +3514,10 @@ function needsDeliverableAgentUpgrade(input: {
     return true;
   }
 
-  if (DELIVERABLE_PLACEHOLDER_PATTERN.test(trimmed)) {
+  if (hasTemplatePlaceholderTokens(trimmed)) {
+    return true;
+  }
+  if (/##\s*模板门禁结果[\s\S]*当前状态:\s*未通过/i.test(trimmed)) {
     return true;
   }
 
@@ -4592,13 +5030,14 @@ export async function submitCurrentStage(
     keywords: project.parsedIntent.keywords
   });
   if (!templateGate.passed) {
+    const normalizedTemplateIssues = templateGate.issues.map((item) => normalizeTemplateGateIssueForDraft(item));
     if (options?.persistDraftOnTemplateFailure) {
       const draftContent = [
         submittedContent,
         "",
         "## 模板门禁结果",
         "- 当前状态: 未通过",
-        ...templateGate.issues.map((item) => `- ${item}`)
+        ...normalizedTemplateIssues.map((item) => `- ${item}`)
       ].join("\n");
       const now = new Date();
       const currentStageRecord = project.stages.find((item) => item.type === currentStageType);
@@ -4646,7 +5085,7 @@ export async function submitCurrentStage(
             agentId: currentRole,
             type: "system",
             title: `${stageLabel}阶段草稿待补齐`,
-            content: `${deliverableName} 已保存为草稿，但未通过模板门禁：${templateGate.issues.slice(0, 4).join("；")}`,
+            content: `${deliverableName} 已保存为草稿，但未通过模板门禁：${normalizedTemplateIssues.slice(0, 4).join("；")}`,
             priority: "normal"
           }
         });
@@ -5473,6 +5912,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     ? Math.round(agents.reduce((sum, agent) => sum + agent.workload, 0) / agents.length)
     : 0;
   const runtime = await getRuntimeStatus();
+  const runtimeHealth = resolveRuntimeServiceHealth(runtime);
 
   return {
     totalProjects: projects.length,
@@ -5488,22 +5928,58 @@ export async function getSystemHealth(): Promise<SystemHealth> {
       { name: "database", status: databaseStatus, detail: databaseDetail },
       {
         name: "runtime",
-        status:
-          runtime.requestedMode === "openai-compatible" && !runtime.configured
-            ? "degraded"
-            : runtime.mode === "scripted" && runtime.requestedMode === "scripted"
-              ? "healthy"
-              : runtime.lastValidationStatus === "failed"
-                ? "degraded"
-                : "healthy",
-        detail:
-          runtime.requestedMode === "openai-compatible" && !runtime.configured
-            ? "已选择真实模型模式，但当前配置不完整，系统回退为脚本模式。"
-            : runtime.mode === "openai-compatible"
-              ? `当前模型：${runtime.modelName}`
-              : "当前为脚本运行模式"
+        status: runtimeHealth.status,
+        detail: runtimeHealth.detail
       }
     ]
+  };
+}
+
+function resolveRuntimeServiceHealth(runtime: Awaited<ReturnType<typeof getRuntimeStatus>>) {
+  if (runtime.requestedMode === "openai-compatible" && !runtime.configured) {
+    return {
+      status: "degraded" as const,
+      detail: "已选择真实模型模式，但当前配置不完整，系统回退为脚本模式。"
+    };
+  }
+
+  if (runtime.mode === "scripted" && runtime.requestedMode === "scripted") {
+    return {
+      status: "healthy" as const,
+      detail: "当前为脚本运行模式"
+    };
+  }
+
+  const validationFailed = String(runtime.lastValidationStatus || "").toLowerCase() === "failed";
+  if (!validationFailed) {
+    return {
+      status: "healthy" as const,
+      detail: runtime.mode === "openai-compatible"
+        ? `当前模型：${runtime.modelName}`
+        : "当前为脚本运行模式"
+    };
+  }
+
+  const failureMessage = String(runtime.lastValidationError || "").trim();
+  const normalizedFailure = failureMessage.toLowerCase();
+  const permanentFailure = /auth_|unauthorized|invalid api key|forbidden|配置不完整|not configured|缺少 api|401|403/.test(
+    normalizedFailure
+  );
+  const validatedAtMs = Date.parse(String(runtime.lastValidatedAt || ""));
+  const recentFailure = Number.isFinite(validatedAtMs) && Date.now() - validatedAtMs <= 10 * 60 * 1000;
+
+  if (permanentFailure || recentFailure) {
+    return {
+      status: "degraded" as const,
+      detail: failureMessage || "运行时校验失败，请检查模型网关配置。"
+    };
+  }
+
+  return {
+    status: "healthy" as const,
+    detail: runtime.mode === "openai-compatible"
+      ? `当前模型：${runtime.modelName}（历史校验曾失败，建议手动复核）`
+      : "当前为脚本运行模式"
   };
 }
 

@@ -9,6 +9,9 @@ import type {
   SystemRuntime,
   SystemRuntimeConfig,
   SystemRuntimeConfigInput,
+  SystemUiAutonomousModeApplyResult,
+  SystemUiPreferences,
+  SystemUiPreferencesInput,
 } from './types';
 
 export const systemApi = {
@@ -39,6 +42,24 @@ export const systemApi = {
     return request<SystemExecutionProtocolSnapshot>('/system/execution-protocol', {
       method: 'PUT',
       body: JSON.stringify(data),
+    });
+  },
+
+  async getUiPreferences() {
+    return request<SystemUiPreferences>('/system/ui-preferences');
+  },
+
+  async updateUiPreferences(data: SystemUiPreferencesInput) {
+    return request<SystemUiPreferences>('/system/ui-preferences', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async applyUiAutonomousMode(autonomousMode?: boolean, scope: 'all' | 'core' | 'design' = 'all') {
+    return request<SystemUiAutonomousModeApplyResult>('/system/ui-preferences/apply-autonomous-mode', {
+      method: 'POST',
+      body: JSON.stringify({ autonomousMode, scope }),
     });
   },
 

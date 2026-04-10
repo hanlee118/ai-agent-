@@ -1,15 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { evaluateStageBestModelGate } from "./repository.js";
+import { getPreferredStageModels } from "../system/project-stage-execution.js";
 
 test("best-model gate accepts when latest successful executions use the top preferred model", () => {
+  const analystTopModel = getPreferredStageModels("ANALYSIS", "ROLE_ANALYST")[0] ?? "qwen3-max-2026-01-23";
+  const productTopModel = getPreferredStageModels("ANALYSIS", "ROLE_PRODUCT")[0] ?? analystTopModel;
+  const pmTopModel = getPreferredStageModels("ANALYSIS", "ROLE_PM")[0] ?? analystTopModel;
   const result = evaluateStageBestModelGate({
     stageType: "ANALYSIS",
     currentRole: "ROLE_ANALYST",
     stageExecutions: [
-      { role: "ROLE_PM", model: "openai/gpt-5.4" },
-      { role: "ROLE_PRODUCT", model: "gpt-5.4" },
-      { role: "ROLE_ANALYST", model: "openai/gpt-5.4" }
+      { role: "ROLE_PM", model: pmTopModel },
+      { role: "ROLE_PRODUCT", model: productTopModel },
+      { role: "ROLE_ANALYST", model: analystTopModel }
     ]
   });
 
@@ -18,13 +22,17 @@ test("best-model gate accepts when latest successful executions use the top pref
 });
 
 test("best-model gate accepts when latest successful executions use a non-top preferred model", () => {
+  const pmTopModel = getPreferredStageModels("DESIGN", "ROLE_PM")[0] ?? "qwen3-max-2026-01-23";
+  const productTopModel = getPreferredStageModels("DESIGN", "ROLE_PRODUCT")[0] ?? pmTopModel;
+  const designPreferred = getPreferredStageModels("DESIGN", "ROLE_DESIGN");
+  const designNonTopModel = designPreferred[1] ?? designPreferred[0] ?? pmTopModel;
   const result = evaluateStageBestModelGate({
     stageType: "DESIGN",
     currentRole: "ROLE_DESIGN",
     stageExecutions: [
-      { role: "ROLE_PM", model: "openai/gpt-5.4" },
-      { role: "ROLE_PRODUCT", model: "openai/gpt-5.4" },
-      { role: "ROLE_DESIGN", model: "openai/gpt-5.4" }
+      { role: "ROLE_PM", model: pmTopModel },
+      { role: "ROLE_PRODUCT", model: productTopModel },
+      { role: "ROLE_DESIGN", model: designNonTopModel }
     ]
   });
 
@@ -33,30 +41,35 @@ test("best-model gate accepts when latest successful executions use a non-top pr
 });
 
 test("best-model gate blocks when latest successful execution is outside preferred pool", () => {
+  const pmTopModel = getPreferredStageModels("ACCEPT", "ROLE_PM")[0] ?? "qwen3-max-2026-01-23";
+  const qaTopModel = getPreferredStageModels("ACCEPT", "ROLE_QA")[0] ?? pmTopModel;
+  const qaOutsideModel = "openai/gpt-5.2";
   const result = evaluateStageBestModelGate({
     stageType: "ACCEPT",
     currentRole: "ROLE_QA",
     stageExecutions: [
-      { role: "ROLE_QA", model: "openai/gpt-5.2" },
-      { role: "ROLE_PM", model: "openai/gpt-5.4" }
+      { role: "ROLE_QA", model: qaOutsideModel },
+      { role: "ROLE_PM", model: pmTopModel }
     ]
   });
 
   assert.equal(result.passed, false);
   assert.equal(
-    result.issues.some((item) => item.includes("测试工程师") && item.includes("openai/gpt-5.4") && item.includes("openai/gpt-5.2")),
+    result.issues.some((item) => item.includes("测试工程师") && item.includes(qaTopModel) && item.includes(qaOutsideModel)),
     true
   );
 });
 
 test("best-model gate prefers latest non-scripted success for role evaluation", () => {
+  const qaTopModel = getPreferredStageModels("ACCEPT", "ROLE_QA")[0] ?? "qwen3-max-2026-01-23";
+  const pmTopModel = getPreferredStageModels("ACCEPT", "ROLE_PM")[0] ?? qaTopModel;
   const result = evaluateStageBestModelGate({
     stageType: "ACCEPT",
     currentRole: "ROLE_QA",
     stageExecutions: [
       { role: "ROLE_QA", model: "scripted-agent", provider: "scripted" },
-      { role: "ROLE_QA", model: "openai/gpt-5.4", provider: "openai-compatible" },
-      { role: "ROLE_PM", model: "openai/gpt-5.4", provider: "openai-compatible" }
+      { role: "ROLE_QA", model: qaTopModel, provider: "openai-compatible" },
+      { role: "ROLE_PM", model: pmTopModel, provider: "openai-compatible" }
     ]
   });
 
@@ -65,13 +78,16 @@ test("best-model gate prefers latest non-scripted success for role evaluation", 
 });
 
 test("best-model gate uses role-specific top model for design roles", () => {
+  const pmTopModel = getPreferredStageModels("DESIGN", "ROLE_PM")[0] ?? "qwen3-max-2026-01-23";
+  const productTopModel = getPreferredStageModels("DESIGN", "ROLE_PRODUCT")[0] ?? pmTopModel;
+  const designTopModel = getPreferredStageModels("DESIGN", "ROLE_DESIGN")[0] ?? pmTopModel;
   const result = evaluateStageBestModelGate({
     stageType: "DESIGN",
     currentRole: "ROLE_DESIGN",
     stageExecutions: [
-      { role: "ROLE_PM", model: "anthropic/claude-opus-4-6" },
-      { role: "ROLE_PRODUCT", model: "openai/gpt-5.4" },
-      { role: "ROLE_DESIGN", model: "anthropic/claude-opus-4-6" }
+      { role: "ROLE_PM", model: pmTopModel },
+      { role: "ROLE_PRODUCT", model: productTopModel },
+      { role: "ROLE_DESIGN", model: designTopModel }
     ]
   });
 

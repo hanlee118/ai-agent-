@@ -217,7 +217,7 @@ function pickProductCandidates(seed: number, keywords: string[]) {
 }
 
 export type DesignRequirementProfile = {
-  scenarioId: "cross_border_product_radar" | "generic_business_ui";
+  scenarioId: "cross_border_product_radar" | "collaboration_platform" | "generic_business_ui";
   scenarioLabel: string;
   visualDirection: string;
   visualTheme: string;
@@ -239,6 +239,7 @@ export function resolveDesignRequirementProfile(input: DesignProfileInput): Desi
     `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`
   );
   const isCrossBorderProductRadar = /(跨境|电商|选品|跟品|爆品|商品|sku|tiktok|tik tok|亚马逊|amazon|temu|榜单|排名|监控|告警)/i.test(source);
+  const isCollaborationPlatform = /(协作平台|项目房间|任务流转|验收报告|质量门禁|agent\s*名册|agent roster|project room|quality gate|signoff|项目详情|多\s*agent|执行证据|阶段推进|项目推进)/i.test(source);
 
   if (isCrossBorderProductRadar) {
     const seed = hashSeed(source);
@@ -284,6 +285,37 @@ export function resolveDesignRequirementProfile(input: DesignProfileInput): Desi
     };
   }
 
+  if (isCollaborationPlatform) {
+    return {
+      scenarioId: "collaboration_platform",
+      scenarioLabel: "多 Agent 协作项目平台",
+      visualDirection: "围绕项目状态、任务阻塞、Agent 执行证据与质量门禁构建工作台，让用户快速判断项目是否真实推进、卡点在哪、下一步该做什么。",
+      visualTheme: "高密度工作台、强状态语义、清晰层级与证据可追溯。",
+      brandTone: "专业、冷静、可信、以决策效率为先",
+      uxPrinciples: [
+        "项目健康度、当前阻塞点与下一步动作必须首屏可见",
+        "每个关键任务都要暴露 agent、模型、技能与产出证据",
+        "审批、打回、放行等人工决策动作要贴近上下文呈现"
+      ],
+      accessibilityChecklist: [
+        "状态颜色必须配合图标与文案，避免仅靠颜色表达风险",
+        "任务流转、质量门禁和时间线支持键盘导航与焦点可见",
+        "复杂执行证据按分组展开，避免长文本直接堆叠"
+      ],
+      layoutStrategy: [
+        "首屏使用总览工作台，直接展示项目阶段、质量门禁状态、阻塞任务与最新执行证据。",
+        "中段使用任务流转泳道和项目房间双视角，让用户同时看到阶段推进与多 Agent 协作关系。",
+        "右侧上下文面板固定展示当前选中任务的 agent、模型、技能、交付物和审批动作。"
+      ],
+      componentChecklist: [
+        "项目健康度总览卡（阶段、风险、Quality Gate、最近活跃 Agent）",
+        "任务流转泳道 / 看板（todo、running、blocked、review、done）",
+        "Agent 执行证据面板（模型、技能、耗时、产出链接）",
+        "验收报告与质量门禁矩阵（通过/阻断/待人工确认）"
+      ]
+    };
+  }
+
   return {
     scenarioId: "generic_business_ui",
     scenarioLabel: "通用业务产品界面",
@@ -319,6 +351,15 @@ export function buildRequirementAwareDesignSections(
 ) {
   const profile = resolveDesignRequirementProfile(input);
   const keywords = input.keywords?.slice(0, 6).join(" / ") || profile.scenarioLabel;
+  const scenarioGuardrails = profile.scenarioId === "collaboration_platform"
+    ? [
+        "- 必须显式呈现项目、任务、Agent、交付物与质量门禁之间的关系。",
+        "- 不允许把协作平台重构成营销落地页或泛化业务官网。"
+      ]
+    : [
+        "- 禁止把业务站点设计成项目协作平台、Agent 中心或需求流转面板。",
+        "- 所有模块都必须直接服务于业务判断、执行动作或结果追踪。"
+      ];
 
   return [
     "## 视觉方案",
@@ -333,8 +374,7 @@ export function buildRequirementAwareDesignSections(
     ...profile.componentChecklist.map((item) => `- ${item}`),
     "## 品牌语气",
     `- 文案语气：${profile.brandTone}`,
-    "- 禁止把业务站点设计成项目协作平台、Agent 中心或需求流转面板。",
-    "- 所有模块都必须直接服务于业务判断、执行动作或结果追踪。"
+    ...scenarioGuardrails
   ].join("\n");
 }
 
@@ -565,10 +605,139 @@ function buildGenericBusinessPreviewHtml(input: DesignProfileInput & { visualDir
   ].join("\n");
 }
 
+function buildCollaborationPlatformPreviewHtml(input: DesignProfileInput & { visualDirection?: string }) {
+  const profile = resolveDesignRequirementProfile(input);
+  const seedSource = `${input.projectName || ""}|${input.projectDescription || ""}|${(input.keywords || []).join("|")}`;
+  const seed = hashSeed(seedSource);
+  const title = escapeHtml(input.projectName || "协作平台 UI 重构");
+  const direction = escapeHtml(input.visualDirection || profile.visualDirection);
+  const keywords = escapeHtml(input.keywords?.slice(0, 8).join(" / ") || profile.scenarioLabel);
+  const runningTasks = 6 + (seed % 4);
+  const blockedTasks = 1 + (seed % 3);
+  const passedGates = 8 + (seed % 3);
+  const totalGates = passedGates + 2;
+  const agentRows = [
+    ["Jeremy", "视觉设计总监", "Stitch 方案定稿", "running"],
+    ["Kuhn", "项目经理", "设计评审排队", "review"],
+    ["Feynman", "研发负责人", "接口契约对齐", "blocked"]
+  ];
+
+  return [
+    "<!doctype html>",
+    "<html lang=\"zh-CN\">",
+    "<head>",
+    "  <meta charset=\"UTF-8\" />",
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
+    `  <title>${title} · 视觉定稿预览</title>`,
+    "  <style>",
+    "    :root { --bg:#09111f; --panel:#101b31; --panel-soft:#16233d; --panel-muted:#1c2c4b; --line:rgba(148,163,184,.18); --text:#ecf3ff; --muted:#93a4bf; --blue:#4f8cff; --cyan:#5dd6ff; --green:#3dd68c; --amber:#ffbf66; --red:#ff6b6b; }",
+    "    * { box-sizing:border-box; }",
+    "    body { margin:0; font-family:'Sora','PingFang SC','Segoe UI',sans-serif; background:radial-gradient(circle at top left, rgba(79,140,255,.18), transparent 28%), linear-gradient(180deg,#08101d,#0c1526 48%,#0a1322); color:var(--text); }",
+    "    .shell { max-width:1360px; margin:0 auto; padding:28px 18px 48px; }",
+    "    .hero { display:grid; grid-template-columns:1.18fr .82fr; gap:18px; }",
+    "    .card { background:linear-gradient(180deg,rgba(16,27,49,.96),rgba(11,20,38,.96)); border:1px solid var(--line); border-radius:24px; padding:22px; box-shadow:0 18px 48px rgba(3,8,20,.34); }",
+    "    .badge { display:inline-flex; align-items:center; gap:8px; padding:7px 12px; border-radius:999px; background:rgba(93,214,255,.12); color:var(--cyan); font-size:12px; letter-spacing:.04em; text-transform:uppercase; }",
+    "    h1 { margin:14px 0 12px; font-size:42px; line-height:1.06; max-width:12ch; }",
+    "    p { color:var(--muted); line-height:1.72; }",
+    "    .metrics { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:18px; }",
+    "    .metric { padding:14px; border-radius:18px; background:rgba(255,255,255,.03); border:1px solid var(--line); }",
+    "    .metric strong { display:block; font-size:26px; margin-bottom:4px; }",
+    "    .metric span { color:var(--muted); font-size:13px; }",
+    "    .cta-row { display:flex; gap:12px; flex-wrap:wrap; margin-top:18px; }",
+    "    .cta, .ghost { display:inline-flex; align-items:center; justify-content:center; min-height:44px; padding:0 16px; border-radius:14px; text-decoration:none; font-weight:700; }",
+    "    .cta { background:linear-gradient(135deg,var(--blue),var(--cyan)); color:#07101d; }",
+    "    .ghost { border:1px solid var(--line); color:var(--text); background:rgba(255,255,255,.02); }",
+    "    .list { display:grid; gap:12px; margin-top:14px; }",
+    "    .lane-grid { display:grid; grid-template-columns:1.05fr .95fr; gap:18px; margin-top:18px; }",
+    "    .lane-head, .agent-row { display:grid; grid-template-columns:1.2fr .9fr .9fr .7fr; gap:10px; align-items:center; }",
+    "    .lane-head { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.08em; margin-bottom:10px; }",
+    "    .agent-row { padding:12px 0; border-top:1px solid var(--line); }",
+    "    .pill { display:inline-flex; align-items:center; gap:8px; padding:6px 10px; border-radius:999px; font-size:12px; }",
+    "    .running { background:rgba(93,214,255,.12); color:var(--cyan); }",
+    "    .review { background:rgba(255,191,102,.12); color:var(--amber); }",
+    "    .blocked { background:rgba(255,107,107,.12); color:var(--red); }",
+    "    .flow { display:grid; gap:12px; }",
+    "    .flow-card { padding:16px; border-radius:18px; border:1px solid var(--line); background:rgba(255,255,255,.03); }",
+    "    .flow-card header { display:flex; justify-content:space-between; gap:10px; margin-bottom:10px; }",
+    "    .flow-card strong { font-size:16px; }",
+    "    .flow-card small { color:var(--muted); }",
+    "    .evidence { display:grid; gap:10px; margin-top:10px; }",
+    "    .evidence div { padding:12px; border-radius:14px; background:var(--panel-muted); color:var(--muted); }",
+    "    .gate { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin-top:14px; }",
+    "    .gate-item { padding:12px; border-radius:16px; border:1px solid var(--line); background:rgba(255,255,255,.03); }",
+    "    .gate-item strong { display:block; margin-bottom:6px; }",
+    "    @media (max-width:1100px) { .hero, .lane-grid, .metrics, .gate { grid-template-columns:1fr; } }",
+    "  </style>",
+    "</head>",
+    "<body>",
+    "  <main class=\"shell\">",
+    "    <section class=\"hero\">",
+    "      <article class=\"card\">",
+    "        <span class=\"badge\">协作平台工作台 · Real Execution UI</span>",
+    `        <h1>${title}</h1>`,
+    `        <p>${direction}</p>`,
+    `        <p>需求关键词：${keywords}</p>`,
+    "        <div class=\"metrics\">",
+    `          <div class=\"metric\"><strong>${runningTasks}</strong><span>运行中任务</span></div>`,
+    `          <div class=\"metric\"><strong>${blockedTasks}</strong><span>阻塞项</span></div>`,
+    `          <div class=\"metric\"><strong>${passedGates}/${totalGates}</strong><span>Quality Gate</span></div>`,
+    "          <div class=\"metric\"><strong>3m 24s</strong><span>最近链路耗时</span></div>",
+    "        </div>",
+    "        <div class=\"cta-row\">",
+    "          <a class=\"cta\" href=\"#project-room\">进入项目房间</a>",
+    "          <a class=\"ghost\" href=\"#quality-gate\">查看质量门禁</a>",
+    "        </div>",
+    "      </article>",
+    "      <aside class=\"card\">",
+    "        <h2 style=\"margin:0 0 8px;\">Agent 执行概览</h2>",
+    "        <p>通过同屏暴露 agent、模型、技能与交付物，减少“看起来完成但没有证据”的判断风险。</p>",
+    "        <div class=\"list\">",
+    "          <div class=\"lane-head\"><span>名称</span><span>角色</span><span>当前任务</span><span>状态</span></div>",
+    ...agentRows.map(([name, role, task, status]) => `          <div class="agent-row"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(role)}</span><span>${escapeHtml(task)}</span><span class="pill ${status}">${escapeHtml(status)}</span></div>`),
+    "        </div>",
+    "      </aside>",
+    "    </section>",
+    "    <section class=\"lane-grid\" id=\"project-room\">",
+    "      <article class=\"card\">",
+    "        <h2 style=\"margin:0 0 14px;\">任务流转</h2>",
+    "        <div class=\"flow\">",
+    "          <section class=\"flow-card\">",
+    "            <header><strong>设计阶段 / UI 重构主链</strong><span class=\"pill running\">running</span></header>",
+    "            <small>当前聚焦：项目房间、任务流转、验收报告、Quality Gate 的统一视觉体系</small>",
+    "            <div class=\"evidence\">",
+    "              <div>Agent: Jeremy · Model: openai/gpt-5.4 · Skill: frontend-design / stitch</div>",
+    "              <div>最新产出：设计审查卡、视觉定稿单页、Stitch 导出链接</div>",
+    "            </div>",
+    "          </section>",
+    "          <section class=\"flow-card\">",
+    "            <header><strong>质量门禁阻断项批量修复</strong><span class=\"pill blocked\">blocked</span></header>",
+    "            <small>阻塞原因：部分历史项目未归档真实执行证据，需在验收报告中补齐链接与运行结果。</small>",
+    "          </section>",
+    "        </div>",
+    "      </article>",
+    "      <aside class=\"card\" id=\"quality-gate\">",
+    "        <h2 style=\"margin:0 0 10px;\">验收报告与 Quality Gate</h2>",
+    "        <p>将人工审批动作放到证据附近，而不是隐藏在页面深处。</p>",
+    "        <div class=\"gate\">",
+    "          <div class=\"gate-item\"><strong>真实模型执行</strong><span>通过：保留模型、耗时与降级痕迹</span></div>",
+    "          <div class=\"gate-item\"><strong>Stitch 设计证据</strong><span>通过：记录 html / image 链接</span></div>",
+    "          <div class=\"gate-item\"><strong>页面可访问性</strong><span>待确认：移动端折叠规则与焦点态</span></div>",
+    "        </div>",
+    "      </aside>",
+    "    </section>",
+    "  </main>",
+    "</body>",
+    "</html>"
+  ].join("\n");
+}
+
 export function buildRequirementAwareVisualPreviewHtml(input: DesignProfileInput & { visualDirection?: string }) {
   const profile = resolveDesignRequirementProfile(input);
   if (profile.scenarioId === "cross_border_product_radar") {
     return buildCrossBorderProductPreviewHtml(input);
+  }
+  if (profile.scenarioId === "collaboration_platform") {
+    return buildCollaborationPlatformPreviewHtml(input);
   }
   return buildGenericBusinessPreviewHtml(input);
 }
@@ -589,7 +758,7 @@ export function evaluateVisualDesignRequirementAlignment(input: DesignProfileInp
   const diagnostics: string[] = [];
   const genericHits = GENERIC_DESIGN_TEMPLATE_PATTERNS.filter((pattern) => pattern.test(content));
 
-  if (genericHits.length >= 2) {
+  if (profile.scenarioId !== "collaboration_platform" && genericHits.length >= 2) {
     issues.push("视觉稿仍在描述协作平台流程，而不是用户真实业务界面。");
   }
 
@@ -612,6 +781,25 @@ export function evaluateVisualDesignRequirementAlignment(input: DesignProfileInp
     }
     if (!matchedGroups.some((group) => group.label === "跟品动作")) {
       issues.push("缺少“加入跟品 / 继续观察 / 查看链接”等人工决策动作。");
+    }
+  } else if (profile.scenarioId === "collaboration_platform") {
+    const groups = [
+      { label: "项目总览", patterns: [/项目|project|项目详情|项目房间/i] },
+      { label: "任务流转", patterns: [/任务|流转|看板|泳道|blocked|review|todo|running/i] },
+      { label: "Agent 证据", patterns: [/agent|模型|skills?|技能|执行证据|耗时/i] },
+      { label: "质量门禁", patterns: [/质量门禁|quality gate|signoff|验收|审批/i] },
+      { label: "决策动作", patterns: [/打回|放行|批准|approve|reject|介入|进入项目房间/i] }
+    ];
+    const matchedGroups = groups.filter((group) => hasAny(content, group.patterns));
+    diagnostics.push(`协作平台信号命中: ${matchedGroups.length}/${groups.length}`);
+    if (matchedGroups.length < 4) {
+      issues.push("视觉稿没有覆盖项目总览、任务流转、Agent 证据、质量门禁等协作平台核心信号。");
+    }
+    if (!matchedGroups.some((group) => group.label === "Agent 证据")) {
+      issues.push("缺少 agent / 模型 / 技能 / 产出证据的可视化表达。");
+    }
+    if (!matchedGroups.some((group) => group.label === "质量门禁")) {
+      issues.push("缺少验收报告或 Quality Gate 的决策信息层。");
     }
   } else {
     const businessSignals = [

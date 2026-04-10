@@ -7,6 +7,7 @@ import {
   DESIGN_MODEL_FALLBACKS,
   DESIGN_MODEL_PRIMARY
 } from "../agents/design-model-policy.js";
+import { buildOpenAiCompatibleHeaders } from "../utils/openai-compatible-headers.js";
 
 type ModelRole = "primary" | "fallback";
 type CheckStatus = "healthy" | "failed";
@@ -368,10 +369,11 @@ async function sendProbeRequest(input: {
     const response = await fetch(endpoint, {
       method: "POST",
       signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${input.apiKey}`
-      },
+      headers: buildOpenAiCompatibleHeaders({
+        apiBaseUrl: input.apiBaseUrl,
+        apiKey: input.apiKey,
+        json: true
+      }),
       body: JSON.stringify({
         model: normalizeProbeModel(input.model),
         temperature: 0,

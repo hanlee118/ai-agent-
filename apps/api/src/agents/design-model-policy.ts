@@ -1,8 +1,12 @@
-const DEFAULT_DESIGN_MODEL_PRIMARY = "anthropic/claude-opus-4-6";
+const DEFAULT_DESIGN_MODEL_PRIMARY = "openai/gpt-5.4";
 const DEFAULT_DESIGN_MODEL_FALLBACKS = [
-  "anthropic/claude-sonnet-4-6",
-  "openai/gpt-5.4",
-  "openai/gpt-5.3-codex"
+  "openai/gpt-5.3-codex",
+  "qwen3.5-plus",
+  "qwen3-max-2026-01-23",
+  "qwen3-coder-plus",
+  "kimi-k2.5",
+  "minima/MiniMax-M2.7-highspeed",
+  "glm-5"
 ];
 
 function parseModelCsv(value?: string | null) {
@@ -23,11 +27,19 @@ export const DESIGN_MODEL_FALLBACKS: readonly string[] = (() => {
   return DEFAULT_DESIGN_MODEL_FALLBACKS;
 })();
 
-export const DESIGN_MODEL_POLICY_CHAIN: readonly string[] = [
-  DESIGN_MODEL_PRIMARY,
-  ...DESIGN_MODEL_FALLBACKS,
-  "qwen3-coder-plus"
-];
+export const DESIGN_MODEL_POLICY_CHAIN: readonly string[] = (() => {
+  const seen = new Set<string>();
+  const chain: string[] = [];
+  for (const model of [DESIGN_MODEL_PRIMARY, ...DESIGN_MODEL_FALLBACKS]) {
+    const normalized = normalizeModelIdForPolicy(model);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    chain.push(normalized);
+  }
+  return chain;
+})();
 
 export function normalizeModelIdForPolicy(value?: string | null) {
   return String(value ?? "").trim();

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildRequirementAwareVisualPreviewHtml,
-  evaluateVisualDesignRequirementAlignment
+  evaluateVisualDesignRequirementAlignment,
+  resolveDesignRequirementProfile
 } from "./design-preview.js";
 
 describe("design preview alignment", () => {
@@ -36,5 +37,45 @@ describe("design preview alignment", () => {
 
     assert.equal(result.pass, false);
     assert.ok(result.issues.some((item) => item.includes("业务")));
+  });
+
+  it("recognizes collaboration-platform redesign requirements", () => {
+    const profile = resolveDesignRequirementProfile({
+      projectName: "协作平台 UI 重构",
+      projectDescription: "重构项目房间、任务流转、agent 名册、验收报告和 quality gate",
+      keywords: ["协作平台", "任务流转", "项目房间", "agent", "quality gate"]
+    });
+
+    assert.equal(profile.scenarioId, "collaboration_platform");
+    assert.match(profile.visualDirection, /项目|任务|质量门禁|agent/i);
+  });
+
+  it("builds collaboration-platform preview with project and quality signals", () => {
+    const html = buildRequirementAwareVisualPreviewHtml({
+      projectName: "协作平台 UI 重构",
+      projectDescription: "提升项目推进透明度，展示 agent 执行证据、任务流转与质量门禁",
+      keywords: ["协作平台", "项目房间", "任务流转", "验收报告", "quality gate"]
+    });
+
+    assert.match(html, /任务流转|项目房间|Quality Gate/);
+    assert.match(html, /Jeremy|Kuhn|Feynman/);
+    assert.match(html, /Agent: Jeremy|执行证据|模型/);
+  });
+
+  it("requires collaboration-platform signals for collaboration-platform preview alignment", () => {
+    const result = evaluateVisualDesignRequirementAlignment({
+      projectName: "协作平台 UI 重构",
+      projectDescription: "展示项目状态、Agent 证据和验收门禁",
+      keywords: ["协作平台", "任务流转", "agent", "质量门禁"],
+      content: [
+        "## 单页预览代码（HTML）",
+        "```html",
+        "<main><section><h1>协作平台 UI 重构</h1><div>项目房间</div><div>任务流转</div><div>Agent 执行证据</div><div>Quality Gate</div><button>批准放行</button></section></main>",
+        "```"
+      ].join("\n")
+    });
+
+    assert.equal(result.pass, true);
+    assert.equal(result.issues.length, 0);
   });
 });

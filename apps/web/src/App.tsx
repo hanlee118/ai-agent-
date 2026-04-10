@@ -320,6 +320,7 @@ export default function App() {
     const targetProjectId = params.get('signoff_project_id') || params.get('project_id');
     const targetAgentId = params.get('agent_id');
     const nextTab = isAppTab(appTabParam) ? appTabParam : null;
+    const shouldIgnoreProjectUrlParams = Boolean(nextTab && nextTab !== 'project-room');
 
     if (!nextTab && !targetProjectId && !targetAgentId) {
       return;
@@ -338,9 +339,28 @@ export default function App() {
     }
 
     if (targetProjectId) {
-      setSelectedProjectId(targetProjectId);
-      if (!nextTab || nextTab === 'project-room' || params.has('signoff_project_id')) {
-        setActiveTab('project-room');
+      if (shouldIgnoreProjectUrlParams) {
+        // 非项目页深链不应携带 project-room 参数，避免地址长期“粘住”某个项目。
+        let scrubbed = false;
+        PROJECT_ROOM_URL_KEYS.forEach((key) => {
+          if (!params.has(key)) {
+            return;
+          }
+          params.delete(key);
+          scrubbed = true;
+        });
+        if (scrubbed && typeof window !== 'undefined') {
+          const nextSearch = params.toString();
+          const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+          window.history.replaceState(window.history.state, '', nextUrl);
+          setUrlSearch(window.location.search);
+        }
+      } else {
+        setSelectedProjectId(targetProjectId);
+        // 仅在未显式指定其它 tab 时切回项目页，避免 signoff 参数把用户强制拉回单个项目。
+        if (!nextTab || nextTab === 'project-room') {
+          setActiveTab('project-room');
+        }
       }
       applied = true;
     }

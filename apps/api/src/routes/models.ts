@@ -10,6 +10,7 @@ import {
 } from "./utils.js";
 import { ensureSystemConfig, getRuntimeSettings, updateRuntimeSettings } from "../system/runtime-config.js";
 import { decryptSecret } from "../security/secret-store.js";
+import { buildOpenAiCompatibleHeaders } from "../utils/openai-compatible-headers.js";
 
 interface CreateModelBody {
   name?: unknown;
@@ -121,10 +122,11 @@ async function probeOpenAICompatibleHealth(input: {
       const response = await fetch(endpoint, {
         method: "POST",
         signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${input.apiKey}`
-        },
+        headers: buildOpenAiCompatibleHeaders({
+          apiBaseUrl: input.apiBaseUrl,
+          apiKey: input.apiKey,
+          json: true
+        }),
         body: JSON.stringify({
           model: normalizeProbeModelName(input.model),
           temperature: 0,
@@ -328,9 +330,10 @@ export function createModelsRouter() {
 
     const response = await fetch(buildModelsUrl(apiBaseUrl), {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`
-      }
+      headers: buildOpenAiCompatibleHeaders({
+        apiBaseUrl,
+        apiKey
+      })
     });
 
     if (!response.ok) {

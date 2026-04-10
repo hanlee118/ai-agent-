@@ -8,6 +8,7 @@ import { listProjects, listTasks, getSystemHealth } from "../data/repository.js"
 import { listAuditLogs } from "./audit-log.js";
 import { getRuntimeStatus } from "../agents/runtime.js";
 import { listOpenClawAgents } from "../openclaw/workspace.js";
+import { getUiPreferences } from "./ui-preferences.js";
 
 type LiveNotificationCandidate = {
   sourceKey: string;
@@ -129,13 +130,23 @@ export async function updateNotificationInboxState(
 
 async function buildLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
   const isEnglish = locale === "en-US";
-  const [projects, tasks, auditLogs, runtime, health, agents] = await Promise.all([
+  const [projects, tasks, auditLogs, runtime, health, agents, uiPreferences] = await Promise.all([
     listProjects(),
     listTasks(),
     listAuditLogs(12),
     getRuntimeStatus(),
     getSystemHealth(),
-    listOpenClawAgents()
+    listOpenClawAgents(),
+    getUiPreferences().catch(() => ({
+      language: "zh" as const,
+      workspacePath: "",
+      autoSync: true,
+      apiProtection: true,
+      autonomousMode: false,
+      usageAlert: true,
+      usageAlertThresholdPercent: 80,
+      source: "default" as const
+    }))
   ]);
 
   const next: LiveNotificationCandidate[] = [];
@@ -204,6 +215,51 @@ async function buildLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
       to: `/agents/${agent.agentId}`,
       timestamp: agent.lastActiveAt
     });
+  }
+
+  if (uiPreferences.usageAlert) {
+    const thresholdPercent = Math.max(50, Math.min(95, Number(uiPreferences.usageAlertThresholdPercent || 80)));
+    const thresholdRatio = thresholdPercent / 100;
+    const tokenRiskAgents = agents
+      .map((agent) => {
+        const dailyLimit = Number(agent.commander.maxDailyTokens ?? agent.usage.dailyLimit ?? 0);
+        const used = Number(agent.usage.totalTokensToday ?? 0);
+        if (!Number.isFinite(dailyLimit) || dailyLimit <= 0 || !Number.isFinite(used) || used <= 0) {
+          return null;
+        }
+        const ratio = used / dailyLimit;
+        if (ratio < thresholdRatio) {
+          return null;
+        }
+        return {
+          agent,
+          used,
+          dailyLimit,
+          ratio
+        };
+      })
+      .filter((item): item is { agent: typeof agents[number]; used: number; dailyLimit: number; ratio: number } => Boolean(item))
+      .sort((left, right) => right.ratio - left.ratio);
+
+    for (const item of tokenRiskAgents.slice(0, 8)) {
+      const percent = Math.round(item.ratio * 100);
+      const limitText = `${item.used.toLocaleString()} / ${item.dailyLimit.toLocaleString()}`;
+      next.push({
+        sourceKey: `agent-token:${item.agent.agentId}`,
+        sourceType: "agent_token_budget",
+        severity: item.ratio >= 1 ? "critical" : "warning",
+        category: isEnglish ? "Token budget" : "Token 预算",
+        title: isEnglish
+          ? `${item.agent.name} token usage reached ${percent}%`
+          : `${item.agent.name} Token 使用达到 ${percent}%`,
+        detail: isEnglish
+          ? `Daily usage ${limitText}; alert threshold ${thresholdPercent}%.`
+          : `日用量 ${limitText}；告警阈值 ${thresholdPercent}%。`,
+        actionLabel: isEnglish ? "Open commander" : "进入指挥页",
+        to: `/agents/${item.agent.agentId}`,
+        timestamp: item.agent.usage.lastUsedAt || item.agent.lastActiveAt
+      });
+    }
   }
 
   for (const item of auditLogs.slice(0, 6)) {

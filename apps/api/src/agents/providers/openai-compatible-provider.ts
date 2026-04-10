@@ -1,6 +1,7 @@
 import type { RuntimeMode } from "@occ/shared";
 import { ROLE_LABELS, STAGE_LABELS } from "@occ/shared";
 import type { AgentRunContext, AgentRunResult } from "./scripted-provider.js";
+import { buildOpenAiCompatibleHeaders } from "../../utils/openai-compatible-headers.js";
 
 export interface OpenAICompatibleConfig {
   apiBaseUrl: string;
@@ -159,10 +160,11 @@ async function requestCompletion(input: {
   return fetch(`${input.apiBaseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     signal: input.signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${input.apiKey}`
-    },
+    headers: buildOpenAiCompatibleHeaders({
+      apiBaseUrl: input.apiBaseUrl,
+      apiKey: input.apiKey,
+      json: true
+    }),
     body: JSON.stringify({
       model: input.model,
       temperature: 0.3,

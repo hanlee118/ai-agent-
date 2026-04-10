@@ -11,6 +11,7 @@ import {
   Workflow,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { systemApi } from '../../lib/api';
 import { useSettings } from './useSettings';
 import RuntimeConfigPanel from '../runtime-config/RuntimeConfigPanel';
 import { useRuntimeConfig } from '../runtime-config/useRuntimeConfig';
@@ -30,6 +31,8 @@ type NativeSectionProps = {
   description: string;
   children: ReactNode;
 };
+
+type SettingScope = 'local' | 'platform';
 
 function ToggleControl(props: { checked: boolean; onToggle: () => void }) {
   return (
@@ -77,12 +80,27 @@ function SettingRow(props: {
   title: string;
   description: string;
   control: ReactNode;
+  scope?: SettingScope;
   divider?: boolean;
 }) {
   return (
     <div className={cn('flex items-center justify-between gap-6', props.divider && 'border-t border-white/10 pt-5')}>
       <div className="min-w-0">
-        <p className="text-sm font-medium text-white">{props.title}</p>
+        <div className="flex items-center gap-2">
+          <p className="text-sm font-medium text-white">{props.title}</p>
+          {props.scope ? (
+            <span
+              className={cn(
+                'rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em]',
+                props.scope === 'platform'
+                  ? 'border-cyan-300/35 bg-cyan-400/10 text-cyan-100'
+                  : 'border-amber-300/35 bg-amber-400/10 text-amber-100',
+              )}
+            >
+              {props.scope === 'platform' ? '平台生效' : '本地偏好'}
+            </span>
+          ) : null}
+        </div>
         <p className="mt-1 text-xs leading-5 text-slate-400">{props.description}</p>
       </div>
       <div className="shrink-0">{props.control}</div>
@@ -92,20 +110,65 @@ function SettingRow(props: {
 
 export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPanelProps) {
   const [isSaving, setIsSaving] = useState(false);
+  const [isApplyingAutonomousMode, setIsApplyingAutonomousMode] = useState(false);
+  const [autonomousApplyScope, setAutonomousApplyScope] = useState<'all' | 'core' | 'design'>('all');
   const settings = useSettings();
   const runtime = useRuntimeConfig();
   const executionProtocol = useExecutionProtocol();
 
+  const toErrorMessage = (reason: unknown) => (reason instanceof Error ? reason.message : '未知错误');
+
   const handleSave = async () => {
     setIsSaving(true);
     try {
-      settings.saveToStorage();
-      await runtime.saveRuntimeConfig();
-      await executionProtocol.saveExecutionProtocol();
-      if (onRuntimeUpdated) {
-        await onRuntimeUpdated();
+      const [settingsResult, runtimeResult, protocolResult] = await Promise.allSettled([
+        settings.saveSettings(),
+        runtime.saveRuntimeConfig(),
+        executionProtocol.saveExecutionProtocol(),
+      ]);
+
+      const hardFailures: string[] = [];
+      const softNotices: string[] = [];
+
+      if (settingsResult.status === 'rejected') {
+        hardFailures.push(`界面偏好保存失败: ${toErrorMessage(settingsResult.reason)}`);
+      } else if (!settingsResult.value.serverSaved) {
+        if (settingsResult.value.localSaved) {
+          softNotices.push(`界面偏好已保存到本地浏览器（服务端未同步: ${settingsResult.value.serverError || '未知错误'}）`);
+        } else {
+          hardFailures.push(`界面偏好保存失败: ${settingsResult.value.serverError || '本地与服务端均不可用'}`);
+        }
+      } else if (!settingsResult.value.localSaved) {
+        softNotices.push('界面偏好已同步到服务端，但本地缓存写入失败');
       }
-      addToast('设置已保存', 'success');
+
+      if (runtimeResult.status === 'rejected') {
+        hardFailures.push(`运行模型配置保存失败: ${toErrorMessage(runtimeResult.reason)}`);
+      }
+      if (protocolResult.status === 'rejected') {
+        hardFailures.push(`执行协议保存失败: ${toErrorMessage(protocolResult.reason)}`);
+      }
+
+      if ((runtimeResult.status === 'fulfilled' || protocolResult.status === 'fulfilled') && onRuntimeUpdated) {
+        try {
+          await onRuntimeUpdated();
+        } catch (error) {
+          softNotices.push(`运行状态刷新失败: ${toErrorMessage(error)}`);
+        }
+      }
+
+      if (hardFailures.length > 0) {
+        const message = [...hardFailures, ...softNotices].join('；');
+        addToast(`保存未完成: ${message}`, 'error');
+        return;
+      }
+
+      if (softNotices.length > 0) {
+        addToast(`保存完成（部分降级）: ${softNotices.join('；')}`, 'info');
+        return;
+      }
+
+      addToast('设置已全部保存并生效', 'success');
     } catch (error) {
       addToast(`保存失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
@@ -117,7 +180,7 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
     settings.resetToDefaults();
     runtime.resetRuntimeConfig();
     executionProtocol.resetExecutionProtocol();
-    addToast('设置已重置', 'info');
+    addToast('已恢复默认值，请点击“保存全部更改”后生效', 'info');
   };
 
   const handleValidateRuntime = async () => {
@@ -145,9 +208,8 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
       const directory = await picker();
       const pickedName = directory?.name?.trim();
       if (pickedName) {
-        const normalized = pickedName.startsWith('/') ? pickedName : `/${pickedName}`;
-        settings.setWorkspacePath(normalized);
-        addToast(`已选择目录: ${normalized}`, 'success');
+        // 浏览器 Directory Picker 不会返回绝对路径，避免把目录名误写成伪绝对路径。
+        addToast(`已选择目录“${pickedName}”，请手动补全绝对路径后保存`, 'info');
       }
     } catch (error) {
       const name = (error as { name?: string })?.name;
@@ -160,6 +222,23 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
 
   const handlePasswordChange = () => {
     addToast('当前版本暂不支持在线改密，请通过初始化流程重置管理员密码。', 'info');
+  };
+
+  const handleApplyAutonomousMode = async () => {
+    setIsApplyingAutonomousMode(true);
+    try {
+      const result = await systemApi.applyUiAutonomousMode(settings.autonomousMode, autonomousApplyScope);
+      const modeLabel = result.executionMode === 'autonomous' ? '自主执行' : '确认优先';
+      const scopeLabel = result.scope === 'core' ? '核心 Agent' : result.scope === 'design' ? '设计 Agent' : '全部 Agent';
+      addToast(
+        `已下发到${scopeLabel}：${modeLabel}（更新 ${result.updatedAgents}/${result.totalAgents}，补齐配置 ${result.createdConfigs}）`,
+        'success',
+      );
+    } catch (error) {
+      addToast(`下发失败: ${toErrorMessage(error)}`, 'error');
+    } finally {
+      setIsApplyingAutonomousMode(false);
+    }
   };
 
   const handleJumpToModelNexus = () => {
@@ -232,6 +311,16 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
         tone: 'text-cyan-100',
       },
       {
+        label: '偏好同步',
+        value:
+          settings.settingsSource === 'server'
+            ? '服务端已同步'
+            : settings.settingsSource === 'local'
+              ? '仅浏览器本地'
+              : '默认值',
+        tone: 'text-sky-100',
+      },
+      {
         label: '语言',
         value: settings.language === 'zh' ? '中文界面' : 'English UI',
         tone: 'text-emerald-100',
@@ -252,6 +341,7 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
       runtime.runtimeProvider,
       settings.autoSync,
       settings.language,
+      settings.settingsSource,
     ],
   );
 
@@ -283,7 +373,11 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
             <div>
               <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Save Rail</p>
               <p className="mt-2 text-sm leading-6 text-slate-300">
-                当前页的改动涉及本地设置、运行时配置和执行协议。保存时会统一写回，减少局部配置不同步。
+                当前页改动分为三段：界面偏好、运行时配置、执行协议。保存会并行提交，并明确提示哪一段成功或失败。
+              </p>
+              <p className="mt-2 text-xs leading-5 text-slate-400">
+                界面偏好同步来源: {settings.settingsSource === 'server' ? '服务端文件' : settings.settingsSource === 'local' ? '浏览器本地' : '系统默认'}
+                {settings.settingsUpdatedAt ? ` · 最近同步 ${new Date(settings.settingsUpdatedAt).toLocaleString('zh-CN')}` : ''}
               </p>
             </div>
             <div className="space-y-3">
@@ -398,11 +492,12 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
             id="settings-localization"
             icon={Languages}
             title="本地化与界面偏好"
-            description="把当前语言和基础界面偏好集中到同一块，避免这类全局设置散落在多个区域。"
+            description="这一分区是界面偏好层，当前版本会同步到设置服务，但不会直接修改业务数据。"
           >
             <SettingRow
               title="系统语言"
-              description="选择设置页和工作台的主要展示语言。"
+              description="控制界面语言偏好与时间格式标记。当前版本只覆盖基础语言偏好。"
+              scope="local"
               control={
                 <div className="flex gap-2 rounded-2xl border border-white/10 bg-white/[0.04] p-1">
                   <button
@@ -438,11 +533,16 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
             id="settings-workspace"
             icon={Database}
             title="工作区配置"
-            description="这里负责本地 OpenClaw 根路径与同步方式，后续如果增加更多本地目录治理项，也能继续扩在这个分区。"
+            description="这里管理前端侧的工作区偏好与同步开关，用于默认输入和本地工作习惯。"
           >
             <div className="space-y-5">
               <div className="space-y-2">
-                <label className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500">OpenClaw 根路径</label>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold uppercase tracking-[0.22em] text-slate-500">OpenClaw 根路径</label>
+                  <span className="rounded-full border border-amber-300/35 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.16em] text-amber-100">
+                    本地偏好
+                  </span>
+                </div>
                 <div className="flex flex-col gap-3 md:flex-row">
                   <input
                     type="text"
@@ -460,13 +560,14 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
                   </button>
                 </div>
                 <p className="text-xs leading-5 text-slate-400">
-                  推荐填写真实工作区根路径，后续执行链、工作区读取与本地同步都会以这里为准。
+                  该值用于前端默认路径提示，不会覆盖服务端实际工作区根目录。
                 </p>
               </div>
 
               <SettingRow
                 title="自动同步工作区"
-                description="自动同步来自本地文件系统的更改。关闭后，适合只在关键节点手动刷新。"
+                description="控制前端工作区视图的自动刷新策略，关闭后适合关键节点手动刷新。"
+                scope="local"
                 control={<ToggleControl checked={settings.autoSync} onToggle={() => settings.setAutoSync(!settings.autoSync)} />}
                 divider
               />
@@ -477,7 +578,7 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
             id="settings-security"
             icon={ShieldCheck}
             title="安全与访问"
-            description="把密码、密钥展示和基础访问保护放在同一层，后续扩展审计、RBAC 或脱敏规则时不会打散。"
+            description="当前分区负责访问安全入口和前端脱敏偏好。管理员密码仍由初始化流程控制。"
           >
             <div className="space-y-5">
               <SettingRow
@@ -496,7 +597,8 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
 
               <SettingRow
                 title="API 密钥保护"
-                description="在系统运行页和配置页中默认隐藏敏感密钥内容，适合演示与协作场景。"
+                description="控制前端显示时是否默认遮罩密钥，不会改变后端密钥存储方式。"
+                scope="local"
                 control={
                   <ToggleControl
                     checked={settings.apiProtection}
@@ -512,12 +614,13 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
             id="settings-agent-governance"
             icon={BrainCircuit}
             title="Agent 治理"
-            description="自治能力和资源告警是后续扩展的重要入口，这里先整理成明确的治理区块。"
+            description="该分区记录治理偏好，并支持将“自主模式”一键下发到全部 Agent 的执行策略。"
           >
             <div className="space-y-5">
               <SettingRow
                 title="自主模式"
-                description="允许 Agent 在没有明确人工确认的情况下执行任务。建议只在高确定性链路中开启。"
+                description="记录默认治理倾向。可点击下方按钮同步到全部 Agent 的执行模式。"
+                scope="platform"
                 control={
                   <ToggleControl
                     checked={settings.autonomousMode}
@@ -528,7 +631,8 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
 
               <SettingRow
                 title="Token 使用警报"
-                description="当 Agent 超过每日配额阈值时给出提示，便于及早发现成本或异常使用。"
+                description="开启后会在通知中心按阈值监控 Agent 日 Token 预算。"
+                scope="platform"
                 control={
                   <ToggleControl
                     checked={settings.usageAlert}
@@ -537,6 +641,56 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
                 }
                 divider
               />
+
+              <SettingRow
+                title="Token 告警阈值"
+                description="达到该百分比后触发预算预警，100% 以上将升级为严重告警。"
+                scope="platform"
+                control={
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={50}
+                      max={95}
+                      step={5}
+                      value={settings.usageAlertThresholdPercent}
+                      onChange={(event) => settings.setUsageAlertThresholdPercent(Number(event.target.value))}
+                      className="w-20 rounded-xl border border-white/10 bg-slate-950/55 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-cyan-400/40"
+                    />
+                    <span className="text-xs text-slate-400">%</span>
+                  </div>
+                }
+                divider
+              />
+
+              <div className="rounded-2xl border border-white/10 bg-slate-950/30 p-4">
+                <p className="text-xs leading-5 text-slate-400">
+                  将当前“自主模式”偏好下发到选定范围的 Agent：
+                  {settings.autonomousMode ? '切换为自主执行（免确认）' : '切换为确认优先（高风险动作需确认）'}。
+                </p>
+                <div className="mt-3">
+                  <label className="mb-2 block text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                    下发范围
+                  </label>
+                  <select
+                    value={autonomousApplyScope}
+                    onChange={(event) => setAutonomousApplyScope(event.target.value as 'all' | 'core' | 'design')}
+                    className="w-full rounded-2xl border border-white/10 bg-slate-950/55 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-cyan-400/40"
+                  >
+                    <option value="all">全部 Agent</option>
+                    <option value="core">核心 Agent（main）</option>
+                    <option value="design">设计 Agent（按角色识别）</option>
+                  </select>
+                </div>
+                <button
+                  type="button"
+                  disabled={isApplyingAutonomousMode}
+                  onClick={() => void handleApplyAutonomousMode()}
+                  className="mt-3 w-full rounded-2xl border border-cyan-300/30 bg-cyan-400/10 px-4 py-3 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-400/20 disabled:opacity-60"
+                >
+                  {isApplyingAutonomousMode ? '下发中...' : '同步自主模式到全部 Agent'}
+                </button>
+              </div>
             </div>
           </NativeSection>
         </main>

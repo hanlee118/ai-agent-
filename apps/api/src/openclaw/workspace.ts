@@ -66,6 +66,7 @@ import {
   OPENCLAW_ROOT,
   OPENCLAW_WORKSPACE_ROOT
 } from "./paths.js";
+import { getUiPreferences } from "../system/ui-preferences.js";
 
 function resolveOpenClawBin(): string {
   const envPath = String(process.env.OPENCLAW_BIN ?? "").trim();
@@ -115,6 +116,7 @@ type OpenClawConfig = {
       baseUrl?: string;
       api?: string;
       apiKey?: string;
+      headers?: Record<string, string>;
       models?: Array<Record<string, unknown>>;
     }>;
   };
@@ -236,13 +238,211 @@ const RESERVED_WORKSPACE_DIRS = new Set([
 const SOP_FILE_CANDIDATES = ["sop-document.md", "SOP.md"];
 const NON_DELETABLE_AGENT_IDS = new Set(["main"]);
 const MODEL_ROUTING_PLACEHOLDERS = new Set(["runtime", "unknown", "default", "auto"]);
+const UNBOUNDTECH_GATEWAY_HOST = "ai.unboundtech.cn";
+const UNBOUNDTECH_GATEWAY_V1 = "https://ai.unboundtech.cn/v1";
 const HARD_FALLBACK_MODELS = [
   "openai/gpt-5.4",
   "openai/gpt-5.3-codex",
-  "anthropic/claude-sonnet-4-6",
+  "qwen3-max-2026-01-23",
+  "qwen3.5-plus",
+  "qwen3-coder-plus",
+  "kimi-k2.5",
   "minima/MiniMax-M2.7-highspeed"
 ];
+const DESIGN_REMOTE_FAILURE_COOLDOWN_MS_DEFAULT = 10 * 60 * 1000;
+const DESIGN_REMOTE_FAILURE_COOLDOWN_MS_MIN = 30 * 1000;
+const DESIGN_REMOTE_FAILURE_COOLDOWN_MS_MAX = 24 * 60 * 60 * 1000;
+const designRemoteFailureUntilByAgent = new Map<string, number>();
+const MODEL_ROUTE_COOLDOWN_MS_DEFAULT = 8 * 60 * 1000;
+const MODEL_ROUTE_COOLDOWN_MS_MIN = 15_000;
+const MODEL_ROUTE_COOLDOWN_MS_MAX = 24 * 60 * 60 * 1000;
+const modelRouteCooldownUntilByModel = new Map<string, number>();
+const OPENCLAW_CANONICAL_TOOL_ALLOWLIST = new Set([
+  "sessions_spawn",
+  "sessions_send",
+  "sessions_list",
+  "sessions_history",
+  "session_status",
+  "subagents",
+  "read",
+  "write",
+  "edit",
+  "apply_patch",
+  "exec",
+  "web_search",
+  "web_fetch",
+  "feishu_chat",
+  "feishu_doc",
+  "feishu_drive",
+  "feishu_wiki",
+  "feishu_bitable"
+]);
+const OPENCLAW_LEGACY_TOOL_ALIASES = new Map<string, string>([
+  ["feishu_search_doc_wiki", "feishu_wiki"],
+  ["feishu_drive_file", "feishu_drive"],
+  ["feishu_doc_comments", "feishu_doc"],
+  ["feishu_doc_media", "feishu_doc"],
+  ["feishu_fetch_doc", "feishu_doc"],
+  ["feishu_create_doc", "feishu_doc"],
+  ["feishu_update_doc", "feishu_doc"],
+  ["feishu_search_user", "feishu_chat"],
+  ["feishu_get_user", "feishu_chat"],
+  ["feishu_chat_members", "feishu_chat"],
+  ["feishu_im_user_message", "feishu_chat"],
+  ["feishu_im_user_get_messages", "feishu_chat"],
+  ["feishu_im_user_get_thread_messages", "feishu_chat"],
+  ["feishu_im_user_search_messages", "feishu_chat"],
+  ["feishu_im_user_fetch_resource", "feishu_chat"]
+]);
+type AgentExecutionQueueState = {
+  tail: Promise<void>;
+  pending: number;
+};
+const agentExecutionQueueById = new Map<string, AgentExecutionQueueState>();
+const globalOpenClawExecutionWaitQueue: Array<{
+  id: string;
+  resolve: () => void;
+}> = [];
+let globalOpenClawExecutionActiveCount = 0;
 let statusCache: { expiresAt: number; value: OpenClawStatusSummary } | null = null;
+
+function resolveOpenClawAgentQueueMaxPending() {
+  const configured = Number(process.env.OPENCLAW_AGENT_MAX_PENDING ?? "");
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return 6;
+  }
+  return Math.max(1, Math.min(100, Math.round(configured)));
+}
+
+function resolveOpenClawGlobalExecutionMaxConcurrent() {
+  const configured = Number(process.env.OPENCLAW_GLOBAL_MAX_CONCURRENT ?? "");
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return 2;
+  }
+  return Math.max(1, Math.min(16, Math.round(configured)));
+}
+
+function resolveOpenClawGlobalExecutionQueueTimeoutMs() {
+  const configured = Number(process.env.OPENCLAW_GLOBAL_QUEUE_TIMEOUT_MS ?? "");
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return 180_000;
+  }
+  return Math.max(5_000, Math.min(30 * 60 * 1000, Math.round(configured)));
+}
+
+async function acquireGlobalOpenClawExecutionSlot() {
+  const maxConcurrent = resolveOpenClawGlobalExecutionMaxConcurrent();
+  if (globalOpenClawExecutionActiveCount < maxConcurrent) {
+    globalOpenClawExecutionActiveCount += 1;
+    return;
+  }
+
+  const timeoutMs = resolveOpenClawGlobalExecutionQueueTimeoutMs();
+  const waiterId = randomUUID();
+  let timeoutHandle: NodeJS.Timeout | null = null;
+
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+        timeoutHandle = null;
+      }
+      const index = globalOpenClawExecutionWaitQueue.findIndex((item) => item.id === waiterId);
+      if (index >= 0) {
+        globalOpenClawExecutionWaitQueue.splice(index, 1);
+      }
+    };
+
+    globalOpenClawExecutionWaitQueue.push({
+      id: waiterId,
+      resolve: () => {
+        cleanup();
+        globalOpenClawExecutionActiveCount += 1;
+        resolve();
+      }
+    });
+
+    timeoutHandle = setTimeout(() => {
+      cleanup();
+      reject(
+        new Error(
+          `OPENCLAW_GLOBAL_QUEUE_TIMEOUT: waiting>${timeoutMs}ms; active=${globalOpenClawExecutionActiveCount}; queued=${globalOpenClawExecutionWaitQueue.length}`
+        )
+      );
+    }, timeoutMs);
+  });
+}
+
+function releaseGlobalOpenClawExecutionSlot() {
+  globalOpenClawExecutionActiveCount = Math.max(0, globalOpenClawExecutionActiveCount - 1);
+  while (globalOpenClawExecutionWaitQueue.length > 0) {
+    const next = globalOpenClawExecutionWaitQueue.shift();
+    if (!next) {
+      continue;
+    }
+    next.resolve();
+    break;
+  }
+}
+
+async function runWithGlobalOpenClawExecutionLimit<T>(task: () => Promise<T>) {
+  await acquireGlobalOpenClawExecutionSlot();
+  try {
+    return await task();
+  } finally {
+    releaseGlobalOpenClawExecutionSlot();
+  }
+}
+
+async function runExclusiveOpenClawAgentExecution<T>(agentId: string, task: () => Promise<T>): Promise<T> {
+  const normalizedAgentId = String(agentId || "").trim() || "__unknown__";
+  const queueState = agentExecutionQueueById.get(normalizedAgentId) ?? {
+    tail: Promise.resolve(),
+    pending: 0
+  };
+  const maxPending = resolveOpenClawAgentQueueMaxPending();
+  if (queueState.pending >= maxPending) {
+    throw new Error(
+      `OPENCLAW_AGENT_QUEUE_SATURATED: agent=${normalizedAgentId}; pending=${queueState.pending}; max=${maxPending}`
+    );
+  }
+  queueState.pending += 1;
+
+  const previousTail = queueState.tail.catch(() => undefined);
+  let releaseGate: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = () => resolve();
+  });
+
+  queueState.tail = previousTail.then(() => gate);
+  agentExecutionQueueById.set(normalizedAgentId, queueState);
+
+  await previousTail;
+  try {
+    return await runWithGlobalOpenClawExecutionLimit(task);
+  } finally {
+    releaseGate();
+    queueState.pending -= 1;
+    if (queueState.pending <= 0) {
+      agentExecutionQueueById.delete(normalizedAgentId);
+    }
+  }
+}
+
+export function normalizeAgentToolAllowlist(values?: string[] | null) {
+  const strict = String(process.env.OPENCLAW_TOOL_ALLOWLIST_STRICT ?? "true").trim().toLowerCase() !== "false";
+  const normalized = normalizeStringArray(values);
+  const mapped = dedupeStrings(
+    normalized
+      .map((item) => OPENCLAW_LEGACY_TOOL_ALIASES.get(item) ?? item)
+      .map((item) => String(item || "").trim())
+      .filter(Boolean)
+  );
+  if (!strict) {
+    return mapped;
+  }
+  return mapped.filter((item) => OPENCLAW_CANONICAL_TOOL_ALLOWLIST.has(item));
+}
 
 export async function getOpenClawWorkspace(): Promise<OpenClawWorkspaceOverview> {
   const { agents, projects } = await buildWorkspaceSnapshot();
@@ -297,7 +497,145 @@ function shouldPreferLocalAgentExecution(input: {
   isDesignAgent: boolean;
   shouldIsolateSession: boolean;
 }) {
-  return input.isDesignAgent || input.shouldIsolateSession;
+  const preferLocalForDesign = String(process.env.OPENCLAW_DESIGN_PREFER_LOCAL ?? "false").trim().toLowerCase() === "true";
+  if (input.isDesignAgent) {
+    return preferLocalForDesign;
+  }
+  return input.shouldIsolateSession;
+}
+
+function resolveDesignRemoteFailureCooldownMs() {
+  const configured = Number(process.env.OPENCLAW_DESIGN_REMOTE_FAILURE_COOLDOWN_MS ?? "");
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return DESIGN_REMOTE_FAILURE_COOLDOWN_MS_DEFAULT;
+  }
+  return Math.max(
+    DESIGN_REMOTE_FAILURE_COOLDOWN_MS_MIN,
+    Math.min(DESIGN_REMOTE_FAILURE_COOLDOWN_MS_MAX, Math.round(configured))
+  );
+}
+
+function resolveModelRouteCooldownMs() {
+  const configured = Number(process.env.OPENCLAW_MODEL_ROUTE_COOLDOWN_MS ?? "");
+  if (!Number.isFinite(configured) || configured <= 0) {
+    return MODEL_ROUTE_COOLDOWN_MS_DEFAULT;
+  }
+  return Math.max(
+    MODEL_ROUTE_COOLDOWN_MS_MIN,
+    Math.min(MODEL_ROUTE_COOLDOWN_MS_MAX, Math.round(configured))
+  );
+}
+
+function normalizeModelRouteCooldownKey(model: string) {
+  return String(normalizeModelForRouting(model) || "").trim().toLowerCase();
+}
+
+function noteModelRouteUnavailable(model: string, nowMs = Date.now(), cooldownMs?: number) {
+  const key = normalizeModelRouteCooldownKey(model);
+  if (!key) {
+    return 0;
+  }
+  const effectiveCooldownMs = Number.isFinite(cooldownMs)
+    ? Math.max(0, Number(cooldownMs))
+    : resolveModelRouteCooldownMs();
+  const untilMs = nowMs + effectiveCooldownMs;
+  modelRouteCooldownUntilByModel.set(key, Math.max(modelRouteCooldownUntilByModel.get(key) ?? 0, untilMs));
+  return modelRouteCooldownUntilByModel.get(key) ?? untilMs;
+}
+
+function clearModelRouteUnavailable(model: string) {
+  const key = normalizeModelRouteCooldownKey(model);
+  if (!key) {
+    return false;
+  }
+  const removedPrimary = modelRouteCooldownUntilByModel.delete(key);
+  if (key.startsWith("openai/")) {
+    return modelRouteCooldownUntilByModel.delete(key.slice("openai/".length)) || removedPrimary;
+  }
+  if (key.startsWith("gpt-")) {
+    return modelRouteCooldownUntilByModel.delete(`openai/${key}`) || removedPrimary;
+  }
+  return removedPrimary;
+}
+
+function isModelRouteUnavailable(model: string, nowMs = Date.now()) {
+  const aliases = new Set<string>();
+  const normalized = normalizeModelRouteCooldownKey(model);
+  if (!normalized) {
+    return false;
+  }
+  aliases.add(normalized);
+  if (normalized.startsWith("openai/")) {
+    aliases.add(normalized.slice("openai/".length));
+  } else if (normalized.startsWith("gpt-")) {
+    aliases.add(`openai/${normalized}`);
+  }
+
+  let unavailable = false;
+  for (const alias of aliases) {
+    const untilMs = modelRouteCooldownUntilByModel.get(alias);
+    if (!untilMs) {
+      continue;
+    }
+    if (untilMs <= nowMs) {
+      modelRouteCooldownUntilByModel.delete(alias);
+      continue;
+    }
+    unavailable = true;
+  }
+  return unavailable;
+}
+
+export function noteOpenClawDesignRemoteFailure(
+  agentId: string,
+  options?: { nowMs?: number; cooldownMs?: number }
+) {
+  const normalizedAgentId = String(agentId || "").trim();
+  if (!normalizedAgentId) {
+    return 0;
+  }
+  const nowMs = Number.isFinite(options?.nowMs) ? Number(options?.nowMs) : Date.now();
+  const cooldownMs = Number.isFinite(options?.cooldownMs)
+    ? Math.max(0, Number(options?.cooldownMs))
+    : resolveDesignRemoteFailureCooldownMs();
+  const untilMs = nowMs + cooldownMs;
+  designRemoteFailureUntilByAgent.set(normalizedAgentId, untilMs);
+  return untilMs;
+}
+
+export function clearOpenClawDesignRemoteFailure(agentId: string) {
+  const normalizedAgentId = String(agentId || "").trim();
+  if (!normalizedAgentId) {
+    return false;
+  }
+  return designRemoteFailureUntilByAgent.delete(normalizedAgentId);
+}
+
+export function shouldUseLocalExecutionAfterRecentDesignRemoteFailure(
+  agentId: string,
+  isDesignAgent: boolean,
+  nowMs = Date.now()
+) {
+  if (!isDesignAgent) {
+    return false;
+  }
+
+  const normalizedAgentId = String(agentId || "").trim();
+  if (!normalizedAgentId) {
+    return false;
+  }
+
+  const untilMs = designRemoteFailureUntilByAgent.get(normalizedAgentId);
+  if (!Number.isFinite(untilMs)) {
+    return false;
+  }
+
+  if (Number(untilMs) <= nowMs) {
+    designRemoteFailureUntilByAgent.delete(normalizedAgentId);
+    return false;
+  }
+
+  return true;
 }
 
 type OpenClawAttemptFailureFlags = {
@@ -352,10 +690,12 @@ export function selectOpenClawFallbackModel(input: {
   const remainingFallbacks = input.fallbackQueue
     .slice(input.fallbackCursor)
     .filter((modelId) => modelId !== input.activeModel);
-  let nextFallbackModel = remainingFallbacks[0];
+  const availableFallbacks = remainingFallbacks.filter((modelId) => !isModelRouteUnavailable(modelId));
+  const candidatePool = availableFallbacks.length > 0 ? availableFallbacks : remainingFallbacks;
+  let nextFallbackModel = candidatePool[0];
 
   if (/claude_code|no available channel/i.test(input.errorText) && input.activeModel.startsWith("anthropic/")) {
-    nextFallbackModel = remainingFallbacks.find((modelId) => !modelId.startsWith("anthropic/")) ?? nextFallbackModel;
+    nextFallbackModel = candidatePool.find((modelId) => !modelId.startsWith("anthropic/")) ?? nextFallbackModel;
   }
 
   return nextFallbackModel;
@@ -990,6 +1330,7 @@ export async function updateOpenClawAgentSettings(
       ?? jsonArrayToStringArray(existingRecord?.toolAllowlist)
       ?? agentConfig.tools?.allow
   );
+  const normalizedNextTools = normalizeAgentToolAllowlist(nextTools);
 
   const nextDefaultModel = pickPreferredModel([
     input.defaultModel,
@@ -1016,7 +1357,7 @@ export async function updateOpenClawAgentSettings(
     allowAgents: nextAllowedAgentIds
   };
   agentConfig.tools = {
-    allow: nextTools
+    allow: normalizedNextTools
   };
   await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
 
@@ -1057,7 +1398,7 @@ export async function updateOpenClawAgentSettings(
       maxDailyTokens: nextSettings.maxDailyTokens,
       memoryEnabled: nextSettings.memoryEnabled,
       allowedAgentIds: nextAllowedAgentIds,
-      toolAllowlist: nextTools
+      toolAllowlist: normalizedNextTools
     },
     update: {
       displayName: nextDisplayName,
@@ -1075,7 +1416,7 @@ export async function updateOpenClawAgentSettings(
       maxDailyTokens: nextSettings.maxDailyTokens,
       memoryEnabled: nextSettings.memoryEnabled,
       allowedAgentIds: nextAllowedAgentIds,
-      toolAllowlist: nextTools
+      toolAllowlist: normalizedNextTools
     }
   });
 
@@ -1102,7 +1443,7 @@ export async function createOpenClawAgent(
   const intro = String(input.intro ?? "").trim() || undefined;
   const responsibility = String(input.responsibility ?? "").trim() || undefined;
   const allowedAgentIds = normalizeStringArray(input.allowedAgentIds);
-  const tools = normalizeStringArray(input.tools);
+  const tools = normalizeAgentToolAllowlist(normalizeStringArray(input.tools));
   const model = normalizeModelId(input.model) || "gpt-5.2";
 
   if (!agentId || !name || !title) {
@@ -1119,6 +1460,7 @@ export async function createOpenClawAgent(
 
   const workspacePath = path.join(OPENCLAW_WORKSPACE_ROOT, "agents", agentId);
   await mkdir(workspacePath, { recursive: true });
+  const governanceDefaults = await resolveCommanderGovernanceDefaults();
 
   config.agents.list.push({
     id: agentId,
@@ -1159,9 +1501,9 @@ export async function createOpenClawAgent(
       responsibility,
       selectedModel: model,
       defaultModel: model,
-      executionMode: "confirm_first",
-      requireConfirmation: true,
-      autoApproveMinorSteps: false,
+      executionMode: governanceDefaults.executionMode,
+      requireConfirmation: governanceDefaults.requireConfirmation,
+      autoApproveMinorSteps: governanceDefaults.autoApproveMinorSteps,
       maxPromptTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
       maxCompletionTokens: null,
       maxDailyTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
@@ -1182,6 +1524,107 @@ export async function createOpenClawAgent(
   });
 
   return findOpenClawAgent(agentId);
+}
+
+export async function applyOpenClawAutonomousModePreference(
+  input: {
+    autonomousMode: boolean;
+    scope?: "all" | "core" | "design";
+  }
+): Promise<{
+  autonomousMode: boolean;
+  scope: "all" | "core" | "design";
+  executionMode: OpenClawExecutionMode;
+  requireConfirmation: boolean;
+  autoApproveMinorSteps: boolean;
+  totalAgents: number;
+  createdConfigs: number;
+  updatedAgents: number;
+  agentIds: string[];
+}> {
+  const autonomousMode = Boolean(input.autonomousMode);
+  const scope = input.scope === "core" || input.scope === "design" ? input.scope : "all";
+  const config = (await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH)) ?? { agents: { list: [] } };
+  const allAgentConfigs = config.agents?.list ?? [];
+  const agentConfigs = allAgentConfigs.filter((item) => {
+    if (!item?.id) {
+      return false;
+    }
+    if (scope === "core") {
+      return NON_DELETABLE_AGENT_IDS.has(String(item.id).trim());
+    }
+    if (scope === "design") {
+      return isDesignAgentProfile(`${item.id} ${item.name ?? ""}`);
+    }
+    return true;
+  });
+  const agentIds = dedupeStrings(agentConfigs.map((item) => String(item.id ?? "").trim()).filter(Boolean));
+  const executionMode: OpenClawExecutionMode = autonomousMode ? "autonomous" : "confirm_first";
+  const requireConfirmation = !autonomousMode;
+  const autoApproveMinorSteps = autonomousMode;
+
+  if (agentIds.length === 0) {
+    return {
+      autonomousMode,
+      scope,
+      executionMode,
+      requireConfirmation,
+      autoApproveMinorSteps,
+      totalAgents: 0,
+      createdConfigs: 0,
+      updatedAgents: 0,
+      agentIds: []
+    };
+  }
+
+  const existing = await prisma.managedAgentConfig.findMany({
+    where: {
+      agentId: { in: agentIds }
+    },
+    select: {
+      agentId: true
+    }
+  });
+  const existingIds = new Set(existing.map((item) => item.agentId));
+  let createdConfigs = 0;
+
+  for (const agentConfig of agentConfigs) {
+    const agentId = String(agentConfig.id ?? "").trim();
+    if (!agentId || existingIds.has(agentId)) {
+      continue;
+    }
+
+    await ensureManagedAgentConfigExists(
+      agentId,
+      agentConfig.name || humanizeAgentId(agentId),
+      humanizeAgentId(agentId),
+      resolveAgentConfiguredPrimaryModel(agentConfig.model) || "gpt-5.2"
+    );
+    createdConfigs += 1;
+  }
+
+  const updated = await prisma.managedAgentConfig.updateMany({
+    where: {
+      agentId: { in: agentIds }
+    },
+    data: {
+      executionMode,
+      requireConfirmation,
+      autoApproveMinorSteps
+    }
+  });
+
+  return {
+    autonomousMode,
+    scope,
+    executionMode,
+    requireConfirmation,
+    autoApproveMinorSteps,
+    totalAgents: agentIds.length,
+    createdConfigs,
+    updatedAgents: updated.count,
+    agentIds
+  };
 }
 
 export async function deleteOpenClawAgent(
@@ -1566,11 +2009,12 @@ export async function getOpenClawStatusSummary(forceRefresh = false): Promise<Op
   return value;
 }
 
-export async function sendOpenClawAgentMessage(
+async function sendOpenClawAgentMessageInternal(
   agentId: string,
   input: OpenClawAgentMessageInput
 ): Promise<OpenClawAgentCommandResult> {
   await repairOpenClawProviderApis();
+  await repairOpenClawAgentToolAllowlist(agentId);
 
   const message = String(input.message ?? "").trim();
   if (!message) {
@@ -1615,36 +2059,69 @@ export async function sendOpenClawAgentMessage(
     ...DESIGN_MODEL_FALLBACKS.map((item) => normalizeModelForRouting(item)),
     ...defaultFallbackCandidates
   ].filter((item): item is string => Boolean(item)));
-  const fallbackCandidates = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates);
-  let activeModel = pickPreferredModel([
+  const fallbackCandidatesRaw = (isDesignAgent ? designFallbackCandidates : defaultFallbackCandidates);
+  const availableFallbackCandidates = fallbackCandidatesRaw.filter((modelId) => !isModelRouteUnavailable(modelId));
+  const fallbackCandidates = availableFallbackCandidates.length > 0
+    ? availableFallbackCandidates
+    : fallbackCandidatesRaw;
+  const modelSelectionPool = [
     preferredModelOverride,
     agent.commander.selectedModel,
     agent.commander.defaultModel,
     agent.commander.fallbackModel ?? undefined,
     ...(isDesignAgent ? [designPrimaryModel] : []),
     ...fallbackCandidates
-  ]);
+  ];
+  const availableModelSelectionPool = modelSelectionPool.filter((modelId): modelId is string =>
+    typeof modelId === "string"
+    && modelId.trim().length > 0
+    && !isModelRouteUnavailable(modelId)
+  );
+  let activeModel = pickPreferredModel(
+    availableModelSelectionPool.length > 0 ? availableModelSelectionPool : modelSelectionPool
+  );
   const requestedModel = activeModel;
   const fallbackQueue = fallbackCandidates.filter((modelId) => modelId !== activeModel);
   let fallbackCursor = 0;
   const shouldIsolateSession = shouldUseIsolatedAgentSession(agent, message);
-  const preferLocalExecution = shouldPreferLocalAgentExecution({
+  const shouldResetMainSessionForIsolatedRun = shouldIsolateSession
+    && String(process.env.OPENCLAW_ISOLATED_SESSION_FORCE_RESET ?? "true").trim().toLowerCase() !== "false";
+  if (shouldResetMainSessionForIsolatedRun) {
+    await resetOpenClawAgentMainSession(agentId).catch(() => false);
+  }
+  let preferLocalExecution = shouldPreferLocalAgentExecution({
     isDesignAgent,
     shouldIsolateSession
   });
+  if (!preferLocalExecution && shouldUseLocalExecutionAfterRecentDesignRemoteFailure(agentId, isDesignAgent)) {
+    preferLocalExecution = true;
+  }
   const isCodingExecution = /\bcoding-agent\b/i.test(message) || agentId === "rd_manager" || agentId === "rd_director";
   let gatewayRepairAttempted = false;
-  const maxAttempts = Math.max(1, Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? 4));
-  const cliTimeoutSeconds = Math.max(
-    preferLocalExecution
-      ? (isCodingExecution ? 180 : 90)
-      : (isCodingExecution ? 120 : 30),
-    Number(process.env.OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS ?? 75)
-  );
-  const commandTimeoutMs = Math.max(
-    (cliTimeoutSeconds + 20) * 1000,
-    Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? 90_000)
-  );
+  const defaultMaxAttempts = isDesignAgent ? 3 : 4;
+  const configuredMaxAttempts = Number(process.env.OPENCLAW_AGENT_MAX_ATTEMPTS ?? "");
+  const requestedMaxAttempts = Number.isFinite(configuredMaxAttempts) && configuredMaxAttempts > 0
+    ? Math.round(configuredMaxAttempts)
+    : defaultMaxAttempts;
+  const maxAttempts = Math.max(1, Math.min(4, requestedMaxAttempts));
+  const resolveCommandTimeouts = () => {
+    const baselineCliTimeoutSeconds = preferLocalExecution
+      ? (isCodingExecution ? 120 : 45)
+      : (isCodingExecution ? 90 : 25);
+    const configuredCliTimeoutSeconds = Number(process.env.OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS ?? "");
+    const cliTimeoutSeconds = Number.isFinite(configuredCliTimeoutSeconds) && configuredCliTimeoutSeconds > 0
+      ? Math.round(configuredCliTimeoutSeconds)
+      : baselineCliTimeoutSeconds;
+    const baselineCommandTimeoutMs = (cliTimeoutSeconds + 15) * 1000;
+    const configuredCommandTimeoutMs = Number(process.env.OPENCLAW_AGENT_COMMAND_TIMEOUT_MS ?? "");
+    const commandTimeoutMs = Number.isFinite(configuredCommandTimeoutMs) && configuredCommandTimeoutMs > 0
+      ? Math.max(baselineCommandTimeoutMs, Math.round(configuredCommandTimeoutMs))
+      : baselineCommandTimeoutMs;
+    return {
+      cliTimeoutSeconds,
+      commandTimeoutMs
+    };
+  };
   const liveLockStealAfterMs = Math.max(
     12_000,
     Number(process.env.OPENCLAW_LIVE_LOCK_STEAL_AFTER_MS ?? 15_000)
@@ -1657,6 +2134,25 @@ export async function sendOpenClawAgentMessage(
   const attempts: OpenClawAgentAttemptTrace[] = [];
 
   const selectedModelRaw = normalizeModelId(agent.commander.selectedModel) || "";
+  const originalSelectedModel = selectedModelRaw;
+  const restoreSelectedModelIfNeeded = async () => {
+    if (!originalSelectedModel) {
+      return;
+    }
+    const currentSelected = await findOpenClawAgent(agentId);
+    const currentModel = normalizeModelId(currentSelected?.commander.selectedModel) || "";
+    if (!currentModel || currentModel === originalSelectedModel) {
+      return;
+    }
+    try {
+      await restoreAgentSelectedModel(agentId, originalSelectedModel);
+    } catch (error) {
+      console.warn(
+        `[openclaw] failed to restore selected model for ${agentId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  };
   if (!externalFallbackControl && (selectedModelRaw !== activeModel || externalFallbackControl)) {
     try {
       await switchAgentModelForRetry(agentId, activeModel, {
@@ -1713,6 +2209,7 @@ export async function sendOpenClawAgentMessage(
     if (attempt > 1) {
       await cleanupOpenClawAgentStaleSessionLocks(agentId);
     }
+    const { cliTimeoutSeconds, commandTimeoutMs } = resolveCommandTimeouts();
     const attemptStartedAtMs = Date.now();
     const attemptStartedAt = new Date(attemptStartedAtMs).toISOString();
     const sessionId = shouldIsolateSession
@@ -1773,6 +2270,11 @@ export async function sendOpenClawAgentMessage(
         );
       }
       const actualModel = normalizeModelForRouting(successPayload.result?.meta?.agentMeta?.model);
+      if (isOpenAiGptFamilyModel(activeModel)) {
+        if (!actualModel || !isOpenAiGptFamilyModel(actualModel)) {
+          throw new Error(`unexpected execution model: ${actualModel || "unknown"}`);
+        }
+      }
       if (isDesignAgent && actualModel && !isDesignModelPreferred(actualModel) && !fallbackCandidates.includes(actualModel)) {
         throw new Error(`unexpected execution model: ${actualModel}`);
       }
@@ -1793,6 +2295,13 @@ export async function sendOpenClawAgentMessage(
         sessionId,
         localExecution: preferLocalExecution
       });
+      if (isDesignAgent && !preferLocalExecution) {
+        clearOpenClawDesignRemoteFailure(agentId);
+      }
+      clearModelRouteUnavailable(activeModel);
+      if (actualModel) {
+        clearModelRouteUnavailable(actualModel);
+      }
       break;
     } catch (error) {
       const stderrText =
@@ -1832,14 +2341,40 @@ export async function sendOpenClawAgentMessage(
         isGatewayRepairableError
       } = failure;
       if (isModelUnavailableError) {
+        noteModelRouteUnavailable(activeModel);
+      }
+      if (isModelUnavailableError) {
         for (const modelId of listGroupFallbackModels(finalError)) {
-          if (modelId !== activeModel && !fallbackQueue.includes(modelId)) {
+          if (modelId !== activeModel && !fallbackQueue.includes(modelId) && !isModelRouteUnavailable(modelId)) {
             fallbackQueue.push(modelId);
           }
         }
       }
       let recoveryAction: string | undefined;
       let recoveryTargetModel: string | undefined;
+
+      if ((isTransportError || isGatewayRepairableError) && isDesignAgent && !preferLocalExecution && attempt < maxAttempts) {
+        noteOpenClawDesignRemoteFailure(agentId);
+        recoveryAction = "switch_local_execution";
+        attempts.push({
+          attempt,
+          route: "openclaw-cli",
+          status: "failed",
+          startedAt: attemptStartedAt,
+          elapsedMs: Math.max(0, Date.now() - attemptStartedAtMs),
+          requestedModel,
+          selectedModel: activeModel,
+          isolatedSession: shouldIsolateSession,
+          sessionId,
+          localExecution: preferLocalExecution,
+          failureKind: failure.kind,
+          recoveryAction,
+          error: finalError
+        });
+        preferLocalExecution = true;
+        await sleep(Math.min(900, 300 * attempt));
+        continue;
+      }
 
       if (isGatewayRepairableError && !gatewayRepairAttempted) {
         gatewayRepairAttempted = true;
@@ -1870,12 +2405,17 @@ export async function sendOpenClawAgentMessage(
         errorText: finalError
       });
       const shouldRetryWithFallback =
-        (isTokenError || isModelUnavailableError || isUnexpectedModelError)
+        (
+          isTokenError
+          || isModelUnavailableError
+          || isUnexpectedModelError
+          || (isTransportError && !preferLocalExecution)
+        )
         && Boolean(nextFallbackModel)
         && nextFallbackModel !== activeModel;
 
       if (shouldRetryWithFallback) {
-        recoveryAction = "switch_model";
+        recoveryAction = (isTransportError && !preferLocalExecution) ? "switch_model_transport" : "switch_model";
         recoveryTargetModel = nextFallbackModel;
         attempts.push({
           attempt,
@@ -2054,6 +2594,7 @@ export async function sendOpenClawAgentMessage(
   }
 
   if (finalError) {
+    await restoreSelectedModelIfNeeded();
     const commandError = new Error(finalError) as Error & { attempts?: OpenClawAgentAttemptTrace[] };
     commandError.attempts = attempts;
     throw commandError;
@@ -2077,6 +2618,7 @@ export async function sendOpenClawAgentMessage(
     || promptErrorDetected
     || /request was aborted/i.test(promptErrorMessage)
   ) {
+    await restoreSelectedModelIfNeeded();
     const commandError = new Error(
       promptErrorMessage || `OpenClaw returned interrupted result (stopReason=${stopReason || "unknown"})`
     ) as Error & { attempts?: OpenClawAgentAttemptTrace[] };
@@ -2114,17 +2656,7 @@ export async function sendOpenClawAgentMessage(
     }
   });
 
-  const actualModel = normalizeModelForRouting(model);
-  if (requestedModel && actualModel && actualModel !== requestedModel) {
-    try {
-      await restoreAgentSelectedModel(agentId, requestedModel);
-    } catch (error) {
-      console.warn(
-        `[openclaw] failed to restore preferred model for ${agentId}:`,
-        error instanceof Error ? error.message : String(error)
-      );
-    }
-  }
+  await restoreSelectedModelIfNeeded();
 
   return {
     ok,
@@ -2137,6 +2669,13 @@ export async function sendOpenClawAgentMessage(
     reply,
     attempts
   };
+}
+
+export async function sendOpenClawAgentMessage(
+  agentId: string,
+  input: OpenClawAgentMessageInput
+): Promise<OpenClawAgentCommandResult> {
+  return runExclusiveOpenClawAgentExecution(agentId, () => sendOpenClawAgentMessageInternal(agentId, input));
 }
 
 export async function sendOpenClawBatchAgentMessage(
@@ -2351,7 +2890,7 @@ async function buildAgent(
   const allowedAgentIds = normalizeStringArray(
     jsonArrayToStringArray(managedConfig?.allowedAgentIds) ?? agentConfig.subagents?.allowAgents
   );
-  const tools = normalizeStringArray(
+  const tools = normalizeAgentToolAllowlist(
     jsonArrayToStringArray(managedConfig?.toolAllowlist) ?? agentConfig.tools?.allow
   );
 
@@ -3758,8 +4297,47 @@ function normalizeOpenClawBaseUrl(value: string | undefined) {
   return String(value ?? "").trim().replace(/\/+$/, "");
 }
 
+function normalizeOpenAiCompatibleGatewayBaseUrl(value: string | undefined) {
+  const trimmed = normalizeOpenClawBaseUrl(value);
+  if (!trimmed) {
+    return "";
+  }
+
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    const parsed = new URL(withProtocol);
+    const host = parsed.hostname.toLowerCase();
+    if (host === UNBOUNDTECH_GATEWAY_HOST) {
+      return UNBOUNDTECH_GATEWAY_V1;
+    }
+    return parsed.toString().replace(/\/+$/, "");
+  } catch {
+    return trimmed;
+  }
+}
+
 function isOfficialOpenAiBaseUrl(baseUrl: string) {
   return /^https:\/\/api\.openai\.com(?:\/v1)?$/i.test(baseUrl);
+}
+
+function isOpenAiApiKeyPlaceholder(value?: string) {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    return true;
+  }
+  const upper = normalized.toUpperCase();
+  return upper === "OPENAI_API_KEY"
+    || upper === "$OPENAI_API_KEY"
+    || upper === "${OPENAI_API_KEY}"
+    || upper === "ENV:OPENAI_API_KEY";
+}
+
+function resolveOpenAiApiKeyValue(value?: string) {
+  const normalized = String(value ?? "").trim();
+  if (isOpenAiApiKeyPlaceholder(normalized)) {
+    return "";
+  }
+  return normalized;
 }
 
 export function shouldRepairOpenAiProviderApi(provider?: {
@@ -3795,6 +4373,75 @@ export function normalizeOpenClawProviderApis(config: OpenClawConfig) {
     openaiProvider!.api = "openai-completions";
   }
 
+  const openaiProviderApiKey = resolveOpenAiApiKeyValue(openaiProvider?.apiKey);
+  const envOpenAiApiKey = resolveOpenAiApiKeyValue(config.env?.OPENAI_API_KEY);
+  const effectiveOpenAiApiKey = openaiProviderApiKey || envOpenAiApiKey;
+
+  if (effectiveOpenAiApiKey) {
+    if (!config.env) {
+      config.env = {};
+    }
+    if ((config.env.OPENAI_API_KEY ?? "") !== effectiveOpenAiApiKey) {
+      repairs.push({
+        provider: "env.OPENAI_API_KEY",
+        from: config.env.OPENAI_API_KEY ? "configured" : "empty",
+        to: "configured",
+        reason: "sync runtime OPENAI_API_KEY with active OpenAI provider key"
+      });
+      config.env.OPENAI_API_KEY = effectiveOpenAiApiKey;
+    }
+  }
+
+  if (openaiProvider && !openaiProviderApiKey && effectiveOpenAiApiKey) {
+    repairs.push({
+      provider: "openai.apiKey",
+      from: openaiProvider.apiKey ? "placeholder" : "empty",
+      to: "configured",
+      reason: "hydrate OpenAI provider apiKey from synchronized runtime OPENAI_API_KEY"
+    });
+    openaiProvider.apiKey = effectiveOpenAiApiKey;
+  }
+
+  for (const [providerName, provider] of Object.entries(config.models?.providers ?? {})) {
+    const api = String(provider?.api ?? "").trim().toLowerCase();
+    if (!api.startsWith("openai-")) {
+      continue;
+    }
+    const normalizedBaseUrl = normalizeOpenAiCompatibleGatewayBaseUrl(provider?.baseUrl);
+    const beforeBaseUrl = normalizeOpenClawBaseUrl(provider?.baseUrl);
+    if (!normalizedBaseUrl || normalizedBaseUrl === beforeBaseUrl) {
+      continue;
+    }
+    repairs.push({
+      provider: providerName,
+      from: beforeBaseUrl || "empty",
+      to: normalizedBaseUrl,
+      reason: "normalize OpenAI-compatible gateway endpoint to canonical /v1 URL"
+    });
+    provider.baseUrl = normalizedBaseUrl;
+  }
+
+  const normalizedOpenAiBaseUrl = normalizeOpenAiCompatibleGatewayBaseUrl(openaiProvider?.baseUrl);
+  if (normalizedOpenAiBaseUrl === UNBOUNDTECH_GATEWAY_V1 && openaiProvider) {
+    const existingGroup = String(
+      openaiProvider.headers?.["X-Group"]
+      ?? openaiProvider.headers?.["x-group"]
+      ?? ""
+    ).trim();
+    if (existingGroup.toLowerCase() !== "codex") {
+      repairs.push({
+        provider: "openai.headers.X-Group",
+        from: existingGroup || "empty",
+        to: "codex",
+        reason: "pin unboundtech OpenAI requests to codex group for stable channel routing"
+      });
+      openaiProvider.headers = {
+        ...(openaiProvider.headers ?? {}),
+        "X-Group": "codex"
+      };
+    }
+  }
+
   return {
     config,
     changed: repairs.length > 0,
@@ -3817,6 +4464,64 @@ async function repairOpenClawProviderApis() {
   }
 
   return normalized;
+}
+
+async function repairOpenClawAgentToolAllowlist(agentId: string) {
+  const normalizedAgentId = String(agentId || "").trim();
+  if (!normalizedAgentId) {
+    return {
+      changed: false,
+      before: [] as string[],
+      after: [] as string[]
+    };
+  }
+
+  const config = await readJsonFile<OpenClawConfig>(OPENCLAW_CONFIG_PATH);
+  if (!config?.agents?.list?.length) {
+    return {
+      changed: false,
+      before: [] as string[],
+      after: [] as string[]
+    };
+  }
+
+  const target = config.agents.list.find((item) => item.id === normalizedAgentId);
+  if (!target) {
+    return {
+      changed: false,
+      before: [] as string[],
+      after: [] as string[]
+    };
+  }
+
+  const before = normalizeStringArray(target.tools?.allow);
+  const after = normalizeAgentToolAllowlist(before);
+  const changed = before.length !== after.length || before.some((item, index) => item !== after[index]);
+
+  if (!changed) {
+    return {
+      changed: false,
+      before,
+      after
+    };
+  }
+
+  target.tools = {
+    allow: after
+  };
+  await writeJsonFile(OPENCLAW_CONFIG_PATH, config);
+  await prisma.managedAgentConfig.updateMany({
+    where: { agentId: normalizedAgentId },
+    data: {
+      toolAllowlist: after
+    }
+  });
+
+  return {
+    changed: true,
+    before,
+    after
+  };
 }
 
 async function restartOpenClawGateway() {
@@ -3931,22 +4636,68 @@ function recommendModelsByFamily(currentModel: string) {
   const normalized = currentModel.toLowerCase();
 
   if (normalized.includes("gemini")) {
-    return ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash"];
+    return [
+      "qwen3-max-2026-01-23",
+      "qwen3.5-plus",
+      "qwen3-coder-plus",
+      "kimi-k2.5",
+      "glm-5",
+      "minima/MiniMax-M2.7-highspeed",
+      "openai/gpt-5.4",
+      "openai/gpt-5.3-codex"
+    ];
   }
 
   if (normalized.includes("claude")) {
-    return ["claude-sonnet-4-6", "claude-opus-4-6", "claude-3-5-haiku-20241022"];
+    return [
+      "qwen3-max-2026-01-23",
+      "qwen3.5-plus",
+      "qwen3-coder-plus",
+      "kimi-k2.5",
+      "glm-5",
+      "openai/gpt-5.4",
+      "openai/gpt-5.3-codex"
+    ];
   }
 
   if (normalized.includes("gpt") || normalized.includes("o3") || normalized.includes("o4")) {
-    return ["gpt-5.4", "gpt-5.3-codex", "kimi-k2.5"];
+    return [
+      "qwen3-max-2026-01-23",
+      "qwen3.5-plus",
+      "qwen3-coder-plus",
+      "kimi-k2.5",
+      "glm-5",
+      "minima/MiniMax-M2.7-highspeed",
+      "openai/gpt-5.4",
+      "openai/gpt-5.3-codex",
+      "gpt-5.4",
+      "gpt-5.3-codex"
+    ];
   }
 
   if (normalized.includes("qwen")) {
-    return ["qwen-max", "qwen-plus", "qwen2.5-coder-32b-instruct"];
+    return [
+      "qwen3-max-2026-01-23",
+      "qwen3.5-plus",
+      "qwen3-coder-plus",
+      "kimi-k2.5",
+      "glm-5",
+      "minima/MiniMax-M2.7-highspeed",
+      "openai/gpt-5.4",
+      "openai/gpt-5.3-codex"
+    ];
   }
 
-  return ["gpt-5.4", "gpt-5.3-codex", "kimi-k2.5"];
+  return [
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "qwen3-coder-plus",
+    "kimi-k2.5",
+    "glm-5",
+    "minima/MiniMax-M2.7-highspeed",
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex"
+  ];
 }
 
 function humanizeModelLabel(modelId: string) {
@@ -4013,9 +4764,28 @@ function parseCsvModels(value?: string) {
     .filter((item): item is string => Boolean(item));
 }
 
+function isClaudeFamilyModel(model: string | undefined) {
+  const normalized = normalizeModelForRouting(model)?.toLowerCase() ?? "";
+  if (!normalized) {
+    return false;
+  }
+  return normalized.startsWith("anthropic/") || normalized.startsWith("claude");
+}
+
+function isOpenAiGptFamilyModel(model: string | undefined) {
+  const normalized = normalizeModelForRouting(model)?.toLowerCase() ?? "";
+  if (!normalized) {
+    return false;
+  }
+  return normalized.startsWith("openai/gpt-") || normalized.startsWith("gpt-");
+}
+
+function filterNonClaudeModels(models: Array<string | undefined>) {
+  return models.filter((item): item is string => Boolean(item) && !isClaudeFamilyModel(item));
+}
+
 export function prioritizeFallbackModels(models: string[], options?: { preferOpenAi?: boolean }) {
-  const preferOpenAi = options?.preferOpenAi !== false;
-  if (!preferOpenAi) {
+  if (options?.preferOpenAi === false) {
     return dedupeStrings(models);
   }
 
@@ -4030,34 +4800,45 @@ export function prioritizeFallbackModels(models: string[], options?: { preferOpe
     if (normalized.startsWith("openai/")) {
       return 2;
     }
-    if (normalized.startsWith("anthropic/")) {
+    if (normalized.startsWith("qwen3-max-2026-01-23")) {
       return 3;
     }
-    if (normalized.startsWith("minima/")) {
+    if (normalized.startsWith("qwen3.5-plus")) {
       return 4;
     }
-    return 5;
+    if (normalized.startsWith("qwen3-coder-plus")) {
+      return 5;
+    }
+    if (normalized.startsWith("kimi-k2.5")) {
+      return 6;
+    }
+    if (normalized.startsWith("minima/")) {
+      return 7;
+    }
+    if (normalized.startsWith("anthropic/")) {
+      return 8;
+    }
+    return 9;
   };
 
   return dedupeStrings(models).slice().sort((left, right) => rank(left) - rank(right));
 }
 
 function listGlobalFallbackModels() {
-  return prioritizeFallbackModels([
+  return prioritizeFallbackModels(filterNonClaudeModels([
     ...parseCsvModels(process.env.OPENCLAW_CLAUDE_CODE_DEV_MODELS),
     normalizeModelForRouting(process.env.OPENCLAW_AGENT_FALLBACK_MODEL),
     ...HARD_FALLBACK_MODELS.map((item) => normalizeModelForRouting(item)),
-  ].filter((item): item is string => Boolean(item)));
+  ]));
 }
 
 function listGroupFallbackModels(errorText: string) {
   if (/group\s+claude_code/i.test(errorText)) {
-    return dedupeStrings([
+    return prioritizeFallbackModels(filterNonClaudeModels([
       ...parseCsvModels(process.env.OPENCLAW_CLAUDE_CODE_DEV_MODELS),
-      "anthropic/claude-sonnet-4-6",
-      "claude-sonnet-4-6",
-      "claude-3-5-haiku-20241022",
-    ].map((item) => normalizeModelForRouting(item)).filter((item): item is string => Boolean(item)));
+      ...HARD_FALLBACK_MODELS,
+      "glm-5"
+    ].map((item) => normalizeModelForRouting(item))));
   }
   return [] as string[];
 }
@@ -4075,7 +4856,7 @@ function pickPreferredModel(candidates: Array<string | undefined>, fallback?: st
     return fallbackResolved;
   }
 
-  return listGlobalFallbackModels()[0] || "minima/MiniMax-M2.7-highspeed";
+  return listGlobalFallbackModels()[0] || "qwen3-max-2026-01-23";
 }
 
 function extractOpenClawGatewayError(raw: string) {
@@ -4175,6 +4956,27 @@ function normalizeNumericLimit(value?: number | null, fallback?: number) {
 }
 
 const DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT = 100_000_000;
+
+async function resolveCommanderGovernanceDefaults() {
+  try {
+    const preferences = await getUiPreferences();
+    if (preferences.autonomousMode) {
+      return {
+        executionMode: "autonomous" as const,
+        requireConfirmation: false,
+        autoApproveMinorSteps: true
+      };
+    }
+  } catch {
+    // ignore ui preferences read failures and fallback to safe defaults
+  }
+
+  return {
+    executionMode: "confirm_first" as const,
+    requireConfirmation: true,
+    autoApproveMinorSteps: false
+  };
+}
 
 function buildUsageSummary(
   usageLogs: Array<{ promptTokens: number; completionTokens: number; totalTokens: number; createdAt: Date }>,
@@ -4308,6 +5110,7 @@ async function ensureManagedAgentConfigExists(
   title: string,
   model: string
 ) {
+  const governanceDefaults = await resolveCommanderGovernanceDefaults();
   const isDesignAgent = isDesignAgentProfile(`${agentId} ${displayName} ${title}`);
   const designPrimaryModel = normalizeModelForRouting(process.env.DESIGN_MODEL) || DESIGN_MODEL_PRIMARY;
   const designFallbackModel =
@@ -4336,9 +5139,9 @@ async function ensureManagedAgentConfigExists(
       selectedModel,
       defaultModel: selectedModel,
       fallbackModel: isDesignAgent ? designFallbackModel : undefined,
-      executionMode: "confirm_first",
-      requireConfirmation: true,
-      autoApproveMinorSteps: false,
+      executionMode: governanceDefaults.executionMode,
+      requireConfirmation: governanceDefaults.requireConfirmation,
+      autoApproveMinorSteps: governanceDefaults.autoApproveMinorSteps,
       maxPromptTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,
       maxCompletionTokens: null,
       maxDailyTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT,

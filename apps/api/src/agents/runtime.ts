@@ -14,8 +14,13 @@ import {
 } from "../system/runtime-config.js";
 import { OPENCLAW_CONFIG_PATH } from "../openclaw/paths.js";
 import { normalizeOpenClawProviderApis } from "../openclaw/workspace.js";
+import { buildOpenAiCompatibleHeaders } from "../utils/openai-compatible-headers.js";
 
 const STAGE_AGENT_MAX_MODELS = Math.max(1, Number(process.env.STAGE_AGENT_MAX_MODELS ?? 3));
+const STAGE_AGENT_MAX_MODELS_DESIGN = Math.max(
+  STAGE_AGENT_MAX_MODELS,
+  Number(process.env.STAGE_AGENT_MAX_MODELS_DESIGN ?? 8)
+);
 const STAGE_AGENT_TOTAL_TIMEOUT_MS = Math.max(12000, Number(process.env.STAGE_AGENT_TOTAL_TIMEOUT_MS ?? 90000));
 const MIN_ATTEMPT_BUDGET_MS = 8000;
 const MAX_SINGLE_ATTEMPT_TIMEOUT_MS = Math.max(
@@ -64,40 +69,49 @@ const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
 };
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
-  INIT: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
-  ANALYSIS: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex", "kimi-k2.5"],
-  DESIGN: ["anthropic/claude-opus-4-6", "anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex"],
-  DEV: ["openai/gpt-5.4", "anthropic/claude-sonnet-4-6", "openai/gpt-5.3-codex", "qwen3-coder-plus"],
-  ACCEPT: ["anthropic/claude-sonnet-4-6", "openai/gpt-5.4", "openai/gpt-5.3-codex"]
+  INIT: ["qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus"],
+  ANALYSIS: ["qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus", "glm-5"],
+  DESIGN: [
+    "qwen3-max-2026-01-23",
+    "qwen3.5-plus",
+    "qwen3-coder-plus",
+    "kimi-k2.5",
+    "minima/MiniMax-M2.7-highspeed",
+    "glm-5",
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex"
+  ],
+  DEV: ["qwen3-coder-plus", "qwen3-coder-next", "qwen3-max-2026-01-23", "glm-5"],
+  ACCEPT: ["qwen3-max-2026-01-23", "qwen3.5-plus", "glm-5"]
 };
 
-// Issue 讨论优先走高能力模型，并补充 Claude 作为高可用兜底，避免单一网关波动导致讨论超时。
+// Issue 讨论优先走当前网关已实测可用的模型链，避免把不可用模型写成首选。
 const ISSUE_DEBATE_MODEL_PREFERENCES = [
-  "openai/gpt-5.4",
-  "anthropic/claude-sonnet-4-6",
-  "openai/gpt-5.3-codex"
+  "qwen3-max-2026-01-23",
+  "qwen3.5-plus",
+  "qwen3-coder-plus"
 ] as const;
 
 const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: string }> = {
   INIT: {
     objective: "快速理解需求与项目初始化。",
-    bestFit: "anthropic/claude-sonnet-4-6（首选） -> openai/gpt-5.4（高推理补位）"
+    bestFit: "qwen3-max-2026-01-23（首选） -> qwen3.5-plus（补位） -> qwen3-coder-plus"
   },
   ANALYSIS: {
     objective: "抽取约束/风险/验收标准，形成可执行分析。",
-    bestFit: "anthropic/claude-sonnet-4-6（首选） -> openai/gpt-5.4（次选） -> openai/gpt-5.3-codex（补位）"
+    bestFit: "qwen3-max-2026-01-23（首选） -> qwen3.5-plus（次选） -> glm-5 / qwen3-coder-plus（补位）"
   },
   DESIGN: {
     objective: "输出高质量视觉与交互策略，避免模板化设计。",
-    bestFit: "anthropic/claude-opus-4-6（设计首选） -> anthropic/claude-sonnet-4-6 -> openai/gpt-5.4"
+    bestFit: "qwen3-max-2026-01-23（设计首选） -> qwen3.5-plus -> qwen3-coder-plus -> kimi/minimax/glm（扩展） -> gpt-5.x（网关可用时）"
   },
   DEV: {
     objective: "面向实现落地，强调代码可执行性和稳定性。",
-    bestFit: "openai/gpt-5.4（实现质量首选） -> anthropic/claude-sonnet-4-6（稳定补位） -> openai/gpt-5.3-codex"
+    bestFit: "qwen3-coder-plus（实现质量首选） -> qwen3-coder-next（编码补位） -> qwen3-max-2026-01-23"
   },
   ACCEPT: {
     objective: "验收复盘与质量关口确认。",
-    bestFit: "anthropic/claude-sonnet-4-6（质量复核） -> openai/gpt-5.4（总结评审）"
+    bestFit: "qwen3-max-2026-01-23（质量复核） -> qwen3.5-plus（总结评审） -> glm-5"
   }
 };
 
@@ -242,10 +256,11 @@ async function probeRouteModel(route: ExecutionRoute, model: string, timeoutMs: 
   const request = async (stream: boolean) => fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     signal: controller.signal,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${route.apiKey}`
-    },
+    headers: buildOpenAiCompatibleHeaders({
+      apiBaseUrl: route.apiBaseUrl,
+      apiKey: route.apiKey,
+      json: true
+    }),
     body: JSON.stringify({
       model: normalizedModel,
       stream,
@@ -397,7 +412,7 @@ export async function runStageAgent(input: {
     }
 
     const modelPlan = (await resolveRoleModelPlan(input.role, input.stageType, runtime.modelName, input.promptMode ?? "default"))
-      .slice(0, STAGE_AGENT_MAX_MODELS);
+      .slice(0, resolveStageMaxModelsPerRun(input.stageType, input.role));
     const stageTimeoutMs = resolveStageTimeoutMs(input.stageType, input.role);
     const deadline = Date.now() + stageTimeoutMs;
     let lastError: unknown;
@@ -557,6 +572,7 @@ export async function runStageAgent(input: {
 
       if (isOpenAIModel(model)) {
         const routes = await resolveOpenAIExecutionConfigs({
+          model,
           runtimeApiBaseUrl: runtime.apiBaseUrl,
           runtimeApiKey: runtime.apiKey
         });
@@ -768,6 +784,7 @@ export function getStageModelPolicy() {
   return {
     limits: {
       maxModelsPerStageRun: STAGE_AGENT_MAX_MODELS,
+      designMaxModelsPerStageRun: STAGE_AGENT_MAX_MODELS_DESIGN,
       stageTotalTimeoutMs: STAGE_AGENT_TOTAL_TIMEOUT_MS,
       stageTimeouts: {
         INIT: resolveStageTimeoutMs("INIT"),
@@ -897,9 +914,14 @@ async function resolveRoleModelPlan(
   const models: string[] = [];
   let managedSelectedModel = "";
   let managedFallbackModel = "";
+  const designPhase = stageType === "DESIGN" || role === "ROLE_DESIGN";
+  const isDesignBlockedModel = (model: string) => /(^|[/:])claude-opus-4-6($|[\s@])/i.test(model);
   const push = (value?: string | null) => {
     const normalized = String(value ?? "").trim();
     if (!normalized || models.includes(normalized)) {
+      return;
+    }
+    if (designPhase && isDesignBlockedModel(normalized)) {
       return;
     }
     models.push(normalized);
@@ -921,13 +943,22 @@ async function resolveRoleModelPlan(
     // ignore database read errors and continue with runtime/env fallbacks
   }
 
+  if (designPhase) {
+    // 设计阶段优先固定“设计能力最强模型链”，再考虑角色/运行时覆盖，避免落到弱模型。
+    push(process.env.DESIGN_MODEL || DESIGN_MODEL_PRIMARY);
+    for (const model of DESIGN_MODEL_POLICY_CHAIN) {
+      push(model);
+    }
+    push(process.env.DESIGN_FALLBACK_MODEL);
+  }
+
   // 1) 角色专属配置优先，显式 Agent 模型选择不应被阶段默认策略覆盖。
   push(managedSelectedModel);
 
   // 2) 运行时显式模型优先，避免被阶段默认策略截断后无法尝试到真实可用模型。
   push(runtimeModel);
 
-  // 3) Issue 真实讨论优先模型能力：gpt-5.4 > claude-sonnet-4-6 > gpt-5.3-codex。
+  // 3) Issue 真实讨论优先模型能力链（基于当前可用性策略）。
   if (promptMode === "issue_debate") {
     for (const preferredModel of ISSUE_DEBATE_MODEL_PREFERENCES) {
       push(preferredModel);
@@ -939,22 +970,20 @@ async function resolveRoleModelPlan(
     push(preferredModel);
   }
 
-  if (role === "ROLE_DESIGN") {
-    push(process.env.DESIGN_MODEL || DESIGN_MODEL_PRIMARY);
-    for (const model of DESIGN_MODEL_POLICY_CHAIN) {
-      push(model);
-    }
-    push(process.env.DESIGN_FALLBACK_MODEL);
-  }
-
   // 5) 角色兜底模型
   push(managedFallbackModel);
 
   // 6) 通用兜底
   push(process.env.OPENAI_RUNTIME_FALLBACK_MODEL);
   push("qwen3-coder-plus");
-  push("minima/MiniMax-M2.7-highspeed");
-  push("kimi-k2.5");
+  if (designPhase) {
+    // DESIGN 兜底按当前可用能力排序：Kimi（可稳定产出）优先于 MiniMax（当前多次空内容）。
+    push("kimi-k2.5");
+    push("minima/MiniMax-M2.7-highspeed");
+  } else {
+    push("minima/MiniMax-M2.7-highspeed");
+    push("kimi-k2.5");
+  }
 
   return models;
 }
@@ -1040,6 +1069,7 @@ type AnthropicExecutionConfigInput = {
 };
 
 type OpenAIExecutionConfigInput = {
+  model: string;
   runtimeApiBaseUrl: string;
   runtimeApiKey: string;
 };
@@ -1047,8 +1077,28 @@ type OpenAIExecutionConfigInput = {
 async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput): Promise<ExecutionRoute[]> {
   const config = await readOpenClawRuntimeConfig();
   const provider = config.models?.providers?.openai;
+  const requestedModel = String(input.model ?? "").trim().toLowerCase();
+  const prefersDirectOpenAI = requestedModel.startsWith("gpt-") || requestedModel.startsWith("openai/gpt-");
+  const envOpenAiKey = String(process.env.OPENAI_API_KEY ?? "").trim()
+    || String(config.env?.OPENAI_API_KEY ?? "").trim();
+  const envOpenAiBaseUrl = String(process.env.OPENAI_BASE_URL ?? "").trim()
+    || String(process.env.OPENAI_API_BASE_URL ?? "").trim()
+    || String(config.env?.OPENAI_BASE_URL ?? "").trim()
+    || String(config.env?.OPENAI_API_BASE_URL ?? "").trim();
+  const officialOpenAiBaseUrl = "https://api.openai.com/v1";
+  const effectiveEnvOpenAiBaseUrl = envOpenAiBaseUrl || (envOpenAiKey ? officialOpenAiBaseUrl : "");
 
   const routes: ExecutionRoute[] = [
+    ...(prefersDirectOpenAI ? [{
+      source: "env-openai",
+      apiBaseUrl: effectiveEnvOpenAiBaseUrl,
+      apiKey: envOpenAiKey
+    }] : []),
+    ...(prefersDirectOpenAI && effectiveEnvOpenAiBaseUrl && effectiveEnvOpenAiBaseUrl !== officialOpenAiBaseUrl ? [{
+      source: "official-openai",
+      apiBaseUrl: officialOpenAiBaseUrl,
+      apiKey: envOpenAiKey
+    }] : []),
     {
       source: "runtime-selected",
       apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
@@ -1056,8 +1106,8 @@ async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput):
     },
     {
       source: "env-openai",
-      apiBaseUrl: String(process.env.OPENAI_BASE_URL ?? "").trim(),
-      apiKey: String(process.env.OPENAI_API_KEY ?? "").trim()
+      apiBaseUrl: effectiveEnvOpenAiBaseUrl,
+      apiKey: envOpenAiKey
     },
     {
       source: "openclaw-openai",
@@ -1200,4 +1250,11 @@ function normalizeStageType(value: string): StageType | null {
     return normalized;
   }
   return null;
+}
+
+function resolveStageMaxModelsPerRun(stageType: StageType, role: RoleType) {
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
+    return STAGE_AGENT_MAX_MODELS_DESIGN;
+  }
+  return STAGE_AGENT_MAX_MODELS;
 }

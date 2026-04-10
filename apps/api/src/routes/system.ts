@@ -27,12 +27,16 @@ import {
   getExecutionProtocolSnapshot,
   updateExecutionProtocolSettings
 } from "../system/execution-protocol.js";
+import { getUiPreferences, updateUiPreferences } from "../system/ui-preferences.js";
 import { getSystemReadiness } from "../system/readiness.js";
 import { listAuditLogs } from "../system/audit-log.js";
 import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/design-model-policy-health.js";
 import { getIssue } from "../system/v1-method-store.js";
 import { getCachedLocalAgentMonitorOverview, subscribeLocalAgentMonitor } from "../system/local-agent-monitor.js";
-import { inspectOpenClawModelRouting } from "../openclaw/workspace.js";
+import {
+  applyOpenClawAutonomousModePreference,
+  inspectOpenClawModelRouting
+} from "../openclaw/workspace.js";
 import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
 
 interface CreateSystemRouterOptions {
@@ -160,6 +164,72 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     });
 
     res.json(updated);
+  }));
+
+  router.get("/ui-preferences", asyncRoute(async (_req, res) => {
+    res.json(await getUiPreferences());
+  }));
+
+  router.put("/ui-preferences", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as {
+      language?: unknown;
+      workspacePath?: unknown;
+      autoSync?: unknown;
+      apiProtection?: unknown;
+      autonomousMode?: unknown;
+      usageAlert?: unknown;
+      usageAlertThresholdPercent?: unknown;
+    };
+
+    const updated = await updateUiPreferences(payload);
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "system.ui_preferences_updated",
+      resourceType: "system",
+      summary: "已更新设置中心界面偏好",
+      detail: JSON.stringify({
+        language: updated.language,
+        workspacePath: updated.workspacePath,
+        autoSync: updated.autoSync,
+        apiProtection: updated.apiProtection,
+        autonomousMode: updated.autonomousMode,
+        usageAlert: updated.usageAlert,
+        usageAlertThresholdPercent: updated.usageAlertThresholdPercent
+      })
+    });
+    res.json(updated);
+  }));
+
+  router.post("/ui-preferences/apply-autonomous-mode", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as { autonomousMode?: unknown; scope?: unknown };
+    const autonomousMode = payload.autonomousMode === undefined
+      ? (await getUiPreferences()).autonomousMode
+      : Boolean(payload.autonomousMode);
+    const scopeRaw = String(payload.scope ?? "").trim().toLowerCase();
+    const scope = scopeRaw === "core" || scopeRaw === "design" ? scopeRaw : "all";
+    const result = await applyOpenClawAutonomousModePreference({
+      autonomousMode,
+      scope
+    });
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "system.ui_preferences_autonomous_mode_applied",
+      resourceType: "system",
+      summary: `已将自主模式偏好下发到 Agent 配置（scope=${result.scope}, mode=${result.executionMode}, updated=${result.updatedAgents}）`,
+      detail: JSON.stringify({
+        scope: result.scope,
+        autonomousMode: result.autonomousMode,
+        executionMode: result.executionMode,
+        updatedAgents: result.updatedAgents,
+        createdConfigs: result.createdConfigs,
+        totalAgents: result.totalAgents
+      })
+    });
+
+    res.json(result);
   }));
 
   router.get("/model-routing/self-check", asyncRoute(async (_req, res) => {

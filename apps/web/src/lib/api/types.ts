@@ -317,6 +317,40 @@ export interface SystemExecutionProtocolInput {
   blockDegradedWrites?: boolean;
 }
 
+export interface SystemUiPreferences {
+  language: "zh" | "en";
+  workspacePath: string;
+  autoSync: boolean;
+  apiProtection: boolean;
+  autonomousMode: boolean;
+  usageAlert: boolean;
+  usageAlertThresholdPercent: number;
+  source: "default" | "file";
+  updatedAt?: string;
+}
+
+export interface SystemUiPreferencesInput {
+  language?: "zh" | "en";
+  workspacePath?: string;
+  autoSync?: boolean;
+  apiProtection?: boolean;
+  autonomousMode?: boolean;
+  usageAlert?: boolean;
+  usageAlertThresholdPercent?: number;
+}
+
+export interface SystemUiAutonomousModeApplyResult {
+  autonomousMode: boolean;
+  scope: "all" | "core" | "design";
+  executionMode: "autonomous" | "confirm_first";
+  requireConfirmation: boolean;
+  autoApproveMinorSteps: boolean;
+  totalAgents: number;
+  createdConfigs: number;
+  updatedAgents: number;
+  agentIds: string[];
+}
+
 export interface RuntimeRouteHealthItem {
   route: string;
   source: string;
