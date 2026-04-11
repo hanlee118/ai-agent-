@@ -96,6 +96,7 @@ import {
   createWorkflowFromTemplate as createWorkflowV2FromTemplate,
   startWorkflow as startWorkflowV2
 } from "../workflow-v2/workflow-orchestrator.js";
+import { ensureWorkflowV2DefaultTemplates } from "../workflow-v2/default-templates.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import {
   createProjectInputs,
@@ -162,6 +163,8 @@ const PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT =
 const PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT =
   String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_KEY ?? "standard_software_development").trim()
   || "standard_software_development";
+const PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED =
+  String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED ?? "true").trim().toLowerCase() !== "false";
 
 function normalizeProjectExecutionMode(value: unknown): ProjectExecutionMode {
   const normalized = String(value ?? "").trim().toLowerCase();
@@ -2253,6 +2256,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
 
 export async function ensureSeedData(runtimeMode: RuntimeMode) {
   await ensureProjectExecutionStorage();
+  await ensureWorkflowV2TemplatesIfReady();
 
   const existingAgents = await prisma.agentProfile.count();
   if (existingAgents === 0) {
@@ -2287,6 +2291,22 @@ export async function ensureSeedData(runtimeMode: RuntimeMode) {
 
   if (allowRealtimeBackfillOnBoot) {
     await reconcileAllProjectsDeliverables();
+  }
+}
+
+async function ensureWorkflowV2TemplatesIfReady() {
+  if (!PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED) {
+    return;
+  }
+  const workflowSchema = await getWorkflowV2SchemaStatus();
+  if (!workflowSchema.ready) {
+    return;
+  }
+  try {
+    await ensureWorkflowV2DefaultTemplates();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[seed] workflow-v2 template auto-seed skipped: ${message}`);
   }
 }
 
@@ -4262,8 +4282,7 @@ async function tryAutoInitializeProjectWorkflowV2(
     return;
   }
   const autoStart = input.autoStartWorkflow ?? PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT;
-
-  try {
+  const createAndMaybeStart = async () => {
     const workflow = await createWorkflowV2FromTemplate({
       projectId: project.id,
       templateKey
@@ -4271,6 +4290,11 @@ async function tryAutoInitializeProjectWorkflowV2(
     if (autoStart) {
       await startWorkflowV2(workflow.id);
     }
+    return workflow;
+  };
+
+  try {
+    const workflow = await createAndMaybeStart();
     await prisma.timelineEvent.create({
       data: {
         projectId: project.id,
@@ -4286,6 +4310,30 @@ async function tryAutoInitializeProjectWorkflowV2(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const missingTemplate = /template not found/i.test(message);
+    if (missingTemplate && PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED) {
+      try {
+        const seeded = await ensureWorkflowV2DefaultTemplates();
+        const recoveredWorkflow = await createAndMaybeStart();
+        await prisma.timelineEvent.create({
+          data: {
+            projectId: project.id,
+            timestamp: new Date(),
+            agentId: "ROLE_PM",
+            type: "system",
+            title: "V2 工作流模板已自动修复",
+            content: autoStart
+              ? `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并启动 workflow-v2（${recoveredWorkflow.id}）。`
+              : `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并创建 workflow-v2（${recoveredWorkflow.id}）。`,
+            priority: "normal"
+          }
+        });
+        return;
+      } catch (recoverError) {
+        const recoverMessage = recoverError instanceof Error ? recoverError.message : String(recoverError);
+        console.warn(`[project] workflow-v2 auto init retry failed for ${project.id}: ${recoverMessage}`);
+      }
+    }
     // 未迁移数据库或模板不存在时不阻断主项目创建流程。
     console.warn(`[project] workflow-v2 auto init skipped for ${project.id}: ${message}`);
   }

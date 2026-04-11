@@ -184,6 +184,7 @@ const projectAutomationState: {
   lastError: null,
   lastSummary: "尚未执行"
 };
+const projectManualAdvanceEnabled = resolveBooleanEnvDefaultTrueOutsideTest("PROJECT_MANUAL_ADVANCE_ENABLED");
 
 let projectAutomationTimer: ReturnType<typeof setInterval> | null = null;
 let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
@@ -549,6 +550,10 @@ async function executeManualAdvanceCycle(projectId: string) {
 }
 
 function ensureManualAdvanceJob(projectId: string) {
+  if (!projectManualAdvanceEnabled) {
+    return Promise.resolve();
+  }
+
   const existing = projectAdvanceJobs.get(projectId);
   if (existing) {
     return existing;

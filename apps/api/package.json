@@ -8,14 +8,14 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:routes": "tsx --test src/routes/routes.test.ts",
-    "test:workflow-v2": "tsx --test src/workflow-v2/agent-assignment.test.ts src/workflow-v2/quality-gate.test.ts src/workflow-v2/hermes-mcp.test.ts src/data/repository-workflow-v2-link.test.ts src/routes/workflows-v2-schema-guard.test.ts src/routes/workflows-v2.test.ts src/routes/workflows-v2-hermes.test.ts src/routes/knowledge-v2.test.ts src/routes/skills-v2.test.ts src/routes/agents-hermes.test.ts src/routes/issues-workflow-link.test.ts",
+    "test:workflow-v2": "tsx --test src/workflow-v2/agent-assignment.test.ts src/workflow-v2/quality-gate.test.ts src/workflow-v2/hermes-mcp.test.ts src/data/repository-workflow-v2-link.test.ts src/routes/workflows-v2-schema-guard.test.ts src/routes/workflows-v2.test.ts src/routes/workflows-v2-hermes.test.ts src/routes/workflows-v2-hybrid-acceptance.test.ts src/routes/knowledge-v2.test.ts src/routes/skills-v2.test.ts src/routes/agents-hermes.test.ts src/routes/issues-workflow-link.test.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate:deploy": "tsx scripts/sqlite-migrate.ts deploy",
     "db:migrate:status": "tsx scripts/sqlite-migrate.ts status",
     "db:bootstrap": "sqlite3 prisma/dev.db < prisma/bootstrap.sql",
     "db:seed": "tsx prisma/seed.ts",
-    "db:seed:workflow-v2": "tsx ../../scripts/seed-workflow-templates-v2.ts"
+    "db:seed:workflow-v2": "pnpm db:migrate:deploy && tsx ../../scripts/seed-workflow-templates-v2.ts"
   },
   "dependencies": {
     "@google/stitch-sdk": "^0.1.0",

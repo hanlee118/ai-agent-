@@ -104,6 +104,48 @@ after(async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("createProject auto-recovers workflow-v2 templates when template registry is empty", async () => {
+  await prismaClient.workflowTemplate.deleteMany({});
+
+  const project = await createProjectFn(
+    {
+      name: "Workflow Template Auto-Recover Test",
+      description: "验证 workflow-v2 模板缺失时能够自动补种并继续初始化",
+      workflowTemplateKey: "standard_software_development",
+      autoStartWorkflow: true
+    },
+    "scripted"
+  );
+
+  const requiredTemplateKeys = [
+    "standard_software_development",
+    "requirements_design",
+    "visual_design",
+    "tech_design",
+    "code_dev",
+    "qa_acceptance"
+  ];
+  const templates = await prismaClient.workflowTemplate.findMany({
+    where: {
+      key: {
+        in: requiredTemplateKeys
+      }
+    },
+    select: { key: true }
+  });
+  const templateKeys = new Set(templates.map((item: { key: string }) => item.key));
+  for (const key of requiredTemplateKeys) {
+    assert.equal(templateKeys.has(key), true, `missing template ${key}`);
+  }
+
+  const workflow = await prismaClient.workflow.findFirst({
+    where: { projectId: project.id },
+    orderBy: { createdAt: "desc" }
+  });
+  assert.ok(workflow);
+  assert.equal(workflow.status, "active");
+});
+
 test("createProject auto-initializes and starts workflow-v2", async () => {
   const project = await createProjectFn(
     {
