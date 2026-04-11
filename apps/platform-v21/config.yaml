@@ -1,0 +1,54 @@
+platform:
+  name: "Agent Collaboration Workbench v2.1"
+  version: "2.1.0"
+
+database:
+  type: "postgres"
+  host: "${DB_HOST:localhost}"
+  port: "${DB_PORT:5432}"
+  database: "${DB_NAME:agent_platform_v21}"
+  username: "${DB_USER:postgres}"
+  password: "${DB_PASS:postgres}"
+  synchronize: false
+  migrationsRun: true
+
+vectorStore:
+  type: "pgvector"
+  dimension: 1536
+  indexType: "ivfflat"
+
+redis:
+  host: "${REDIS_HOST:localhost}"
+  port: "${REDIS_PORT:6379}"
+  db: 0
+
+hermes:
+  enabled: true
+  mcpEndpoint: "${HERMES_MCP:http://localhost:3001/mcp}"
+  fallbackUrl: "${HERMES_FALLBACK_URL:http://localhost:3001/fallback}"
+  memorySyncInterval: 3600
+  skillLibraryPath: "/data/hermes/skills"
+
+openclaw:
+  enabled: true
+  apiEndpoint: "${OPENCLAW_API:http://localhost:3002/api}"
+  workspaceRoot: "/data/openclaw/workspaces"
+  syncInterval: 300
+
+stitch:
+  apiEndpoint: "${STITCH_API:http://localhost:3010/stitch}"
+
+skillLearning:
+  observationPeriodHours: 24
+  autoExtractThreshold: 7.0
+  refinementTriggerUses: 5
+  maxSkillVersions: 10
+
+routing:
+  defaultStrategy: "auto"
+  hybridComplexityThreshold: 7
+  healthCheckInterval: 60
+
+logging:
+  level: "info"
+  format: "json"

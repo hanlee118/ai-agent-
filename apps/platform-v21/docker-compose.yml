@@ -1,0 +1,111 @@
+services:
+  postgres:
+    image: ankane/pgvector:latest
+    container_name: platform-v21-postgres
+    environment:
+      POSTGRES_DB: agent_platform_v21
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - '5432:5432'
+    volumes:
+      - platform_v21_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres']
+      interval: 5s
+      timeout: 5s
+      retries: 8
+    networks:
+      - agent-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: platform-v21-redis
+    volumes:
+      - platform_v21_redis_data:/data
+    networks:
+      - agent-network
+
+  agent-platform:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: platform-v21-app
+    ports:
+      - '8787:8787'
+    environment:
+      NODE_ENV: production
+      PORT: 8787
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: agent_platform_v21
+      DB_USER: postgres
+      DB_PASS: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      HERMES_ENABLED: true
+      HERMES_MCP: http://hermes:3001/mcp
+      HERMES_MCP_ENDPOINT: http://hermes:3001/mcp
+      HERMES_FALLBACK_URL: http://hermes:3001/fallback
+      OPENCLAW_ENABLED: true
+      OPENCLAW_API: http://openclaw:3002/api
+      OPENCLAW_API_ENDPOINT: http://openclaw:3002/api
+      STITCH_API: http://stitch:3010/stitch
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DB_MIGRATIONS_RUN: 'true'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      hermes:
+        condition: service_started
+      openclaw:
+        condition: service_started
+    volumes:
+      - platform_v21_uploads:/app/uploads
+    networks:
+      - agent-network
+
+  # If you already have a real Hermes service, replace this section with your build config.
+  hermes:
+    image: ealen/echo-server:latest
+    container_name: platform-v21-hermes
+    environment:
+      PORT: 3001
+    ports:
+      - '3001:3001'
+    networks:
+      - agent-network
+
+  # If you already have a real OpenClaw service, replace this section with your runtime image.
+  openclaw:
+    image: ealen/echo-server:latest
+    container_name: platform-v21-openclaw
+    environment:
+      PORT: 3002
+    ports:
+      - '3002:3002'
+    networks:
+      - agent-network
+
+  stitch:
+    image: ealen/echo-server:latest
+    container_name: platform-v21-stitch
+    environment:
+      PORT: 3010
+    ports:
+      - '3010:3010'
+    networks:
+      - agent-network
+
+volumes:
+  platform_v21_postgres_data:
+  platform_v21_redis_data:
+  platform_v21_uploads:
+
+networks:
+  agent-network:
+    name: agent-network
+    driver: bridge
