@@ -91,6 +91,11 @@ import {
   sendOpenClawAgentMessage,
   updateOpenClawAgentSettings
 } from "../openclaw/workspace.js";
+import {
+  createWorkflowFromTemplate as createWorkflowV2FromTemplate,
+  startWorkflow as startWorkflowV2
+} from "../workflow-v2/workflow-orchestrator.js";
+import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -145,6 +150,13 @@ const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
   /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
 const STITCH_OUTPUT_SECTION_TITLE = "## Stitch 设计产物";
 const pendingStitchRecoveryJobs = new Map<string, Promise<void>>();
+const PROJECT_WORKFLOW_V2_AUTO_INIT_ENABLED =
+  String(process.env.PROJECT_WORKFLOW_V2_AUTO_INIT ?? "true").trim().toLowerCase() !== "false";
+const PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT =
+  String(process.env.PROJECT_WORKFLOW_V2_AUTO_START ?? "false").trim().toLowerCase() === "true";
+const PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT =
+  String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_KEY ?? "standard_software_development").trim()
+  || "standard_software_development";
 
 function splitProtocolHints(input: string) {
   return String(input || "")
@@ -4157,7 +4169,55 @@ export async function createProject(
   enrichProjectWithRequirementContract(project, input.requirementContract);
 
   await persistProject(project);
-  return findProject(id).then((value) => value as ProjectDetail);
+  const created = await findProject(id).then((value) => value as ProjectDetail);
+  await tryAutoInitializeProjectWorkflowV2(created, input);
+  return created;
+}
+
+async function tryAutoInitializeProjectWorkflowV2(
+  project: ProjectDetail,
+  input: CreateProjectInput & { requirementContract?: RequirementContract; parsedIntent?: ParsedIntent }
+) {
+  if (!PROJECT_WORKFLOW_V2_AUTO_INIT_ENABLED) {
+    return;
+  }
+  const schemaStatus = await getWorkflowV2SchemaStatus();
+  if (!schemaStatus.ready) {
+    return;
+  }
+
+  const templateKey = String(input.workflowTemplateKey ?? PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT).trim();
+  if (!templateKey) {
+    return;
+  }
+  const autoStart = input.autoStartWorkflow ?? PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT;
+
+  try {
+    const workflow = await createWorkflowV2FromTemplate({
+      projectId: project.id,
+      templateKey
+    });
+    if (autoStart) {
+      await startWorkflowV2(workflow.id);
+    }
+    await prisma.timelineEvent.create({
+      data: {
+        projectId: project.id,
+        timestamp: new Date(),
+        agentId: "ROLE_PM",
+        type: "system",
+        title: "V2 工作流已联动初始化",
+        content: autoStart
+          ? `已基于模板 ${templateKey} 自动创建并启动 workflow-v2（${workflow.id}）。`
+          : `已基于模板 ${templateKey} 自动创建 workflow-v2（${workflow.id}），等待手动启动。`,
+        priority: "normal"
+      }
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // 未迁移数据库或模板不存在时不阻断主项目创建流程。
+    console.warn(`[project] workflow-v2 auto init skipped for ${project.id}: ${message}`);
+  }
 }
 
 export async function startProjectWarmupAfterCreate(projectOrId: ProjectDetail | string) {

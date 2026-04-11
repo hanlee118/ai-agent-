@@ -25,6 +25,7 @@ const MonitoringPage = lazy(() => import('./pages/MonitoringPage'));
 const ProjectsPage = lazy(() => import('./pages/ProjectsPage'));
 const AgentsPage = lazy(() => import('./pages/AgentsPage'));
 const WorkspacePage = lazy(() => import('./pages/WorkspacePage'));
+const KnowledgeHubPage = lazy(() => import('./pages/KnowledgeHubPage'));
 const AuditPage = lazy(() => import('./pages/AuditPage'));
 const SettingsPage = lazy(() => import('./pages/SettingsPage'));
 const NewModelModal = lazy(() => import('./pages/modals/NewModelModal'));
@@ -45,6 +46,7 @@ const APP_TABS = [
   'projects',
   'agents',
   'workspace',
+  'knowledge-hub',
   'audit',
   'settings',
 ] as const;
@@ -607,6 +609,8 @@ export default function App() {
       setActiveTab('audit');
     } else if (target.startsWith('/workspace')) {
       setActiveTab('workspace');
+    } else if (target.startsWith('/knowledge')) {
+      setActiveTab('knowledge-hub');
     } else if (target.startsWith('/monitoring')) {
       setActiveTab('monitoring');
     } else if (target.startsWith('/system')) {
@@ -823,6 +827,7 @@ export default function App() {
                   />
                 )}
                 {activeTab === 'workspace' && <WorkspacePage addToast={addToast} workspace={workspace} onRefreshData={refreshAllData} onNavigate={handleNavigate} />}
+                {activeTab === 'knowledge-hub' && <KnowledgeHubPage addToast={addToast} />}
                 {activeTab === 'audit' && <AuditPage />}
                 {activeTab === 'settings' && <SettingsPage addToast={addToast} onRuntimeUpdated={refreshAllData} />}
               </motion.div>

@@ -8,12 +8,14 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:routes": "tsx --test src/routes/routes.test.ts",
+    "test:workflow-v2": "tsx --test src/workflow-v2/agent-assignment.test.ts src/workflow-v2/quality-gate.test.ts src/data/repository-workflow-v2-link.test.ts src/routes/workflows-v2-schema-guard.test.ts src/routes/workflows-v2.test.ts src/routes/knowledge-v2.test.ts",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate:deploy": "prisma migrate deploy",
     "db:migrate:status": "prisma migrate status",
     "db:bootstrap": "sqlite3 prisma/dev.db < prisma/bootstrap.sql",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "db:seed:workflow-v2": "tsx ../../scripts/seed-workflow-templates-v2.ts"
   },
   "dependencies": {
     "@google/stitch-sdk": "^0.1.0",

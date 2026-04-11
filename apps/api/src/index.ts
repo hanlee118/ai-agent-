@@ -138,6 +138,8 @@ import { createOpenClawRouter } from "./routes/openclaw.js";
 import { createProjectsRouter } from "./routes/projects.js";
 import { createTasksRouter } from "./routes/tasks.js";
 import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js";
+import { createKnowledgeV2Router } from "./routes/knowledge-v2.js";
+import { createWorkflowsV2Router } from "./routes/workflows-v2.js";
 import {
   buildProjectIssueFirstMessage,
   ensureProjectIssueFirst
@@ -3364,14 +3366,45 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
   ].join("\n");
 }
 
-// CORS 配置 - 生产环境禁止通配符
-const corsOrigin = process.env.NODE_ENV === "production"
-  ? (process.env.ALLOWED_ORIGINS?.split(",").map(origin => origin.trim()).filter(Boolean) || [])
-  : true; // 开发环境允许任意源
+// CORS 配置
+const configuredAllowedOrigins = (process.env.ALLOWED_ORIGINS?.split(",").map(origin => origin.trim()).filter(Boolean) || []);
+const loopbackOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+const desktopOriginPatterns = [
+  /^app:\/\//i,
+  /^tauri:\/\//i,
+  /^capacitor:\/\/localhost$/i
+];
 
-if (process.env.NODE_ENV === "production" && !process.env.ALLOWED_ORIGINS) {
+if (process.env.NODE_ENV === "production" && configuredAllowedOrigins.length === 0) {
   throw new Error("生产环境必须设置 ALLOWED_ORIGINS 环境变量，不允许使用通配符");
 }
+
+const corsOrigin: cors.CorsOptions["origin"] = process.env.NODE_ENV === "production"
+  ? (origin, callback) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (configuredAllowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    if (loopbackOriginPattern.test(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    const isDesktopOrigin = desktopOriginPatterns.some((pattern) => pattern.test(origin));
+    if (isDesktopOrigin) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Not allowed by CORS: ${origin}`));
+  }
+  : true; // 开发环境允许任意源
 
 app.use(cors({
   origin: corsOrigin,
@@ -3607,6 +3640,8 @@ app.use("/api/system", createSystemRouter({
   sendEvent
 }));
 app.use("/api/gitlab", createGitLabRouter());
+app.use("/api/v1/knowledge", createKnowledgeV2Router());
+app.use("/api/v1/workflows", createWorkflowsV2Router());
 app.use(createTasksRouter({
   safeAudit
 }));

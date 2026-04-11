@@ -965,6 +965,8 @@ export interface CreateProjectInput {
   name?: string;
   description: string;
   team?: RoleType[];
+  workflowTemplateKey?: string;
+  autoStartWorkflow?: boolean;
 }
 
 export interface InterventionInput {

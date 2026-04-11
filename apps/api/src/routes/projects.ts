@@ -1718,7 +1718,9 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     {
       name: req.body?.name,
       description,
-      team: req.body?.team
+      team: req.body?.team,
+      workflowTemplateKey: req.body?.workflowTemplateKey,
+      autoStartWorkflow: req.body?.autoStartWorkflow
     },
     (await getRuntimeStatus()).mode
   );

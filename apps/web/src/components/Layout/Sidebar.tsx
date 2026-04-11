@@ -2,6 +2,7 @@ import { motion } from 'motion/react';
 import type { LucideIcon } from 'lucide-react';
 import {
   Activity,
+  Database,
   Briefcase,
   ChevronLeft,
   Globe,
@@ -140,6 +141,13 @@ export default function Sidebar({
           label="工作区"
           active={activeTab === 'workspace'}
           onClick={() => onTabChange('workspace')}
+          collapsed={!sidebarOpen}
+        />
+        <NavItem
+          icon={Database}
+          label="知识治理"
+          active={activeTab === 'knowledge-hub'}
+          onClick={() => onTabChange('knowledge-hub')}
           collapsed={!sidebarOpen}
         />
 

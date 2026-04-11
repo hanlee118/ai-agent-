@@ -23,6 +23,7 @@ import { useSSE } from '../hooks/useSSE';
 import {
   tasksApi,
   projectsApi,
+  workflowsApi,
   ApiRequestError,
   type ProjectDetail,
   type TaskDelegation,
@@ -32,6 +33,7 @@ import {
   type ProjectExecutionRecord,
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
+  type WorkflowProjectOverview,
 } from '../lib/api';
 import { agents, projects } from '../lib/runtimeCollections';
 import SurfaceModal from './impl/SurfaceModal';
@@ -279,6 +281,37 @@ const STAGE_LABELS: Record<string, string> = {
   ACCEPT: '验收',
 };
 
+const WORKFLOW_TEMPLATE_STAGE_LABELS: Record<string, string> = {
+  requirements_design: '需求设计',
+  visual_design: '视觉设计',
+  tech_design: '技术设计',
+  code_dev: '代码研发',
+  qa_acceptance: 'QA 验收',
+  standard_software_development: '标准软件开发流程',
+};
+
+const WORKFLOW_TEMPLATE_TO_CORE_STAGE: Record<string, string> = {
+  requirements_design: 'ANALYSIS',
+  visual_design: 'DESIGN',
+  tech_design: 'DEV',
+  code_dev: 'DEV',
+  qa_acceptance: 'ACCEPT',
+  standard_software_development: 'INIT',
+};
+
+const WORKFLOW_OVERVIEW_FILTER_OPTIONS: Array<{
+  key: 'all' | 'current' | 'running' | 'reviewing' | 'completed' | 'failed' | 'gate_blocked';
+  label: string;
+}> = [
+  { key: 'all', label: '全部' },
+  { key: 'current', label: '当前' },
+  { key: 'running', label: '执行中' },
+  { key: 'reviewing', label: '待门禁' },
+  { key: 'completed', label: '已完成' },
+  { key: 'failed', label: '失败' },
+  { key: 'gate_blocked', label: '门禁阻塞' },
+];
+
 const STAGE_ORDER = ['INIT', 'ANALYSIS', 'DESIGN', 'DEV', 'ACCEPT'];
 const PROJECT_ROOM_TAB_TO_PARAM: Record<ProjectRoomTab, ProjectRoomTabParam> = {
   任务: 'tasks',
@@ -299,6 +332,15 @@ const CORE_STAGE_STATUS_LABELS: Record<CoreStageStatus, string> = {
   completed: '已完成',
   blocked: '阻塞',
   rejected: '已驳回',
+};
+
+const WORKFLOW_STAGE_STATUS_LABELS: Record<string, string> = {
+  pending: '待开始',
+  running: '执行中',
+  reviewing: '待门禁',
+  completed: '已完成',
+  failed: '失败',
+  skipped: '已跳过',
 };
 
 const DELIVERABLE_STATUS_LABELS: Record<DeliverableStatus, string> = {
@@ -436,6 +478,29 @@ const toTaskProgress = (status: CoreTaskStatus) => {
 };
 
 const roleLabel = (roleId?: string) => ROLE_LABELS[String(roleId || '')] || roleId || '系统';
+const workflowTemplateLabel = (templateKey?: string) => {
+  const key = String(templateKey || '').trim();
+  if (!key) {
+    return '未命名阶段';
+  }
+  return WORKFLOW_TEMPLATE_STAGE_LABELS[key] || key;
+};
+
+const workflowTemplateToCoreStage = (templateKey?: string) => {
+  const key = String(templateKey || '').trim();
+  if (!key) {
+    return '';
+  }
+  if (WORKFLOW_TEMPLATE_TO_CORE_STAGE[key]) {
+    return WORKFLOW_TEMPLATE_TO_CORE_STAGE[key];
+  }
+  const lowered = key.toLowerCase();
+  if (lowered.includes('qa') || lowered.includes('accept')) return 'ACCEPT';
+  if (lowered.includes('design') || lowered.includes('visual') || lowered.includes('ui') || lowered.includes('ux')) return 'DESIGN';
+  if (lowered.includes('requirement') || lowered.includes('analysis') || lowered.includes('prd')) return 'ANALYSIS';
+  if (lowered.includes('dev') || lowered.includes('code') || lowered.includes('tech') || lowered.includes('arch')) return 'DEV';
+  return '';
+};
 const isProjectNotFoundError = (error: unknown) =>
   /project not found/i.test(error instanceof Error ? error.message : String(error ?? ''));
 
@@ -458,6 +523,14 @@ const statusVariantByStage = (status: CoreStageStatus) => {
   if (status === 'completed') return 'primary';
   if (status === 'active') return 'accent';
   if (status === 'blocked' || status === 'rejected') return 'danger';
+  return 'default';
+};
+
+const statusVariantByWorkflowStage = (status: string) => {
+  if (status === 'completed') return 'primary';
+  if (status === 'running' || status === 'reviewing') return 'accent';
+  if (status === 'failed') return 'danger';
+  if (status === 'skipped') return 'warning';
   return 'default';
 };
 
@@ -505,7 +578,9 @@ const ProjectRoom = ({
 }) => {
   const [activeTab, setActiveTab] = useState<ProjectRoomTab>('任务');
   const [detail, setDetail] = useState<ProjectDetailResponse | null>(null);
+  const [workflowOverview, setWorkflowOverview] = useState<WorkflowProjectOverview | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [isLoadingWorkflowOverview, setIsLoadingWorkflowOverview] = useState(false);
   const [isIntervening, setIsIntervening] = useState(false);
   const [isReviewingStage, setIsReviewingStage] = useState(false);
   const [stageReviewAction, setStageReviewAction] = useState<'approve' | 'reject' | null>(null);
@@ -532,6 +607,7 @@ const ProjectRoom = ({
   const [isExportingSignoffCsv, setIsExportingSignoffCsv] = useState(false);
   const [isCopyingSignoffLink, setIsCopyingSignoffLink] = useState(false);
   const [sseLogs, setSseLogs] = useState<ProjectRoomLogItem[]>([]);
+  const [workflowOverviewFilter, setWorkflowOverviewFilter] = useState<'all' | 'current' | 'running' | 'reviewing' | 'completed' | 'failed' | 'gate_blocked'>('all');
   const signoffAutoOpenKeyRef = useRef<string | null>(null);
   const projectRoomUrlStateAppliedRef = useRef<string | null>(null);
   const lastConnectedLogAtRef = useRef<number>(0);
@@ -562,6 +638,7 @@ const ProjectRoom = ({
   const addToastRef = useRef(addToast);
   const onProjectMissingRef = useRef(onProjectMissing);
   const lastDetailErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
+  const lastWorkflowErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
 
   useEffect(() => {
     addToastRef.current = addToast;
@@ -592,6 +669,7 @@ const ProjectRoom = ({
   useEffect(() => {
     setDesignReviewForm(createDefaultDesignReviewForm());
     setIsDesignReviewOpen(false);
+    setWorkflowOverviewFilter('all');
   }, [effectiveProjectId]);
 
   const loadProjectDetail = useCallback(async () => {
@@ -633,6 +711,47 @@ const ProjectRoom = ({
   useEffect(() => {
     void loadProjectDetail();
   }, [loadProjectDetail]);
+
+  const loadWorkflowOverview = useCallback(async () => {
+    if (!effectiveProjectId) {
+      setWorkflowOverview(null);
+      return;
+    }
+    setIsLoadingWorkflowOverview(true);
+    try {
+      const next = await workflowsApi.getProjectOverview(effectiveProjectId);
+      setWorkflowOverview(next);
+    } catch (error) {
+      const requestError = error instanceof ApiRequestError ? error : null;
+      const code = String(requestError?.code || '').toUpperCase();
+      const isExpectedEmpty =
+        requestError?.status === 404
+        || code === 'NOT_FOUND'
+        || code === 'SERVICE_UNAVAILABLE';
+      if (isExpectedEmpty) {
+        setWorkflowOverview(null);
+        return;
+      }
+
+      const message = `加载工作流视图失败: ${error instanceof Error ? error.message : '未知错误'}`;
+      const now = Date.now();
+      const previous = lastWorkflowErrorRef.current;
+      const isDuplicate = previous
+        && previous.projectId === effectiveProjectId
+        && previous.message === message
+        && now - previous.at < 10000;
+      if (!isDuplicate) {
+        addToastRef.current(message, 'error');
+        lastWorkflowErrorRef.current = { projectId: effectiveProjectId, message, at: now };
+      }
+    } finally {
+      setIsLoadingWorkflowOverview(false);
+    }
+  }, [effectiveProjectId]);
+
+  useEffect(() => {
+    void loadWorkflowOverview();
+  }, [loadWorkflowOverview]);
 
   const loadTaskDelegations = useCallback(
     async (taskId: string, options?: { silent?: boolean }) => {
@@ -1382,9 +1501,10 @@ const ProjectRoom = ({
     projectRefreshTimerRef.current = window.setTimeout(() => {
       projectRefreshTimerRef.current = null;
       void loadProjectDetail();
+      void loadWorkflowOverview();
       void onRefreshData?.();
     }, 300);
-  }, [loadProjectDetail, onRefreshData]);
+  }, [loadProjectDetail, loadWorkflowOverview, onRefreshData]);
 
   const handleProjectRoomSseEvent = useCallback((event: MessageEvent) => {
     const eventType = event.type || 'message';
@@ -1563,6 +1683,66 @@ const ProjectRoom = ({
   const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
+  const workflowStageRows = workflowOverview?.stages || [];
+  const workflowStageSummary = workflowStageRows.reduce(
+    (acc, item) => {
+      acc.total += 1;
+      if (item.status === 'completed') acc.completed += 1;
+      if (item.status === 'running' || item.status === 'reviewing') acc.inProgress += 1;
+      if (item.status === 'failed') acc.failed += 1;
+      if (item.gate && item.gate.violationCount > 0) acc.gateBlocked += 1;
+      if (item.isCurrent) acc.current += 1;
+      return acc;
+    },
+    { total: 0, completed: 0, inProgress: 0, failed: 0, gateBlocked: 0, current: 0 },
+  );
+  const visibleWorkflowStageRows = useMemo(() => {
+    if (workflowOverviewFilter === 'all') return workflowStageRows;
+    if (workflowOverviewFilter === 'current') return workflowStageRows.filter((item) => item.isCurrent);
+    if (workflowOverviewFilter === 'gate_blocked') {
+      return workflowStageRows.filter((item) => item.gate && item.gate.violationCount > 0);
+    }
+    return workflowStageRows.filter((item) => item.status === workflowOverviewFilter);
+  }, [workflowOverviewFilter, workflowStageRows]);
+  const handleFocusWorkflowStageDeliverables = useCallback((templateKey: string) => {
+    const stageType = workflowTemplateToCoreStage(templateKey);
+    if (!stageType) {
+      addToastRef.current(`未能识别阶段 ${workflowTemplateLabel(templateKey)} 对应的交付物分组`, 'info');
+      return;
+    }
+    const items = deliverablesByStage.get(stageType) || [];
+    if (items.length === 0) {
+      addToastRef.current(`当前未找到 ${STAGE_LABELS[stageType] || stageType} 阶段交付物`, 'info');
+      return;
+    }
+    setActiveTab('交付物');
+    setPreviewDeliverable(items[0]);
+    addToastRef.current(`已定位到 ${STAGE_LABELS[stageType] || stageType} 阶段交付物`, 'success');
+  }, [deliverablesByStage]);
+  const handleFocusWorkflowStageKnowledge = useCallback((templateKey: string) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (!project.id) {
+      addToastRef.current('当前项目不可用，无法跳转知识库', 'error');
+      return;
+    }
+    const url = new URL(window.location.href);
+    const params = url.searchParams;
+    params.set('app_tab', 'knowledge-hub');
+    params.set('kb_scope', 'project');
+    params.set('kb_project_id', project.id);
+    params.set('kb_stage', templateKey);
+    params.delete('kb_query');
+    const nextUrl = `${url.pathname}${url.search ? url.search : ''}${url.hash}`;
+    window.history.replaceState(window.history.state, '', nextUrl);
+    if (typeof PopStateEvent === 'function') {
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    } else {
+      window.dispatchEvent(new Event('popstate'));
+    }
+    addToastRef.current(`已切换到知识中心（阶段: ${workflowTemplateLabel(templateKey)}）`, 'success');
+  }, [project.id]);
   const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
   const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
   const isVisualPreviewDeliverable = (item: Pick<ProjectDeliverable, 'name' | 'stageType'>) =>
@@ -1852,10 +2032,11 @@ const ProjectRoom = ({
     await onRefreshData?.();
     await Promise.all([
       loadProjectDetail(),
+      loadWorkflowOverview(),
       loadFinalArtifacts(),
       loadExecutions({ silent: true }),
     ]);
-  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail]);
+  }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadWorkflowOverview]);
 
   useEffect(() => {
     void loadFinalArtifacts({ silent: true });
@@ -3305,6 +3486,116 @@ const ProjectRoom = ({
                 <CheckCircle2 size={14} />
                 阶段验收中心
               </h3>
+
+              <div className="bg-surface-soft border border-border-subtle rounded-2xl p-5 space-y-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Workflow v2 阶段执行总览</p>
+                    <p className="text-xs text-slate-400 mt-1">
+                      {workflowOverview
+                        ? `${workflowOverview.template.name} · ${workflowOverview.name}`
+                        : '当前项目尚未发现可展示的 workflow-v2 运行态'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {isLoadingWorkflowOverview ? <Badge variant="default">同步中</Badge> : null}
+                    {workflowOverview ? (
+                      <Badge variant={workflowOverview.status === 'completed' ? 'primary' : workflowOverview.status === 'active' ? 'accent' : 'default'}>
+                        {workflowOverview.status}
+                      </Badge>
+                    ) : (
+                      <Badge variant="warning">未激活</Badge>
+                    )}
+                  </div>
+                </div>
+
+                {workflowOverview ? (
+                  <>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="default">阶段总数 {workflowStageSummary.total}</Badge>
+                      <Badge variant="primary">已完成 {workflowStageSummary.completed}</Badge>
+                      <Badge variant="accent">进行中 {workflowStageSummary.inProgress}</Badge>
+                      <Badge variant={workflowStageSummary.gateBlocked > 0 ? 'warning' : 'default'}>
+                        门禁阻塞 {workflowStageSummary.gateBlocked}
+                      </Badge>
+                      <Badge variant={workflowStageSummary.failed > 0 ? 'danger' : 'default'}>
+                        执行失败 {workflowStageSummary.failed}
+                      </Badge>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      {WORKFLOW_OVERVIEW_FILTER_OPTIONS.map((option) => (
+                        <button
+                          key={option.key}
+                          onClick={() => setWorkflowOverviewFilter(option.key)}
+                          className={cn(
+                            'px-2 py-1 rounded-lg text-[11px] border transition-colors',
+                            workflowOverviewFilter === option.key
+                              ? 'bg-primary/20 text-primary border-primary/30'
+                              : 'bg-white/5 text-slate-400 border-border-subtle hover:bg-white/10',
+                          )}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                      {visibleWorkflowStageRows.map((item, index) => (
+                        <div key={item.id} className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                          <div className="flex items-start justify-between gap-3">
+                            <div>
+                              <p className="text-sm text-white font-medium">
+                                {index + 1}. {workflowTemplateLabel(item.templateKey)}
+                              </p>
+                              <p className="text-[11px] text-slate-500 mt-1">
+                                node: {item.nodeId || '-'} · agents: {item.assignedAgents.length > 0 ? item.assignedAgents.map((agentId) => roleLabel(agentId)).join(' / ') : '未分配'}
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {item.isCurrent ? <Badge variant="accent">当前</Badge> : null}
+                              <Badge variant={statusVariantByWorkflowStage(item.status)}>
+                                {WORKFLOW_STAGE_STATUS_LABELS[item.status] || item.status}
+                              </Badge>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant="default">产物 {item.outputArtifactCount}</Badge>
+                            <Badge variant="default">上下文 {item.contextMemoryCount}</Badge>
+                            <Badge variant={item.gate.passed ? 'primary' : item.gate.violationCount > 0 ? 'warning' : 'default'}>
+                              {item.gate.passed ? '门禁通过' : `门禁问题 ${item.gate.violationCount}`}
+                            </Badge>
+                            <button
+                              onClick={() => handleFocusWorkflowStageDeliverables(item.templateKey)}
+                              className="px-2 py-1 rounded-lg text-[11px] border bg-white/5 text-slate-300 border-border-subtle hover:bg-white/10"
+                            >
+                              查看交付物
+                            </button>
+                            <button
+                              onClick={() => handleFocusWorkflowStageKnowledge(item.templateKey)}
+                              className="px-2 py-1 rounded-lg text-[11px] border bg-white/5 text-slate-300 border-border-subtle hover:bg-white/10"
+                            >
+                              查看知识
+                            </button>
+                          </div>
+
+                          {item.gate.violations.length > 0 ? (
+                            <p className="text-[11px] text-warning">
+                              {item.gate.violations[0]}
+                            </p>
+                          ) : null}
+                        </div>
+                      ))}
+                      {visibleWorkflowStageRows.length === 0 ? (
+                        <p className="text-xs text-slate-500">当前筛选条件下暂无阶段。</p>
+                      ) : null}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-xs text-slate-500">可先在项目创建时启用 workflow 模板，或在项目中初始化并启动 workflow-v2。</p>
+                )}
+              </div>
 
               <div className="bg-surface-soft border border-border-subtle rounded-2xl p-5 space-y-4">
                 <div className="flex items-start justify-between gap-4">

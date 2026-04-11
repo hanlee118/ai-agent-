@@ -195,6 +195,7 @@ model Project {
   deliverables        Deliverable[]
   timeline            TimelineEvent[]
   executions          ProjectExecution[]
+  workflows           Workflow[]
 }
 
 model Stage {
@@ -450,4 +451,154 @@ model GitLabSyncBinding {
   @@index([gitlabProjectId, bindingType])
   @@unique([taskId, bindingType])
   @@unique([gitlabProjectId, issueIid, bindingType])
+}
+
+model KnowledgeItem {
+  id                String                     @id @default(cuid())
+  scope             String
+  projectId         String?
+  agentId           String?
+  type              String
+  title             String
+  content           String
+  contentVector     Json?
+  metadata          Json
+  tags              Json
+  stageContext      Json
+  techStack         Json
+  memoryType        String?
+  importanceScore   Float?
+  sourceUrl         String?
+  filePath          String?
+  fileType          String?
+  accessCount       Int                        @default(0)
+  lastAccessedAt    DateTime?
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  outgoingRelations KnowledgeRelation[]        @relation("KnowledgeRelationSource")
+  incomingRelations KnowledgeRelation[]        @relation("KnowledgeRelationTarget")
+  preferences       AgentKnowledgePreference[]
+
+  @@index([scope, projectId])
+  @@index([createdAt])
+}
+
+model KnowledgeRelation {
+  id           String        @id @default(cuid())
+  sourceId     String
+  targetId     String
+  relationType String
+  strength     Float         @default(1)
+  createdAt    DateTime      @default(now())
+  source       KnowledgeItem @relation("KnowledgeRelationSource", fields: [sourceId], references: [id], onDelete: Cascade)
+  target       KnowledgeItem @relation("KnowledgeRelationTarget", fields: [targetId], references: [id], onDelete: Cascade)
+
+  @@unique([sourceId, targetId, relationType])
+  @@index([sourceId, createdAt])
+  @@index([targetId, createdAt])
+}
+
+model AgentKnowledgePreference {
+  id              String        @id @default(cuid())
+  agentId         String
+  knowledgeId     String
+  preferenceScore Float         @default(0)
+  context         String?
+  createdAt       DateTime      @default(now())
+  knowledge       KnowledgeItem @relation(fields: [knowledgeId], references: [id], onDelete: Cascade)
+
+  @@unique([agentId, knowledgeId, context])
+  @@index([agentId, createdAt])
+}
+
+model KnowledgeOperationLog {
+  id            String   @id @default(cuid())
+  operationType String
+  scope         String?
+  projectId     String?
+  agentId       String?
+  triggeredBy   String?
+  summary       String
+  payload       Json
+  canRollback   Boolean  @default(false)
+  rolledBackAt  DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([operationType, createdAt])
+  @@index([projectId, createdAt])
+  @@index([agentId, createdAt])
+  @@index([createdAt])
+}
+
+model WorkflowTemplate {
+  id                 String     @id @default(cuid())
+  name               String
+  key                String     @unique
+  description        String?
+  category           String
+  executorConfig     Json
+  inputSchema        Json
+  outputSchema       Json
+  acceptanceCriteria Json?
+  integrationConfig  Json?
+  defaultTimeout     Int?
+  allowParallel      Boolean    @default(false)
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  workflows          Workflow[]
+}
+
+model Workflow {
+  id              String               @id @default(cuid())
+  projectId       String
+  templateId      String
+  name            String
+  stageGraph      Json
+  status          String               @default("draft")
+  currentStageIds Json
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  project         Project              @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  template        WorkflowTemplate     @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  stages          WorkflowStage[]
+  transitions     WorkflowTransition[]
+
+  @@index([projectId, status, createdAt])
+}
+
+model WorkflowStage {
+  id               String    @id @default(cuid())
+  workflowId       String
+  nodeId           String
+  templateKey      String
+  status           String    @default("pending")
+  assignedAgents   Json
+  inputArtifacts   Json
+  outputArtifacts  Json
+  startedAt        DateTime?
+  completedAt      DateTime?
+  deadline         DateTime?
+  gateResults      Json?
+  contextMemoryIds Json
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  workflow         Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@unique([workflowId, nodeId])
+  @@index([workflowId, status, createdAt])
+}
+
+model WorkflowTransition {
+  id          String    @id @default(cuid())
+  workflowId  String
+  fromStageId String?
+  toStageId   String?
+  action      String
+  triggeredBy String
+  reason      String?
+  metadata    Json?
+  createdAt   DateTime  @default(now())
+  workflow    Workflow  @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+
+  @@index([workflowId, createdAt])
 }

@@ -35,6 +35,7 @@
     "gen:api-types:web": "OPENAPI_TYPES_OUT=apps/web/src/lib/api/openapi.generated.ts node scripts/generate-api-types.mjs",
     "db:baseline": "node scripts/prisma-baseline.mjs",
     "db:baseline:apply": "node scripts/prisma-baseline.mjs --mark-applied",
+    "db:seed:workflow-v2": "pnpm --filter @occ/api exec tsx ../../scripts/seed-workflow-templates-v2.ts",
     "health:check": "node scripts/health-check.mjs"
   },
   "dependencies": {

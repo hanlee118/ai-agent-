@@ -15,3 +15,5 @@ export * from './notificationsApi';
 export * from './auditApi';
 export * from './systemApi';
 export * from './openclawAgentsApi';
+export * from './knowledgeApi';
+export * from './workflowsApi';
