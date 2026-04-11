@@ -8,6 +8,7 @@ import {
   type ProjectMessageInput,
   type ParsedIntent,
   type ProjectDetail,
+  type ProjectExecutionMode,
   type ProjectStatus,
   type ProjectSummary,
   type RoleType,
@@ -96,6 +97,10 @@ import {
   startWorkflow as startWorkflowV2
 } from "../workflow-v2/workflow-orchestrator.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
+import {
+  createProjectInputs,
+  importRelayInputs
+} from "../workflow-v2/project-modes.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -157,6 +162,28 @@ const PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT =
 const PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT =
   String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_KEY ?? "standard_software_development").trim()
   || "standard_software_development";
+
+function normalizeProjectExecutionMode(value: unknown): ProjectExecutionMode {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "standalone" || normalized === "relay") {
+    return normalized as ProjectExecutionMode;
+  }
+  return "complete";
+}
+
+function resolveWorkflowTemplateKeyForProjectMode(input: {
+  workflowTemplateKey?: unknown;
+  projectType: ProjectExecutionMode;
+}) {
+  const explicit = String(input.workflowTemplateKey ?? "").trim();
+  if (explicit) {
+    return explicit;
+  }
+  if (input.projectType === "complete") {
+    return PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT;
+  }
+  return "requirements_design";
+}
 
 function splitProtocolHints(input: string) {
   return String(input || "")
@@ -2386,6 +2413,22 @@ async function loadProjectRecord(id: string) {
         }
       },
       deliverables: { orderBy: [{ updatedAt: "desc" }] },
+      projectInputs: {
+        include: {
+          referenceDeliverable: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              stageType: true,
+              projectId: true,
+              version: true,
+              status: true
+            }
+          }
+        },
+        orderBy: { createdAt: "asc" }
+      },
       timeline: { orderBy: { timestamp: "desc" } }
     }
   });
@@ -4061,6 +4104,16 @@ export async function createProject(
   runtimeMode: RuntimeMode
 ): Promise<ProjectDetail> {
   const parsedIntent = input.parsedIntent ?? previewRequirement(input.description);
+  const projectType = normalizeProjectExecutionMode(input.projectType);
+  const parentProjectId = String(input.parentProjectId ?? "").trim() || undefined;
+  const relaySourceStageId = String(input.relaySourceStageId ?? "").trim() || undefined;
+  const workflowTemplateKey = resolveWorkflowTemplateKeyForProjectMode({
+    workflowTemplateKey: input.workflowTemplateKey,
+    projectType
+  });
+  if (projectType === "relay" && !parentProjectId) {
+    throw new Error("relay mode requires parentProjectId");
+  }
   const id = await nextProjectId();
   const currentStage: StageType = "INIT";
   const currentRole = stageAssignees[currentStage];
@@ -4167,10 +4220,28 @@ export async function createProject(
     }
   ];
   enrichProjectWithRequirementContract(project, input.requirementContract);
+  project.projectType = projectType;
+  project.parentProjectId = parentProjectId;
+  project.relaySourceStageId = relaySourceStageId;
 
   await persistProject(project);
+  if (projectType === "relay" && parentProjectId) {
+    await importRelayInputs({
+      targetProjectId: project.id,
+      sourceProjectId: parentProjectId,
+      sourceStageId: relaySourceStageId,
+      relayType: "full"
+    });
+  }
+  if (Array.isArray(input.projectInputs) && input.projectInputs.length > 0) {
+    await createProjectInputs(project.id, input.projectInputs);
+  }
   const created = await findProject(id).then((value) => value as ProjectDetail);
-  await tryAutoInitializeProjectWorkflowV2(created, input);
+  await tryAutoInitializeProjectWorkflowV2(created, {
+    ...input,
+    workflowTemplateKey,
+    projectType
+  });
   return created;
 }
 
@@ -6065,7 +6136,10 @@ async function persistProject(project: ProjectDetail) {
         liveTitle: project.liveSession.title,
         liveBody: project.liveSession.body,
         liveStartedAt: new Date(project.liveSession.startedAt),
-        liveProvider: project.liveSession.provider
+        liveProvider: project.liveSession.provider,
+        projectType: normalizeProjectExecutionMode(project.projectType),
+        parentProjectId: String(project.parentProjectId ?? "").trim() || null,
+        relaySourceStageId: String(project.relaySourceStageId ?? "").trim() || null
       }
     });
 
@@ -6128,6 +6202,9 @@ async function persistProject(project: ProjectDetail) {
 function toProjectSummary(project: {
   id: string;
   name: string;
+  projectType: string;
+  parentProjectId: string | null;
+  relaySourceStageId: string | null;
   status: string;
   currentStage: string;
   progress: number;
@@ -6140,6 +6217,9 @@ function toProjectSummary(project: {
   return {
     id: project.id,
     name: project.name,
+    projectType: normalizeProjectExecutionMode(project.projectType),
+    parentProjectId: project.parentProjectId ?? undefined,
+    relaySourceStageId: project.relaySourceStageId ?? undefined,
     status: project.status as ProjectStatus,
     currentStage: project.currentStage as StageType,
     progress: project.progress,
@@ -6155,6 +6235,9 @@ function toProjectDetail(project: {
   id: string;
   name: string;
   description: string;
+  projectType: string;
+  parentProjectId: string | null;
+  relaySourceStageId: string | null;
   parsedKeywords: Prisma.JsonValue;
   parsedConstraints: Prisma.JsonValue;
   parsedRisks: Prisma.JsonValue;
@@ -6246,6 +6329,19 @@ function toProjectDetail(project: {
     createdBy: string;
     updatedAt: Date;
   }>;
+  projectInputs: Array<{
+    id: string;
+    name: string;
+    type: string;
+    description: string | null;
+    content: string | null;
+    filePath: string | null;
+    referenceDeliverableId: string | null;
+    validationStatus: string;
+    validationErrors: Prisma.JsonValue;
+    inputSource: string;
+    createdAt: Date;
+  }>;
   timeline: Array<{
     id: string;
     timestamp: Date;
@@ -6281,6 +6377,9 @@ function toProjectDetail(project: {
   return {
     id: project.id,
     name: project.name,
+    projectType: normalizeProjectExecutionMode(project.projectType),
+    parentProjectId: project.parentProjectId ?? undefined,
+    relaySourceStageId: project.relaySourceStageId ?? undefined,
     description: project.description,
     parsedIntent: {
       keywords: readStringArray(project.parsedKeywords),
@@ -6290,6 +6389,19 @@ function toProjectDetail(project: {
       summary: project.parsedSummary
     },
     team: readRoleArray(project.team),
+    projectInputs: project.projectInputs.map((item) => ({
+      id: item.id,
+      name: item.name,
+      type: item.type,
+      description: item.description ?? undefined,
+      content: item.content ?? undefined,
+      filePath: item.filePath ?? undefined,
+      referenceDeliverableId: item.referenceDeliverableId ?? undefined,
+      validationStatus: item.validationStatus,
+      validationErrors: readStringArray(item.validationErrors),
+      inputSource: item.inputSource,
+      createdAt: item.createdAt.toISOString()
+    })),
     currentStage: project.currentStage as StageType,
     currentRole: project.currentRole as RoleType,
     progress: project.progress,

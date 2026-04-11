@@ -35,6 +35,7 @@ export type RoleType =
   | "ROLE_HR";
 export type TimelinePriority = "low" | "normal" | "high" | "urgent";
 export type RuntimeMode = "scripted" | "openai-compatible";
+export type ProjectExecutionMode = "complete" | "standalone" | "relay";
 export type ProjectStageExecutionMode = "direct_model" | "terminal_agent";
 export type TaskStatus =
   | "draft"
@@ -275,6 +276,9 @@ export interface LiveSession {
 export interface ProjectSummary {
   id: string;
   name: string;
+  projectType?: ProjectExecutionMode;
+  parentProjectId?: string;
+  relaySourceStageId?: string;
   status: ProjectStatus;
   currentStage: StageType;
   progress: number;
@@ -289,6 +293,19 @@ export interface ProjectDetail extends ProjectSummary {
   description: string;
   parsedIntent: ParsedIntent;
   team: RoleType[];
+  projectInputs?: Array<{
+    id: string;
+    name: string;
+    type: string;
+    description?: string;
+    content?: string;
+    filePath?: string;
+    referenceDeliverableId?: string;
+    validationStatus: string;
+    validationErrors?: string[];
+    inputSource: string;
+    createdAt: string;
+  }>;
   stages: Stage[];
   tasks: Task[];
   deliverables: Deliverable[];
@@ -965,6 +982,18 @@ export interface CreateProjectInput {
   name?: string;
   description: string;
   team?: RoleType[];
+  projectType?: ProjectExecutionMode;
+  parentProjectId?: string;
+  relaySourceStageId?: string;
+  projectInputs?: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    content?: string;
+    filePath?: string;
+    referenceDeliverableId?: string;
+    inputSource?: "manual" | "imported_from_project" | "template_generated";
+  }>;
   workflowTemplateKey?: string;
   autoStartWorkflow?: boolean;
 }

@@ -51,6 +51,12 @@ interface ConfirmIssueBody {
   finalDescription?: unknown;
   teamRoleIds?: unknown;
   conflictResolution?: unknown;
+  projectType?: unknown;
+  parentProjectId?: unknown;
+  relaySourceStageId?: unknown;
+  projectInputs?: unknown;
+  workflowTemplateKey?: unknown;
+  autoStartWorkflow?: unknown;
 }
 
 const ROLE_IDS: RoleType[] = [
@@ -97,6 +103,73 @@ function normalizeRoleList(input: unknown) {
   return input
     .map((item) => String(item ?? "").trim().toUpperCase())
     .filter((item): item is RoleType => ROLE_IDS.includes(item as RoleType));
+}
+
+function normalizeOptionalBoolean(input: unknown) {
+  if (typeof input === "boolean") {
+    return input;
+  }
+  if (input === null || input === undefined) {
+    return undefined;
+  }
+  const text = String(input).trim().toLowerCase();
+  if (text === "true" || text === "1" || text === "yes" || text === "on") {
+    return true;
+  }
+  if (text === "false" || text === "0" || text === "no" || text === "off") {
+    return false;
+  }
+  return undefined;
+}
+
+function normalizeProjectType(input: unknown) {
+  const text = String(input ?? "").trim().toLowerCase();
+  if (text === "standalone" || text === "relay") {
+    return text as "standalone" | "relay";
+  }
+  return "complete" as const;
+}
+
+function normalizeProjectInputs(input: unknown) {
+  type NormalizedProjectInput = {
+    name: string;
+    type: string;
+    description?: string;
+    content?: string;
+    filePath?: string;
+    referenceDeliverableId?: string;
+    inputSource?: "manual" | "imported_from_project" | "template_generated";
+  };
+
+  if (!Array.isArray(input)) {
+    return [] as NormalizedProjectInput[];
+  }
+
+  return input.reduce<NormalizedProjectInput[]>((acc, item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return acc;
+      }
+      const record = item as Record<string, unknown>;
+      const name = String(record.name ?? "").trim();
+      const type = String(record.type ?? "").trim() || "document";
+      if (!name) {
+        return acc;
+      }
+      const sourceRaw = String(record.inputSource ?? "").trim();
+      const inputSource = sourceRaw === "imported_from_project" || sourceRaw === "template_generated"
+        ? sourceRaw
+        : "manual";
+      acc.push({
+        name,
+        type,
+        description: String(record.description ?? "").trim() || undefined,
+        content: String(record.content ?? "").trim() || undefined,
+        filePath: String(record.filePath ?? "").trim() || undefined,
+        referenceDeliverableId: String(record.referenceDeliverableId ?? "").trim() || undefined,
+        inputSource: inputSource as "manual" | "imported_from_project" | "template_generated"
+      });
+      return acc;
+    }, []);
 }
 
 function normalizeStringMap(input: unknown) {
@@ -907,6 +980,19 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
 
     const clarificationAnswers = normalizeStringMap(payload.clarificationAnswers);
     const conflictResolution = String(payload.conflictResolution ?? "").trim();
+    const projectType = normalizeProjectType(payload.projectType);
+    const parentProjectId = String(payload.parentProjectId ?? "").trim() || undefined;
+    const relaySourceStageId = String(payload.relaySourceStageId ?? "").trim() || undefined;
+    const projectInputs = normalizeProjectInputs(payload.projectInputs);
+    const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim();
+    const workflowTemplateKey = workflowTemplateKeyRaw && workflowTemplateKeyRaw !== "none"
+      ? workflowTemplateKeyRaw
+      : undefined;
+    const autoStartWorkflow = normalizeOptionalBoolean(payload.autoStartWorkflow);
+    if (projectType === "relay" && !parentProjectId) {
+      sendError(res, 400, "VALIDATION_ERROR", "relay mode requires parentProjectId");
+      return;
+    }
     const requiredQuestions = issue.questions.filter((question) => question.required);
     const missingRequired = requiredQuestions.find((question) => !String(clarificationAnswers[question.id] ?? "").trim());
     if (missingRequired) {
@@ -1004,8 +1090,14 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         name: finalName,
         description: finalProjectDescription,
         team: constrainedRoleIds,
+        projectType,
+        parentProjectId,
+        relaySourceStageId,
+        projectInputs,
         requirementContract: confirmedContract,
-        parsedIntent
+        parsedIntent,
+        workflowTemplateKey,
+        autoStartWorkflow
       },
       runtime.mode
     );

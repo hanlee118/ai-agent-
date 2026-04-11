@@ -1,12 +1,16 @@
 import express from "express";
+import { extname } from "node:path";
+import multer from "multer";
 import {
   applyKnowledgeCuration,
+  autoOrganizeKnowledge,
   buildAgentContext,
   bulkDeleteKnowledgeItems,
   deleteKnowledgeItemById,
   getKnowledgeItemById,
   getProjectMemorySummary,
   ingestDocumentText,
+  ingestKnowledgeItem,
   ingestTextAsKnowledge,
   listKnowledgeItems,
   listKnowledgeOperationLogs,
@@ -15,9 +19,10 @@ import {
   rollbackKnowledgeOperation,
   updateKnowledgeItemById
 } from "../workflow-v2/knowledge-service.js";
-import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
+import { getKnowledgeV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { asStringArray, normalizeText, type KnowledgeScope } from "../workflow-v2/types.js";
+import { validateHermesApiKey } from "./hermes-auth.js";
 
 type UploadKnowledgeBody = {
   scope?: unknown;
@@ -83,6 +88,98 @@ type CurationBody = {
   triggeredBy?: unknown;
 };
 
+type HermesMemorySyncBody = {
+  projectId?: unknown;
+  scope?: unknown;
+  memoryType?: unknown;
+  title?: unknown;
+  content?: unknown;
+  importanceScore?: unknown;
+  tags?: unknown;
+  stageContext?: unknown;
+  techStack?: unknown;
+  agentId?: unknown;
+};
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: Math.max(1_024 * 1_024, Number(process.env.KNOWLEDGE_UPLOAD_MAX_BYTES ?? 12 * 1_024 * 1_024))
+  }
+});
+
+const KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST =
+  String(process.env.KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST ?? "true").trim().toLowerCase() !== "false"
+  && String(process.env.NODE_ENV ?? "").trim().toLowerCase() !== "test";
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".json",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".py",
+  ".java",
+  ".go",
+  ".sql",
+  ".yaml",
+  ".yml",
+  ".csv"
+]);
+
+function parseFlexibleStringArray(value: unknown) {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => String(item ?? "").split(","))
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return [] as string[];
+  }
+  if (raw.startsWith("[") && raw.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item ?? "").trim()).filter(Boolean);
+      }
+    } catch {
+      // fallback to csv parser
+    }
+  }
+  return raw.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+async function extractTextFromUploadedFile(file: Express.Multer.File) {
+  const extension = extname(file.originalname || "").toLowerCase();
+
+  if (extension === ".pdf") {
+    const module = await import("pdf-parse");
+    const pdfParse = (module.default as unknown as (buffer: Buffer) => Promise<{ text?: string }>);
+    const parsed = await pdfParse(file.buffer);
+    return String(parsed?.text || "");
+  }
+
+  if (extension === ".docx") {
+    const module = await import("mammoth");
+    const mammoth = module as unknown as {
+      extractRawText: (input: { buffer: Buffer }) => Promise<{ value?: string }>;
+    };
+    const parsed = await mammoth.extractRawText({ buffer: file.buffer });
+    return String(parsed?.value || "");
+  }
+
+  if (TEXT_FILE_EXTENSIONS.has(extension)) {
+    return file.buffer.toString("utf-8");
+  }
+
+  throw new Error(`unsupported file type: ${extension || "unknown"}`);
+}
+
 function normalizeScope(value: unknown): KnowledgeScope {
   const text = normalizeText(value).toLowerCase();
   if (text === "project" || text === "agent" || text === "template") {
@@ -145,7 +242,7 @@ export function createKnowledgeV2Router() {
   const router = express.Router();
 
   async function ensureSchemaReady(res: express.Response) {
-    const status = await getWorkflowV2SchemaStatus();
+    const status = await getKnowledgeV2SchemaStatus();
     if (status.ready) {
       return true;
     }
@@ -153,13 +250,26 @@ export function createKnowledgeV2Router() {
     return false;
   }
 
-  router.post("/upload", asyncRoute(async (req, res) => {
+  router.post("/upload", upload.single("file"), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
     const payload = (req.body ?? {}) as UploadKnowledgeBody;
-    const fileName = normalizeText(payload.fileName) || "uploaded-document.txt";
-    const fileContent = String(payload.fileContent ?? "");
+
+    let fileName = normalizeText(payload.fileName) || "uploaded-document.txt";
+    let fileContent = String(payload.fileContent ?? "");
+    const uploadedFile = req.file;
+    if (uploadedFile) {
+      fileName = normalizeText(uploadedFile.originalname) || fileName;
+      try {
+        fileContent = await extractTextFromUploadedFile(uploadedFile);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        sendError(res, 400, "VALIDATION_ERROR", `file parse failed: ${message}`);
+        return;
+      }
+    }
+
     if (!fileContent.trim()) {
       sendError(res, 400, "VALIDATION_ERROR", "fileContent is required");
       return;
@@ -171,9 +281,16 @@ export function createKnowledgeV2Router() {
       scope: normalizeScope(payload.scope),
       projectId: normalizeText(payload.projectId) || undefined,
       agentId: normalizeText(payload.agentId) || undefined,
-      tags: asStringArray(payload.tags),
+      tags: parseFlexibleStringArray(payload.tags),
       triggeredBy: normalizeText(payload.triggeredBy) || undefined
     });
+    if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
+      void autoOrganizeKnowledge({
+        projectId: normalizeText(payload.projectId) || undefined,
+        agentId: normalizeText(payload.agentId) || undefined,
+        limit: 200
+      });
+    }
     sendSuccess(res, {
       count: items.length,
       items: items.map((item) => ({ id: item.id, title: item.title }))
@@ -198,8 +315,67 @@ export function createKnowledgeV2Router() {
       projectId: normalizeText(payload.projectId) || undefined,
       agentId: normalizeText(payload.agentId) || undefined,
       tags: asStringArray(payload.tags),
-      importanceScore: Number(payload.importanceScore ?? 0.5)
+      importanceScore: payload.importanceScore === undefined
+        ? undefined
+        : Number(payload.importanceScore)
     });
+    if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
+      void autoOrganizeKnowledge({
+        projectId: normalizeText(payload.projectId) || undefined,
+        agentId: normalizeText(payload.agentId) || undefined,
+        limit: 120
+      });
+    }
+    sendSuccess(res, { id: item.id }, 201);
+  }));
+
+  router.post("/sync-from-hermes", asyncRoute(async (req, res) => {
+    if (!(await ensureSchemaReady(res))) {
+      return;
+    }
+    if (!validateHermesApiKey(req, res)) {
+      return;
+    }
+    const payload = (req.body ?? {}) as HermesMemorySyncBody;
+    const title = normalizeText(payload.title);
+    const content = String(payload.content ?? "");
+    if (!title || !content.trim()) {
+      sendError(res, 400, "VALIDATION_ERROR", "title and content are required");
+      return;
+    }
+
+    const projectId = normalizeText(payload.projectId) || undefined;
+    const scope = projectId ? "project" : normalizeScope(payload.scope);
+    const memoryType = normalizeMemoryType(payload.memoryType) || "semantic";
+    const importanceScore = Number(payload.importanceScore ?? 0.5);
+    const clampedImportance = Number.isFinite(importanceScore)
+      ? Math.max(0, Math.min(1, importanceScore))
+      : 0.5;
+
+    const item = await ingestKnowledgeItem({
+      scope,
+      projectId,
+      agentId: normalizeText(payload.agentId) || undefined,
+      type: "text",
+      title,
+      content,
+      tags: asStringArray(payload.tags),
+      stageContext: asStringArray(payload.stageContext),
+      techStack: asStringArray(payload.techStack),
+      memoryType,
+      importanceScore: clampedImportance,
+      metadata: {
+        source: "hermes",
+        syncedAt: new Date().toISOString()
+      }
+    });
+    if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
+      void autoOrganizeKnowledge({
+        projectId,
+        agentId: normalizeText(payload.agentId) || undefined,
+        limit: 120
+      });
+    }
     sendSuccess(res, { id: item.id }, 201);
   }));
 
@@ -271,6 +447,58 @@ export function createKnowledgeV2Router() {
     }
     const summary = await getProjectMemorySummary(projectId);
     sendSuccess(res, { summary });
+  }));
+
+  router.get("/for-hermes", asyncRoute(async (req, res) => {
+    if (!(await ensureSchemaReady(res))) {
+      return;
+    }
+    if (!validateHermesApiKey(req, res)) {
+      return;
+    }
+    const projectId = normalizeText(req.query.projectId);
+
+    const limit = parsePositiveInt(req.query.limit, 20, 200);
+    const episodicLimit = Math.max(1, Math.floor(limit / 2));
+    const semanticLimit = Math.max(1, limit - episodicLimit);
+    const [episodic, semantic] = await Promise.all([
+      listKnowledgeItems({
+        scope: projectId ? "project" : undefined,
+        projectId: projectId || undefined,
+        memoryType: "episodic",
+        limit: episodicLimit
+      }),
+      listKnowledgeItems({
+        scope: projectId ? "project" : undefined,
+        projectId: projectId || undefined,
+        memoryType: "semantic",
+        limit: semanticLimit
+      })
+    ]);
+    const merged = [...episodic, ...semantic]
+      .sort((a, b) => {
+        const scoreA = Number(a.importanceScore ?? 0);
+        const scoreB = Number(b.importanceScore ?? 0);
+        if (scoreA !== scoreB) {
+          return scoreB - scoreA;
+        }
+        return b.createdAt.getTime() - a.createdAt.getTime();
+      })
+      .slice(0, limit);
+
+    sendSuccess(res, {
+      items: merged.map((item) => ({
+        id: item.id,
+        projectId: item.projectId,
+        title: item.title,
+        content: item.content,
+        memoryType: item.memoryType,
+        importanceScore: item.importanceScore,
+        tags: asStringArray(item.tags),
+        stageContext: asStringArray(item.stageContext),
+        techStack: asStringArray(item.techStack)
+      }))
+    });
   }));
 
   router.get("/", asyncRoute(async (req, res) => {

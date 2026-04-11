@@ -223,6 +223,20 @@ export const issuesApi = {
     finalDescription?: string;
     teamRoleIds?: string[];
     conflictResolution?: string;
+    projectType?: 'complete' | 'standalone' | 'relay';
+    parentProjectId?: string;
+    relaySourceStageId?: string;
+    projectInputs?: Array<{
+      name: string;
+      type: string;
+      description?: string;
+      content?: string;
+      filePath?: string;
+      referenceDeliverableId?: string;
+      inputSource?: 'manual' | 'imported_from_project' | 'template_generated';
+    }>;
+    workflowTemplateKey?: string;
+    autoStartWorkflow?: boolean;
   }) {
     return request<{
       issue: {

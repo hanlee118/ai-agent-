@@ -145,7 +145,7 @@ export default function Sidebar({
         />
         <NavItem
           icon={Database}
-          label="知识治理"
+          label="知识库（上传/编辑）"
           active={activeTab === 'knowledge-hub'}
           onClick={() => onTabChange('knowledge-hub')}
           collapsed={!sidebarOpen}

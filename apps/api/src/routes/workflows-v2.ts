@@ -1,6 +1,7 @@
 import express from "express";
 import { prisma } from "../db.js";
 import {
+  addStageInputArtifact,
   addStageOutputArtifact,
   createWorkflowFromTemplate,
   getActiveWorkflow,
@@ -18,9 +19,13 @@ type CreateTemplateBody = {
   key?: unknown;
   description?: unknown;
   category?: unknown;
+  isStandalone?: unknown;
+  standaloneCategory?: unknown;
   executorConfig?: unknown;
   inputSchema?: unknown;
   outputSchema?: unknown;
+  inputContract?: unknown;
+  outputContract?: unknown;
   acceptanceCriteria?: unknown;
   integrationConfig?: unknown;
   defaultTimeout?: unknown;
@@ -151,6 +156,8 @@ export function createWorkflowsV2Router() {
       name,
       description: normalizeText(payload.description) || undefined,
       category,
+      isStandalone: Boolean(payload.isStandalone),
+      standaloneCategory: normalizeText(payload.standaloneCategory) || undefined,
       executorConfig: (asRecord(payload.executorConfig) ?? {
         type: "agent",
         requiredCapabilities: []
@@ -162,6 +169,8 @@ export function createWorkflowsV2Router() {
       },
       inputSchema: asRecord(payload.inputSchema) ?? {},
       outputSchema: asRecord(payload.outputSchema) ?? {},
+      inputContract: asRecord(payload.inputContract) ?? undefined,
+      outputContract: asRecord(payload.outputContract) ?? undefined,
       acceptanceCriteria: asRecordArray(payload.acceptanceCriteria).map((item) => ({
         type: normalizeText(item.type) as "artifact_exists" | "quality_gate" | "manual_approval" | "auto_check",
         config: asRecord(item.config) ?? {}
@@ -278,6 +287,33 @@ export function createWorkflowsV2Router() {
       }
     });
     sendSuccess(res, { stageId: stage.id, artifactCount: Array.isArray(stage.outputArtifacts) ? stage.outputArtifacts.length : 0 });
+  }));
+
+  router.post("/stages/:stageId/input", asyncRoute(async (req, res) => {
+    const status = await getWorkflowV2SchemaStatus();
+    if (!status.ready) {
+      sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
+      return;
+    }
+    const stageId = normalizeText(req.params.stageId);
+    const payload = asRecord(req.body) ?? {};
+    const name = normalizeText(payload.name) || "input.md";
+    const type = normalizeText(payload.type) || "document";
+    const content = String(payload.content ?? "");
+    if (!stageId || !content.trim()) {
+      sendError(res, 400, "VALIDATION_ERROR", "stageId and content are required");
+      return;
+    }
+    const stage = await addStageInputArtifact({
+      stageId,
+      artifact: {
+        name,
+        type,
+        content,
+        createdAt: new Date().toISOString()
+      }
+    });
+    sendSuccess(res, { stageId: stage.id, artifactCount: Array.isArray(stage.inputArtifacts) ? stage.inputArtifacts.length : 0 });
   }));
 
   router.post("/stages/:stageId/transition", asyncRoute(async (req, res) => {

@@ -141,10 +141,25 @@ export const knowledgeApi = {
     projectId?: string;
     agentId?: string;
     tags?: string[];
-    fileName: string;
-    fileContent: string;
+    fileName?: string;
+    fileContent?: string;
+    file?: File;
     triggeredBy?: string;
   }) {
+    if (payload.file) {
+      const form = new FormData();
+      form.append('file', payload.file, payload.fileName || payload.file.name || 'uploaded-file');
+      if (payload.scope) form.append('scope', payload.scope);
+      if (payload.projectId) form.append('projectId', payload.projectId);
+      if (payload.agentId) form.append('agentId', payload.agentId);
+      if (payload.tags && payload.tags.length > 0) form.append('tags', JSON.stringify(payload.tags));
+      if (payload.triggeredBy) form.append('triggeredBy', payload.triggeredBy);
+      return request<{ count: number; items: Array<{ id: string; title: string }> }>('/v1/knowledge/upload', {
+        method: 'POST',
+        body: form,
+      });
+    }
+
     return request<{ count: number; items: Array<{ id: string; title: string }> }>('/v1/knowledge/upload', {
       method: 'POST',
       body: JSON.stringify(payload),

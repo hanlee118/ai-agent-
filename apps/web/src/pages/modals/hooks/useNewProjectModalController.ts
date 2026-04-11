@@ -40,6 +40,7 @@ import {
 } from '../utils/newProjectHelpers';
 
 type UseControllerArgs = NewProjectModalProps;
+type ConfirmIssuePayload = Parameters<typeof issuesApi.confirm>[1];
 
 const INITIAL_FORM_DATA: NewProjectFormData = {
   name: '',
@@ -87,6 +88,14 @@ export function useNewProjectModalController({
   const [isCreating, setIsCreating] = useState(false);
   const [isSavingAlignment, setIsSavingAlignment] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
+  const [projectType, setProjectType] = useState<'complete' | 'standalone' | 'relay'>('complete');
+  const [parentProjectId, setParentProjectId] = useState('');
+  const [relaySourceStageId, setRelaySourceStageId] = useState('');
+  const [standaloneInputName, setStandaloneInputName] = useState('rawRequirements');
+  const [standaloneInputType, setStandaloneInputType] = useState('document');
+  const [standaloneInputContent, setStandaloneInputContent] = useState('');
+  const [workflowTemplateKey, setWorkflowTemplateKey] = useState('standard_software_development');
+  const [autoStartWorkflow, setAutoStartWorkflow] = useState(true);
   const [formData, setFormData] = useState<NewProjectFormData>(INITIAL_FORM_DATA);
 
   const allowedRoleIds = useMemo(
@@ -131,6 +140,17 @@ export function useNewProjectModalController({
     const filtered = pool.filter((agent) => allowed.has(getAgentRoleId(agent)));
     return filtered.length > 0 ? filtered : pool;
   }, [allowedRoleIds]);
+
+  useEffect(() => {
+    if (projectType === 'complete' && workflowTemplateKey !== 'standard_software_development' && workflowTemplateKey !== 'none') {
+      setWorkflowTemplateKey('standard_software_development');
+      return;
+    }
+    if ((projectType === 'standalone' || projectType === 'relay')
+      && workflowTemplateKey === 'standard_software_development') {
+      setWorkflowTemplateKey('requirements_design');
+    }
+  }, [projectType, workflowTemplateKey]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -350,6 +370,14 @@ export function useNewProjectModalController({
     setIsCreating(false);
     setIsSavingAlignment(false);
     setShowManualForm(false);
+    setProjectType('complete');
+    setParentProjectId('');
+    setRelaySourceStageId('');
+    setStandaloneInputName('rawRequirements');
+    setStandaloneInputType('document');
+    setStandaloneInputContent('');
+    setWorkflowTemplateKey('standard_software_development');
+    setAutoStartWorkflow(true);
     setFormData(INITIAL_FORM_DATA);
   };
 
@@ -803,6 +831,19 @@ export function useNewProjectModalController({
 
     setIsCreating(true);
     try {
+      if (projectType === 'relay' && !parentProjectId.trim()) {
+        addToast('接力模式需要填写来源项目 ID', 'error');
+        setIsCreating(false);
+        return;
+      }
+      const projectInputs: NonNullable<ConfirmIssuePayload['projectInputs']> = standaloneInputContent.trim()
+        ? [{
+            name: standaloneInputName.trim() || 'rawRequirements',
+            type: standaloneInputType.trim() || 'document',
+            content: standaloneInputContent.trim(),
+            inputSource: projectType === 'relay' ? 'imported_from_project' : 'manual',
+          }]
+        : [];
       const confirmation = await issuesApi.confirm(issuePreview.issueId, {
         finalName: parsedProject.name,
         finalDescription,
@@ -811,6 +852,12 @@ export function useNewProjectModalController({
         },
         teamRoleIds: parsedProject.team,
         conflictResolution: conflictResolution.trim() || undefined,
+        projectType,
+        parentProjectId: parentProjectId.trim() || undefined,
+        relaySourceStageId: relaySourceStageId.trim() || undefined,
+        projectInputs,
+        workflowTemplateKey: workflowTemplateKey.trim() || undefined,
+        autoStartWorkflow,
       });
       const created = confirmation.project;
       addToast(`项目已创建: ${created.name || parsedProject.name}`, 'success');
@@ -1162,6 +1209,22 @@ export function useNewProjectModalController({
     isSavingAlignment,
     showManualForm,
     setShowManualForm,
+    projectType,
+    setProjectType,
+    parentProjectId,
+    setParentProjectId,
+    relaySourceStageId,
+    setRelaySourceStageId,
+    standaloneInputName,
+    setStandaloneInputName,
+    standaloneInputType,
+    setStandaloneInputType,
+    standaloneInputContent,
+    setStandaloneInputContent,
+    workflowTemplateKey,
+    setWorkflowTemplateKey,
+    autoStartWorkflow,
+    setAutoStartWorkflow,
     formData,
     setFormData,
     allowedRoleIds,

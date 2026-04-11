@@ -404,10 +404,42 @@ const TAG_KEYWORDS: Array<{ token: string; tag: string }> = [
   { token: "test", tag: "testing" }
 ];
 
+const STAGE_HINTS: Array<{ stage: string; terms: string[] }> = [
+  {
+    stage: "requirements_design",
+    terms: ["需求", "需求分析", "需求设计", "prd", "user story", "user-story", "acceptance criteria", "验收标准"]
+  },
+  {
+    stage: "visual_design",
+    terms: ["视觉", "视觉设计", "ui", "ux", "figma", "mockup", "design system", "设计稿"]
+  },
+  {
+    stage: "tech_design",
+    terms: ["技术方案", "架构", "architecture", "api contract", "api设计", "technical design"]
+  },
+  {
+    stage: "code_dev",
+    terms: ["开发", "研发", "代码", "coding", "implementation", "实现", "code review"]
+  },
+  {
+    stage: "qa_acceptance",
+    terms: ["测试", "qa", "验收", "test report", "bug", "缺陷", "回归测试"]
+  }
+];
+
+const MEMORY_HINT_TERMS = {
+  episodic: ["复盘", "回顾", "事故", "故障", "postmortem", "incident", "lessons learned", "经验教训"],
+  procedural: ["sop", "runbook", "playbook", "步骤", "流程", "操作指南", "checklist", "手册"]
+} as const;
+
+function normalizeStageKey(value: string) {
+  const normalized = value.toLowerCase().replace(/\s+/g, "_");
+  return STAGE_ALIAS[normalized] ?? normalized;
+}
+
 function normalizeStageContextList(values: string[]) {
   return uniqueNormalized(values, (value) => {
-    const normalized = value.toLowerCase().replace(/\s+/g, "_");
-    return STAGE_ALIAS[normalized] ?? normalized;
+    return normalizeStageKey(value);
   });
 }
 
@@ -437,6 +469,80 @@ function inferTechStackFromText(content: string) {
   }
   const matched = Object.keys(TECH_ALIAS).filter((key) => lowered.includes(key));
   return normalizeTechStackList(matched.map((key) => TECH_ALIAS[key] ?? key));
+}
+
+function inferStageContextFromText(input: {
+  title?: string;
+  content: string;
+  tags?: string[];
+  stageContext?: string[];
+}) {
+  const text = `${normalizeText(input.title)}\n${normalizeText(input.content)}`.toLowerCase();
+  const tagText = (input.tags ?? []).map((item) => normalizeText(item).toLowerCase()).filter(Boolean);
+  const inferred: string[] = [...(input.stageContext ?? [])];
+
+  for (const hint of STAGE_HINTS) {
+    const byText = hint.terms.some((term) => text.includes(term.toLowerCase()));
+    const byTag = hint.terms.some((term) => tagText.some((tag) => tag.includes(term.toLowerCase())));
+    if (byText || byTag) {
+      inferred.push(hint.stage);
+    }
+  }
+
+  return normalizeStageContextList(inferred);
+}
+
+function inferMemoryTypeFromText(input: {
+  type: KnowledgeType;
+  title?: string;
+  content: string;
+  stageContext?: string[];
+}) {
+  const text = `${normalizeText(input.title)}\n${normalizeText(input.content)}`.toLowerCase();
+  if (input.type === "sop") {
+    return "procedural" as const;
+  }
+  if ((input.stageContext ?? []).includes("qa_acceptance")) {
+    return "episodic" as const;
+  }
+  if (MEMORY_HINT_TERMS.episodic.some((term) => text.includes(term))) {
+    return "episodic" as const;
+  }
+  if (MEMORY_HINT_TERMS.procedural.some((term) => text.includes(term))) {
+    return "procedural" as const;
+  }
+  return "semantic" as const;
+}
+
+function normalizeMemoryTypeValue(value: unknown) {
+  const normalized = normalizeText(value).toLowerCase();
+  if (normalized === "episodic" || normalized === "semantic" || normalized === "procedural") {
+    return normalized as "episodic" | "semantic" | "procedural";
+  }
+  return null;
+}
+
+function clampImportanceScore(value: number | null | undefined, fallback = 0.5) {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+  return Math.max(0, Math.min(1, Number(value)));
+}
+
+function inferImportanceScoreFromText(input: {
+  title?: string;
+  content: string;
+  memoryType: "episodic" | "semantic" | "procedural";
+}) {
+  const baselineByMemory = {
+    episodic: 0.65,
+    procedural: 0.7,
+    semantic: 0.5
+  } as const;
+  const text = `${normalizeText(input.title)}\n${normalizeText(input.content)}`.toLowerCase();
+  const criticalTerms = ["p0", "p1", "critical", "blocker", "紧急", "必须", "上线", "生产事故"];
+  const boost = criticalTerms.some((term) => text.includes(term)) ? 0.1 : 0;
+  return clampImportanceScore(baselineByMemory[input.memoryType] + boost, baselineByMemory[input.memoryType]);
 }
 
 function similarityFromTokens(a: string, b: string) {
@@ -519,7 +625,12 @@ function buildNormalizationSuggestion(item: KnowledgeRow): KnowledgeNormalizatio
   const next = {
     title: normalizeKnowledgeTitle(item.title) || "Untitled knowledge",
     tags: normalizeTagList(before.tags, combinedText),
-    stageContext: normalizeStageContextList(before.stageContext),
+    stageContext: inferStageContextFromText({
+      title: item.title,
+      content: item.content,
+      tags: before.tags,
+      stageContext: before.stageContext
+    }),
     techStack: normalizeTechStackList([...before.techStack, ...inferTechStackFromText(combinedText)])
   };
   const reasons: string[] = [];
@@ -619,11 +730,29 @@ export async function ingestKnowledgeItem(input: IngestKnowledgeInput) {
   const content = String(input.content ?? "");
   const combinedText = `${normalizedTitle}\n${content}`;
   const normalizedTags = normalizeTagList(input.tags ?? [], combinedText);
-  const normalizedStages = normalizeStageContextList(input.stageContext ?? []);
+  const normalizedStages = inferStageContextFromText({
+    title: normalizedTitle,
+    content,
+    tags: normalizedTags,
+    stageContext: input.stageContext ?? []
+  });
   const normalizedTechStack = normalizeTechStackList([
     ...(input.techStack ?? []),
     ...inferTechStackFromText(combinedText)
   ]);
+  const resolvedMemoryType = input.memoryType ?? inferMemoryTypeFromText({
+    type: input.type,
+    title: normalizedTitle,
+    content,
+    stageContext: normalizedStages
+  });
+  const resolvedImportanceScore = input.importanceScore === undefined
+    ? inferImportanceScoreFromText({
+      title: normalizedTitle,
+      content,
+      memoryType: resolvedMemoryType
+    })
+    : clampImportanceScore(input.importanceScore, 0.5);
   return prisma.knowledgeItem.create({
     data: {
       scope: input.scope,
@@ -636,8 +765,8 @@ export async function ingestKnowledgeItem(input: IngestKnowledgeInput) {
       tags: toJson(normalizedTags),
       stageContext: toJson(normalizedStages),
       techStack: toJson(normalizedTechStack),
-      memoryType: input.memoryType ?? "semantic",
-      importanceScore: input.importanceScore ?? 0.5,
+      memoryType: resolvedMemoryType,
+      importanceScore: resolvedImportanceScore,
       sourceUrl: input.sourceUrl ?? null,
       filePath: input.filePath ?? null,
       fileType: input.fileType ?? null
@@ -664,7 +793,7 @@ export async function ingestTextAsKnowledge(input: {
     tags: input.tags ?? [],
     stageContext: [],
     techStack: [],
-    importanceScore: input.importanceScore ?? 0.5
+    importanceScore: input.importanceScore
   });
 }
 
@@ -768,6 +897,12 @@ export async function retrieveKnowledgeForContext(input: {
   const topK = Math.max(1, Number(input.topK ?? 5));
   const threshold = Math.max(0, Math.min(1, Number(input.threshold ?? 0.18)));
   const context = input.context;
+  const normalizedCurrentStage = context.currentStage
+    ? normalizeStageContextList([context.currentStage]).at(0)
+    : undefined;
+  const normalizedTechNeed = context.techStack && context.techStack.length > 0
+    ? normalizeTechStackList(context.techStack)
+    : [];
 
   const rows = await prisma.knowledgeItem.findMany({
     where: {
@@ -793,14 +928,13 @@ export async function retrieveKnowledgeForContext(input: {
 
   const scored: RetrievalResult[] = rows
     .map((row) => {
-      const stageContext = asStringArray(row.stageContext);
-      const techStack = asStringArray(row.techStack).map((item) => item.toLowerCase());
-      if (context.currentStage && stageContext.length > 0 && !stageContext.includes(context.currentStage)) {
+      const stageContext = normalizeStageContextList(asStringArray(row.stageContext));
+      const techStack = normalizeTechStackList(asStringArray(row.techStack));
+      if (normalizedCurrentStage && stageContext.length > 0 && !stageContext.includes(normalizedCurrentStage)) {
         return null;
       }
-      if (context.techStack && context.techStack.length > 0) {
-        const normalizedNeed = context.techStack.map((item) => item.toLowerCase());
-        const hasHit = normalizedNeed.some((item) => techStack.includes(item));
+      if (normalizedTechNeed.length > 0) {
+        const hasHit = normalizedTechNeed.some((item) => techStack.includes(item));
         if (!hasHit && techStack.length > 0) {
           return null;
         }
@@ -953,6 +1087,30 @@ export async function updateKnowledgeItemById(id: string, patch: KnowledgeUpdate
   const tags = patch.tags === undefined ? asStringArray(current.tags) : patch.tags;
   const stageContext = patch.stageContext === undefined ? asStringArray(current.stageContext) : patch.stageContext;
   const techStack = patch.techStack === undefined ? asStringArray(current.techStack) : patch.techStack;
+  const normalizedTags = normalizeTagList(tags, combinedText);
+  const normalizedStages = inferStageContextFromText({
+    title: nextTitle,
+    content: nextContent,
+    tags: normalizedTags,
+    stageContext
+  });
+  const normalizedTechStack = normalizeTechStackList([...techStack, ...inferTechStackFromText(combinedText)]);
+  const currentMemoryType = normalizeMemoryTypeValue(current.memoryType);
+  const resolvedMemoryType = patch.memoryType === undefined
+    ? (currentMemoryType ?? inferMemoryTypeFromText({
+      type: (patch.type ?? current.type) as KnowledgeType,
+      title: nextTitle,
+      content: nextContent,
+      stageContext: normalizedStages
+    }))
+    : patch.memoryType;
+  const resolvedImportanceScore = patch.importanceScore === undefined
+    ? (current.importanceScore ?? inferImportanceScoreFromText({
+      title: nextTitle,
+      content: nextContent,
+      memoryType: resolvedMemoryType ?? "semantic"
+    }))
+    : clampImportanceScore(patch.importanceScore, current.importanceScore ?? 0.5);
 
   return prisma.knowledgeItem.update({
     where: { id: normalizedId },
@@ -966,11 +1124,11 @@ export async function updateKnowledgeItemById(id: string, patch: KnowledgeUpdate
       metadata: patch.metadata === undefined
         ? toJson(asRecord(current.metadata) ?? {})
         : toJson(patch.metadata),
-      tags: toJson(normalizeTagList(tags, combinedText)),
-      stageContext: toJson(normalizeStageContextList(stageContext)),
-      techStack: toJson(normalizeTechStackList([...techStack, ...inferTechStackFromText(combinedText)])),
-      memoryType: patch.memoryType === undefined ? current.memoryType : patch.memoryType,
-      importanceScore: patch.importanceScore === undefined ? current.importanceScore : patch.importanceScore,
+      tags: toJson(normalizedTags),
+      stageContext: toJson(normalizedStages),
+      techStack: toJson(normalizedTechStack),
+      memoryType: resolvedMemoryType,
+      importanceScore: resolvedImportanceScore,
       sourceUrl: patch.sourceUrl === undefined ? current.sourceUrl : patch.sourceUrl,
       filePath: patch.filePath === undefined ? current.filePath : patch.filePath,
       fileType: patch.fileType === undefined ? current.fileType : patch.fileType

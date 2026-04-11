@@ -184,8 +184,14 @@ model Project {
   liveBody            String
   liveStartedAt       DateTime
   liveProvider        String
+  projectType         String          @default("complete")
+  parentProjectId     String?
+  relaySourceStageId  String?
   createdAt           DateTime        @default(now())
   updatedAt           DateTime        @updatedAt
+  parentProject       Project?        @relation("ProjectRelayParent", fields: [parentProjectId], references: [id], onDelete: SetNull)
+  childProjects       Project[]       @relation("ProjectRelayParent")
+  relaySourceStage    Stage?          @relation("ProjectRelaySourceStage", fields: [relaySourceStageId], references: [id], onDelete: SetNull)
   stages              Stage[]
   tasks               Task[]
   taskParticipants    TaskParticipant[]
@@ -193,9 +199,15 @@ model Project {
   taskDelegations     TaskDelegation[]
   gitlabSyncBindings  GitLabSyncBinding[]
   deliverables        Deliverable[]
+  projectInputs       ProjectInput[]
   timeline            TimelineEvent[]
   executions          ProjectExecution[]
   workflows           Workflow[]
+  outgoingRelayRelations StageRelayRelation[] @relation("RelaySourceProject")
+  incomingRelayRelations StageRelayRelation[] @relation("RelayTargetProject")
+
+  @@index([projectType, createdAt])
+  @@index([parentProjectId])
 }
 
 model Stage {
@@ -212,6 +224,8 @@ model Stage {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  relayTargetProjects Project[] @relation("ProjectRelaySourceStage")
+  sourceRelayRelations StageRelayRelation[] @relation("RelaySourceStage")
 
   @@unique([projectId, type])
   @@index([projectId, sortOrder])
@@ -230,6 +244,7 @@ model Deliverable {
   createdAt  DateTime @default(now())
   updatedAt  DateTime
   project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  referencedByInputs ProjectInput[]
 
   @@index([projectId, stageType])
 }
@@ -530,15 +545,40 @@ model KnowledgeOperationLog {
   @@index([createdAt])
 }
 
+model HermesSkill {
+  id             String   @id @default(cuid())
+  hermesSkillId  String?  @unique
+  skillKey       String   @unique
+  name           String
+  instruction    String
+  type           String
+  manifest       Json
+  sourceProjectId String?
+  source         String   @default("hermes")
+  isCertified    Boolean  @default(true)
+  isActive       Boolean  @default(true)
+  usageCount     Int      @default(0)
+  lastSyncedAt   DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([sourceProjectId, isCertified, updatedAt])
+  @@index([skillKey, isActive])
+}
+
 model WorkflowTemplate {
   id                 String     @id @default(cuid())
   name               String
   key                String     @unique
   description        String?
   category           String
+  isStandalone       Boolean    @default(false)
+  standaloneCategory String?
   executorConfig     Json
   inputSchema        Json
   outputSchema       Json
+  inputContract      Json?
+  outputContract     Json?
   acceptanceCriteria Json?
   integrationConfig  Json?
   defaultTimeout     Int?
@@ -564,6 +604,49 @@ model Workflow {
   transitions     WorkflowTransition[]
 
   @@index([projectId, status, createdAt])
+}
+
+model ProjectInput {
+  id                   String           @id @default(cuid())
+  projectId            String
+  name                 String
+  type                 String
+  description          String?
+  content              String?
+  filePath             String?
+  referenceDeliverableId String?
+  validationStatus     String           @default("pending")
+  validationErrors     Json?
+  inputSource          String           @default("manual")
+  createdAt            DateTime         @default(now())
+  project              Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  referenceDeliverable Deliverable?     @relation(fields: [referenceDeliverableId], references: [id], onDelete: SetNull)
+  relayRelations       StageRelayRelation[] @relation("RelayTargetInput")
+
+  @@index([projectId, createdAt])
+  @@index([referenceDeliverableId])
+}
+
+model StageRelayRelation {
+  id                  String       @id @default(cuid())
+  sourceProjectId     String
+  sourceStageId       String?
+  sourceDeliverableIds Json
+  targetProjectId     String
+  targetInputId       String?
+  relayType           String       @default("full")
+  transformationConfig Json?
+  syncStatus          String       @default("active")
+  lastSyncAt          DateTime?
+  createdAt           DateTime     @default(now())
+  sourceProject       Project      @relation("RelaySourceProject", fields: [sourceProjectId], references: [id], onDelete: Cascade)
+  sourceStage         Stage?       @relation("RelaySourceStage", fields: [sourceStageId], references: [id], onDelete: SetNull)
+  targetProject       Project      @relation("RelayTargetProject", fields: [targetProjectId], references: [id], onDelete: Cascade)
+  targetInput         ProjectInput? @relation("RelayTargetInput", fields: [targetInputId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceProjectId, sourceStageId, targetProjectId])
+  @@index([sourceProjectId, sourceStageId, createdAt])
+  @@index([targetProjectId, createdAt])
 }
 
 model WorkflowStage {

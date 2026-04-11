@@ -10,6 +10,7 @@ import {
 } from "./utils.js";
 
 const DEFAULT_AGENT_TOKEN_LIMIT = 100_000_000;
+const HERMES_AGENT_DEFAULT_ID = String(process.env.HERMES_AGENT_ID ?? "hermes-agent-1").trim() || "hermes-agent-1";
 
 interface CreateAgentBody {
   name?: unknown;
@@ -56,6 +57,51 @@ function normalizeAgentStatus(status: string | null | undefined) {
   }
 
   return status ?? "Idle";
+}
+
+function inferIntegrationEngine(parts: Array<string | null | undefined>) {
+  const joined = parts
+    .map((item) => String(item ?? "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" ");
+  if (joined.includes("hermes")) {
+    return "hermes" as const;
+  }
+  if (joined.includes("openclaw") || joined.includes("codex")) {
+    return "openclaw" as const;
+  }
+  return "managed" as const;
+}
+
+function isHermesIntegrationEnabled() {
+  const enabled = String(process.env.HERMES_ENABLED ?? "").trim().toLowerCase();
+  if (enabled) {
+    return enabled !== "false" && enabled !== "0" && enabled !== "off";
+  }
+  return Boolean(String(process.env.HERMES_MCP_ENDPOINT ?? process.env.HERMES_MCP ?? "").trim());
+}
+
+function buildBuiltinHermesAgentRow() {
+  const nowIso = new Date().toISOString();
+  return {
+    id: HERMES_AGENT_DEFAULT_ID,
+    name: "Hermes Agent",
+    role: "Hermes 协作引擎",
+    status: "Idle" as const,
+    load: 0,
+    currentModelId: "hermes-v2.1",
+    fallbackModel: undefined,
+    tasks: 0,
+    memoryCount: 0,
+    tokensUsed: 0,
+    tokenLimit: DEFAULT_AGENT_TOKEN_LIMIT,
+    sessionCount: 0,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    integrationEngine: "hermes" as const,
+    allowedAgentIds: [] as string[],
+    builtin: true
+  };
 }
 
 function resolveTokenLimit(
@@ -142,7 +188,14 @@ async function getAgentDetail(agentId: string) {
     sop: parseStoredSteps(sop?.steps ?? null),
     createdAt: (config?.createdAt ?? profile?.createdAt ?? new Date()).toISOString(),
     updatedAt: (config?.updatedAt ?? profile?.updatedAt ?? new Date()).toISOString(),
-    allowedAgentIds: toStringArrayFromJson(config?.allowedAgentIds)
+    allowedAgentIds: toStringArrayFromJson(config?.allowedAgentIds),
+    integrationEngine: inferIntegrationEngine([
+      agentId,
+      profile?.roleId,
+      profile?.name,
+      config?.title,
+      config?.displayName
+    ])
   };
 }
 
@@ -231,10 +284,24 @@ export function createAgentsRouter() {
             modelLimitById,
             modelLimitByName
           ),
-          sessionCount: usage?.sessionCount ?? 0
+          sessionCount: usage?.sessionCount ?? 0,
+          integrationEngine: inferIntegrationEngine([
+            agentId,
+            profile?.roleId,
+            profile?.name,
+            config?.title,
+            config?.displayName
+          ])
         };
       })
       .sort((a, b) => a.id.localeCompare(b.id));
+
+    if (isHermesIntegrationEnabled()) {
+      const hasHermes = list.some((item) => item.id === HERMES_AGENT_DEFAULT_ID || item.integrationEngine === "hermes");
+      if (!hasHermes) {
+        list.unshift(buildBuiltinHermesAgentRow());
+      }
+    }
 
     sendSuccess(res, list);
   }));
@@ -541,6 +608,10 @@ export function createAgentsRouter() {
     const detail = await getAgentDetail(agentId);
 
     if (!detail) {
+      if (isHermesIntegrationEnabled() && agentId === HERMES_AGENT_DEFAULT_ID) {
+        sendSuccess(res, buildBuiltinHermesAgentRow());
+        return;
+      }
       sendError(res, 404, "NOT_FOUND", "Agent not found");
       return;
     }

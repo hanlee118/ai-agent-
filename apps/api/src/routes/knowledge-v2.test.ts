@@ -14,7 +14,9 @@ const apiRoot = path.resolve(__dirname, "../../");
 const seedDbPath = path.join(apiRoot, "prisma/dev.db");
 const migrationPaths = [
   path.join(apiRoot, "prisma/migrations/20260411103000_add_knowledge_workflow_v2/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql")
+  path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql"),
+  path.join(apiRoot, "prisma/migrations/20260411193000_add_hermes_skill_sync/migration.sql"),
+  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql")
 ];
 
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-knowledge-v2-"));
@@ -26,6 +28,7 @@ process.env.DATABASE_URL = `file:${dbPath}`;
 process.env.PROJECT_AUTO_ADVANCE = "false";
 process.env.PROJECT_WARMUP = "false";
 process.env.ENFORCE_REAL_MODEL_GATE = "false";
+process.env.HERMES_API_KEY = "test-hermes-key";
 
 let prismaClient: any;
 let app: express.Express;
@@ -139,6 +142,124 @@ test("knowledge-v2 ingests text and can search/context/summary", async () => {
   assert.equal(summaryRes.status, 200);
   assert.equal(summaryRes.body.success, true);
   assert.match(String(summaryRes.body.data.summary), /阶段复盘/);
+});
+
+test("knowledge-v2 supports multipart file upload for document ingestion", async () => {
+  const uploadRes = await request(app)
+    .post("/api/v1/knowledge/upload")
+    .field("scope", "project")
+    .field("projectId", "KBV2-PROJECT-001")
+    .field("agentId", "ROLE_PM")
+    .field("tags", JSON.stringify(["upload", "guide"]))
+    .attach("file", Buffer.from("这是上传的知识文档。\n\n包含阶段目标、风险与验收要点。", "utf-8"), "kb-guide.md");
+
+  assert.equal(uploadRes.status, 200);
+  assert.equal(uploadRes.body.success, true);
+  assert.equal(Number(uploadRes.body.data.count) >= 1, true);
+  assert.equal(Array.isArray(uploadRes.body.data.items), true);
+  assert.equal(uploadRes.body.data.items.length >= 1, true);
+
+  const listRes = await request(app)
+    .get("/api/v1/knowledge")
+    .query({ projectId: "KBV2-PROJECT-001", query: "验收要点", limit: 20 });
+  assert.equal(listRes.status, 200);
+  assert.equal(listRes.body.success, true);
+  assert.equal(
+    (listRes.body.data.items as Array<{ title: string }>).some((item) => item.title.includes("kb-guide.md")),
+    true
+  );
+});
+
+test("knowledge-v2 infers stage context and memory type from content", async () => {
+  const createRes = await request(app)
+    .post("/api/v1/knowledge/text")
+    .send({
+      title: "QA 验收复盘记录",
+      content: "本次 QA 验收后复盘：发现发布阻塞问题并形成经验教训与回归测试清单。",
+      scope: "project",
+      projectId: "KBV2-PROJECT-001",
+      tags: ["qa", "复盘"]
+    });
+
+  assert.equal(createRes.status, 201);
+  assert.equal(createRes.body.success, true);
+  const id = String(createRes.body.data.id || "");
+  assert.ok(id);
+
+  const detailRes = await request(app).get(`/api/v1/knowledge/${id}`);
+  assert.equal(detailRes.status, 200);
+  assert.equal(detailRes.body.success, true);
+  const detail = detailRes.body.data as {
+    stageContext?: string[];
+    memoryType?: string;
+    importanceScore?: number;
+  };
+  assert.equal(Array.isArray(detail.stageContext), true);
+  assert.equal((detail.stageContext || []).includes("qa_acceptance"), true);
+  assert.equal(detail.memoryType, "episodic");
+  assert.equal(typeof detail.importanceScore, "number");
+  assert.equal(Number(detail.importanceScore) >= 0.6, true);
+});
+
+test("knowledge-v2 search supports stage alias matching", async () => {
+  const createRes = await request(app)
+    .post("/api/v1/knowledge/text")
+    .send({
+      title: "QA 阶段回归清单",
+      content: "用于 QA 验收阶段的回归测试任务与问题追踪建议。",
+      scope: "project",
+      projectId: "KBV2-PROJECT-001",
+      tags: ["qa", "testing"]
+    });
+  assert.equal(createRes.status, 201);
+  assert.equal(createRes.body.success, true);
+
+  const searchRes = await request(app)
+    .post("/api/v1/knowledge/search")
+    .send({
+      query: "qa",
+      projectId: "KBV2-PROJECT-001",
+      stage: "qa",
+      limit: 10
+    });
+  assert.equal(searchRes.status, 200);
+  assert.equal(searchRes.body.success, true);
+  const results = searchRes.body.data.results as Array<{ title: string }>;
+  assert.equal(Array.isArray(results), true);
+  assert.equal(results.length > 0, true);
+});
+
+test("knowledge-v2 supports hermes sync and export endpoints", async () => {
+  const syncRes = await request(app)
+    .post("/api/v1/knowledge/sync-from-hermes")
+    .set("x-hermes-api-key", "test-hermes-key")
+    .send({
+      projectId: "KBV2-PROJECT-001",
+      title: "Hermes 设计复盘",
+      content: "本次视觉设计阶段确认主色、栅格与组件命名规范。",
+      memoryType: "episodic",
+      tags: ["hermes", "design"],
+      stageContext: ["visual_design"],
+      techStack: ["react", "stitch"],
+      importanceScore: 0.82
+    });
+  assert.equal(syncRes.status, 201);
+  assert.equal(syncRes.body.success, true);
+
+  const exportRes = await request(app)
+    .get("/api/v1/knowledge/for-hermes")
+    .set("x-hermes-api-key", "test-hermes-key")
+    .query({ projectId: "KBV2-PROJECT-001", limit: 10 });
+  assert.equal(exportRes.status, 200);
+  assert.equal(exportRes.body.success, true);
+  assert.equal(Array.isArray(exportRes.body.data.items), true);
+  assert.equal(exportRes.body.data.items.some((item: { title: string }) => item.title.includes("Hermes")), true);
+
+  const unauthorizedRes = await request(app)
+    .get("/api/v1/knowledge/for-hermes")
+    .query({ projectId: "KBV2-PROJECT-001", limit: 10 });
+  assert.equal(unauthorizedRes.status, 401);
+  assert.equal(unauthorizedRes.body.success, false);
 });
 
 test("knowledge-v2 supports CRUD and curation workflow", async () => {

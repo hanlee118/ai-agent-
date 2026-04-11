@@ -14,7 +14,9 @@ const apiRoot = path.resolve(__dirname, "../../");
 const seedDbPath = path.join(apiRoot, "prisma/dev.db");
 const migrationPaths = [
   path.join(apiRoot, "prisma/migrations/20260411103000_add_knowledge_workflow_v2/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql")
+  path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql"),
+  path.join(apiRoot, "prisma/migrations/20260411193000_add_hermes_skill_sync/migration.sql"),
+  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql")
 ];
 
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-workflow-v2-"));
@@ -246,4 +248,75 @@ test("workflow-v2 can autonomously execute stage with agent and produce artifact
   assert.equal(transitionRes.status, 200);
   assert.equal(transitionRes.body.data.success, true);
   assert.deepEqual(transitionRes.body.data.nextStageIds, []);
+});
+
+test("workflow-v2 input endpoint can unblock inputContract-gated stage", async () => {
+  process.env.WORKFLOW_V2_AGENT_AUTO_EXECUTE = "false";
+
+  const templateRes = await request(app)
+    .post("/api/v1/workflows/templates")
+    .send({
+      key: "requirements_input_gate",
+      name: "需求输入门禁流程",
+      category: "pm",
+      executorConfig: {
+        type: "agent",
+        agentRole: "Product_Manager",
+        requiredCapabilities: ["prd_writing"],
+        modelPreference: "openai/gpt-5.4"
+      },
+      inputSchema: {},
+      outputSchema: {},
+      inputContract: {
+        requiresExternalInput: true,
+        allowedInputTypes: ["document"],
+        inputValidationRules: [
+          { field: "rawRequirements", required: true, minLength: 10 }
+        ]
+      },
+      acceptanceCriteria: []
+    });
+  assert.equal(templateRes.status, 201);
+
+  const initRes = await request(app)
+    .post("/api/v1/workflows/projects/WFV2-PROJECT-001/init")
+    .send({
+      templateKey: "requirements_input_gate",
+      name: "输入门禁流程"
+    });
+  assert.equal(initRes.status, 201);
+  const workflowId = String(initRes.body.data.workflowId);
+
+  const startRes = await request(app)
+    .post(`/api/v1/workflows/${workflowId}/start`)
+    .send({});
+  assert.equal(startRes.status, 200);
+
+  let stage = await prismaClient.workflowStage.findFirst({
+    where: { workflowId }
+  });
+  assert.ok(stage);
+  assert.equal(stage.status, "pending");
+
+  const addInputRes = await request(app)
+    .post(`/api/v1/workflows/stages/${stage.id}/input`)
+    .send({
+      name: "rawRequirements",
+      type: "document",
+      content: "这是补充的输入需求文档，满足门禁长度要求。"
+    });
+  assert.equal(addInputRes.status, 200);
+  assert.equal(addInputRes.body.success, true);
+  assert.equal(Number(addInputRes.body.data.artifactCount) >= 1, true);
+
+  const restartRes = await request(app)
+    .post(`/api/v1/workflows/${workflowId}/start`)
+    .send({});
+  assert.equal(restartRes.status, 200);
+
+  stage = await prismaClient.workflowStage.findUnique({
+    where: { id: stage.id }
+  });
+  assert.ok(stage);
+  assert.equal(stage.status === "running" || stage.status === "reviewing", true);
 });

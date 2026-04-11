@@ -545,6 +545,20 @@ export const projectsApi = {
     description?: string;
     requirements?: string;
     team?: string[];
+    projectType?: 'complete' | 'standalone' | 'relay';
+    parentProjectId?: string;
+    relaySourceStageId?: string;
+    projectInputs?: Array<{
+      name: string;
+      type: string;
+      description?: string;
+      content?: string;
+      filePath?: string;
+      referenceDeliverableId?: string;
+      inputSource?: 'manual' | 'imported_from_project' | 'template_generated';
+    }>;
+    workflowTemplateKey?: string;
+    autoStartWorkflow?: boolean;
   }) {
     return request<Project>('/projects', {
       method: 'POST',

@@ -464,6 +464,7 @@ function mapAgent(agent: OpenClawAgentSummary): Agent {
     id: agent.agentId,
     name: agent.name,
     role: normalizeAgentRoleLabel(agent),
+    integrationEngine: 'openclaw',
     status: mapAgentStatus(agent.status, agent.activeSessionCount, agent.taskCount),
     load,
     // Keep runtime model route string to avoid lossy m1/m2/m3 placeholders.

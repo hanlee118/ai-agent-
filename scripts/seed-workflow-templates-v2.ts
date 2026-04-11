@@ -5,6 +5,8 @@ const DEFAULT_TEMPLATES = [
     key: "requirements_design",
     name: "需求设计",
     category: "pm",
+    isStandalone: true,
+    standaloneCategory: "requirements",
     executorConfig: {
       type: "agent",
       agentRole: "Product_Manager",
@@ -21,6 +23,16 @@ const DEFAULT_TEMPLATES = [
       properties: { prd: { type: "string" }, userStories: { type: "array" }, acceptanceCriteria: { type: "array" } },
       required: ["prd", "userStories"]
     },
+    inputContract: {
+      requiresExternalInput: true,
+      allowedInputTypes: ["document", "text", "rawrequirements", "prd"],
+      inputValidationRules: [{ field: "rawRequirements", minLength: 40 }]
+    },
+    outputContract: {
+      deliverables: ["prd", "userStories", "acceptanceCriteria"],
+      handoffFormat: "markdown_bundle",
+      archiveLocation: "project_deliverables"
+    },
     acceptanceCriteria: [{ type: "artifact_exists", config: { artifact: "prd", minLength: 800 } }],
     defaultTimeout: 120,
     allowParallel: false
@@ -29,6 +41,8 @@ const DEFAULT_TEMPLATES = [
     key: "visual_design",
     name: "视觉设计",
     category: "design",
+    isStandalone: true,
+    standaloneCategory: "visual",
     executorConfig: {
       type: "agent",
       agentRole: "UI_Designer",
@@ -45,6 +59,16 @@ const DEFAULT_TEMPLATES = [
       properties: { mockups: { type: "array" }, designTokens: { type: "object" } },
       required: ["mockups"]
     },
+    inputContract: {
+      requiresExternalInput: true,
+      allowedInputTypes: ["prd", "document", "text", "mockup"],
+      inputValidationRules: [{ field: "prd", minLength: 80 }]
+    },
+    outputContract: {
+      deliverables: ["mockups", "designTokens"],
+      handoffFormat: "figma_bundle",
+      archiveLocation: "design_assets"
+    },
     acceptanceCriteria: [
       { type: "artifact_exists", config: { artifact: "mockups", minCount: 1 } },
       { type: "auto_check", config: { validator: "stitch_artifact", artifact: "stitch_design_artifact.md" } }
@@ -57,6 +81,8 @@ const DEFAULT_TEMPLATES = [
     key: "tech_design",
     name: "技术设计",
     category: "dev",
+    isStandalone: true,
+    standaloneCategory: "tech",
     executorConfig: {
       type: "agent",
       agentRole: "Architect",
@@ -73,6 +99,16 @@ const DEFAULT_TEMPLATES = [
       properties: { techSpec: { type: "string" }, apiContract: { type: "object" } },
       required: ["techSpec", "apiContract"]
     },
+    inputContract: {
+      requiresExternalInput: true,
+      allowedInputTypes: ["document", "text", "prd"],
+      inputValidationRules: [{ field: "prd", minLength: 40 }]
+    },
+    outputContract: {
+      deliverables: ["techSpec", "apiContract"],
+      handoffFormat: "markdown_json",
+      archiveLocation: "tech_specs"
+    },
     acceptanceCriteria: [{ type: "artifact_exists", config: { artifact: "techSpec" } }],
     defaultTimeout: 150,
     allowParallel: false
@@ -81,6 +117,8 @@ const DEFAULT_TEMPLATES = [
     key: "code_dev",
     name: "代码研发",
     category: "dev",
+    isStandalone: true,
+    standaloneCategory: "code",
     executorConfig: {
       type: "agent",
       agentRole: "Developer",
@@ -97,6 +135,16 @@ const DEFAULT_TEMPLATES = [
       properties: { sourceCode: { type: "string" }, testCases: { type: "array" } },
       required: ["sourceCode"]
     },
+    inputContract: {
+      requiresExternalInput: true,
+      allowedInputTypes: ["mockup", "document", "text", "techspec", "code_repo"],
+      inputValidationRules: [{ field: "mockups", minCount: 1 }]
+    },
+    outputContract: {
+      deliverables: ["sourceCode", "testCases"],
+      handoffFormat: "repo_bundle",
+      archiveLocation: "code_delivery"
+    },
     acceptanceCriteria: [
       { type: "artifact_exists", config: { artifact: "sourceCode" } },
       { type: "auto_check", config: { validator: "no_placeholder", artifact: "sourceCode" } }
@@ -108,6 +156,8 @@ const DEFAULT_TEMPLATES = [
     key: "qa_acceptance",
     name: "QA验收",
     category: "qa",
+    isStandalone: true,
+    standaloneCategory: "qa",
     executorConfig: {
       type: "hybrid",
       agentRole: "QA_Engineer",
@@ -124,6 +174,16 @@ const DEFAULT_TEMPLATES = [
       properties: { testReport: { type: "string" }, bugList: { type: "array" }, approvalStatus: { type: "string" } },
       required: ["testReport", "approvalStatus"]
     },
+    inputContract: {
+      requiresExternalInput: true,
+      allowedInputTypes: ["code_repo", "document", "text"],
+      inputValidationRules: [{ field: "sourceCode", minLength: 20 }]
+    },
+    outputContract: {
+      deliverables: ["testReport", "bugList", "approvalStatus"],
+      handoffFormat: "report_bundle",
+      archiveLocation: "qa_reports"
+    },
     acceptanceCriteria: [
       { type: "artifact_exists", config: { artifact: "testReport" } },
       { type: "manual_approval", config: { role: "qa_lead" } }
@@ -135,9 +195,21 @@ const DEFAULT_TEMPLATES = [
     key: "standard_software_development",
     name: "标准软件开发流程",
     category: "pm",
+    isStandalone: false,
+    standaloneCategory: null,
     executorConfig: { type: "agent", agentRole: "Project_Manager", requiredCapabilities: [] },
     inputSchema: { type: "object", properties: {} },
     outputSchema: { type: "object", properties: {} },
+    inputContract: {
+      requiresExternalInput: false,
+      allowedInputTypes: [],
+      inputValidationRules: []
+    },
+    outputContract: {
+      deliverables: [],
+      handoffFormat: "json",
+      archiveLocation: "project_deliverables"
+    },
     acceptanceCriteria: [],
     defaultTimeout: null,
     allowParallel: false

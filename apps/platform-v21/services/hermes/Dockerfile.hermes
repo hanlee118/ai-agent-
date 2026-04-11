@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY hermes /app/hermes
+COPY config /app/config
+
+VOLUME ["/data/hermes"]
+
+ENV PYTHONPATH=/app
+ENV HERMES_CONFIG_PATH=/app/config/hermes.yaml
+ENV HERMES_DATA_DIR=/data/hermes
+
+EXPOSE 3001
+
+CMD ["python", "-m", "hermes.server"]

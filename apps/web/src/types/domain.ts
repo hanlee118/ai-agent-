@@ -30,6 +30,8 @@ export interface Agent {
   id: string;
   name: string;
   role: string;
+  integrationEngine?: 'openclaw' | 'hermes' | 'managed' | string;
+  builtin?: boolean;
   status: AgentStatus;
   load: number;
   currentModelId: string;

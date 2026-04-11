@@ -45,12 +45,14 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
   for (let index = 0; index < urls.length; index += 1) {
     const url = urls[index];
     const hasNextCandidate = index < urls.length - 1;
+    const isFormDataBody = typeof FormData !== 'undefined' && options.body instanceof FormData;
+    const headers = new Headers(options.headers || {});
+    if (!isFormDataBody && !headers.has('Content-Type')) {
+      headers.set('Content-Type', 'application/json');
+    }
     const config: RequestInit = {
       ...options,
-      headers: {
-        'Content-Type': 'application/json',
-        ...options.headers,
-      },
+      headers,
       credentials: resolveRequestCredentials(url, options.credentials),
     };
     try {

@@ -139,6 +139,7 @@ import { createProjectsRouter } from "./routes/projects.js";
 import { createTasksRouter } from "./routes/tasks.js";
 import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js";
 import { createKnowledgeV2Router } from "./routes/knowledge-v2.js";
+import { createSkillsV2Router } from "./routes/skills-v2.js";
 import { createWorkflowsV2Router } from "./routes/workflows-v2.js";
 import {
   buildProjectIssueFirstMessage,
@@ -3552,6 +3553,18 @@ app.get("/ready", asyncRoute(async (_req, res) => {
   });
 }));
 
+app.get("/metrics", asyncRoute(async (_req, res) => {
+  res.json({
+    ok: true,
+    timestamp: new Date().toISOString(),
+    process: {
+      uptimeSeconds: process.uptime(),
+      memory: process.memoryUsage(),
+      cpu: process.cpuUsage()
+    }
+  });
+}));
+
 const enableApiDocs = process.env.ENABLE_API_DOCS !== "false";
 if (enableApiDocs) {
   const openApiSpec = buildOpenApiSpec({ host, port });
@@ -3601,6 +3614,16 @@ app.use("/api", (req, res, next) => {
     return;
   }
 
+  if (
+    req.path === "/v1/knowledge/for-hermes"
+    || req.path === "/v1/knowledge/sync-from-hermes"
+    || req.path === "/v1/skills/for-hermes"
+    || req.path === "/v1/skills/import/hermes"
+  ) {
+    next();
+    return;
+  }
+
   void (async () => {
     const sessionToken = parseSessionToken(req.headers.cookie);
     const authStatus = await getAuthStatus(sessionToken);
@@ -3641,6 +3664,7 @@ app.use("/api/system", createSystemRouter({
 }));
 app.use("/api/gitlab", createGitLabRouter());
 app.use("/api/v1/knowledge", createKnowledgeV2Router());
+app.use("/api/v1/skills", createSkillsV2Router());
 app.use("/api/v1/workflows", createWorkflowsV2Router());
 app.use(createTasksRouter({
   safeAudit
@@ -3693,7 +3717,7 @@ if (existsSync(siteGeneratedPath)) {
 if (existsSync(webDistPath)) {
   app.use(express.static(webDistPath));
   app.get("*", (req, res, next) => {
-    if (req.path.startsWith("/api") || req.path === "/health" || req.path === "/ready") {
+    if (req.path.startsWith("/api") || req.path === "/health" || req.path === "/ready" || req.path === "/metrics") {
       next();
       return;
     }

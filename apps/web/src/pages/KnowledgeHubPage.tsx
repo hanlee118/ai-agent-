@@ -22,6 +22,7 @@ import {
   type KnowledgeOperationLog,
   type KnowledgeScope,
 } from '../lib/api';
+import HermesSyncPanel from '../features/knowledge/HermesSyncPanel';
 
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
 
@@ -358,18 +359,13 @@ export default function KnowledgeHubPage({ addToast }: Props) {
     }
     setUploadingFile(true);
     try {
-      const content = await uploadFile.text();
-      if (!content.trim()) {
-        addToast('文件内容为空，无法导入', 'info');
-        return;
-      }
       const result = await knowledgeApi.uploadDocument({
         scope: newScope,
         projectId: newProjectId.trim() || undefined,
         agentId: newAgentId.trim() || undefined,
         tags: CSV_SPLIT(newTags),
+        file: uploadFile,
         fileName: uploadFile.name,
-        fileContent: content,
         triggeredBy: 'knowledge_hub_ui',
       });
       addToast(`文档已导入，共切分 ${result.count} 条知识`, 'success');
@@ -805,7 +801,15 @@ export default function KnowledgeHubPage({ addToast }: Props) {
                 {creatingText ? '创建中...' : '创建文本知识'}
               </button>
               <div className="h-px bg-border-subtle my-1" />
-              <input type="file" onChange={(e) => setUploadFile(e.target.files?.[0] || null)} className="text-sm text-slate-300" />
+              <input
+                type="file"
+                accept=".txt,.md,.markdown,.json,.js,.jsx,.ts,.tsx,.py,.java,.go,.sql,.yaml,.yml,.csv,.pdf,.docx"
+                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                className="text-sm text-slate-300"
+              />
+              <p className="text-[11px] text-slate-500">
+                支持文本类文档 + PDF/DOCX 直接导入；如有跨系统知识也可用 Hermes 同步。
+              </p>
               <button onClick={() => void handleUploadDocument()} disabled={!uploadFile || uploadingFile} className="px-3 py-2 rounded-lg border border-border-subtle bg-white/5 text-sm font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60 inline-flex items-center justify-center gap-2">
                 <Download size={14} />
                 {uploadingFile ? '导入中...' : '导入文档为知识'}
@@ -828,6 +832,14 @@ export default function KnowledgeHubPage({ addToast }: Props) {
             </div>
             <textarea value={projectSummary} readOnly rows={5} className="w-full bg-surface-muted border border-border-subtle rounded-lg px-3 py-2 text-xs text-slate-300" placeholder="点击查询后展示项目历史经验摘要..." />
           </div>
+
+          <HermesSyncPanel
+            addToast={addToast}
+            defaultProjectId={projectIdFilter || summaryProjectId}
+            onSynced={async () => {
+              await Promise.all([listKnowledge(), loadOperationLogs()]);
+            }}
+          />
 
           <div className="rounded-2xl border border-border-subtle bg-surface-soft p-5 space-y-3">
             <div className="flex items-center justify-between">

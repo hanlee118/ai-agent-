@@ -63,6 +63,8 @@ export interface Agent {
   id: string;
   name: string;
   role: string;
+  integrationEngine?: 'openclaw' | 'hermes' | 'managed' | string;
+  builtin?: boolean;
   status: 'Idle' | 'Thinking' | 'Executing' | 'Offline';
   load: number;
   currentModelId?: string;
