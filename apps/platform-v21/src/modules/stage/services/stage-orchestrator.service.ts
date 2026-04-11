@@ -124,13 +124,13 @@ export class StageOrchestratorService {
       .map((node) => workflow.stages.find((stage) => stage.nodeId === node.id))
       .filter((stage): stage is ProjectStage => Boolean(stage));
 
-    for (const stage of entryStages) {
-      await this.activateStage(stage.id);
-    }
-
     workflow.status = WorkflowStatus.ACTIVE;
     workflow.currentStageIds = entryStages.map((stage) => stage.id);
     await this.workflowRepo.save(workflow);
+
+    for (const stage of entryStages) {
+      await this.activateStage(stage.id);
+    }
   }
 
   private async activateStage(stageId: string): Promise<void> {

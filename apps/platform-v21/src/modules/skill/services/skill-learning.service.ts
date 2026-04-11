@@ -283,41 +283,56 @@ export class SkillLearningService {
     const observationHours = Number(process.env.SKILL_OBSERVATION_PERIOD_HOURS || 24);
     const observationPeriodEnds = new Date(Date.now() + observationHours * 60 * 60 * 1000);
 
-    const created = this.skillRepo.create({
-      skillKey: `${this.toKebabCase(evaluation.name)}-v1`,
-      name: evaluation.name,
-      type: evaluation.type as SkillType,
-      source: SkillSource.AUTO_EXTRACTED,
-      manifest: {
-        version: '1.0.0',
-        author: 'system',
-        description: `Extracted from ${stage.templateKey}`,
-        tags: [stage.templateKey, 'auto-generated'],
-        inputSchema: {},
-        outputSchema: {},
-        requiredTools: this.extractToolNames(stage),
-        estimatedDuration: this.calculateDuration(stage),
-        successRate: stage.status === StageStatus.COMPLETED ? 1 : 0,
-      },
-      instruction,
-      originProjectId: workflow?.projectId,
-      originStage: stage.templateKey,
-      extractionDate: new Date(),
-      embedding,
-      observationPeriodEnds,
-      isCertified: false,
-      visibility: 'project',
-      isActive: true,
-      usageCount: 0,
-      examples: [],
-      successHistory: [],
-      refinementCount: 0,
-      externalMappings: {},
-    });
+    const baseKey = this.toKebabCase(evaluation.name) || 'auto-extracted-skill';
 
-    const saved = await this.skillRepo.save(created);
-    this.logger.log(`Created skill ${saved.skillKey} from stage ${stage.id}`);
-    return saved;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const skillKey = await this.generateVersionedSkillKey(baseKey);
+      const created = this.skillRepo.create({
+        skillKey,
+        name: evaluation.name,
+        type: evaluation.type as SkillType,
+        source: SkillSource.AUTO_EXTRACTED,
+        manifest: {
+          version: '1.0.0',
+          author: 'system',
+          description: `Extracted from ${stage.templateKey}`,
+          tags: [stage.templateKey, 'auto-generated'],
+          inputSchema: {},
+          outputSchema: {},
+          requiredTools: this.extractToolNames(stage),
+          estimatedDuration: this.calculateDuration(stage),
+          successRate: stage.status === StageStatus.COMPLETED ? 1 : 0,
+        },
+        instruction,
+        originProjectId: workflow?.projectId,
+        originStage: stage.templateKey,
+        extractionDate: new Date(),
+        embedding,
+        observationPeriodEnds,
+        isCertified: false,
+        visibility: 'project',
+        isActive: true,
+        usageCount: 0,
+        examples: [],
+        successHistory: [],
+        refinementCount: 0,
+        externalMappings: {},
+      });
+
+      try {
+        const saved = await this.skillRepo.save(created);
+        this.logger.log(`Created skill ${saved.skillKey} from stage ${stage.id}`);
+        return saved;
+      } catch (error) {
+        const dbError = error as { code?: string; constraint?: string };
+        const isDuplicateKey = dbError.code === '23505' && dbError.constraint === 'skills_skill_key_key';
+        if (!isDuplicateKey || attempt === 2) {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error('Failed to create unique skill key');
   }
 
   private async evaluateRefinement(skill: Skill, successRate: number): Promise<void> {
@@ -362,6 +377,25 @@ export class SkillLearningService {
       .trim()
       .replace(/\s+/g, '-')
       .replace(/-+/g, '-');
+  }
+
+  private async generateVersionedSkillKey(baseKey: string): Promise<string> {
+    const rows = await this.skillRepo
+      .createQueryBuilder('skill')
+      .select('skill.skill_key', 'skillKey')
+      .where('skill.skill_key LIKE :pattern', { pattern: `${baseKey}-v%` })
+      .getRawMany<{ skillKey: string }>();
+
+    const maxVersion = rows.reduce((max, row) => {
+      const key = row.skillKey || '';
+      const match = key.match(/-v(\d+)$/);
+      if (!match) {
+        return max;
+      }
+      return Math.max(max, Number(match[1]));
+    }, 0);
+
+    return `${baseKey}-v${maxVersion + 1}`;
   }
 
   private calculateDuration(stage: ProjectStage) {

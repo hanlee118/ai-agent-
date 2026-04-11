@@ -60,6 +60,25 @@ Hermes sync APIs:
 - `GET /api/v1/knowledge/for-hermes`
 - `POST /api/v1/knowledge/sync-from-hermes`
 
+## Hermes UI Design Stage Demo
+
+1. Ensure Hermes MCP endpoint is reachable and set `HERMES_MCP` / `HERMES_MCP_ENDPOINT`.
+2. Ensure the standalone UI template exists (migration `1710000003000` or `pnpm seed`).
+3. Create standalone UI design project:
+
+```bash
+curl -X POST http://localhost:3310/api/v1/projects \
+  -H "content-type: application/json" \
+  -d '{
+    "name":"Agent协作平台 UI设计阶段项目",
+    "projectType":"standalone",
+    "templateKey":"ui_design_standalone_hermes",
+    "inputs":[
+      {"name":"raw-prd","type":"prd","content":"设计Agent协作平台UI"}
+    ]
+  }'
+```
+
 ## Test & Build
 
 ```bash
