@@ -89,6 +89,57 @@ after(async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+test("issues preview should adapt artifacts and SOP by workflow template", async () => {
+  const visualRes = await request(app)
+    .post("/api/issues/preview")
+    .send({
+      input: "我需要先完成视觉设计阶段，产出可以评审的页面原型。",
+      industryCode: "saas",
+      sourceType: "text",
+      debateMode: "off",
+      workflowTemplateKey: "visual_design"
+    });
+
+  assert.equal(visualRes.status, 200);
+  assert.equal(visualRes.body.success, true);
+  const visualArtifacts = Array.isArray(visualRes.body.data.expectedArtifacts)
+    ? visualRes.body.data.expectedArtifacts as Array<{ id: string; ownerRoleId: string }>
+    : [];
+  assert.equal(visualArtifacts.length >= 2, true);
+  assert.equal(visualArtifacts.some((item) => item.id === "artifact-design-review"), true);
+  assert.equal(visualArtifacts.some((item) => item.id === "artifact-visual-preview"), true);
+  assert.equal(visualArtifacts.every((item) => item.ownerRoleId === "ROLE_DESIGN"), true);
+  const visualWorkflowSteps = Array.isArray(visualRes.body.data.workflow?.steps)
+    ? visualRes.body.data.workflow.steps as Array<{ roleId: string }>
+    : [];
+  assert.equal(visualWorkflowSteps.length >= 2, true);
+  assert.equal(visualWorkflowSteps.every((step) => step.roleId === "ROLE_DESIGN"), true);
+
+  const qaRes = await request(app)
+    .post("/api/issues/preview")
+    .send({
+      input: "当前代码已完成，下一步进入 QA 验收与回归。",
+      industryCode: "saas",
+      sourceType: "text",
+      debateMode: "off",
+      workflowTemplateKey: "qa_acceptance"
+    });
+
+  assert.equal(qaRes.status, 200);
+  assert.equal(qaRes.body.success, true);
+  const qaArtifacts = Array.isArray(qaRes.body.data.expectedArtifacts)
+    ? qaRes.body.data.expectedArtifacts as Array<{ id: string; ownerRoleId: string }>
+    : [];
+  assert.equal(qaArtifacts.some((item) => item.id === "artifact-test-plan"), true);
+  assert.equal(qaArtifacts.some((item) => item.id === "artifact-test-report"), true);
+  assert.equal(qaArtifacts.every((item) => item.ownerRoleId === "ROLE_QA"), true);
+  const qaWorkflowSteps = Array.isArray(qaRes.body.data.workflow?.steps)
+    ? qaRes.body.data.workflow.steps as Array<{ roleId: string }>
+    : [];
+  assert.equal(qaWorkflowSteps.length >= 2, true);
+  assert.equal(qaWorkflowSteps.every((step) => step.roleId === "ROLE_QA"), true);
+});
+
 test("issues confirm can pass workflow template fields and auto-link workflow-v2", async () => {
   const previewRes = await request(app)
     .post("/api/issues/preview")

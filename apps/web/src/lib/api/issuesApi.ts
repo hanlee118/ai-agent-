@@ -210,6 +210,7 @@ export const issuesApi = {
     industryCode: string;
     sourceType?: IssueSourceType;
     debateMode?: 'auto' | 'model' | 'off';
+    workflowTemplateKey?: string;
   }) {
     return request<IssuePreview>('/issues/preview', {
       method: 'POST',

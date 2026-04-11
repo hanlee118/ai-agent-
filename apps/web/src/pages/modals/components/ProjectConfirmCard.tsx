@@ -3,57 +3,11 @@ import type { NewProjectModalController } from '../hooks/useNewProjectModalContr
 import type { Priority } from '../NewProjectModal.types';
 import { formatClarificationBlock, formatIssueAnswersBlock, roleLabel } from '../utils/newProjectHelpers';
 import Badge from './Badge';
+import ProjectExecutionConfigurator from './ProjectExecutionConfigurator';
 
 type Props = {
   controller: NewProjectModalController;
 };
-
-const FULL_WORKFLOW_TEMPLATE_OPTIONS: Array<{ key: string; label: string; description: string }> = [
-  {
-    key: 'standard_software_development',
-    label: '混合协作（推荐）',
-    description: '需求→视觉/技术→研发→QA，多阶段自动编排',
-  },
-  {
-    key: 'none',
-    label: '暂不初始化 workflow',
-    description: '只创建项目，不自动联动阶段引擎',
-  },
-];
-
-const STANDALONE_TEMPLATE_OPTIONS: Array<{ key: string; label: string; description: string }> = [
-  {
-    key: 'requirements_design',
-    label: '仅需求设计',
-    description: '创建后从需求设计单阶段开始',
-  },
-  {
-    key: 'visual_design',
-    label: '仅视觉设计',
-    description: '创建后直接进入视觉设计阶段',
-  },
-  {
-    key: 'code_dev',
-    label: '仅代码研发',
-    description: '创建后直接进入研发阶段',
-  },
-  {
-    key: 'qa_acceptance',
-    label: '仅 QA 验收',
-    description: '创建后直接进入验收阶段',
-  },
-  {
-    key: 'none',
-    label: '暂不初始化 workflow',
-    description: '只创建项目，不自动联动阶段引擎',
-  },
-];
-
-const PROJECT_MODE_OPTIONS: Array<{ key: 'complete' | 'standalone' | 'relay'; label: string; description: string }> = [
-  { key: 'complete', label: '完整流程', description: '需求→设计→研发→QA，完整流水线协作' },
-  { key: 'standalone', label: '单阶段交付', description: '独立阶段输入、实施、验收、交付' },
-  { key: 'relay', label: '阶段接力', description: '导入上游项目产物，作为当前阶段输入' },
-];
 
 export default function ProjectConfirmCard({ controller }: Props) {
   const {
@@ -93,7 +47,6 @@ export default function ProjectConfirmCard({ controller }: Props) {
   }
 
   const canCreate = Boolean(issuePreview?.issueId) && Boolean(issuePreview?.analysisGate.canProceed) && !isCreating;
-  const workflowOptions = projectType === 'complete' ? FULL_WORKFLOW_TEMPLATE_OPTIONS : STANDALONE_TEMPLATE_OPTIONS;
   const createBlockedHint = !issuePreview?.issueId
     ? '请先回到需求输入步骤完成 Issue 分析。'
     : !issuePreview.analysisGate.canProceed
@@ -210,116 +163,25 @@ export default function ProjectConfirmCard({ controller }: Props) {
           )}
         </div>
 
-        <div className="space-y-2">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目策略模式</label>
-          <select
-            value={projectType}
-            onChange={(event) => setProjectType(event.target.value as 'complete' | 'standalone' | 'relay')}
-            className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-          >
-            {PROJECT_MODE_OPTIONS.map((option) => (
-              <option key={option.key} value={option.key}>{option.label}</option>
-            ))}
-          </select>
-          <p className="text-[11px] text-slate-500">
-            {PROJECT_MODE_OPTIONS.find((item) => item.key === projectType)?.description}
-          </p>
-        </div>
-
-        {projectType === 'relay' ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">来源项目 ID</label>
-              <input
-                type="text"
-                value={parentProjectId}
-                onChange={(event) => setParentProjectId(event.target.value)}
-                placeholder="例如 P-2026-001"
-                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
-            </div>
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">来源阶段 ID（可选）</label>
-              <input
-                type="text"
-                value={relaySourceStageId}
-                onChange={(event) => setRelaySourceStageId(event.target.value)}
-                placeholder="可留空导入该项目最新交付"
-                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
-            </div>
-          </div>
-        ) : null}
-
-        {(projectType === 'standalone' || projectType === 'relay') ? (
-          <div className="space-y-2">
-            <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">阶段输入（独立事项输入）</label>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-              <input
-                type="text"
-                value={standaloneInputName}
-                onChange={(event) => setStandaloneInputName(event.target.value)}
-                placeholder="输入名称（如 rawRequirements / prd）"
-                className="bg-surface-muted border border-border-subtle rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
-              />
-              <select
-                value={standaloneInputType}
-                onChange={(event) => setStandaloneInputType(event.target.value)}
-                className="bg-surface-muted border border-border-subtle rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-              >
-                <option value="document">document</option>
-                <option value="text">text</option>
-                <option value="prd">prd</option>
-                <option value="mockup">mockup</option>
-                <option value="code_repo">code_repo</option>
-              </select>
-              <span className="text-[11px] text-slate-500 self-center">
-                空内容可先创建，后续在项目输入里补充。
-              </span>
-            </div>
-            <textarea
-              rows={4}
-              value={standaloneInputContent}
-              onChange={(event) => setStandaloneInputContent(event.target.value)}
-              placeholder="输入内容（例如需求摘要、PRD 片段、设计说明、代码仓库地址等）"
-              className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-y min-h-[100px]"
-            />
-          </div>
-        ) : null}
-
-        <div className="space-y-2">
-          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目执行模式（workflow v2）</label>
-          <select
-            value={workflowTemplateKey}
-            onChange={(event) => {
-              const nextKey = event.target.value;
-              setWorkflowTemplateKey(nextKey);
-              if (nextKey === 'none') {
-                setAutoStartWorkflow(false);
-              } else if (!autoStartWorkflow) {
-                setAutoStartWorkflow(true);
-              }
-            }}
-            className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-          >
-            {workflowOptions.map((option) => (
-              <option key={option.key} value={option.key}>{option.label}</option>
-            ))}
-          </select>
-          <p className="text-[11px] text-slate-500">
-            {workflowOptions.find((item) => item.key === workflowTemplateKey)?.description || '按所选模板初始化 workflow'}
-          </p>
-          <label className="inline-flex items-center gap-2 text-xs text-slate-300">
-            <input
-              type="checkbox"
-              checked={autoStartWorkflow}
-              disabled={workflowTemplateKey === 'none'}
-              onChange={(event) => setAutoStartWorkflow(event.target.checked)}
-              className="accent-primary"
-            />
-            创建后自动启动 workflow（不勾选则仅初始化）
-          </label>
-        </div>
+        <ProjectExecutionConfigurator
+          compact
+          projectType={projectType}
+          setProjectType={setProjectType}
+          parentProjectId={parentProjectId}
+          setParentProjectId={setParentProjectId}
+          relaySourceStageId={relaySourceStageId}
+          setRelaySourceStageId={setRelaySourceStageId}
+          standaloneInputName={standaloneInputName}
+          setStandaloneInputName={setStandaloneInputName}
+          standaloneInputType={standaloneInputType}
+          setStandaloneInputType={setStandaloneInputType}
+          standaloneInputContent={standaloneInputContent}
+          setStandaloneInputContent={setStandaloneInputContent}
+          workflowTemplateKey={workflowTemplateKey}
+          setWorkflowTemplateKey={setWorkflowTemplateKey}
+          autoStartWorkflow={autoStartWorkflow}
+          setAutoStartWorkflow={setAutoStartWorkflow}
+        />
       </div>
 
       <div className="flex gap-3 pt-2">

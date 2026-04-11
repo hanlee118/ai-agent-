@@ -781,6 +781,18 @@ async function resolveStageIdsByNode(workflowId: string, nodeIds: string[]) {
   return nodeIds.map((nodeId) => map.get(nodeId)).filter((id): id is string => Boolean(id));
 }
 
+function sameStageIdList(a: string[], b: string[]) {
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
 async function updateStageStatus(stageId: string, action: TransitionAction) {
   if (action === "proceed") {
     return prisma.workflowStage.update({
@@ -896,13 +908,29 @@ export async function transitionWorkflowStage(input: {
     }
   });
 
-  await prisma.workflow.update({
+  const desiredStatus = nextStageIds.length > 0 ? "active" : "completed";
+  const latestWorkflow = await prisma.workflow.findUnique({
     where: { id: workflow.id },
-    data: {
-      currentStageIds: nextStageIds,
-      status: nextStageIds.length > 0 ? "active" : "completed"
+    select: {
+      status: true,
+      currentStageIds: true
     }
   });
+  const latestStageIds = asStringArray(latestWorkflow?.currentStageIds);
+  const shouldPreserveAdvancedState = desiredStatus === "active"
+    && (
+      normalizeText(latestWorkflow?.status).toLowerCase() !== "active"
+      || (latestStageIds.length > 0 && !sameStageIdList(latestStageIds, nextStageIds))
+    );
+  if (!shouldPreserveAdvancedState) {
+    await prisma.workflow.update({
+      where: { id: workflow.id },
+      data: {
+        currentStageIds: nextStageIds,
+        status: desiredStatus
+      }
+    });
+  }
 
   return {
     success: true,

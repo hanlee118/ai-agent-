@@ -125,6 +125,14 @@ export interface IssueExpectedArtifact {
   ownerRoleId: RoleType;
 }
 
+export type IssueWorkflowTemplateKey =
+  | "standard_software_development"
+  | "requirements_design"
+  | "visual_design"
+  | "tech_design"
+  | "code_dev"
+  | "qa_acceptance";
+
 export interface IssueContextAlignment {
   productName: string;
   missionAnchor: string;
@@ -868,8 +876,17 @@ export function buildIssueDiscussion(
   });
 }
 
-export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
-  return [
+const ISSUE_TEMPLATE_REQUIRED_ROLES: Record<IssueWorkflowTemplateKey, RoleType[]> = {
+  standard_software_development: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"],
+  requirements_design: ["ROLE_PM", "ROLE_ANALYST"],
+  visual_design: ["ROLE_DESIGN"],
+  tech_design: ["ROLE_ARCH"],
+  code_dev: ["ROLE_ARCH", "ROLE_DEV"],
+  qa_acceptance: ["ROLE_QA"]
+};
+
+const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedArtifact[]> = {
+  standard_software_development: [
     {
       id: "artifact-analysis-doc",
       name: "需求分析文档",
@@ -926,7 +943,273 @@ export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
       stageType: "ACCEPT",
       ownerRoleId: "ROLE_QA"
     }
-  ];
+  ],
+  requirements_design: [
+    {
+      id: "artifact-analysis-doc",
+      name: "需求分析文档",
+      description: "面向后续阶段的结构化需求、边界、约束与风险分析。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_ANALYST"
+    },
+    {
+      id: "artifact-requirement-contract",
+      name: "需求确认单",
+      description: "明确目标、范围、验收标准与阶段交接条件。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_PM"
+    },
+    {
+      id: "artifact-schedule",
+      name: "阶段排期与里程碑",
+      description: "当前阶段的里程碑、负责人与风险缓冲计划。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_PM"
+    }
+  ],
+  visual_design: [
+    {
+      id: "artifact-design-review",
+      name: "设计审查卡",
+      description: "视觉方向、信息层级、可访问性检查与审查结论。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_DESIGN"
+    },
+    {
+      id: "artifact-visual-preview",
+      name: "视觉定稿单页",
+      description: "可直接用于评审与交接的静态图或 HTML 单页设计稿。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_DESIGN"
+    }
+  ],
+  tech_design: [
+    {
+      id: "artifact-tech-plan",
+      name: "技术方案与选型",
+      description: "系统边界、技术选型、风险取舍与非功能约束。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_ARCH"
+    },
+    {
+      id: "artifact-api-contract",
+      name: "接口与数据契约",
+      description: "API 契约、数据模型、错误语义与联调约定。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_ARCH"
+    }
+  ],
+  code_dev: [
+    {
+      id: "artifact-impl-result",
+      name: "实现结果说明",
+      description: "核心功能实现、代码变更摘要与关键验证证据。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_DEV"
+    },
+    {
+      id: "artifact-runtime-delivery",
+      name: "运行地址与部署说明",
+      description: "运行入口、部署方式、环境变量与联调步骤。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_DEV"
+    }
+  ],
+  qa_acceptance: [
+    {
+      id: "artifact-test-plan",
+      name: "测试计划与用例清单",
+      description: "覆盖范围、测试策略、关键用例与阻断项定义。",
+      stageType: "ACCEPT",
+      ownerRoleId: "ROLE_QA"
+    },
+    {
+      id: "artifact-test-report",
+      name: "测试报告",
+      description: "执行结果、缺陷结论、回归建议与发布建议。",
+      stageType: "ACCEPT",
+      ownerRoleId: "ROLE_QA"
+    }
+  ]
+};
+
+const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
+  roleId: RoleType;
+  title: string;
+  input: string;
+  output: string;
+}>> = {
+  standard_software_development: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "需求理解与边界识别",
+      input: "Issue + Product Spec + 历史变更",
+      output: "需求分析文档、关键风险与冲突点"
+    },
+    {
+      roleId: "ROLE_PM",
+      title: "阶段目标与排期确认",
+      input: "需求分析文档",
+      output: "里程碑计划、负责人与交接条件"
+    },
+    {
+      roleId: "ROLE_DESIGN",
+      title: "视觉与交互方案审查",
+      input: "需求确认单",
+      output: "设计审查卡、视觉定稿单页"
+    },
+    {
+      roleId: "ROLE_ARCH",
+      title: "技术方案与契约设计",
+      input: "需求确认单 + 设计审查卡",
+      output: "技术方案、接口与数据契约"
+    },
+    {
+      roleId: "ROLE_DEV",
+      title: "研发实现与联调",
+      input: "技术方案与任务拆解",
+      output: "实现结果说明、运行地址与部署说明"
+    },
+    {
+      roleId: "ROLE_QA",
+      title: "回归验收与发布建议",
+      input: "实现结果与验收口径",
+      output: "测试报告、发布建议"
+    }
+  ],
+  requirements_design: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "需求理解与边界识别",
+      input: "Issue + 业务背景 + 历史经验",
+      output: "需求分析文档（范围/约束/风险）"
+    },
+    {
+      roleId: "ROLE_PM",
+      title: "需求确认与阶段排期",
+      input: "需求分析文档",
+      output: "需求确认单、阶段排期与交接条件"
+    }
+  ],
+  visual_design: [
+    {
+      roleId: "ROLE_DESIGN",
+      title: "视觉方向与信息架构",
+      input: "需求确认单 + 品牌约束",
+      output: "视觉框架、信息层级与交互草案"
+    },
+    {
+      roleId: "ROLE_DESIGN",
+      title: "交互细节与设计定稿",
+      input: "视觉框架与交互草案",
+      output: "设计审查卡、视觉定稿单页"
+    }
+  ],
+  tech_design: [
+    {
+      roleId: "ROLE_ARCH",
+      title: "技术边界与架构设计",
+      input: "需求确认单 + 设计约束",
+      output: "技术方案与选型结论"
+    },
+    {
+      roleId: "ROLE_ARCH",
+      title: "接口与数据契约定义",
+      input: "技术方案与选型",
+      output: "API 契约、数据模型与联调规范"
+    }
+  ],
+  code_dev: [
+    {
+      roleId: "ROLE_ARCH",
+      title: "研发任务拆解与技术守护线",
+      input: "技术方案与阶段目标",
+      output: "任务拆解、实现边界与技术约束"
+    },
+    {
+      roleId: "ROLE_DEV",
+      title: "代码实现与联调验证",
+      input: "任务拆解与技术约束",
+      output: "实现结果说明、代码与联调证据"
+    },
+    {
+      roleId: "ROLE_DEV",
+      title: "运行交付与部署准备",
+      input: "实现结果说明",
+      output: "运行地址、部署说明与回滚预案"
+    }
+  ],
+  qa_acceptance: [
+    {
+      roleId: "ROLE_QA",
+      title: "测试计划与用例设计",
+      input: "需求确认单 + 实现结果",
+      output: "测试计划、覆盖矩阵与验收用例"
+    },
+    {
+      roleId: "ROLE_QA",
+      title: "回归验收与发布建议",
+      input: "测试执行结果",
+      output: "测试报告、阻断项与发布建议"
+    }
+  ]
+};
+
+export function resolveIssueWorkflowTemplateKey(input: unknown): IssueWorkflowTemplateKey {
+  const text = String(input ?? "").trim().toLowerCase();
+  if (!text || text === "none") {
+    return "standard_software_development";
+  }
+  if (
+    text === "standard_software_development"
+    || text === "requirements_design"
+    || text === "visual_design"
+    || text === "tech_design"
+    || text === "code_dev"
+    || text === "qa_acceptance"
+  ) {
+    return text;
+  }
+  return "standard_software_development";
+}
+
+export function getTemplateRequiredRoles(templateKey: unknown): RoleType[] {
+  const key = resolveIssueWorkflowTemplateKey(templateKey);
+  return [...(ISSUE_TEMPLATE_REQUIRED_ROLES[key] || [])];
+}
+
+export function buildIssueWorkflowSop(templateKey: unknown) {
+  const key = resolveIssueWorkflowTemplateKey(templateKey);
+  const workflowNameMap: Record<IssueWorkflowTemplateKey, string> = {
+    standard_software_development: "标准软件开发协作流程",
+    requirements_design: "需求设计阶段协作流程",
+    visual_design: "视觉设计阶段协作流程",
+    tech_design: "技术设计阶段协作流程",
+    code_dev: "代码研发阶段协作流程",
+    qa_acceptance: "QA 验收阶段协作流程"
+  };
+  const stepDefs = ISSUE_TEMPLATE_WORKFLOW_STEPS[key] || ISSUE_TEMPLATE_WORKFLOW_STEPS.standard_software_development;
+  return {
+    id: `workflow-${key}`,
+    name: workflowNameMap[key],
+    steps: stepDefs.map((step, index) => ({
+      order: index + 1,
+      roleId: step.roleId,
+      title: step.title,
+      input: step.input,
+      output: step.output
+    })),
+    requiredRoleIds: Array.from(new Set(stepDefs.map((step) => step.roleId))),
+    isDefault: key === "standard_software_development",
+    version: "v2",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function buildExpectedArtifacts(templateKey?: unknown): IssueExpectedArtifact[] {
+  const key = resolveIssueWorkflowTemplateKey(templateKey);
+  const artifacts = ISSUE_TEMPLATE_ARTIFACTS[key] || ISSUE_TEMPLATE_ARTIFACTS.standard_software_development;
+  return artifacts.map((item) => ({ ...item }));
 }
 
 export function buildContextAlignment(

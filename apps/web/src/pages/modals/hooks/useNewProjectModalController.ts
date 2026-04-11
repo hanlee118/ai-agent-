@@ -50,6 +50,28 @@ const INITIAL_FORM_DATA: NewProjectFormData = {
   agentIds: [],
 };
 
+const WORKFLOW_TEMPLATE_REQUIRED_ROLES: Record<string, string[]> = {
+  standard_software_development: ['ROLE_PM', 'ROLE_ANALYST', 'ROLE_DESIGN', 'ROLE_ARCH', 'ROLE_DEV', 'ROLE_QA'],
+  requirements_design: ['ROLE_PM', 'ROLE_ANALYST'],
+  visual_design: ['ROLE_DESIGN'],
+  tech_design: ['ROLE_ARCH'],
+  code_dev: ['ROLE_ARCH', 'ROLE_DEV'],
+  qa_acceptance: ['ROLE_QA'],
+};
+
+const WORKFLOW_TEMPLATE_INPUT_PRESETS: Record<string, { name: string; type: string }> = {
+  requirements_design: { name: 'prd_requirements', type: 'prd' },
+  visual_design: { name: 'design_brief', type: 'mockup' },
+  tech_design: { name: 'technical_spec', type: 'document' },
+  code_dev: { name: 'implementation_scope', type: 'code_repo' },
+  qa_acceptance: { name: 'qa_test_scope', type: 'document' },
+  standard_software_development: { name: 'raw_requirements', type: 'document' },
+};
+
+function uniqueNormalizedRoles(input: string[]) {
+  return Array.from(new Set(input.map((item) => normalizeRoleId(item)).filter(Boolean)));
+}
+
 export function useNewProjectModalController({
   isOpen,
   onClose,
@@ -91,7 +113,7 @@ export function useNewProjectModalController({
   const [projectType, setProjectType] = useState<'complete' | 'standalone' | 'relay'>('complete');
   const [parentProjectId, setParentProjectId] = useState('');
   const [relaySourceStageId, setRelaySourceStageId] = useState('');
-  const [standaloneInputName, setStandaloneInputName] = useState('rawRequirements');
+  const [standaloneInputName, setStandaloneInputName] = useState('raw_requirements');
   const [standaloneInputType, setStandaloneInputType] = useState('document');
   const [standaloneInputContent, setStandaloneInputContent] = useState('');
   const [workflowTemplateKey, setWorkflowTemplateKey] = useState('standard_software_development');
@@ -141,6 +163,44 @@ export function useNewProjectModalController({
     return filtered.length > 0 ? filtered : pool;
   }, [allowedRoleIds]);
 
+  const requiredWorkflowRoles = useMemo(() => {
+    if (workflowTemplateKey === 'none') {
+      return [] as string[];
+    }
+    const explicit = WORKFLOW_TEMPLATE_REQUIRED_ROLES[workflowTemplateKey] || [];
+    const fallbackByMode = projectType === 'complete'
+      ? WORKFLOW_TEMPLATE_REQUIRED_ROLES.standard_software_development
+      : WORKFLOW_TEMPLATE_REQUIRED_ROLES.requirements_design;
+    const merged = uniqueNormalizedRoles(explicit.length > 0 ? explicit : fallbackByMode);
+    if (requiresSoulRole && soulRoleId) {
+      return uniqueNormalizedRoles([soulRoleId, ...merged]);
+    }
+    return merged;
+  }, [workflowTemplateKey, projectType, requiresSoulRole, soulRoleId]);
+
+  const applyTemplateRolePlan = (seedRoleIds: string[]) => {
+    const normalizedSeed = uniqueNormalizedRoles(seedRoleIds);
+    if (workflowTemplateKey === 'none') {
+      return normalizedSeed;
+    }
+    if (projectType === 'complete') {
+      return uniqueNormalizedRoles([...requiredWorkflowRoles, ...normalizedSeed]);
+    }
+    return requiredWorkflowRoles.length > 0
+      ? requiredWorkflowRoles
+      : normalizedSeed;
+  };
+
+  const selectedWorkflowRoleIds = useMemo(
+    () => uniqueNormalizedRoles(analysisRecommendations.map((item) => item.roleId)),
+    [analysisRecommendations],
+  );
+
+  const missingWorkflowRoles = useMemo(
+    () => requiredWorkflowRoles.filter((roleId) => !selectedWorkflowRoleIds.includes(normalizeRoleId(roleId))),
+    [requiredWorkflowRoles, selectedWorkflowRoleIds],
+  );
+
   useEffect(() => {
     if (projectType === 'complete' && workflowTemplateKey !== 'standard_software_development' && workflowTemplateKey !== 'none') {
       setWorkflowTemplateKey('standard_software_development');
@@ -151,6 +211,70 @@ export function useNewProjectModalController({
       setWorkflowTemplateKey('requirements_design');
     }
   }, [projectType, workflowTemplateKey]);
+
+  useEffect(() => {
+    if (!(projectType === 'standalone' || projectType === 'relay')) {
+      return;
+    }
+    const preset = WORKFLOW_TEMPLATE_INPUT_PRESETS[workflowTemplateKey] || WORKFLOW_TEMPLATE_INPUT_PRESETS.requirements_design;
+    const normalizedName = String(standaloneInputName || '').trim().toLowerCase();
+    if (!normalizedName || normalizedName === 'rawrequirements' || normalizedName === 'raw_requirements') {
+      setStandaloneInputName(preset.name);
+    }
+    const normalizedType = String(standaloneInputType || '').trim().toLowerCase();
+    if (!normalizedType || normalizedType === 'document' || normalizedType === 'text') {
+      setStandaloneInputType(preset.type);
+    }
+  }, [projectType, workflowTemplateKey]);
+
+  useEffect(() => {
+    if (!parsedProject) {
+      return;
+    }
+
+    const seedRoleIds = analysisRecommendations.length > 0
+      ? analysisRecommendations.map((item) => item.roleId)
+      : parsedProject.team;
+    const nextPlannedRoles = applyTemplateRolePlan(seedRoleIds);
+    if (nextPlannedRoles.length === 0) {
+      return;
+    }
+
+    const nextRecommendations = buildRoleBasedAgentRecommendations(nextPlannedRoles, {
+      allowedRoleIds,
+      mustHaveSoulRole: requiresSoulRole,
+      soulRoleId,
+    });
+    if (nextRecommendations.length === 0) {
+      return;
+    }
+
+    const prevAgentIds = analysisRecommendations.map((item) => item.agentId).join('|');
+    const nextAgentIds = nextRecommendations.map((item) => item.agentId).join('|');
+    if (prevAgentIds !== nextAgentIds) {
+      setAnalysisRecommendations(nextRecommendations);
+    }
+
+    const nextRoleIds = uniqueNormalizedRoles(nextRecommendations.map((item) => item.roleId));
+    const prevRoleIds = uniqueNormalizedRoles(parsedProject.team);
+    if (nextRoleIds.join('|') !== prevRoleIds.join('|')) {
+      setParsedProject((prev) => (prev
+        ? {
+            ...prev,
+            team: nextRoleIds,
+            agents: nextRecommendations.map((item) => item.name),
+          }
+        : prev));
+    }
+  }, [
+    workflowTemplateKey,
+    projectType,
+    allowedRoleIds,
+    requiresSoulRole,
+    soulRoleId,
+    parsedProject,
+    analysisRecommendations,
+  ]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -373,7 +497,7 @@ export function useNewProjectModalController({
     setProjectType('complete');
     setParentProjectId('');
     setRelaySourceStageId('');
-    setStandaloneInputName('rawRequirements');
+    setStandaloneInputName('raw_requirements');
     setStandaloneInputType('document');
     setStandaloneInputContent('');
     setWorkflowTemplateKey('standard_software_development');
@@ -440,6 +564,15 @@ export function useNewProjectModalController({
     setAnalysisRecommendations((prev) => {
       const exists = prev.some((item) => item.agentId === agentId);
       if (exists) {
+        const target = prev.find((item) => item.agentId === agentId);
+        const targetRoleId = normalizeRoleId(target?.roleId || '');
+        if (targetRoleId && requiredWorkflowRoles.includes(targetRoleId)) {
+          const roleCount = prev.filter((item) => normalizeRoleId(item.roleId) === targetRoleId).length;
+          if (roleCount <= 1) {
+            addToast(`当前模板要求保留角色 ${roleLabel(targetRoleId)}，请先调整模板或补充同角色 Agent`, 'error');
+            return prev;
+          }
+        }
         return prev.filter((item) => item.agentId !== agentId);
       }
       const manual = buildManualRecommendation(agentId);
@@ -461,13 +594,14 @@ export function useNewProjectModalController({
         industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
         sourceType: issueSourceType,
         debateMode: 'model',
+        workflowTemplateKey,
       });
 
       const refreshedRoleIds = (refreshed.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
       const constrainedRoleIds = allowedRoleIds.length > 0
         ? refreshedRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
         : refreshedRoleIds;
-      const refreshedRecommendations = buildRoleBasedAgentRecommendations(constrainedRoleIds, {
+      const refreshedRecommendations = buildRoleBasedAgentRecommendations(applyTemplateRolePlan(constrainedRoleIds), {
         allowedRoleIds,
         mustHaveSoulRole: requiresSoulRole,
         soulRoleId,
@@ -525,14 +659,15 @@ export function useNewProjectModalController({
         input,
         industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
         sourceType: issueSourceType,
+        workflowTemplateKey,
       });
 
       const parsedTeamRoleIds = (preview?.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
       const constrainedTeamRoleIds = allowedRoleIds.length > 0
         ? parsedTeamRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
         : parsedTeamRoleIds;
-
-      const recommendations = buildRoleBasedAgentRecommendations(constrainedTeamRoleIds, {
+      const plannedRoleIds = applyTemplateRolePlan(constrainedTeamRoleIds);
+      const recommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
         allowedRoleIds,
         mustHaveSoulRole: requiresSoulRole,
         soulRoleId,
@@ -656,6 +791,17 @@ export function useNewProjectModalController({
       return;
     }
 
+    if (workflowTemplateKey !== 'none') {
+      const missingTemplateRoles = requiredWorkflowRoles.filter((roleId) => !nextRoleIds.includes(normalizeRoleId(roleId)));
+      if (missingTemplateRoles.length > 0) {
+        addToast(
+          `当前阶段模板缺少关键角色: ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}`,
+          'error',
+        );
+        return;
+      }
+    }
+
     setParsedProject((prev) => {
       if (!prev) {
         return prev;
@@ -681,6 +827,21 @@ export function useNewProjectModalController({
     if (!issuePreview.analysisGate.canProceed) {
       addToast(issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足推进条件，请等待正式讨论完成', 'info');
       return;
+    }
+    if (workflowTemplateKey !== 'none') {
+      const currentRoleIds = uniqueNormalizedRoles(
+        analysisRecommendations.length > 0
+          ? analysisRecommendations.map((item) => item.roleId)
+          : parsedProject.team,
+      );
+      const missingTemplateRoles = requiredWorkflowRoles.filter((roleId) => !currentRoleIds.includes(normalizeRoleId(roleId)));
+      if (missingTemplateRoles.length > 0) {
+        addToast(
+          `无法创建：当前阶段模板缺少角色 ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}`,
+          'error',
+        );
+        return;
+      }
     }
 
     const effectiveSummary = String(editableDraft?.summary || issuePreview?.summary || parsedProject.description).trim();
@@ -836,12 +997,16 @@ export function useNewProjectModalController({
         setIsCreating(false);
         return;
       }
-      const projectInputs: NonNullable<ConfirmIssuePayload['projectInputs']> = standaloneInputContent.trim()
+      const effectiveStandaloneInputContent = standaloneInputContent.trim()
+        || ((projectType === 'standalone' || projectType === 'relay') ? sourceInput.trim() : '');
+      const projectInputs: NonNullable<ConfirmIssuePayload['projectInputs']> = effectiveStandaloneInputContent
         ? [{
-            name: standaloneInputName.trim() || 'rawRequirements',
+            name: standaloneInputName.trim() || 'raw_requirements',
             type: standaloneInputType.trim() || 'document',
-            content: standaloneInputContent.trim(),
-            inputSource: projectType === 'relay' ? 'imported_from_project' : 'manual',
+            content: effectiveStandaloneInputContent,
+            inputSource: standaloneInputContent.trim()
+              ? (projectType === 'relay' ? 'imported_from_project' : 'manual')
+              : 'manual',
           }]
         : [];
       const confirmation = await issuesApi.confirm(issuePreview.issueId, {
@@ -935,6 +1100,17 @@ export function useNewProjectModalController({
       addToast(`当前行业最少需要 ${minRoles} 个角色，请继续选择`, 'error');
       return;
     }
+    if (workflowTemplateKey !== 'none') {
+      const requiredPlannedRoles = applyTemplateRolePlan(manualRoleIds);
+      const missingTemplateRoles = requiredPlannedRoles.filter((roleId) => !manualRoleIds.includes(normalizeRoleId(roleId)));
+      if (missingTemplateRoles.length > 0) {
+        addToast(
+          `当前模板要求角色: ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}，请先补充对应 Agent`,
+          'error',
+        );
+        return;
+      }
+    }
 
     setIsParsing(true);
     let manualPreview: IssuePreview;
@@ -943,6 +1119,7 @@ export function useNewProjectModalController({
         input: formData.description.trim(),
         industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
         sourceType: (issueSourceType === 'prd' ? 'prd' : 'text') as IssueSourceType,
+        workflowTemplateKey,
       });
     } catch (error) {
       addToast(`手动模式需求分析失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
@@ -968,16 +1145,24 @@ export function useNewProjectModalController({
         && (manualPreview.debateTask.status === 'queued' || manualPreview.debateTask.status === 'running'),
     ));
 
-    setAnalysisRecommendations(
-      manualSelected.map((agent) => ({
-        agentId: agent!.id,
-        roleId: getAgentRoleId(agent!),
-        name: agent!.name,
-        role: agent!.role,
-        score: 1,
-        reason: '手动指定参与该项目',
-      })),
-    );
+    const manualRecommendations = manualSelected.map((agent) => ({
+      agentId: agent!.id,
+      roleId: getAgentRoleId(agent!),
+      name: agent!.name,
+      role: agent!.role,
+      score: 1,
+      reason: '手动指定参与该项目',
+    }));
+    const plannedRoleIds = applyTemplateRolePlan(manualRoleIds);
+    const templateRecommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
+      allowedRoleIds,
+      mustHaveSoulRole: requiresSoulRole,
+      soulRoleId,
+    });
+    const mergedRecommendations = templateRecommendations.length > 0
+      ? templateRecommendations
+      : manualRecommendations;
+    setAnalysisRecommendations(mergedRecommendations);
     setDetectedDomains(detectDomains(formData.description.trim()));
     setClarification((prev) => ({
       ...prev,
@@ -988,9 +1173,11 @@ export function useNewProjectModalController({
       name: formData.name.trim(),
       description: formData.description.trim(),
       phase: '规划中',
-      agents: manualNames.length > 0 ? manualNames : agents.slice(0, 3).map((agent) => agent.name),
+      agents: mergedRecommendations.length > 0
+        ? mergedRecommendations.map((item) => item.name)
+        : (manualNames.length > 0 ? manualNames : agents.slice(0, 3).map((agent) => agent.name)),
       priority: formData.priority,
-      team: manualRoleIds,
+      team: uniqueNormalizedRoles(mergedRecommendations.map((item) => item.roleId)),
     });
     setDiscussionOverride('');
     setStep('team');
@@ -1223,6 +1410,8 @@ export function useNewProjectModalController({
     setStandaloneInputContent,
     workflowTemplateKey,
     setWorkflowTemplateKey,
+    requiredWorkflowRoles,
+    missingWorkflowRoles,
     autoStartWorkflow,
     setAutoStartWorkflow,
     formData,

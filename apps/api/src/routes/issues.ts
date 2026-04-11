@@ -9,17 +9,20 @@ import {
   buildContextAlignment,
   buildDesignBlueprint,
   buildExpectedArtifacts,
+  buildIssueWorkflowSop,
   buildClarificationQuestions,
   buildIssueDiscussion,
   buildRelatedHistory,
   buildRequirementContract,
   buildRequirementRefinement,
+  getTemplateRequiredRoles,
   buildSuggestedAnswers,
   detectIndustry,
   detectConflicts,
   inferIssueSummary,
   inferIssueTitle,
   recommendRoles,
+  resolveIssueWorkflowTemplateKey,
   synthesizeIssueArtifactsFromDebate
 } from "../system/issue-engine.js";
 import { buildIssueRoleDebate, type IssueDebateResult as RuntimeIssueDebateResult } from "../system/issue-debate.js";
@@ -43,6 +46,7 @@ interface PreviewIssueBody {
   industryCode?: unknown;
   sourceType?: unknown;
   debateMode?: unknown;
+  workflowTemplateKey?: unknown;
 }
 
 interface ConfirmIssueBody {
@@ -128,6 +132,23 @@ function normalizeProjectType(input: unknown) {
     return text as "standalone" | "relay";
   }
   return "complete" as const;
+}
+
+function applyTemplateRolePlan(input: {
+  recommendedRoleIds: RoleType[];
+  workflowTemplateKey: unknown;
+  mustHaveSoulRole: boolean;
+  soulRoleId: RoleType;
+}) {
+  const resolvedTemplateKey = resolveIssueWorkflowTemplateKey(input.workflowTemplateKey);
+  const requiredRoles = getTemplateRequiredRoles(resolvedTemplateKey);
+  const planned = resolvedTemplateKey === "standard_software_development"
+    ? Array.from(new Set([...requiredRoles, ...input.recommendedRoleIds]))
+    : [...requiredRoles];
+  if (input.mustHaveSoulRole && input.soulRoleId && !planned.includes(input.soulRoleId)) {
+    planned.unshift(input.soulRoleId);
+  }
+  return planned.length > 0 ? Array.from(new Set(planned)) : input.recommendedRoleIds;
 }
 
 function normalizeProjectInputs(input: unknown) {
@@ -559,6 +580,7 @@ function startIssueDebateTask(input: {
   rawInput: string;
   title: string;
   summary: string;
+  workflowTemplateKey: string;
   industryCode: string;
   recommendedRoleIds: RoleType[];
   soulRoleId: RoleType;
@@ -617,7 +639,7 @@ function startIssueDebateTask(input: {
             productContext: await getProductContext(),
             industryCode: input.industryCode,
             questions: draftIssue.questions,
-            expectedArtifacts: buildExpectedArtifacts(),
+            expectedArtifacts: buildExpectedArtifacts(input.workflowTemplateKey),
             draft: {
               summary: draftIssue.summary,
               refinement: draftIssue.refinement,
@@ -802,6 +824,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const industryCode = String(payload.industryCode ?? "").trim().toLowerCase();
     const sourceType = normalizeSourceType(payload.sourceType);
     const debateMode = normalizeDebateMode(payload.debateMode);
+    const workflowTemplateKey = resolveIssueWorkflowTemplateKey(payload.workflowTemplateKey);
 
     if (!input) {
       sendError(res, 400, "VALIDATION_ERROR", "input is required");
@@ -833,7 +856,12 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       refinement,
       alignment: contextAlignment
     });
-    const recommendedRoleIds = recommendRoles(input, config);
+    const recommendedRoleIds = applyTemplateRolePlan({
+      recommendedRoleIds: recommendRoles(input, config),
+      workflowTemplateKey,
+      mustHaveSoulRole: config.assemblyRule.mustHaveSoulRole,
+      soulRoleId: config.assemblyRule.soulRoleId
+    });
     const ruleDiscussion = buildIssueDiscussion(
       input,
       recommendedRoleIds as RoleType[],
@@ -849,7 +877,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       discussion
     });
     const relatedHistory = buildRelatedHistory(input, productContext.requirementHistory ?? []);
-    const expectedArtifacts = buildExpectedArtifacts();
+    const expectedArtifacts = buildExpectedArtifacts(workflowTemplateKey);
     const requirementContract = buildRequirementContract({
       suggestedAnswers,
       refinement,
@@ -902,6 +930,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         rawInput: input,
         title,
         summary,
+        workflowTemplateKey,
         industryCode: config.roleSet.industryCode,
         recommendedRoleIds: recommendedRoleIds as RoleType[],
         soulRoleId: config.assemblyRule.soulRoleId,
@@ -953,7 +982,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       contentProvenance,
       analysisGate,
       expectedArtifacts,
-      workflow: config.workflows.find((item) => item.isDefault) ?? config.workflows[0] ?? null
+      workflow: buildIssueWorkflowSop(workflowTemplateKey)
     });
   }));
 
