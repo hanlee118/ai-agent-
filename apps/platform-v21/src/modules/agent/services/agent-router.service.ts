@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AgentType } from '../../../shared/enums';
@@ -14,6 +14,8 @@ import { AgentInstance } from '../entities/agent-instance.entity';
 
 @Injectable()
 export class AgentRouterService {
+  private readonly logger = new Logger(AgentRouterService.name);
+
   constructor(
     private readonly hermesAdapter: HermesAdapter,
     private readonly openClawAdapter: OpenClawAdapter,
@@ -79,33 +81,101 @@ export class AgentRouterService {
   async execute(routing: RoutingDecision, task: AgentTask): Promise<AgentResult> {
     await this.reserveAgents(routing.agentIds);
     try {
-      if (routing.strategy === 'hybrid' || routing.strategy === 'hybrid_sequential') {
-        const planner = await this.getAdapter(routing.agentIds[0]);
-        const executor = await this.getAdapter(routing.agentIds[1]);
+      try {
+        if (routing.strategy === 'hybrid' || routing.strategy === 'hybrid_sequential') {
+          const planner = await this.getAdapter(routing.agentIds[0]);
+          const executor = await this.getAdapter(routing.agentIds[1]);
 
-        const planResult = await planner.execute(
-          { ...task, description: `[Planning] ${task.description}` },
-          task.context || {},
-        );
+          const planResult = await planner.execute(
+            { ...task, description: `[Planning] ${task.description}` },
+            task.context || {},
+          );
 
-        if (!planResult.success) {
-          return planResult;
+          if (!planResult.success) {
+            return planResult;
+          }
+
+          return await executor.execute(
+            {
+              ...task,
+              description: `[Execution] ${task.description}`,
+              plan: planResult.artifacts,
+            },
+            task.context || {},
+          );
         }
 
-        return executor.execute(
-          {
-            ...task,
-            description: `[Execution] ${task.description}`,
-            plan: planResult.artifacts,
-          },
-          task.context || {},
-        );
-      }
+        const adapter = await this.getAdapter(routing.agentIds[0]);
+        return await adapter.execute(task, task.context || {});
+      } catch (error) {
+        const fallback = await this.tryExecuteFallback(routing, task);
+        if (fallback) {
+          return fallback;
+        }
 
-      const adapter = await this.getAdapter(routing.agentIds[0]);
-      return adapter.execute(task, task.context || {});
+        return {
+          success: false,
+          artifacts: [],
+          executionTrace: {
+            toolCalls: [],
+            decisions: [],
+            errors: [{ message: (error as Error).message || 'agent execution failed' }],
+          },
+          errorMessage: (error as Error).message || 'agent execution failed',
+        };
+      }
     } finally {
       await this.releaseAgents(routing.agentIds);
+    }
+  }
+
+  private async tryExecuteFallback(routing: RoutingDecision, task: AgentTask): Promise<AgentResult | null> {
+    if (routing.strategy !== 'hermes' && routing.strategy !== 'openclaw') {
+      return null;
+    }
+
+    const fallbackType = routing.strategy === 'hermes' ? AgentType.OPENCLAW : AgentType.HERMES;
+    const fallbackStrategy = fallbackType === AgentType.HERMES ? 'hermes' : 'openclaw';
+    const candidates = await this.pickAgents(fallbackType, 1);
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const fallbackAgentId = candidates[0].agentId;
+    this.logger.warn(
+      `Primary agent strategy "${routing.strategy}" failed, trying fallback agent ${fallbackAgentId}`,
+    );
+    await this.reserveAgents([fallbackAgentId]);
+    try {
+      const adapter = await this.getAdapter(fallbackAgentId);
+      const result = await adapter.execute(
+        {
+          ...task,
+          description: `[Fallback from ${routing.strategy}] ${task.description}`,
+        },
+        task.context || {},
+      );
+
+      return {
+        ...result,
+        executionTrace: {
+          ...(result.executionTrace || {}),
+          decisions: [
+            ...((result.executionTrace?.decisions || []) as Array<Record<string, unknown>>),
+            {
+              type: 'agent_fallback',
+              from: routing.strategy,
+              to: fallbackStrategy,
+              fallbackAgentId,
+            },
+          ],
+        },
+      };
+    } catch {
+      this.logger.warn(`Fallback agent ${fallbackAgentId} execution failed`);
+      return null;
+    } finally {
+      await this.releaseAgents([fallbackAgentId]);
     }
   }
 
@@ -181,7 +251,7 @@ export class AgentRouterService {
   }
 
   private async pickAgents(agentType: AgentType, count: number): Promise<AgentInstance[]> {
-    const agents = await this.agentRepo.find({
+    const agents = (await this.agentRepo.find({
       where: {
         agentType,
         isHealthy: true,
@@ -191,7 +261,7 @@ export class AgentRouterService {
         updatedAt: 'ASC',
       },
       take: count * 3,
-    });
+    })) || [];
 
     return agents.filter((agent) => agent.currentLoad < agent.maxConcurrent).slice(0, count);
   }
