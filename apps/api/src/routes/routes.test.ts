@@ -16,7 +16,8 @@ const migrationPaths = [
   path.join(apiRoot, "prisma/migrations/20260411103000_add_knowledge_workflow_v2/migration.sql"),
   path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql"),
   path.join(apiRoot, "prisma/migrations/20260411193000_add_hermes_skill_sync/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql")
+  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql"),
+  path.join(apiRoot, "prisma/migrations/20260413091000_add_agent_integration_engine/migration.sql")
 ];
 
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-routes-"));
@@ -250,6 +251,14 @@ describe("Error Matrix: models/agents/team", () => {
     assert.equal(switchModelRes.status, 200);
     assert.equal(switchModelRes.body.success, true);
 
+    const switchEngineRes = await request(app)
+      .patch("/api/agents/ROLE_DEV_2/engine")
+      .send({ integrationEngine: "hermes" });
+
+    assert.equal(switchEngineRes.status, 200);
+    assert.equal(switchEngineRes.body.success, true);
+    assert.equal(switchEngineRes.body.data.integrationEngine, "hermes");
+
     const soulRes = await request(app)
       .patch("/api/agents/ROLE_DEV_2/soul")
       .send({ content: "新的 SOUL" });
@@ -361,6 +370,9 @@ describe("Error Matrix: auth + projects", () => {
     assert.equal(detailRes.status, 200);
     assert.equal(detailRes.body.id, projectId);
     assert.equal(typeof detailRes.body.requiredActions?.length, "number");
+    assert.equal(typeof detailRes.body.postCreatePrep?.issueGateEnabled, "boolean");
+    assert.equal(typeof detailRes.body.postCreatePrep?.doneCount, "number");
+    assert.ok(Array.isArray(detailRes.body.postCreatePrep?.checks));
 
     const deleteRes = await request(fullApp).delete(`/api/projects/${projectId}`);
     assert.equal(deleteRes.status, 200);

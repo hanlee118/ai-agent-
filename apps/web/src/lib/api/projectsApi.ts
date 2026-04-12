@@ -235,6 +235,46 @@ export type ProjectRequiredAction = {
   prefillContent?: string;
 };
 
+export type ProjectIssueFirstStatus = {
+  ok: boolean;
+  enforced: boolean;
+  code?: string;
+  message?: string;
+  reason?: string;
+  data?: {
+    projectId: string;
+    projectPath?: string;
+    issueIid?: number;
+    issueId?: string;
+    source?: string;
+  };
+};
+
+export type ProjectWorkflowScope = {
+  workflowId?: string;
+  workflowStatus?: string;
+  templateKey?: string;
+  templateKeys?: string[];
+  allowedStages?: string[];
+  mode?: 'full' | 'single' | 'custom' | string;
+};
+
+export type ProjectPostCreatePrep = {
+  issueGateEnabled: boolean;
+  issueReady: boolean;
+  executionStarted: boolean;
+  shouldEnforce: boolean;
+  checks: Array<{
+    key: 'issue' | 'debate' | 'analysis' | string;
+    label: string;
+    done: boolean;
+  }>;
+  doneCount: number;
+  total: number;
+  completed: boolean;
+  blockReason?: string;
+};
+
 export type ProjectTemplateGatePrecheck = {
   projectId: string;
   stageType: string;
@@ -537,6 +577,9 @@ export const projectsApi = {
   async getDetail(id: string) {
     return request<ProjectDetail & {
       requiredActions?: ProjectRequiredAction[];
+      issueFirst?: ProjectIssueFirstStatus;
+      workflowScope?: ProjectWorkflowScope;
+      postCreatePrep?: ProjectPostCreatePrep;
     }>(`/projects/${toProjectPathId(id)}`);
   },
 

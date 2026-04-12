@@ -37,6 +37,7 @@ import {
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
   type ProjectIssueFirstStatus,
+  type ProjectPostCreatePrep,
   type WorkflowProjectOverview,
 } from '../lib/api';
 import { agents, projects } from '../lib/runtimeCollections';
@@ -51,6 +52,7 @@ type CoreStageStatus = 'pending' | 'active' | 'completed' | 'blocked' | 'rejecte
 type ProjectDetailResponse = ProjectDetail & {
   requiredActions?: ProjectRequiredAction[];
   issueFirst?: ProjectIssueFirstStatus;
+  postCreatePrep?: ProjectPostCreatePrep;
   workflowScope?: {
     workflowId?: string;
     workflowStatus?: string;
@@ -1689,6 +1691,10 @@ const ProjectRoom = ({
     () => (detail?.issueFirst ? detail.issueFirst : null),
     [detail?.issueFirst],
   );
+  const serverPostCreatePrep = useMemo<ProjectPostCreatePrep | null>(
+    () => (detail?.postCreatePrep ? detail.postCreatePrep : null),
+    [detail?.postCreatePrep],
+  );
   const hasPersistedPostCreateDebate = useMemo(
     () => String(detail?.description || '').includes(POST_CREATE_DEBATE_MARKER),
     [detail?.description],
@@ -1717,10 +1723,16 @@ const ProjectRoom = ({
     const deliverableExists = deliverables.some((item) => normalizeCoreStageType(item.stageType) !== 'INIT');
     return progressedStageExists || activeTaskExists || deliverableExists;
   }, [detail?.stages, deliverables, effectiveProjectTasks]);
-  const postCreateIssueGateEnabled = Boolean(projectIssueFirst?.enforced);
-  const postCreateIssueGatePassed = !postCreateIssueGateEnabled || Boolean(projectIssueFirst?.ok);
-  const shouldEnforcePostCreatePrep = postCreateIssueGateEnabled && !hasExecutionStarted;
-  const postCreatePrepChecks = useMemo(
+  const postCreateIssueGateEnabled = serverPostCreatePrep
+    ? Boolean(serverPostCreatePrep.issueGateEnabled)
+    : Boolean(projectIssueFirst?.enforced);
+  const postCreateIssueGatePassed = serverPostCreatePrep
+    ? Boolean(serverPostCreatePrep.issueReady)
+    : !postCreateIssueGateEnabled || Boolean(projectIssueFirst?.ok);
+  const shouldEnforcePostCreatePrep = serverPostCreatePrep
+    ? Boolean(serverPostCreatePrep.shouldEnforce)
+    : postCreateIssueGateEnabled && !hasExecutionStarted;
+  const fallbackPostCreatePrepChecks = useMemo(
     () => [
       {
         key: 'issue',
@@ -1745,15 +1757,34 @@ const ProjectRoom = ({
       postCreateIssueGatePassed,
     ],
   );
-  const postCreatePrepDoneCount = postCreatePrepChecks.filter((item) => item.done).length;
-  const isPostCreatePrepCompleted = !shouldEnforcePostCreatePrep || postCreatePrepChecks.every((item) => item.done);
+  const postCreatePrepChecks = useMemo(
+    () => (
+      serverPostCreatePrep && Array.isArray(serverPostCreatePrep.checks) && serverPostCreatePrep.checks.length > 0
+        ? serverPostCreatePrep.checks.map((item) => ({
+          key: String(item.key || ''),
+          label: String(item.label || ''),
+          done: Boolean(item.done),
+        }))
+        : fallbackPostCreatePrepChecks
+    ),
+    [fallbackPostCreatePrepChecks, serverPostCreatePrep],
+  );
+  const postCreatePrepDoneCount = serverPostCreatePrep
+    ? Number(serverPostCreatePrep.doneCount || 0)
+    : postCreatePrepChecks.filter((item) => item.done).length;
+  const isPostCreatePrepCompleted = serverPostCreatePrep
+    ? Boolean(serverPostCreatePrep.completed)
+    : !shouldEnforcePostCreatePrep || postCreatePrepChecks.every((item) => item.done);
   const postCreatePrepBlockReason = useMemo(() => {
+    if (serverPostCreatePrep?.blockReason) {
+      return String(serverPostCreatePrep.blockReason);
+    }
     if (isPostCreatePrepCompleted) {
       return '';
     }
     const nextPending = postCreatePrepChecks.find((item) => !item.done);
     return nextPending ? `请先完成：${nextPending.label}` : '请先完成需求补齐与理解确认。';
-  }, [isPostCreatePrepCompleted, postCreatePrepChecks]);
+  }, [isPostCreatePrepCompleted, postCreatePrepChecks, serverPostCreatePrep?.blockReason]);
 
   useEffect(() => {
     if (isPostCreatePrepCompleted) {

@@ -52,7 +52,6 @@ import {
   listProjectInputs
 } from "../workflow-v2/project-modes.js";
 
-const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
 const QUALITY_GATE_REPAIR_DEFAULT_LIMIT = 80;
 const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
@@ -67,6 +66,208 @@ const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
   "pnpm --filter @occ/web typecheck",
   "pnpm --filter @occ/web build"
 ];
+const CORE_STAGE_TYPES = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"] as const;
+const POST_CREATE_DEBATE_MARKER = "## 多Agent需求讨论结论";
+const POST_CREATE_ANALYSIS_MARKER = "## 项目详情理解确认草案";
+
+function normalizeCoreStageType(input: unknown) {
+  const normalized = String(input ?? "").trim().toUpperCase();
+  return CORE_STAGE_TYPES.includes(normalized as typeof CORE_STAGE_TYPES[number]) ? normalized : "";
+}
+
+function workflowTemplateToCoreStageType(templateKey: unknown) {
+  const normalized = String(templateKey ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.includes("qa") || normalized.includes("accept")) {
+    return "ACCEPT";
+  }
+  if (normalized.includes("dev") || normalized.includes("code") || normalized.includes("tech") || normalized.includes("arch")) {
+    return "DEV";
+  }
+  if (normalized.includes("visual") || normalized.includes("design") || normalized.includes("ui") || normalized.includes("ux")) {
+    return "DESIGN";
+  }
+  if (normalized.includes("requirement") || normalized.includes("analysis") || normalized.includes("prd")) {
+    return "ANALYSIS";
+  }
+  if (normalized.includes("init") || normalized.includes("project_manager")) {
+    return "INIT";
+  }
+  return "";
+}
+
+function dedupeStringList(items: string[]) {
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const item of items) {
+    const normalized = String(item || "").trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    deduped.push(normalized);
+  }
+  return deduped;
+}
+
+function parseTemplateKeysFromGraph(stageGraph: unknown) {
+  if (!stageGraph || typeof stageGraph !== "object" || Array.isArray(stageGraph)) {
+    return [] as string[];
+  }
+  const graph = stageGraph as { nodes?: Array<{ templateKey?: unknown }> };
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  return dedupeStringList(
+    nodes.map((node) => String(node?.templateKey ?? "").trim()).filter(Boolean)
+  );
+}
+
+function isMissingWorkflowV2SchemaError(error: unknown) {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  return (error as { code?: unknown }).code === "P2021";
+}
+
+async function getProjectWorkflowScope(projectId: string) {
+  try {
+    const workflow = await prisma.workflow.findFirst({
+      where: { projectId },
+      orderBy: [{ updatedAt: "desc" }],
+      select: {
+        id: true,
+        status: true,
+        stageGraph: true,
+        template: {
+          select: {
+            key: true
+          }
+        }
+      }
+    });
+    if (!workflow) {
+      return null;
+    }
+
+    const templateKey = String(workflow.template?.key ?? "").trim();
+    const graphTemplateKeys = parseTemplateKeysFromGraph(workflow.stageGraph);
+    const templateKeys = dedupeStringList([
+      ...graphTemplateKeys,
+      ...(templateKey ? [templateKey] : [])
+    ]);
+    const normalizedTemplateKey = templateKey.toLowerCase();
+    const isFullLifecycle =
+      normalizedTemplateKey === "standard_software_development"
+      || templateKeys.includes("standard_software_development");
+    const allowedStages = isFullLifecycle
+      ? []
+      : dedupeStringList(
+        templateKeys
+          .map((key) => workflowTemplateToCoreStageType(key))
+          .map((stageType) => normalizeCoreStageType(stageType))
+          .filter(Boolean)
+      );
+    const mode = isFullLifecycle
+      ? "full"
+      : allowedStages.length <= 1
+        ? "single"
+        : "custom";
+
+    return {
+      workflowId: workflow.id,
+      workflowStatus: workflow.status,
+      templateKey: templateKey || templateKeys[0] || undefined,
+      templateKeys,
+      allowedStages,
+      mode
+    };
+  } catch (error) {
+    if (isMissingWorkflowV2SchemaError(error)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function hasPostCreateExecutionStarted(project: any) {
+  const stages = Array.isArray(project?.stages) ? project.stages : [];
+  const tasks = Array.isArray(project?.tasks) ? project.tasks : [];
+  const deliverables = Array.isArray(project?.deliverables) ? project.deliverables : [];
+
+  const progressedStageExists = stages.some((stage: any) => {
+    const stageType = normalizeCoreStageType(stage?.type);
+    if (!stageType || stageType === "INIT") {
+      return false;
+    }
+    const status = String(stage?.status ?? "").trim().toLowerCase();
+    return ["active", "completed", "blocked", "rejected"].includes(status);
+  });
+
+  const progressedTaskExists = tasks.some((task: any) => {
+    const stageType = normalizeCoreStageType(task?.stageType);
+    if (!stageType || stageType === "INIT") {
+      return false;
+    }
+    const status = String(task?.status ?? "").trim().toLowerCase();
+    return !["draft", "todo", "ready", "assigned"].includes(status);
+  });
+
+  const nonInitDeliverableExists = deliverables.some((deliverable: any) => {
+    const stageType = normalizeCoreStageType(deliverable?.stageType);
+    return Boolean(stageType && stageType !== "INIT");
+  });
+
+  return progressedStageExists || progressedTaskExists || nonInitDeliverableExists;
+}
+
+function buildProjectPostCreatePrep(project: any, issueFirst: any) {
+  const description = String(project?.description ?? "");
+  const issueGateEnabled = Boolean(issueFirst?.enforced);
+  const issueReady = !issueGateEnabled || Boolean(issueFirst?.ok);
+  const hasDebate = description.includes(POST_CREATE_DEBATE_MARKER);
+  const hasAnalysis = description.includes(POST_CREATE_ANALYSIS_MARKER);
+  const executionStarted = hasPostCreateExecutionStarted(project);
+  const shouldEnforce = issueGateEnabled && !executionStarted;
+
+  const checks = [
+    {
+      key: "issue",
+      label: "GitLab 主 Issue 已建立",
+      done: issueReady
+    },
+    {
+      key: "debate",
+      label: "多 Agent 需求讨论已生成",
+      done: hasDebate
+    },
+    {
+      key: "analysis",
+      label: "理解确认草案已写回项目",
+      done: hasAnalysis
+    }
+  ];
+  const doneCount = checks.filter((item) => item.done).length;
+  const completed = !shouldEnforce || checks.every((item) => item.done);
+  const blockReason = completed
+    ? undefined
+    : (() => {
+      const firstPending = checks.find((item) => !item.done);
+      return firstPending ? `请先完成：${firstPending.label}` : "请先完成需求补齐与理解确认。";
+    })();
+
+  return {
+    issueGateEnabled,
+    issueReady,
+    executionStarted,
+    shouldEnforce,
+    checks,
+    doneCount,
+    total: checks.length,
+    completed,
+    blockReason
+  };
+}
 
 function normalizeStringArrayInput(input: unknown) {
   if (!Array.isArray(input)) {
@@ -1786,17 +1987,6 @@ router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
 }));
 
 router.post("/api/projects", asyncRoute(async (req, res) => {
-  if (!PROJECT_DIRECT_CREATE_ENABLED) {
-    res.status(409).json({
-      success: false,
-      error: {
-        code: "PROJECT_ISSUE_FIRST_REQUIRED",
-        message: "当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。"
-      }
-    });
-    return;
-  }
-
   const description = String(req.body?.description ?? "").trim();
 
   if (!description) {
@@ -2044,9 +2234,11 @@ router.post("/api/projects/:id/reconcile-deliverables", asyncRoute(async (req, r
   });
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
+  const issueFirst = await ensureProjectIssueFirst({ projectId });
   res.json({
     ...project,
-    requiredActions
+    requiredActions,
+    issueFirst
   });
 }));
 
@@ -2322,9 +2514,22 @@ router.get("/api/projects/:id", asyncRoute(async (req, res) => {
 
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
+  const [issueFirst, workflowScope] = await Promise.all([
+    ensureProjectIssueFirst({ projectId }).catch((error) => ({
+      ok: false,
+      enforced: true,
+      code: "ISSUE_FIRST_CHECK_FAILED",
+      message: error instanceof Error ? error.message : String(error)
+    })),
+    getProjectWorkflowScope(projectId)
+  ]);
+  const postCreatePrep = buildProjectPostCreatePrep(project, issueFirst);
   res.json({
     ...project,
-    requiredActions
+    requiredActions,
+    issueFirst,
+    workflowScope: workflowScope || undefined,
+    postCreatePrep
   });
 }));
 
