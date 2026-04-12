@@ -48,6 +48,7 @@ services:
       HERMES_MCP: http://hermes:3001/mcp
       HERMES_MCP_ENDPOINT: http://hermes:3001/mcp
       HERMES_FALLBACK_URL: http://hermes:3001/fallback
+      HERMES_API_KEY: ${HERMES_API_KEY:-}
       OPENCLAW_ENABLED: true
       OPENCLAW_API: http://openclaw:3002/api
       OPENCLAW_API_ENDPOINT: http://openclaw:3002/api
@@ -68,35 +69,61 @@ services:
     networks:
       - agent-network
 
-  # If you already have a real Hermes service, replace this section with your build config.
   hermes:
-    image: ealen/echo-server:latest
+    build:
+      context: ./services/hermes
+      dockerfile: Dockerfile.hermes
     container_name: platform-v21-hermes
     environment:
-      PORT: 3001
+      HERMES_PORT: 3001
+      PLATFORM_API_BASE: http://agent-platform:8787/api/v1
+      PLATFORM_API_KEY: ${HERMES_API_KEY:-}
+      PLATFORM_SYNC_ENABLED: true
+      HERMES_SQLITE_PATH: /data/hermes/memory.db
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - '3001:3001'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3001/mcp/health >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - agent-network
 
-  # If you already have a real OpenClaw service, replace this section with your runtime image.
   openclaw:
-    image: ealen/echo-server:latest
+    build:
+      context: ./services/agent-runtime-mock
+      dockerfile: Dockerfile
     container_name: platform-v21-openclaw
     environment:
+      SERVICE_ROLE: openclaw
       PORT: 3002
     ports:
       - '3002:3002'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3002/api/health >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - agent-network
 
   stitch:
-    image: ealen/echo-server:latest
+    build:
+      context: ./services/agent-runtime-mock
+      dockerfile: Dockerfile
     container_name: platform-v21-stitch
     environment:
+      SERVICE_ROLE: stitch
       PORT: 3010
     ports:
       - '3010:3010'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3010/health >/dev/null']
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - agent-network
 

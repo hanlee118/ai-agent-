@@ -8,6 +8,17 @@ type Props = {
   controller: NewProjectModalController;
 };
 
+function resolveEngineMeta(engine: string | undefined) {
+  const normalized = String(engine || 'managed').trim().toLowerCase();
+  if (normalized === 'hermes') {
+    return { label: 'Hermes', className: 'bg-accent/15 border-accent/40 text-accent' };
+  }
+  if (normalized === 'openclaw') {
+    return { label: 'OpenClaw', className: 'bg-primary/15 border-primary/40 text-primary' };
+  }
+  return { label: 'Managed', className: 'bg-white/10 border-border-subtle text-slate-300' };
+}
+
 export default function TeamAssignmentPanel({ controller }: Props) {
   const {
     analysisRecommendations,
@@ -15,6 +26,10 @@ export default function TeamAssignmentPanel({ controller }: Props) {
     selectedIndustryConfig,
     requiresSoulRole,
     soulRoleId,
+    enforceIndustryAssemblyRule,
+    workflowTemplateKey,
+    requiredWorkflowRoles,
+    missingWorkflowRoles,
     handleToggleAnalysisAgent,
     handleContinueFromTeam,
     setStep,
@@ -38,12 +53,35 @@ export default function TeamAssignmentPanel({ controller }: Props) {
           <p className="text-xs text-slate-300">
             行业角色集: {selectedIndustryConfig.roleSet.industryName} ({selectedIndustryConfig.roleSet.industryCode})
           </p>
-          <p className="text-[11px] text-slate-500">
-            灵魂角色: {roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}{requiresSoulRole ? '（必选）' : ''}
-            {' '}· 最少角色数: {selectedIndustryConfig.assemblyRule.minRoles}
-          </p>
+          {enforceIndustryAssemblyRule ? (
+            <p className="text-[11px] text-slate-500">
+              灵魂角色: {roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}{requiresSoulRole ? '（行业默认）' : ''}
+              {` · 最少角色数: ${selectedIndustryConfig.assemblyRule.minRoles}`}
+            </p>
+          ) : (
+            <p className="text-[11px] text-slate-500">
+              当前为阶段模板模式：仅按模板关键角色校验，不应用行业最少角色数/灵魂角色限制。
+            </p>
+          )}
         </div>
       )}
+
+      {workflowTemplateKey !== 'none' ? (
+        <div className={`p-3 rounded-xl border space-y-1 ${missingWorkflowRoles.length > 0 ? 'bg-warning/10 border-warning/30' : 'bg-emerald-500/10 border-emerald-500/30'}`}>
+          <p className="text-xs text-slate-200">
+            当前模板关键角色: {requiredWorkflowRoles.map((roleId) => roleLabel(roleId)).join('、') || '未配置'}
+          </p>
+          {missingWorkflowRoles.length > 0 ? (
+            <p className="text-[11px] text-warning">
+              缺少角色: {missingWorkflowRoles.map((roleId) => roleLabel(roleId)).join('、')}。补齐后才能进入创建确认。
+            </p>
+          ) : (
+            <p className="text-[11px] text-emerald-300">
+              角色覆盖已满足所选阶段模板要求。
+            </p>
+          )}
+        </div>
+      ) : null}
 
       <div className="space-y-3">
         <p className="text-xs text-slate-400">自动分配的需求分析 Agent（可取消/补充）</p>
@@ -52,6 +90,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
             const roleId = getAgentRoleId(agent);
             const selected = selectedAgentIds.has(agent.id);
             const isSoulRole = normalizeRoleId(roleId) === normalizeRoleId(soulRoleId);
+            const engine = resolveEngineMeta(agent.integrationEngine);
             return (
               <label
                 key={agent.id}
@@ -63,12 +102,17 @@ export default function TeamAssignmentPanel({ controller }: Props) {
               >
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-bold text-white">{agent.name}</p>
-                  <input
-                    type="checkbox"
-                    checked={selected}
-                    onChange={() => handleToggleAnalysisAgent(agent.id)}
-                    className="accent-primary"
-                  />
+                  <div className="flex items-center gap-2">
+                    <span className={`px-1.5 py-0.5 rounded-md border text-[10px] font-semibold tracking-wide ${engine.className}`}>
+                      {engine.label}
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      onChange={() => handleToggleAnalysisAgent(agent.id)}
+                      className="accent-primary"
+                    />
+                  </div>
                 </div>
                 <p className="text-[11px] text-slate-400">
                   {roleLabel(roleId)}{isSoulRole ? ' · 灵魂角色' : ''}
@@ -83,7 +127,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
         {analysisRecommendations.length === 0 && (
           <p className="text-xs text-warning">当前未选中任何 Agent。你可以从上方列表勾选后继续。</p>
         )}
-        {requiresSoulRole && soulRoleId && !selectedRoleIds.has(normalizeRoleId(soulRoleId)) && (
+        {enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !selectedRoleIds.has(normalizeRoleId(soulRoleId)) && (
           <p className="text-xs text-warning">
             当前行业要求包含灵魂角色 {roleLabel(soulRoleId)}，请先勾选对应 Agent。
           </p>

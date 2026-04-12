@@ -37,6 +37,7 @@ import {
   buildProjectIssueFirstMessage,
   ensureProjectIssueFirst
 } from "../services/project-issue-first.js";
+import { prisma } from "../db.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import {
@@ -44,6 +45,12 @@ import {
   syncProjectGitLabHarness,
   upsertQualityGateRepairIssue
 } from "./gitlab.js";
+import {
+  bindProjectInputsToWorkflowEntryStages,
+  createProjectInputs,
+  importRelayInputs,
+  listProjectInputs
+} from "../workflow-v2/project-modes.js";
 
 const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
@@ -70,6 +77,54 @@ function normalizeStringArrayInput(input: unknown) {
     .filter(Boolean);
 }
 
+function normalizeProjectType(input: unknown) {
+  const normalized = String(input ?? "").trim().toLowerCase();
+  if (normalized === "standalone" || normalized === "relay") {
+    return normalized as "standalone" | "relay";
+  }
+  return "complete" as const;
+}
+
+function normalizeProjectInputs(input: unknown) {
+  type NormalizedProjectInput = {
+    name: string;
+    type: string;
+    description?: string;
+    content?: string;
+    filePath?: string;
+    referenceDeliverableId?: string;
+    inputSource?: "manual" | "imported_from_project" | "template_generated";
+  };
+
+  if (!Array.isArray(input)) {
+    return [] as NormalizedProjectInput[];
+  }
+  return input.reduce<NormalizedProjectInput[]>((acc, item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return acc;
+      }
+      const record = item as Record<string, unknown>;
+      const name = String(record.name ?? "").trim();
+      if (!name) {
+        return acc;
+      }
+      const sourceRaw = String(record.inputSource ?? "").trim();
+      const inputSource = sourceRaw === "imported_from_project" || sourceRaw === "template_generated"
+        ? sourceRaw
+        : "manual";
+      acc.push({
+        name,
+        type: String(record.type ?? "").trim() || "document",
+        description: String(record.description ?? "").trim() || undefined,
+        content: String(record.content ?? "").trim() || undefined,
+        filePath: String(record.filePath ?? "").trim() || undefined,
+        referenceDeliverableId: String(record.referenceDeliverableId ?? "").trim() || undefined,
+        inputSource: inputSource as "manual" | "imported_from_project" | "template_generated"
+      });
+      return acc;
+    }, []);
+}
+
 function normalizeStatusFilter(input: unknown) {
   const allowed = new Set(["active", "paused", "blocked", "completed"]);
   const values = normalizeStringArrayInput(input).map((item) => item.toLowerCase());
@@ -82,6 +137,41 @@ function parseRepairLimit(input: unknown) {
     return QUALITY_GATE_REPAIR_DEFAULT_LIMIT;
   }
   return Math.max(1, Math.min(300, Math.floor(value)));
+}
+
+function resolveEntryNodeIdsFromGraph(graphValue: unknown) {
+  const graph = graphValue && typeof graphValue === "object" && !Array.isArray(graphValue)
+    ? graphValue as { nodes?: Array<{ id?: unknown }>; edges?: Array<{ to?: unknown }> }
+    : {};
+  const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
+  const edges = Array.isArray(graph.edges) ? graph.edges : [];
+  const targets = new Set(edges.map((edge) => String(edge?.to ?? "").trim()).filter(Boolean));
+  return nodes
+    .map((node) => String(node?.id ?? "").trim())
+    .filter((nodeId) => nodeId && !targets.has(nodeId));
+}
+
+async function syncProjectInputsToLatestWorkflow(projectId: string) {
+  const workflow = await prisma.workflow.findFirst({
+    where: { projectId },
+    orderBy: [{ createdAt: "desc" }],
+    select: {
+      id: true,
+      stageGraph: true
+    }
+  });
+  if (!workflow) {
+    return;
+  }
+  const entryNodeIds = resolveEntryNodeIdsFromGraph(workflow.stageGraph);
+  if (entryNodeIds.length === 0) {
+    return;
+  }
+  await bindProjectInputsToWorkflowEntryStages({
+    workflowId: workflow.id,
+    projectId,
+    entryNodeIds
+  });
 }
 
 async function buildProjectQualityGateRepairResult(input: {
@@ -1713,12 +1803,24 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     res.status(400).json({ message: "description is required" });
     return;
   }
+  const projectType = normalizeProjectType(req.body?.projectType);
+  const parentProjectId = String(req.body?.parentProjectId ?? "").trim() || undefined;
+  const relaySourceStageId = String(req.body?.relaySourceStageId ?? "").trim() || undefined;
+  const projectInputs = normalizeProjectInputs(req.body?.projectInputs);
+  if (projectType === "relay" && !parentProjectId) {
+    res.status(400).json({ message: "parentProjectId is required when projectType=relay" });
+    return;
+  }
 
   const project = await createProject(
     {
       name: req.body?.name,
       description,
       team: req.body?.team,
+      projectType,
+      parentProjectId,
+      relaySourceStageId,
+      projectInputs,
       workflowTemplateKey: req.body?.workflowTemplateKey,
       autoStartWorkflow: req.body?.autoStartWorkflow
     },
@@ -2121,6 +2223,90 @@ router.post("/api/projects/quality-gate/repair-issues", asyncRoute(async (req, r
       processedProjects: totals.processed,
       totals,
       projects: results
+    }
+  });
+}));
+
+router.get("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  const inputs = await listProjectInputs(projectId);
+  res.json({
+    success: true,
+    data: {
+      projectId,
+      total: inputs.length,
+      items: inputs
+    }
+  });
+}));
+
+router.post("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  const normalized = normalizeProjectInputs(Array.isArray(req.body?.items) ? req.body.items : [req.body]);
+  if (normalized.length === 0) {
+    res.status(400).json({ message: "at least one valid input item is required" });
+    return;
+  }
+  const items = await createProjectInputs(projectId, normalized);
+  await syncProjectInputsToLatestWorkflow(projectId);
+  res.status(201).json({
+    success: true,
+    data: {
+      projectId,
+      total: items.length,
+      items
+    }
+  });
+}));
+
+router.post("/api/projects/:id/relay/import", asyncRoute(async (req, res) => {
+  const targetProjectId = String(req.params.id);
+  const targetProject = await findProject(targetProjectId);
+  if (!targetProject) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  const sourceProjectId = String(req.body?.sourceProjectId ?? "").trim();
+  if (!sourceProjectId) {
+    res.status(400).json({ message: "sourceProjectId is required" });
+    return;
+  }
+  const sourceStageId = String(req.body?.sourceStageId ?? "").trim() || undefined;
+  const sourceStageType = String(req.body?.sourceStageType ?? "").trim() || undefined;
+  const relayType = String(req.body?.relayType ?? "").trim() || "full";
+  const sourceDeliverableIds = normalizeStringArrayInput(req.body?.sourceDeliverableIds);
+  const transformationConfig = req.body?.transformationConfig && typeof req.body.transformationConfig === "object"
+    ? req.body.transformationConfig as Record<string, unknown>
+    : undefined;
+
+  const items = await importRelayInputs({
+    targetProjectId,
+    sourceProjectId,
+    sourceStageId,
+    sourceStageType,
+    sourceDeliverableIds,
+    relayType,
+    transformationConfig
+  });
+  await syncProjectInputsToLatestWorkflow(targetProjectId);
+
+  res.status(201).json({
+    success: true,
+    data: {
+      targetProjectId,
+      sourceProjectId,
+      total: items.length,
+      items
     }
   });
 }));

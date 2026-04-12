@@ -2,10 +2,22 @@ import { FileUp } from 'lucide-react';
 import type { NewProjectModalController } from '../hooks/useNewProjectModalController';
 import type { Priority } from '../NewProjectModal.types';
 import { getAgentRoleId, roleLabel } from '../utils/newProjectHelpers';
+import ProjectExecutionConfigurator from './ProjectExecutionConfigurator';
 
 type Props = {
   controller: NewProjectModalController;
 };
+
+function resolveEngineMeta(engine: string | undefined) {
+  const normalized = String(engine || 'managed').trim().toLowerCase();
+  if (normalized === 'hermes') {
+    return { label: 'Hermes', className: 'bg-accent/15 border-accent/40 text-accent' };
+  }
+  if (normalized === 'openclaw') {
+    return { label: 'OpenClaw', className: 'bg-primary/15 border-primary/40 text-primary' };
+  }
+  return { label: 'Managed', className: 'bg-white/10 border-border-subtle text-slate-300' };
+}
 
 export default function IssueInputPanel({ controller }: Props) {
   const {
@@ -29,6 +41,22 @@ export default function IssueInputPanel({ controller }: Props) {
     handleToggleManualAgent,
     handleManualSubmit,
     isCreating,
+    projectType,
+    setProjectType,
+    parentProjectId,
+    setParentProjectId,
+    relaySourceStageId,
+    setRelaySourceStageId,
+    standaloneInputName,
+    setStandaloneInputName,
+    standaloneInputType,
+    setStandaloneInputType,
+    standaloneInputContent,
+    setStandaloneInputContent,
+    workflowTemplateKey,
+    setWorkflowTemplateKey,
+    autoStartWorkflow,
+    setAutoStartWorkflow,
   } = controller;
 
   return (
@@ -110,6 +138,25 @@ export default function IssueInputPanel({ controller }: Props) {
         </div>
       )}
 
+      <ProjectExecutionConfigurator
+        projectType={projectType}
+        setProjectType={setProjectType}
+        parentProjectId={parentProjectId}
+        setParentProjectId={setParentProjectId}
+        relaySourceStageId={relaySourceStageId}
+        setRelaySourceStageId={setRelaySourceStageId}
+        standaloneInputName={standaloneInputName}
+        setStandaloneInputName={setStandaloneInputName}
+        standaloneInputType={standaloneInputType}
+        setStandaloneInputType={setStandaloneInputType}
+        standaloneInputContent={standaloneInputContent}
+        setStandaloneInputContent={setStandaloneInputContent}
+        workflowTemplateKey={workflowTemplateKey}
+        setWorkflowTemplateKey={setWorkflowTemplateKey}
+        autoStartWorkflow={autoStartWorkflow}
+        setAutoStartWorkflow={setAutoStartWorkflow}
+      />
+
       <div className="grid grid-cols-2 gap-3">
         <button
           onClick={() => void handleParseInput()}
@@ -177,20 +224,26 @@ export default function IssueInputPanel({ controller }: Props) {
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配团队</label>
             <div className="flex flex-wrap gap-2">
-              {industryAgents.map((agent) => (
-                <label
-                  key={agent.id}
-                  className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors"
-                >
-                  <input
-                    type="checkbox"
-                    checked={formData.agentIds.includes(agent.id)}
-                    onChange={() => handleToggleManualAgent(agent.id)}
-                    className="accent-primary"
-                  />
-                  <span className="text-xs text-slate-300">{agent.name} · {roleLabel(getAgentRoleId(agent))}</span>
-                </label>
-              ))}
+              {industryAgents.map((agent) => {
+                const engine = resolveEngineMeta(agent.integrationEngine);
+                return (
+                  <label
+                    key={agent.id}
+                    className="flex items-center gap-2 px-3 py-2 bg-white/5 border border-border-subtle rounded-xl cursor-pointer hover:bg-white/10 transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={formData.agentIds.includes(agent.id)}
+                      onChange={() => handleToggleManualAgent(agent.id)}
+                      className="accent-primary"
+                    />
+                    <span className="text-xs text-slate-300">{agent.name} · {roleLabel(getAgentRoleId(agent))}</span>
+                    <span className={`px-1.5 py-0.5 rounded-md border text-[10px] font-semibold tracking-wide ${engine.className}`}>
+                      {engine.label}
+                    </span>
+                  </label>
+                );
+              })}
               {industryAgents.length === 0 && (
                 <p className="text-xs text-slate-500">当前行业角色集中暂无可用 Agent</p>
               )}

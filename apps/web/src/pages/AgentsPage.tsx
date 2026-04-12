@@ -21,6 +21,17 @@ export default function AgentsPage({
   onOpenRoleSets,
   onOpenConfig,
 }: Props) {
+  const resolveEngineMeta = (engine: string | undefined) => {
+    const normalized = String(engine || 'managed').trim().toLowerCase();
+    if (normalized === 'hermes') {
+      return { label: 'Hermes', variant: 'accent' as const };
+    }
+    if (normalized === 'openclaw') {
+      return { label: 'OpenClaw', variant: 'primary' as const };
+    }
+    return { label: 'Managed', variant: 'default' as const };
+  };
+
   const resolveModelLabel = (modelKey: string) => {
     const normalizedKey = String(modelKey || '').trim();
     if (!normalizedKey) {
@@ -72,12 +83,14 @@ export default function AgentsPage({
       </header>
 
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        {agents.map((agent) => (
-          <div
-            key={agent.id}
-            className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-6 hover:border-white/20 transition-all group cursor-pointer"
-            onClick={() => onSelectAgent(agent.id)}
-          >
+        {agents.map((agent) => {
+          const engineMeta = resolveEngineMeta(agent.integrationEngine);
+          return (
+            <div
+              key={agent.id}
+              className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-6 hover:border-white/20 transition-all group cursor-pointer"
+              onClick={() => onSelectAgent(agent.id)}
+            >
             <div className="flex justify-between items-start">
               <div className="flex items-center gap-4">
                 <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center text-accent border border-accent/20 group-hover:scale-110 transition-transform">
@@ -88,7 +101,10 @@ export default function AgentsPage({
                   <p className="text-xs text-slate-500">{agent.role}</p>
                 </div>
               </div>
-              <Badge variant={agent.status === 'Thinking' ? 'accent' : agent.status === 'Executing' ? 'primary' : 'default'}>{agent.status}</Badge>
+              <div className="flex items-center gap-1.5">
+                <Badge variant={engineMeta.variant}>{engineMeta.label}</Badge>
+                <Badge variant={agent.status === 'Thinking' ? 'accent' : agent.status === 'Executing' ? 'primary' : 'default'}>{agent.status}</Badge>
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-4">
@@ -133,8 +149,9 @@ export default function AgentsPage({
                 <Settings size={18} />
               </button>
             </div>
-          </div>
-        ))}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

@@ -1,6 +1,7 @@
 import express from "express";
 import { prisma } from "../db.js";
 import {
+  addStageInputArtifact,
   addStageOutputArtifact,
   createWorkflowFromTemplate,
   getActiveWorkflow,
@@ -18,9 +19,13 @@ type CreateTemplateBody = {
   key?: unknown;
   description?: unknown;
   category?: unknown;
+  isStandalone?: unknown;
+  standaloneCategory?: unknown;
   executorConfig?: unknown;
   inputSchema?: unknown;
   outputSchema?: unknown;
+  inputContract?: unknown;
+  outputContract?: unknown;
   acceptanceCriteria?: unknown;
   integrationConfig?: unknown;
   defaultTimeout?: unknown;
@@ -49,7 +54,185 @@ function asStringList(value: unknown) {
     .filter(Boolean);
 }
 
-function buildWorkflowOverview(workflow: Awaited<ReturnType<typeof getActiveWorkflow>>) {
+type AgentRuntimeProfile = {
+  engine: "hermes" | "openclaw" | "unknown";
+  model: string | null;
+};
+
+function toPreviewText(value: unknown, limit = 220) {
+  const normalized = String(value ?? "")
+    .replace(/```[\s\S]*?```/g, "[code]")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function inferAgentEngine(input: { agentId: string; model?: string | null }) {
+  const model = normalizeText(input.model).toLowerCase();
+  const agentId = normalizeText(input.agentId).toLowerCase();
+  if (model.includes("hermes") || agentId.includes("hermes")) {
+    return "hermes" as const;
+  }
+  if (model || agentId.startsWith("role_") || agentId.includes("openclaw")) {
+    return "openclaw" as const;
+  }
+  return "unknown" as const;
+}
+
+function summarizeStageArtifacts(outputArtifacts: unknown[]) {
+  const sourceCounts = {
+    hermes: 0,
+    openclaw: 0,
+    companion: 0,
+    companionError: 0,
+    stitch: 0,
+    manual: 0,
+    other: 0
+  };
+  const roleSet = new Set<string>();
+  const agentEngineHints = new Map<string, "hermes" | "openclaw" | "unknown">();
+
+  const applyAgentEngineHint = (agentId: string, next: "hermes" | "openclaw") => {
+    const normalized = normalizeText(agentId);
+    if (!normalized) {
+      return;
+    }
+    const prev = agentEngineHints.get(normalized);
+    if (!prev) {
+      agentEngineHints.set(normalized, next);
+      return;
+    }
+    if (prev !== next) {
+      agentEngineHints.set(normalized, "unknown");
+    }
+  };
+
+  for (const artifact of outputArtifacts) {
+    const record = asRecord(artifact) ?? {};
+    const metadata = asRecord(record.metadata) ?? {};
+    const source = normalizeText(metadata.source).toLowerCase();
+    const agentId = normalizeText(metadata.agentId);
+    const role = normalizeText(metadata.role);
+    const primaryRole = normalizeText(metadata.primaryRole);
+    if (role.startsWith("ROLE_")) {
+      roleSet.add(role);
+    }
+    if (primaryRole.startsWith("ROLE_")) {
+      roleSet.add(primaryRole);
+    }
+
+    if (!source) {
+      sourceCounts.manual += 1;
+      continue;
+    }
+    if (source === "workflow_v2_hermes") {
+      sourceCounts.hermes += 1;
+      applyAgentEngineHint(agentId, "hermes");
+      continue;
+    }
+    if (source === "workflow_v2_agent") {
+      sourceCounts.openclaw += 1;
+      applyAgentEngineHint(agentId, "openclaw");
+      continue;
+    }
+    if (source === "workflow_v2_companion") {
+      sourceCounts.companion += 1;
+      applyAgentEngineHint(agentId, "openclaw");
+      continue;
+    }
+    if (source === "workflow_v2_companion_error") {
+      sourceCounts.companionError += 1;
+      applyAgentEngineHint(agentId, "openclaw");
+      continue;
+    }
+    if (source.includes("stitch")) {
+      sourceCounts.stitch += 1;
+      continue;
+    }
+    if (source.startsWith("workflow_v2_")) {
+      sourceCounts.other += 1;
+      continue;
+    }
+    sourceCounts.manual += 1;
+  }
+
+  const hasHermes = sourceCounts.hermes > 0;
+  const hasOpenclaw = sourceCounts.openclaw > 0 || sourceCounts.companion > 0 || sourceCounts.companionError > 0;
+  let executionEngine: "hybrid" | "hermes" | "openclaw" | "manual" | "unknown" = "unknown";
+  if (hasHermes && hasOpenclaw) {
+    executionEngine = "hybrid";
+  } else if (hasHermes) {
+    executionEngine = "hermes";
+  } else if (hasOpenclaw) {
+    executionEngine = "openclaw";
+  } else if (sourceCounts.manual > 0) {
+    executionEngine = "manual";
+  }
+
+  const roles = [...roleSet].sort();
+  return {
+    executionEngine,
+    artifactSources: sourceCounts,
+    agentEngineHints: Object.fromEntries(agentEngineHints.entries()),
+    collaboration: {
+      roleCount: roles.length,
+      roles,
+      analystInvolved: roles.includes("ROLE_ANALYST"),
+      companionEvidenceCount: sourceCounts.companion + sourceCounts.companionError
+    }
+  };
+}
+
+function extractCollaborationArtifacts(outputArtifacts: unknown[]) {
+  const artifacts = Array.isArray(outputArtifacts)
+    ? (outputArtifacts as Array<Record<string, unknown>>)
+    : [];
+  const rows = artifacts
+    .map((artifact, index) => {
+      const metadata = asRecord(artifact.metadata) ?? {};
+      const source = normalizeText(metadata.source).toLowerCase();
+      if (source !== "workflow_v2_companion" && source !== "workflow_v2_companion_error") {
+        return null;
+      }
+      const name = normalizeText(artifact.name) || `collaboration_${index + 1}`;
+      const role = normalizeText(metadata.role);
+      const primaryRole = normalizeText(metadata.primaryRole);
+      const agentId = normalizeText(metadata.agentId);
+      const provider = normalizeText(metadata.provider) || null;
+      const model = normalizeText(metadata.model) || null;
+      const generatedAt = normalizeText(metadata.generatedAt) || null;
+      const knowledgeId = normalizeText(metadata.knowledgeId) || null;
+      return {
+        id: `${name}-${index + 1}`,
+        name,
+        source,
+        role,
+        primaryRole,
+        agentId,
+        provider,
+        model,
+        knowledgeId,
+        status: source === "workflow_v2_companion_error" ? "failed" : "success",
+        generatedAt,
+        preview: toPreviewText(artifact.content)
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+  return rows.sort((left, right) => {
+    const leftTime = left.generatedAt ? Date.parse(left.generatedAt) : 0;
+    const rightTime = right.generatedAt ? Date.parse(right.generatedAt) : 0;
+    return rightTime - leftTime;
+  });
+}
+
+function buildWorkflowOverview(
+  workflow: Awaited<ReturnType<typeof getActiveWorkflow>>,
+  agentProfiles: Map<string, AgentRuntimeProfile>
+) {
   const graphRecord = asRecord(workflow.stageGraph) ?? {};
   const nodes = asRecordArray(graphRecord.nodes).map((node) => ({
     id: normalizeText(node.id),
@@ -79,12 +262,42 @@ function buildWorkflowOverview(workflow: Awaited<ReturnType<typeof getActiveWork
       const contextMemoryIds = Array.isArray(stage.contextMemoryIds) ? stage.contextMemoryIds : [];
       const gateResults = asRecord(stage.gateResults ?? {});
       const gateViolations = asStringList(gateResults?.violations);
+      const assignedAgents = asStringList(stage.assignedAgents);
+      const stageArtifactSummary = summarizeStageArtifacts(outputArtifacts);
+      const collaborationArtifacts = extractCollaborationArtifacts(outputArtifacts);
       return {
         id: stage.id,
         nodeId: stage.nodeId,
         templateKey: stage.templateKey,
         status: stage.status,
-        assignedAgents: asStringList(stage.assignedAgents),
+        assignedAgents,
+        assignedAgentProfiles: assignedAgents.map((agentId) => {
+          const profile = agentProfiles.get(agentId);
+          const hintedEngine = (stageArtifactSummary.agentEngineHints[agentId] as AgentRuntimeProfile["engine"] | undefined) ?? "unknown";
+          const fallbackEngine = inferAgentEngine({ agentId });
+          const resolvedEngine = profile?.engine && profile.engine !== "unknown"
+            ? profile.engine
+            : hintedEngine !== "unknown"
+              ? hintedEngine
+              : fallbackEngine;
+          const resolvedModel = profile?.model ?? null;
+          const singleAgentStageFallback = assignedAgents.length === 1
+            && (stageArtifactSummary.executionEngine === "hermes" || stageArtifactSummary.executionEngine === "openclaw")
+              ? stageArtifactSummary.executionEngine
+              : null;
+          const finalEngine = resolvedEngine === "unknown" && singleAgentStageFallback
+            ? singleAgentStageFallback
+            : resolvedEngine;
+          return {
+            agentId,
+            engine: finalEngine,
+            model: resolvedModel
+          };
+        }),
+        executionEngine: stageArtifactSummary.executionEngine,
+        artifactSources: stageArtifactSummary.artifactSources,
+        collaboration: stageArtifactSummary.collaboration,
+        collaborationArtifacts,
         outputArtifactCount: outputArtifacts.length,
         contextMemoryCount: contextMemoryIds.length,
         gate: {
@@ -151,6 +364,8 @@ export function createWorkflowsV2Router() {
       name,
       description: normalizeText(payload.description) || undefined,
       category,
+      isStandalone: Boolean(payload.isStandalone),
+      standaloneCategory: normalizeText(payload.standaloneCategory) || undefined,
       executorConfig: (asRecord(payload.executorConfig) ?? {
         type: "agent",
         requiredCapabilities: []
@@ -162,6 +377,8 @@ export function createWorkflowsV2Router() {
       },
       inputSchema: asRecord(payload.inputSchema) ?? {},
       outputSchema: asRecord(payload.outputSchema) ?? {},
+      inputContract: asRecord(payload.inputContract) ?? undefined,
+      outputContract: asRecord(payload.outputContract) ?? undefined,
       acceptanceCriteria: asRecordArray(payload.acceptanceCriteria).map((item) => ({
         type: normalizeText(item.type) as "artifact_exists" | "quality_gate" | "manual_approval" | "auto_check",
         config: asRecord(item.config) ?? {}
@@ -280,6 +497,33 @@ export function createWorkflowsV2Router() {
     sendSuccess(res, { stageId: stage.id, artifactCount: Array.isArray(stage.outputArtifacts) ? stage.outputArtifacts.length : 0 });
   }));
 
+  router.post("/stages/:stageId/input", asyncRoute(async (req, res) => {
+    const status = await getWorkflowV2SchemaStatus();
+    if (!status.ready) {
+      sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
+      return;
+    }
+    const stageId = normalizeText(req.params.stageId);
+    const payload = asRecord(req.body) ?? {};
+    const name = normalizeText(payload.name) || "input.md";
+    const type = normalizeText(payload.type) || "document";
+    const content = String(payload.content ?? "");
+    if (!stageId || !content.trim()) {
+      sendError(res, 400, "VALIDATION_ERROR", "stageId and content are required");
+      return;
+    }
+    const stage = await addStageInputArtifact({
+      stageId,
+      artifact: {
+        name,
+        type,
+        content,
+        createdAt: new Date().toISOString()
+      }
+    });
+    sendSuccess(res, { stageId: stage.id, artifactCount: Array.isArray(stage.inputArtifacts) ? stage.inputArtifacts.length : 0 });
+  }));
+
   router.post("/stages/:stageId/transition", asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
@@ -360,7 +604,28 @@ export function createWorkflowsV2Router() {
       }
       throw error;
     }
-    sendSuccess(res, buildWorkflowOverview(workflow));
+    const assignedAgentIds = Array.from(new Set(
+      workflow.stages.flatMap((stage) => asStringList(stage.assignedAgents))
+    ));
+    const managedConfigs = assignedAgentIds.length > 0
+      ? await prisma.managedAgentConfig.findMany({
+        where: { agentId: { in: assignedAgentIds } },
+        select: {
+          agentId: true,
+          selectedModel: true,
+          defaultModel: true
+        }
+      })
+      : [];
+    const agentProfileMap = new Map<string, AgentRuntimeProfile>();
+    for (const config of managedConfigs) {
+      const model = normalizeText(config.selectedModel) || normalizeText(config.defaultModel) || null;
+      agentProfileMap.set(config.agentId, {
+        engine: inferAgentEngine({ agentId: config.agentId, model }),
+        model
+      });
+    }
+    sendSuccess(res, buildWorkflowOverview(workflow, agentProfileMap));
   }));
 
   return router;

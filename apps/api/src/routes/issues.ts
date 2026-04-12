@@ -9,17 +9,20 @@ import {
   buildContextAlignment,
   buildDesignBlueprint,
   buildExpectedArtifacts,
+  buildIssueWorkflowSop,
   buildClarificationQuestions,
   buildIssueDiscussion,
   buildRelatedHistory,
   buildRequirementContract,
   buildRequirementRefinement,
+  getTemplateRequiredRoles,
   buildSuggestedAnswers,
   detectIndustry,
   detectConflicts,
   inferIssueSummary,
   inferIssueTitle,
   recommendRoles,
+  resolveIssueWorkflowTemplateKey,
   synthesizeIssueArtifactsFromDebate
 } from "../system/issue-engine.js";
 import { buildIssueRoleDebate, type IssueDebateResult as RuntimeIssueDebateResult } from "../system/issue-debate.js";
@@ -43,6 +46,7 @@ interface PreviewIssueBody {
   industryCode?: unknown;
   sourceType?: unknown;
   debateMode?: unknown;
+  workflowTemplateKey?: unknown;
 }
 
 interface ConfirmIssueBody {
@@ -51,6 +55,12 @@ interface ConfirmIssueBody {
   finalDescription?: unknown;
   teamRoleIds?: unknown;
   conflictResolution?: unknown;
+  projectType?: unknown;
+  parentProjectId?: unknown;
+  relaySourceStageId?: unknown;
+  projectInputs?: unknown;
+  workflowTemplateKey?: unknown;
+  autoStartWorkflow?: unknown;
 }
 
 const ROLE_IDS: RoleType[] = [
@@ -97,6 +107,95 @@ function normalizeRoleList(input: unknown) {
   return input
     .map((item) => String(item ?? "").trim().toUpperCase())
     .filter((item): item is RoleType => ROLE_IDS.includes(item as RoleType));
+}
+
+function normalizeOptionalBoolean(input: unknown) {
+  if (typeof input === "boolean") {
+    return input;
+  }
+  if (input === null || input === undefined) {
+    return undefined;
+  }
+  const text = String(input).trim().toLowerCase();
+  if (text === "true" || text === "1" || text === "yes" || text === "on") {
+    return true;
+  }
+  if (text === "false" || text === "0" || text === "no" || text === "off") {
+    return false;
+  }
+  return undefined;
+}
+
+function normalizeProjectType(input: unknown) {
+  const text = String(input ?? "").trim().toLowerCase();
+  if (text === "standalone" || text === "relay") {
+    return text as "standalone" | "relay";
+  }
+  return "complete" as const;
+}
+
+function applyTemplateRolePlan(input: {
+  recommendedRoleIds: RoleType[];
+  workflowTemplateKey: unknown;
+  mustHaveSoulRole: boolean;
+  soulRoleId: RoleType;
+  enforceIndustryAssemblyRule?: boolean;
+}) {
+  if (input.enforceIndustryAssemblyRule) {
+    const planned = [...input.recommendedRoleIds];
+    if (input.mustHaveSoulRole && input.soulRoleId && !planned.includes(input.soulRoleId)) {
+      planned.unshift(input.soulRoleId);
+    }
+    return planned.length > 0 ? Array.from(new Set(planned)) : input.recommendedRoleIds;
+  }
+  const resolvedTemplateKey = resolveIssueWorkflowTemplateKey(input.workflowTemplateKey);
+  const requiredRoles = getTemplateRequiredRoles(resolvedTemplateKey);
+  const planned = resolvedTemplateKey === "standard_software_development"
+    ? Array.from(new Set([...requiredRoles, ...input.recommendedRoleIds]))
+    : [...requiredRoles];
+  return planned.length > 0 ? Array.from(new Set(planned)) : input.recommendedRoleIds;
+}
+
+function normalizeProjectInputs(input: unknown) {
+  type NormalizedProjectInput = {
+    name: string;
+    type: string;
+    description?: string;
+    content?: string;
+    filePath?: string;
+    referenceDeliverableId?: string;
+    inputSource?: "manual" | "imported_from_project" | "template_generated";
+  };
+
+  if (!Array.isArray(input)) {
+    return [] as NormalizedProjectInput[];
+  }
+
+  return input.reduce<NormalizedProjectInput[]>((acc, item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        return acc;
+      }
+      const record = item as Record<string, unknown>;
+      const name = String(record.name ?? "").trim();
+      const type = String(record.type ?? "").trim() || "document";
+      if (!name) {
+        return acc;
+      }
+      const sourceRaw = String(record.inputSource ?? "").trim();
+      const inputSource = sourceRaw === "imported_from_project" || sourceRaw === "template_generated"
+        ? sourceRaw
+        : "manual";
+      acc.push({
+        name,
+        type,
+        description: String(record.description ?? "").trim() || undefined,
+        content: String(record.content ?? "").trim() || undefined,
+        filePath: String(record.filePath ?? "").trim() || undefined,
+        referenceDeliverableId: String(record.referenceDeliverableId ?? "").trim() || undefined,
+        inputSource: inputSource as "manual" | "imported_from_project" | "template_generated"
+      });
+      return acc;
+    }, []);
 }
 
 function normalizeStringMap(input: unknown) {
@@ -486,6 +585,7 @@ function startIssueDebateTask(input: {
   rawInput: string;
   title: string;
   summary: string;
+  workflowTemplateKey: string;
   industryCode: string;
   recommendedRoleIds: RoleType[];
   soulRoleId: RoleType;
@@ -544,7 +644,7 @@ function startIssueDebateTask(input: {
             productContext: await getProductContext(),
             industryCode: input.industryCode,
             questions: draftIssue.questions,
-            expectedArtifacts: buildExpectedArtifacts(),
+            expectedArtifacts: buildExpectedArtifacts(input.workflowTemplateKey),
             draft: {
               summary: draftIssue.summary,
               refinement: draftIssue.refinement,
@@ -729,6 +829,10 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const industryCode = String(payload.industryCode ?? "").trim().toLowerCase();
     const sourceType = normalizeSourceType(payload.sourceType);
     const debateMode = normalizeDebateMode(payload.debateMode);
+    const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim().toLowerCase();
+    const workflowTemplateKey = resolveIssueWorkflowTemplateKey(payload.workflowTemplateKey);
+    const enforceIndustryAssemblyRule = workflowTemplateKeyRaw === "none";
+    const hasWorkflowTemplate = !enforceIndustryAssemblyRule;
 
     if (!input) {
       sendError(res, 400, "VALIDATION_ERROR", "input is required");
@@ -760,11 +864,18 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       refinement,
       alignment: contextAlignment
     });
-    const recommendedRoleIds = recommendRoles(input, config);
+    const recommendedRoleIds = applyTemplateRolePlan({
+      recommendedRoleIds: recommendRoles(input, config),
+      workflowTemplateKey,
+      mustHaveSoulRole: config.assemblyRule.mustHaveSoulRole,
+      soulRoleId: config.assemblyRule.soulRoleId,
+      enforceIndustryAssemblyRule
+    });
     const ruleDiscussion = buildIssueDiscussion(
       input,
       recommendedRoleIds as RoleType[],
-      config.assemblyRule.soulRoleId
+      config.assemblyRule.soulRoleId,
+      { includeSoulRole: enforceIndustryAssemblyRule }
     );
     const discussion = ruleDiscussion;
     const suggestedAnswers = buildSuggestedAnswers({
@@ -776,7 +887,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       discussion
     });
     const relatedHistory = buildRelatedHistory(input, productContext.requirementHistory ?? []);
-    const expectedArtifacts = buildExpectedArtifacts();
+    const expectedArtifacts = hasWorkflowTemplate ? buildExpectedArtifacts(workflowTemplateKey) : [];
     const requirementContract = buildRequirementContract({
       suggestedAnswers,
       refinement,
@@ -829,6 +940,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         rawInput: input,
         title,
         summary,
+        workflowTemplateKey,
         industryCode: config.roleSet.industryCode,
         recommendedRoleIds: recommendedRoleIds as RoleType[],
         soulRoleId: config.assemblyRule.soulRoleId,
@@ -880,7 +992,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       contentProvenance,
       analysisGate,
       expectedArtifacts,
-      workflow: config.workflows.find((item) => item.isDefault) ?? config.workflows[0] ?? null
+      workflow: hasWorkflowTemplate ? buildIssueWorkflowSop(workflowTemplateKey) : null
     });
   }));
 
@@ -907,6 +1019,18 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
 
     const clarificationAnswers = normalizeStringMap(payload.clarificationAnswers);
     const conflictResolution = String(payload.conflictResolution ?? "").trim();
+    const projectType = normalizeProjectType(payload.projectType);
+    const parentProjectId = String(payload.parentProjectId ?? "").trim() || undefined;
+    const relaySourceStageId = String(payload.relaySourceStageId ?? "").trim() || undefined;
+    const projectInputs = normalizeProjectInputs(payload.projectInputs);
+    const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim();
+    const workflowTemplateKey = workflowTemplateKeyRaw || undefined;
+    const enforceIndustryAssemblyRule = workflowTemplateKeyRaw.toLowerCase() === "none";
+    const autoStartWorkflow = normalizeOptionalBoolean(payload.autoStartWorkflow);
+    if (projectType === "relay" && !parentProjectId) {
+      sendError(res, 400, "VALIDATION_ERROR", "relay mode requires parentProjectId");
+      return;
+    }
     const requiredQuestions = issue.questions.filter((question) => question.required);
     const missingRequired = requiredQuestions.find((question) => !String(clarificationAnswers[question.id] ?? "").trim());
     if (missingRequired) {
@@ -957,7 +1081,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const allowedRoleSet = new Set(config.roleSet.roleIds);
     const constrainedRoleIds = selectedRoleIds.filter((roleId) => allowedRoleSet.has(roleId));
 
-    if (config.assemblyRule.mustHaveSoulRole && !constrainedRoleIds.includes(config.assemblyRule.soulRoleId)) {
+    if (enforceIndustryAssemblyRule && config.assemblyRule.mustHaveSoulRole && !constrainedRoleIds.includes(config.assemblyRule.soulRoleId)) {
       constrainedRoleIds.unshift(config.assemblyRule.soulRoleId);
     }
 
@@ -1004,8 +1128,14 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         name: finalName,
         description: finalProjectDescription,
         team: constrainedRoleIds,
+        projectType,
+        parentProjectId,
+        relaySourceStageId,
+        projectInputs,
         requirementContract: confirmedContract,
-        parsedIntent
+        parsedIntent,
+        workflowTemplateKey,
+        autoStartWorkflow
       },
       runtime.mode
     );

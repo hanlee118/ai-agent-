@@ -605,11 +605,7 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
       matchedPrinciples: [],
       contextNotes: [
         isCrossBorder ? '当前为本地降级分析结果，建议稍后重试以获取完整云端推理输出。' : '',
-        requiresCrossBorderScene
-          ? (sceneHitPassed
-            ? '场景命中校验: 通过（已命中跨境选品/跟品关键词）。'
-            : '场景命中校验: 未通过（缺少跨境选品/跟品关键词，当前需求不可直接通过）。')
-          : '',
+        !sceneHitPassed ? '当前需求尚未命中行业场景关键词，建议先补充后再推进。' : '',
       ].filter(Boolean),
     },
     designBlueprint: {

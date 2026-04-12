@@ -53,6 +53,8 @@ export function useRealData(): RealDataState {
         id: agent.id,
         name: agent.name,
         role: agent.role,
+        integrationEngine: agent.integrationEngine || 'managed',
+        builtin: Boolean(agent.builtin),
         status: (agent.status as Agent['status']) || 'Idle',
         load: agent.load ?? 0,
         currentModelId: agent.currentModelId || '',
@@ -75,7 +77,8 @@ export function useRealData(): RealDataState {
     }
 
     const managedById = new Map(managedAgents.map((agent) => [agent.id, agent]));
-    return runtimeAgents.map((runtimeAgent) => {
+    const runtimeById = new Map(runtimeAgents.map((agent) => [agent.id, agent]));
+    const merged = runtimeAgents.map((runtimeAgent) => {
       const managed = managedById.get(runtimeAgent.id);
       return managed
         ? {
@@ -84,8 +87,22 @@ export function useRealData(): RealDataState {
             // Keep runtime model label so ModelNexus can reflect real invoking model names.
             model: runtimeAgent.model || managed.model || managed.currentModelId,
             lastActiveAt: runtimeAgent.lastActiveAt || managed.lastActiveAt,
+            integrationEngine: runtimeAgent.integrationEngine || managed.integrationEngine || 'openclaw',
           }
         : runtimeAgent;
+    });
+    for (const managed of managedAgents) {
+      if (!runtimeById.has(managed.id)) {
+        merged.push(managed);
+      }
+    }
+    return merged.sort((a, b) => {
+      const engineA = String(a.integrationEngine || '').toLowerCase();
+      const engineB = String(b.integrationEngine || '').toLowerCase();
+      if (engineA !== engineB) {
+        return engineA.localeCompare(engineB);
+      }
+      return String(a.name || a.id).localeCompare(String(b.name || b.id));
     });
   }, []);
 

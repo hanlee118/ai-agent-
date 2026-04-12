@@ -11,6 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: file:./prisma/dev.db
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,8 +41,8 @@ jobs:
       - name: DB migration status preflight
         run: pnpm --filter @occ/api db:migrate:status
 
-      - name: Prepare route-test seed DB
-        run: pnpm --filter @occ/api db:push
+      - name: Prepare route-test seed DB (ephemeral CI DB)
+        run: pnpm --filter @occ/api exec prisma db push --accept-data-loss --skip-generate
 
       - name: Normalize route-test seed DB path
         run: |

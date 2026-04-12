@@ -12,7 +12,7 @@ const resolveTabLabel = (activeTab: string) => {
   if (activeTab === 'projects') return '项目组合';
   if (activeTab === 'agents') return 'Agent 名册';
   if (activeTab === 'workspace') return 'OpenClaw 工作区';
-  if (activeTab === 'knowledge-hub') return '知识治理中心';
+  if (activeTab === 'knowledge-hub') return '知识库（上传/查阅/编辑）';
   if (activeTab === 'audit') return '审计追踪';
   if (activeTab === 'settings') return '设置';
   return activeTab.replace('-', ' ');

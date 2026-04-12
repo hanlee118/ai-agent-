@@ -1,12 +1,16 @@
 import express from "express";
+import { extname } from "node:path";
+import multer from "multer";
 import {
   applyKnowledgeCuration,
+  autoOrganizeKnowledge,
   buildAgentContext,
   bulkDeleteKnowledgeItems,
   deleteKnowledgeItemById,
   getKnowledgeItemById,
   getProjectMemorySummary,
   ingestDocumentText,
+  ingestKnowledgeItem,
   ingestTextAsKnowledge,
   listKnowledgeItems,
   listKnowledgeOperationLogs,
@@ -15,9 +19,10 @@ import {
   rollbackKnowledgeOperation,
   updateKnowledgeItemById
 } from "../workflow-v2/knowledge-service.js";
-import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
+import { getKnowledgeV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { asStringArray, normalizeText, type KnowledgeScope } from "../workflow-v2/types.js";
+import { validateHermesApiKey } from "./hermes-auth.js";
 
 type UploadKnowledgeBody = {
   scope?: unknown;
@@ -83,6 +88,98 @@ type CurationBody = {
   triggeredBy?: unknown;
 };
 
+type HermesMemorySyncBody = {
+  projectId?: unknown;
+  scope?: unknown;
+  memoryType?: unknown;
+  title?: unknown;
+  content?: unknown;
+  importanceScore?: unknown;
+  tags?: unknown;
+  stageContext?: unknown;
+  techStack?: unknown;
+  agentId?: unknown;
+};
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: Math.max(1_024 * 1_024, Number(process.env.KNOWLEDGE_UPLOAD_MAX_BYTES ?? 12 * 1_024 * 1_024))
+  }
+});
+
+const KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST =
+  String(process.env.KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST ?? "true").trim().toLowerCase() !== "false"
+  && String(process.env.NODE_ENV ?? "").trim().toLowerCase() !== "test";
+
+const TEXT_FILE_EXTENSIONS = new Set([
+  ".txt",
+  ".md",
+  ".markdown",
+  ".json",
+  ".js",
+  ".jsx",
+  ".ts",
+  ".tsx",
+  ".py",
+  ".java",
+  ".go",
+  ".sql",
+  ".yaml",
+  ".yml",
+  ".csv"
+]);
+
+function parseFlexibleStringArray(value: unknown) {
+  if (Array.isArray(value)) {
+    return value
+      .flatMap((item) => String(item ?? "").split(","))
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return [] as string[];
+  }
+  if (raw.startsWith("[") && raw.endsWith("]")) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item ?? "").trim()).filter(Boolean);
+      }
+    } catch {
+      // fallback to csv parser
+    }
+  }
+  return raw.split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+async function extractTextFromUploadedFile(file: Express.Multer.File) {
+  const extension = extname(file.originalname || "").toLowerCase();
+
+  if (extension === ".pdf") {
+    const module = await import("pdf-parse");
+    const pdfParse = (module.default as unknown as (buffer: Buffer) => Promise<{ text?: string }>);
+    const parsed = await pdfParse(file.buffer);
+    return String(parsed?.text || "");
+  }
+
+  if (extension === ".docx") {
+    const module = await import("mammoth");
+    const mammoth = module as unknown as {
+      extractRawText: (input: { buffer: Buffer }) => Promise<{ value?: string }>;
+    };
+    const parsed = await mammoth.extractRawText({ buffer: file.buffer });
+    return String(parsed?.value || "");
+  }
+
+  if (TEXT_FILE_EXTENSIONS.has(extension)) {
+    return file.buffer.toString("utf-8");
+  }
+
+  throw new Error(`unsupported file type: ${extension || "unknown"}`);
+}
+
 function normalizeScope(value: unknown): KnowledgeScope {
   const text = normalizeText(value).toLowerCase();
   if (text === "project" || text === "agent" || text === "template") {
@@ -141,11 +238,66 @@ function normalizeMemoryType(value: unknown) {
   return undefined;
 }
 
+function validateScopeBinding(input: {
+  scope: KnowledgeScope;
+  projectId?: string | null | undefined;
+  agentId?: string | null | undefined;
+}) {
+  const projectId = normalizeText(input.projectId);
+  const agentId = normalizeText(input.agentId);
+  if (input.scope === "project" && !projectId) {
+    return "project scope requires projectId";
+  }
+  if (input.scope === "agent" && !agentId) {
+    return "agent scope requires agentId";
+  }
+  return null;
+}
+
+function normalizeMetadataRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {} as Record<string, unknown>;
+  }
+  return value as Record<string, unknown>;
+}
+
+function resolveKnowledgeSourceMeta(metadata: unknown) {
+  const record = normalizeMetadataRecord(metadata);
+  const source = normalizeText(
+    record.source
+    ?? record.integrationEngine
+    ?? record.provider
+    ?? ""
+  ).toLowerCase();
+  const hasSourceFile = Boolean(normalizeText(record.sourceFile));
+
+  if (source.includes("hermes")) {
+    return { sourceEngine: "hermes", sourceTag: source || "hermes" };
+  }
+  if (source.includes("stitch")) {
+    return { sourceEngine: "stitch", sourceTag: source || "stitch" };
+  }
+  if (
+    source.includes("openclaw")
+    || source.startsWith("workflow_v2_agent")
+    || source.startsWith("workflow_v2_companion")
+  ) {
+    return { sourceEngine: "openclaw", sourceTag: source || "openclaw" };
+  }
+  if (hasSourceFile) {
+    return { sourceEngine: "manual", sourceTag: "upload_document" };
+  }
+  if (source) {
+    return { sourceEngine: "system", sourceTag: source };
+  }
+  return { sourceEngine: "manual", sourceTag: "manual" };
+}
+
 export function createKnowledgeV2Router() {
   const router = express.Router();
 
   async function ensureSchemaReady(res: express.Response) {
-    const status = await getWorkflowV2SchemaStatus();
+    const status = await getKnowledgeV2SchemaStatus();
     if (status.ready) {
       return true;
     }
@@ -153,27 +305,56 @@ export function createKnowledgeV2Router() {
     return false;
   }
 
-  router.post("/upload", asyncRoute(async (req, res) => {
+  router.post("/upload", upload.single("file"), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
     const payload = (req.body ?? {}) as UploadKnowledgeBody;
-    const fileName = normalizeText(payload.fileName) || "uploaded-document.txt";
-    const fileContent = String(payload.fileContent ?? "");
+
+    let fileName = normalizeText(payload.fileName) || "uploaded-document.txt";
+    let fileContent = String(payload.fileContent ?? "");
+    const uploadedFile = req.file;
+    if (uploadedFile) {
+      fileName = normalizeText(uploadedFile.originalname) || fileName;
+      try {
+        fileContent = await extractTextFromUploadedFile(uploadedFile);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        sendError(res, 400, "VALIDATION_ERROR", `file parse failed: ${message}`);
+        return;
+      }
+    }
+
     if (!fileContent.trim()) {
       sendError(res, 400, "VALIDATION_ERROR", "fileContent is required");
+      return;
+    }
+
+    const scope = normalizeScope(payload.scope);
+    const projectId = normalizeText(payload.projectId) || undefined;
+    const agentId = normalizeText(payload.agentId) || undefined;
+    const scopeError = validateScopeBinding({ scope, projectId, agentId });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
       return;
     }
 
     const items = await ingestDocumentText({
       fileName,
       fileContent,
-      scope: normalizeScope(payload.scope),
-      projectId: normalizeText(payload.projectId) || undefined,
-      agentId: normalizeText(payload.agentId) || undefined,
-      tags: asStringArray(payload.tags),
+      scope,
+      projectId,
+      agentId,
+      tags: parseFlexibleStringArray(payload.tags),
       triggeredBy: normalizeText(payload.triggeredBy) || undefined
     });
+    if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
+      void autoOrganizeKnowledge({
+        projectId: normalizeText(payload.projectId) || undefined,
+        agentId: normalizeText(payload.agentId) || undefined,
+        limit: 200
+      });
+    }
     sendSuccess(res, {
       count: items.length,
       items: items.map((item) => ({ id: item.id, title: item.title }))
@@ -191,15 +372,89 @@ export function createKnowledgeV2Router() {
       sendError(res, 400, "VALIDATION_ERROR", "title and content are required");
       return;
     }
+    const scope = normalizeScope(payload.scope);
+    const projectId = normalizeText(payload.projectId) || undefined;
+    const agentId = normalizeText(payload.agentId) || undefined;
+    const scopeError = validateScopeBinding({ scope, projectId, agentId });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
+
     const item = await ingestTextAsKnowledge({
       title,
       content,
-      scope: normalizeScope(payload.scope),
-      projectId: normalizeText(payload.projectId) || undefined,
-      agentId: normalizeText(payload.agentId) || undefined,
+      scope,
+      projectId,
+      agentId,
       tags: asStringArray(payload.tags),
-      importanceScore: Number(payload.importanceScore ?? 0.5)
+      importanceScore: payload.importanceScore === undefined
+        ? undefined
+        : Number(payload.importanceScore)
     });
+    if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
+      void autoOrganizeKnowledge({
+        projectId: normalizeText(payload.projectId) || undefined,
+        agentId: normalizeText(payload.agentId) || undefined,
+        limit: 120
+      });
+    }
+    sendSuccess(res, { id: item.id }, 201);
+  }));
+
+  router.post("/sync-from-hermes", asyncRoute(async (req, res) => {
+    if (!(await ensureSchemaReady(res))) {
+      return;
+    }
+    if (!validateHermesApiKey(req, res)) {
+      return;
+    }
+    const payload = (req.body ?? {}) as HermesMemorySyncBody;
+    const title = normalizeText(payload.title);
+    const content = String(payload.content ?? "");
+    if (!title || !content.trim()) {
+      sendError(res, 400, "VALIDATION_ERROR", "title and content are required");
+      return;
+    }
+
+    const projectId = normalizeText(payload.projectId) || undefined;
+    const scope = projectId ? "project" : normalizeScope(payload.scope);
+    const agentId = normalizeText(payload.agentId) || undefined;
+    const scopeError = validateScopeBinding({ scope, projectId, agentId });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
+    const memoryType = normalizeMemoryType(payload.memoryType) || "semantic";
+    const importanceScore = Number(payload.importanceScore ?? 0.5);
+    const clampedImportance = Number.isFinite(importanceScore)
+      ? Math.max(0, Math.min(1, importanceScore))
+      : 0.5;
+
+    const item = await ingestKnowledgeItem({
+      scope,
+      projectId,
+      agentId,
+      type: "text",
+      title,
+      content,
+      tags: asStringArray(payload.tags),
+      stageContext: asStringArray(payload.stageContext),
+      techStack: asStringArray(payload.techStack),
+      memoryType,
+      importanceScore: clampedImportance,
+      metadata: {
+        source: "hermes",
+        syncedAt: new Date().toISOString()
+      }
+    });
+    if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
+      void autoOrganizeKnowledge({
+        projectId,
+        agentId: normalizeText(payload.agentId) || undefined,
+        limit: 120
+      });
+    }
     sendSuccess(res, { id: item.id }, 201);
   }));
 
@@ -273,6 +528,58 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, { summary });
   }));
 
+  router.get("/for-hermes", asyncRoute(async (req, res) => {
+    if (!(await ensureSchemaReady(res))) {
+      return;
+    }
+    if (!validateHermesApiKey(req, res)) {
+      return;
+    }
+    const projectId = normalizeText(req.query.projectId);
+
+    const limit = parsePositiveInt(req.query.limit, 20, 200);
+    const episodicLimit = Math.max(1, Math.floor(limit / 2));
+    const semanticLimit = Math.max(1, limit - episodicLimit);
+    const [episodic, semantic] = await Promise.all([
+      listKnowledgeItems({
+        scope: projectId ? "project" : undefined,
+        projectId: projectId || undefined,
+        memoryType: "episodic",
+        limit: episodicLimit
+      }),
+      listKnowledgeItems({
+        scope: projectId ? "project" : undefined,
+        projectId: projectId || undefined,
+        memoryType: "semantic",
+        limit: semanticLimit
+      })
+    ]);
+    const merged = [...episodic, ...semantic]
+      .sort((a, b) => {
+        const scoreA = Number(a.importanceScore ?? 0);
+        const scoreB = Number(b.importanceScore ?? 0);
+        if (scoreA !== scoreB) {
+          return scoreB - scoreA;
+        }
+        return b.createdAt.getTime() - a.createdAt.getTime();
+      })
+      .slice(0, limit);
+
+    sendSuccess(res, {
+      items: merged.map((item) => ({
+        id: item.id,
+        projectId: item.projectId,
+        title: item.title,
+        content: item.content,
+        memoryType: item.memoryType,
+        importanceScore: item.importanceScore,
+        tags: asStringArray(item.tags),
+        stageContext: asStringArray(item.stageContext),
+        techStack: asStringArray(item.techStack)
+      }))
+    });
+  }));
+
   router.get("/", asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
@@ -296,6 +603,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, {
       total: items.length,
       items: items.map((item) => ({
+        ...resolveKnowledgeSourceMeta(item.metadata),
         id: item.id,
         scope: item.scope,
         projectId: item.projectId,
@@ -438,10 +746,34 @@ export function createKnowledgeV2Router() {
       sendError(res, 400, "VALIDATION_ERROR", "memoryType must be episodic|semantic|procedural");
       return;
     }
+    const existing = await getKnowledgeItemById(knowledgeId);
+    if (!existing) {
+      sendError(res, 404, "NOT_FOUND", `knowledge not found: ${knowledgeId}`);
+      return;
+    }
+
+    const existingScope = normalizeOptionalScope(existing.scope) ?? "global";
+    const nextScope: KnowledgeScope = normalizeOptionalScope(payload.scope) ?? existingScope;
+    const nextProjectId = payload.projectId === undefined
+      ? existing.projectId
+      : (normalizeText(payload.projectId) || null);
+    const nextAgentId = payload.agentId === undefined
+      ? existing.agentId
+      : (normalizeText(payload.agentId) || null);
+    const scopeError = validateScopeBinding({
+      scope: nextScope,
+      projectId: nextProjectId,
+      agentId: nextAgentId
+    });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
+
     const updated = await updateKnowledgeItemById(knowledgeId, {
-      scope: normalizeOptionalScope(payload.scope),
-      projectId: payload.projectId === undefined ? undefined : (normalizeText(payload.projectId) || null),
-      agentId: payload.agentId === undefined ? undefined : (normalizeText(payload.agentId) || null),
+      scope: nextScope,
+      projectId: nextProjectId,
+      agentId: nextAgentId,
       type: nextType,
       title: payload.title === undefined ? undefined : normalizeText(payload.title),
       content: payload.content === undefined ? undefined : String(payload.content ?? ""),

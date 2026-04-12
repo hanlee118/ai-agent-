@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -301,7 +301,14 @@ async function loadStore(): Promise<StoreSchema> {
 
 async function saveStore(next: StoreSchema) {
   await ensureStoreDir();
-  await writeFile(PRIMARY_STORE_PATH, JSON.stringify(next, null, 2), "utf8");
+  const tempPath = `${PRIMARY_STORE_PATH}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    await writeFile(tempPath, JSON.stringify(next, null, 2), "utf8");
+    await rename(tempPath, PRIMARY_STORE_PATH);
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function loadStoreOrDefault(): Promise<StoreSchema> {

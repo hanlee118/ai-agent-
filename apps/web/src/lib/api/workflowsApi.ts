@@ -6,6 +6,41 @@ export type WorkflowStageOverview = {
   templateKey: string;
   status: 'pending' | 'running' | 'reviewing' | 'completed' | 'failed' | 'skipped' | string;
   assignedAgents: string[];
+  assignedAgentProfiles: Array<{
+    agentId: string;
+    engine: 'hermes' | 'openclaw' | 'unknown' | string;
+    model: string | null;
+  }>;
+  executionEngine: 'hybrid' | 'hermes' | 'openclaw' | 'manual' | 'unknown' | string;
+  artifactSources: {
+    hermes: number;
+    openclaw: number;
+    companion: number;
+    companionError: number;
+    stitch: number;
+    manual: number;
+    other: number;
+  };
+  collaboration: {
+    roleCount: number;
+    roles: string[];
+    analystInvolved: boolean;
+    companionEvidenceCount: number;
+  };
+  collaborationArtifacts: Array<{
+    id: string;
+    name: string;
+    source: string;
+    role: string;
+    primaryRole: string;
+    agentId: string;
+    provider: string | null;
+    model: string | null;
+    knowledgeId: string | null;
+    status: 'success' | 'failed' | string;
+    generatedAt: string | null;
+    preview: string;
+  }>;
   outputArtifactCount: number;
   contextMemoryCount: number;
   gate: {
@@ -50,4 +85,3 @@ export const workflowsApi = {
     return request<WorkflowProjectOverview>(`/v1/workflows/projects/${id}/overview`);
   },
 };
-

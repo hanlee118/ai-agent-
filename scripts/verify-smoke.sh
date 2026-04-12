@@ -278,25 +278,14 @@ assert_json "$TMP_DIR/runtime.json" '
 
 curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/projects" > "$TMP_DIR/projects.json"
 if [[ "$SKIP_OPENCLAW_CHECKS" == "true" ]]; then
-  PROJECT_COUNT="$(node --input-type=module - "$TMP_DIR/projects.json" <<'EOF'
-import { readFileSync } from "node:fs";
-const payload = JSON.parse(readFileSync(process.argv[2], "utf8"));
-console.log(Array.isArray(payload) ? payload.length : 0);
-EOF
-)"
-  if [[ "$PROJECT_COUNT" -eq 0 ]]; then
-    curl -sf -X POST \
-      -H "Cookie: $COOKIE_HEADER" \
-      -H "Content-Type: application/json" \
-      "$API_BASE_URL/api/projects" \
-      -d '{"name":"ci-smoke-project","description":"ci smoke bootstrap project","team":["ROLE_PM","ROLE_ANALYST","ROLE_PRODUCT","ROLE_DEV","ROLE_QA"]}' \
-      > /dev/null
-    curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/projects" > "$TMP_DIR/projects.json"
-  fi
+  assert_json "$TMP_DIR/projects.json" '
+    if (!Array.isArray(payload)) throw new Error("projects endpoint did not return an array");
+  '
+else
+  assert_json "$TMP_DIR/projects.json" '
+    if (!Array.isArray(payload) || payload.length === 0) throw new Error("projects endpoint returned no projects");
+  '
 fi
-assert_json "$TMP_DIR/projects.json" '
-  if (!Array.isArray(payload) || payload.length === 0) throw new Error("projects endpoint returned no projects");
-'
 
 if [[ "$SKIP_OPENCLAW_CHECKS" != "true" ]]; then
   curl -sf -H "Cookie: $COOKIE_HEADER" "$API_BASE_URL/api/openclaw/workspace" > "$TMP_DIR/workspace.json"

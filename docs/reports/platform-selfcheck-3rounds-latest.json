@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-04-10T15:00:48.904Z",
-  "startedAt": "2026-04-10T15:00:25.176Z",
+  "generatedAt": "2026-04-12T14:55:19.178Z",
+  "startedAt": "2026-04-12T14:54:59.840Z",
   "rounds": 3,
   "stepTimeoutMs": 1080000,
   "summary": {
@@ -19,7 +19,7 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 7561,
+          "durationMs": 3349,
           "stdout": "> occ-workspace@1.0.3 verify:smoke /Users/dalongxia/Documents/agentteam\n> bash scripts/verify-smoke.sh\n\nverify-smoke: checking public endpoints\nverify-smoke: creating temporary authenticated session\nverify-smoke: session source = temporary-session\nverify-smoke: checking protected APIs\nverify-smoke: checking local monitor SSE stream\nverify-smoke: ok",
           "stderr": ""
         },
@@ -29,7 +29,7 @@
           "status": "skipped_issue_first",
           "exitCode": 1,
           "signal": null,
-          "durationMs": 242,
+          "durationMs": 502,
           "stdout": "",
           "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n{\n  \"ok\": false,\n  \"error\": \"Error: create failed: 409 {\\\"success\\\":false,\\\"error\\\":{\\\"code\\\":\\\"PROJECT_ISSUE_FIRST_REQUIRED\\\",\\\"message\\\":\\\"当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。\\\"}}\"\n}"
         },
@@ -39,8 +39,8 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 751,
-          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (15ms) - 1\n✅ 核心表结构 (4ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (2ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (34ms) - real-model ready\n✅ GitLab webhook 真链路 (539ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (31ms) - HTTP 200\n✅ 关键路由 /ready (33ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (2ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: 最近一次校验失败：fetch failed\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-10T15-00-33-010Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
+          "durationMs": 991,
+          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (12ms) - 1\n✅ 核心表结构 (4ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (41ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (62ms) - real-model ready\n✅ GitLab webhook 真链路 (655ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (33ms) - HTTP 200\n✅ 关键路由 /ready (33ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (2ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: none\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-12T14-55-03-722Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
           "stderr": ""
         }
       ]
@@ -55,7 +55,7 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 5869,
+          "durationMs": 7370,
           "stdout": "> occ-workspace@1.0.3 verify:smoke /Users/dalongxia/Documents/agentteam\n> bash scripts/verify-smoke.sh\n\nverify-smoke: checking public endpoints\nverify-smoke: creating temporary authenticated session\nverify-smoke: session source = temporary-session\nverify-smoke: checking protected APIs\nverify-smoke: checking local monitor SSE stream\nverify-smoke: ok",
           "stderr": ""
         },
@@ -65,7 +65,7 @@
           "status": "skipped_issue_first",
           "exitCode": 1,
           "signal": null,
-          "durationMs": 249,
+          "durationMs": 244,
           "stdout": "",
           "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n{\n  \"ok\": false,\n  \"error\": \"Error: create failed: 409 {\\\"success\\\":false,\\\"error\\\":{\\\"code\\\":\\\"PROJECT_ISSUE_FIRST_REQUIRED\\\",\\\"message\\\":\\\"当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。\\\"}}\"\n}"
         },
@@ -75,8 +75,8 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 590,
-          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (7ms) - 1\n✅ 核心表结构 (4ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (1ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (31ms) - real-model ready\n✅ GitLab webhook 真链路 (395ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (30ms) - HTTP 200\n✅ 关键路由 /ready (32ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: 最近一次校验失败：fetch failed\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-10T15-00-39-878Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
+          "durationMs": 674,
+          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (21ms) - 1\n✅ 核心表结构 (8ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (1ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (33ms) - real-model ready\n✅ GitLab webhook 真链路 (453ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (34ms) - HTTP 200\n✅ 关键路由 /ready (31ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: none\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-12T14-55-12-328Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
           "stderr": ""
         }
       ]
@@ -91,7 +91,7 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 7462,
+          "durationMs": 5018,
           "stdout": "> occ-workspace@1.0.3 verify:smoke /Users/dalongxia/Documents/agentteam\n> bash scripts/verify-smoke.sh\n\nverify-smoke: checking public endpoints\nverify-smoke: creating temporary authenticated session\nverify-smoke: session source = temporary-session\nverify-smoke: checking protected APIs\nverify-smoke: checking local monitor SSE stream\nverify-smoke: ok",
           "stderr": ""
         },
@@ -101,7 +101,7 @@
           "status": "skipped_issue_first",
           "exitCode": 1,
           "signal": null,
-          "durationMs": 266,
+          "durationMs": 534,
           "stdout": "",
           "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n{\n  \"ok\": false,\n  \"error\": \"Error: create failed: 409 {\\\"success\\\":false,\\\"error\\\":{\\\"code\\\":\\\"PROJECT_ISSUE_FIRST_REQUIRED\\\",\\\"message\\\":\\\"当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。\\\"}}\"\n}"
         },
@@ -111,8 +111,8 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 734,
-          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (6ms) - 1\n✅ 核心表结构 (3ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (2ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (30ms) - real-model ready\n✅ GitLab webhook 真链路 (541ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (31ms) - HTTP 200\n✅ 关键路由 /ready (32ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: 最近一次校验失败：fetch failed\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-10T15-00-48-198Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
+          "durationMs": 654,
+          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (6ms) - 1\n✅ 核心表结构 (5ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (46ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (60ms) - real-model ready\n✅ GitLab webhook 真链路 (340ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (32ms) - HTTP 200\n✅ 关键路由 /ready (32ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (2ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (0ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: none\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-12T14-55-18-552Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
           "stderr": ""
         }
       ]

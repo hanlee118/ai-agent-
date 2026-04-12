@@ -12,6 +12,12 @@ import {
 } from '../../../lib/api';
 import { sendBatchAgentMessage } from '../../../lib/adapters';
 import { agents } from '../../../lib/runtimeCollections';
+import {
+  getTemplateExpectedArtifacts,
+  getTemplateInputPreset,
+  getTemplateRequiredRoles,
+  getTemplateWorkflowSop,
+} from '../utils/workflowTemplateMeta';
 import type {
   AgentRecommendation,
   ClarificationAnswers,
@@ -40,6 +46,7 @@ import {
 } from '../utils/newProjectHelpers';
 
 type UseControllerArgs = NewProjectModalProps;
+type ConfirmIssuePayload = Parameters<typeof issuesApi.confirm>[1];
 
 const INITIAL_FORM_DATA: NewProjectFormData = {
   name: '',
@@ -48,6 +55,10 @@ const INITIAL_FORM_DATA: NewProjectFormData = {
   dueDate: '',
   agentIds: [],
 };
+
+function uniqueNormalizedRoles(input: string[]) {
+  return Array.from(new Set(input.map((item) => normalizeRoleId(item)).filter(Boolean)));
+}
 
 export function useNewProjectModalController({
   isOpen,
@@ -87,7 +98,16 @@ export function useNewProjectModalController({
   const [isCreating, setIsCreating] = useState(false);
   const [isSavingAlignment, setIsSavingAlignment] = useState(false);
   const [showManualForm, setShowManualForm] = useState(false);
+  const [projectType, setProjectType] = useState<'complete' | 'standalone' | 'relay'>('complete');
+  const [parentProjectId, setParentProjectId] = useState('');
+  const [relaySourceStageId, setRelaySourceStageId] = useState('');
+  const [standaloneInputName, setStandaloneInputName] = useState('raw_requirements');
+  const [standaloneInputType, setStandaloneInputType] = useState('document');
+  const [standaloneInputContent, setStandaloneInputContent] = useState('');
+  const [workflowTemplateKey, setWorkflowTemplateKey] = useState('standard_software_development');
+  const [autoStartWorkflow, setAutoStartWorkflow] = useState(true);
   const [formData, setFormData] = useState<NewProjectFormData>(INITIAL_FORM_DATA);
+  const enforceIndustryAssemblyRule = workflowTemplateKey === 'none';
 
   const allowedRoleIds = useMemo(
     () => selectedIndustryConfig?.roleSet.roleIds || [],
@@ -131,6 +151,119 @@ export function useNewProjectModalController({
     const filtered = pool.filter((agent) => allowed.has(getAgentRoleId(agent)));
     return filtered.length > 0 ? filtered : pool;
   }, [allowedRoleIds]);
+
+  const requiredWorkflowRoles = useMemo(() => {
+    if (workflowTemplateKey === 'none') {
+      return [] as string[];
+    }
+    const explicit = getTemplateRequiredRoles(workflowTemplateKey);
+    const fallbackByMode = projectType === 'complete'
+      ? getTemplateRequiredRoles('standard_software_development')
+      : getTemplateRequiredRoles('requirements_design');
+    const merged = uniqueNormalizedRoles(explicit.length > 0 ? explicit : fallbackByMode);
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId) {
+      return uniqueNormalizedRoles([soulRoleId, ...merged]);
+    }
+    return merged;
+  }, [workflowTemplateKey, projectType, enforceIndustryAssemblyRule, requiresSoulRole, soulRoleId]);
+
+  const applyTemplateRolePlan = (seedRoleIds: string[]) => {
+    const normalizedSeed = uniqueNormalizedRoles(seedRoleIds);
+    if (workflowTemplateKey === 'none') {
+      return normalizedSeed;
+    }
+    if (projectType === 'complete') {
+      return uniqueNormalizedRoles([...requiredWorkflowRoles, ...normalizedSeed]);
+    }
+    return requiredWorkflowRoles.length > 0
+      ? requiredWorkflowRoles
+      : normalizedSeed;
+  };
+
+  const selectedWorkflowRoleIds = useMemo(
+    () => uniqueNormalizedRoles(analysisRecommendations.map((item) => item.roleId)),
+    [analysisRecommendations],
+  );
+
+  const missingWorkflowRoles = useMemo(
+    () => requiredWorkflowRoles.filter((roleId) => !selectedWorkflowRoleIds.includes(normalizeRoleId(roleId))),
+    [requiredWorkflowRoles, selectedWorkflowRoleIds],
+  );
+
+  const activeExpectedArtifacts = useMemo(
+    () => getTemplateExpectedArtifacts(workflowTemplateKey, issuePreview?.expectedArtifacts || []),
+    [workflowTemplateKey, issuePreview],
+  );
+
+  const activeWorkflowSop = useMemo(
+    () => getTemplateWorkflowSop(workflowTemplateKey, issuePreview?.workflow || null),
+    [workflowTemplateKey, issuePreview],
+  );
+
+  useEffect(() => {
+    if (!(projectType === 'standalone' || projectType === 'relay')) {
+      return;
+    }
+    const preset = getTemplateInputPreset(workflowTemplateKey);
+    const normalizedName = String(standaloneInputName || '').trim().toLowerCase();
+    if (!normalizedName || normalizedName === 'rawrequirements' || normalizedName === 'raw_requirements') {
+      setStandaloneInputName(preset.name);
+    }
+    const normalizedType = String(standaloneInputType || '').trim().toLowerCase();
+    if (!normalizedType || normalizedType === 'document' || normalizedType === 'text') {
+      setStandaloneInputType(preset.type);
+    }
+  }, [projectType, workflowTemplateKey]);
+
+  useEffect(() => {
+    if (!parsedProject) {
+      return;
+    }
+
+    const seedRoleIds = analysisRecommendations.length > 0
+      ? analysisRecommendations.map((item) => item.roleId)
+      : parsedProject.team;
+    const nextPlannedRoles = applyTemplateRolePlan(seedRoleIds);
+    if (nextPlannedRoles.length === 0) {
+      return;
+    }
+
+    const nextRecommendations = buildRoleBasedAgentRecommendations(nextPlannedRoles, {
+      allowedRoleIds,
+      mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+      soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
+    });
+    if (nextRecommendations.length === 0) {
+      return;
+    }
+
+    const prevAgentIds = analysisRecommendations.map((item) => item.agentId).join('|');
+    const nextAgentIds = nextRecommendations.map((item) => item.agentId).join('|');
+    if (prevAgentIds !== nextAgentIds) {
+      setAnalysisRecommendations(nextRecommendations);
+    }
+
+    const nextRoleIds = uniqueNormalizedRoles(nextRecommendations.map((item) => item.roleId));
+    const prevRoleIds = uniqueNormalizedRoles(parsedProject.team);
+    if (nextRoleIds.join('|') !== prevRoleIds.join('|')) {
+      setParsedProject((prev) => (prev
+        ? {
+            ...prev,
+            team: nextRoleIds,
+            agents: nextRecommendations.map((item) => item.name),
+          }
+        : prev));
+    }
+  }, [
+    workflowTemplateKey,
+    projectType,
+    allowedRoleIds,
+    enforceIndustryAssemblyRule,
+    requiresSoulRole,
+    soulRoleId,
+    parsedProject,
+    analysisRecommendations,
+  ]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -350,6 +483,14 @@ export function useNewProjectModalController({
     setIsCreating(false);
     setIsSavingAlignment(false);
     setShowManualForm(false);
+    setProjectType('complete');
+    setParentProjectId('');
+    setRelaySourceStageId('');
+    setStandaloneInputName('raw_requirements');
+    setStandaloneInputType('document');
+    setStandaloneInputContent('');
+    setWorkflowTemplateKey('standard_software_development');
+    setAutoStartWorkflow(true);
     setFormData(INITIAL_FORM_DATA);
   };
 
@@ -412,6 +553,15 @@ export function useNewProjectModalController({
     setAnalysisRecommendations((prev) => {
       const exists = prev.some((item) => item.agentId === agentId);
       if (exists) {
+        const target = prev.find((item) => item.agentId === agentId);
+        const targetRoleId = normalizeRoleId(target?.roleId || '');
+        if (targetRoleId && requiredWorkflowRoles.includes(targetRoleId)) {
+          const roleCount = prev.filter((item) => normalizeRoleId(item.roleId) === targetRoleId).length;
+          if (roleCount <= 1) {
+            addToast(`当前模板要求保留角色 ${roleLabel(targetRoleId)}，请先调整模板或补充同角色 Agent`, 'error');
+            return prev;
+          }
+        }
         return prev.filter((item) => item.agentId !== agentId);
       }
       const manual = buildManualRecommendation(agentId);
@@ -433,16 +583,17 @@ export function useNewProjectModalController({
         industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
         sourceType: issueSourceType,
         debateMode: 'model',
+        workflowTemplateKey,
       });
 
       const refreshedRoleIds = (refreshed.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
       const constrainedRoleIds = allowedRoleIds.length > 0
         ? refreshedRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
         : refreshedRoleIds;
-      const refreshedRecommendations = buildRoleBasedAgentRecommendations(constrainedRoleIds, {
+      const refreshedRecommendations = buildRoleBasedAgentRecommendations(applyTemplateRolePlan(constrainedRoleIds), {
         allowedRoleIds,
-        mustHaveSoulRole: requiresSoulRole,
-        soulRoleId,
+        mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+        soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
       });
 
       setIssuePreview(refreshed);
@@ -497,17 +648,18 @@ export function useNewProjectModalController({
         input,
         industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
         sourceType: issueSourceType,
+        workflowTemplateKey,
       });
 
       const parsedTeamRoleIds = (preview?.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
       const constrainedTeamRoleIds = allowedRoleIds.length > 0
         ? parsedTeamRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
         : parsedTeamRoleIds;
-
-      const recommendations = buildRoleBasedAgentRecommendations(constrainedTeamRoleIds, {
+      const plannedRoleIds = applyTemplateRolePlan(constrainedTeamRoleIds);
+      const recommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
         allowedRoleIds,
-        mustHaveSoulRole: requiresSoulRole,
-        soulRoleId,
+        mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+        soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
       });
       const recommendedNames = recommendations.map((item) => item.name);
       const recommendationRoleIds = Array.from(new Set(recommendations.map((item) => normalizeRoleId(item.roleId))));
@@ -544,7 +696,7 @@ export function useNewProjectModalController({
       });
       setStep('analysis');
 
-      if (requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
+      if (enforceIndustryAssemblyRule && requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
         addToast(`已完成需求分析，但当前未匹配到灵魂角色 ${roleLabel(soulRoleId)}，请手动补充`, 'error');
       } else {
         addToast(
@@ -617,15 +769,28 @@ export function useNewProjectModalController({
     const names = analysisRecommendations.map((item) => item.name);
     const nextRoleIds = roleIds.length > 0 ? roleIds : parsedProject.team.map((role) => normalizeRoleId(role));
 
-    if (requiresSoulRole && soulRoleId && !nextRoleIds.includes(normalizeRoleId(soulRoleId))) {
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !nextRoleIds.includes(normalizeRoleId(soulRoleId))) {
       addToast(`当前行业团队必须包含灵魂角色 ${roleLabel(soulRoleId)}，请先补充后再继续`, 'error');
       return;
     }
 
-    const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
-    if (minRoles > 0 && nextRoleIds.length < minRoles) {
-      addToast(`当前行业最少需要 ${minRoles} 个角色，请继续补充团队`, 'error');
-      return;
+    if (enforceIndustryAssemblyRule) {
+      const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
+      if (minRoles > 0 && nextRoleIds.length < minRoles) {
+        addToast(`当前行业最少需要 ${minRoles} 个角色，请继续补充团队`, 'error');
+        return;
+      }
+    }
+
+    if (workflowTemplateKey !== 'none') {
+      const missingTemplateRoles = requiredWorkflowRoles.filter((roleId) => !nextRoleIds.includes(normalizeRoleId(roleId)));
+      if (missingTemplateRoles.length > 0) {
+        addToast(
+          `当前阶段模板缺少关键角色: ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}`,
+          'error',
+        );
+        return;
+      }
     }
 
     setParsedProject((prev) => {
@@ -654,6 +819,21 @@ export function useNewProjectModalController({
       addToast(issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足推进条件，请等待正式讨论完成', 'info');
       return;
     }
+    if (workflowTemplateKey !== 'none') {
+      const currentRoleIds = uniqueNormalizedRoles(
+        analysisRecommendations.length > 0
+          ? analysisRecommendations.map((item) => item.roleId)
+          : parsedProject.team,
+      );
+      const missingTemplateRoles = requiredWorkflowRoles.filter((roleId) => !currentRoleIds.includes(normalizeRoleId(roleId)));
+      if (missingTemplateRoles.length > 0) {
+        addToast(
+          `无法创建：当前阶段模板缺少角色 ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}`,
+          'error',
+        );
+        return;
+      }
+    }
 
     const effectiveSummary = String(editableDraft?.summary || issuePreview?.summary || parsedProject.description).trim();
     const effectiveProblemStatement = String(editableDraft?.problemStatement || issuePreview?.refinement.problemStatement || '').trim();
@@ -677,6 +857,11 @@ export function useNewProjectModalController({
     const effectiveContextNotes = parseMultiline(
       editableDraft?.contextNotes ?? toMultilineText(issuePreview?.contextAlignment.contextNotes),
     );
+    const conciseContextNotes = effectiveContextNotes
+      .map((item) => String(item || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .map((item) => (item.length > 90 ? `${item.slice(0, 89)}…` : item))
+      .slice(0, 2);
     const effectiveDesignTheme = String(editableDraft?.designTheme || issuePreview?.designBlueprint.designTheme || '').trim();
     const effectiveValueNarrative = String(
       editableDraft?.valueNarrative || issuePreview?.designBlueprint.valueNarrative || '',
@@ -715,17 +900,16 @@ export function useNewProjectModalController({
       ? `讨论分歧处理: ${discussionOverride.trim()}`
       : '';
 
-    const artifactsBlock = (issuePreview?.expectedArtifacts || [])
+    const artifactsBlock = activeExpectedArtifacts
       .map((artifact) => `- ${artifact.name}（${roleLabel(artifact.ownerRoleId)} / ${artifact.stageType}）`)
       .join('\n');
 
     const alignmentBlock = issuePreview
       ? [
-          `产品: ${issuePreview.contextAlignment.productName}`,
-          `使命锚点: ${effectiveMissionAnchor || '未填写'}`,
+          effectiveMissionAnchor ? `使命锚点: ${effectiveMissionAnchor}` : null,
           effectiveGoals.length > 0 ? `对齐目标: ${effectiveGoals.join('；')}` : null,
           effectivePrinciples.length > 0 ? `对齐原则: ${effectivePrinciples.join('；')}` : null,
-          effectiveContextNotes.length > 0 ? `上下文参考: ${effectiveContextNotes.join('；')}` : null,
+          conciseContextNotes.length > 0 ? `上下文参考: ${conciseContextNotes.join('；')}` : null,
         ]
           .filter(Boolean)
           .join('\n')
@@ -769,10 +953,10 @@ export function useNewProjectModalController({
             effectiveAcceptanceDraft.length > 0 ? `初始验收: ${effectiveAcceptanceDraft.join('；')}` : null,
           ].filter(Boolean).join('\n')
         : null,
-      selectedIndustryConfig
+      selectedIndustryConfig && enforceIndustryAssemblyRule
         ? `行业角色集: ${selectedIndustryConfig.roleSet.industryName} (${selectedIndustryConfig.roleSet.industryCode})`
         : null,
-      selectedIndustryConfig
+      selectedIndustryConfig && enforceIndustryAssemblyRule
         ? `灵魂角色: ${roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}`
         : null,
       issuePreview ? `Issue: ${issuePreview.title}` : null,
@@ -803,6 +987,23 @@ export function useNewProjectModalController({
 
     setIsCreating(true);
     try {
+      if (projectType === 'relay' && !parentProjectId.trim()) {
+        addToast('接力模式需要填写来源项目 ID', 'error');
+        setIsCreating(false);
+        return;
+      }
+      const effectiveStandaloneInputContent = standaloneInputContent.trim()
+        || ((projectType === 'standalone' || projectType === 'relay') ? sourceInput.trim() : '');
+      const projectInputs: NonNullable<ConfirmIssuePayload['projectInputs']> = effectiveStandaloneInputContent
+        ? [{
+            name: standaloneInputName.trim() || 'raw_requirements',
+            type: standaloneInputType.trim() || 'document',
+            content: effectiveStandaloneInputContent,
+            inputSource: standaloneInputContent.trim()
+              ? (projectType === 'relay' ? 'imported_from_project' : 'manual')
+              : 'manual',
+          }]
+        : [];
       const confirmation = await issuesApi.confirm(issuePreview.issueId, {
         finalName: parsedProject.name,
         finalDescription,
@@ -811,12 +1012,18 @@ export function useNewProjectModalController({
         },
         teamRoleIds: parsedProject.team,
         conflictResolution: conflictResolution.trim() || undefined,
+        projectType,
+        parentProjectId: parentProjectId.trim() || undefined,
+        relaySourceStageId: relaySourceStageId.trim() || undefined,
+        projectInputs,
+        workflowTemplateKey: workflowTemplateKey.trim() || undefined,
+        autoStartWorkflow,
       });
       const created = confirmation.project;
       addToast(`项目已创建: ${created.name || parsedProject.name}`, 'success');
 
       if (assignedAgentIds.length > 0) {
-        const artifactsText = (issuePreview?.expectedArtifacts || [])
+        const artifactsText = activeExpectedArtifacts
           .map((artifact) => `- ${artifact.name}（${roleLabel(artifact.ownerRoleId)}）`)
           .join('\n');
         const executionInstruction = [
@@ -878,15 +1085,28 @@ export function useNewProjectModalController({
       new Set(manualSelected.map((agent) => normalizeRoleId(getAgentRoleId(agent!)))),
     );
 
-    if (requiresSoulRole && soulRoleId && !manualRoleIds.includes(normalizeRoleId(soulRoleId))) {
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !manualRoleIds.includes(normalizeRoleId(soulRoleId))) {
       addToast(`当前行业团队必须包含灵魂角色 ${roleLabel(soulRoleId)}`, 'error');
       return;
     }
 
-    const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
-    if (minRoles > 0 && manualRoleIds.length < minRoles) {
-      addToast(`当前行业最少需要 ${minRoles} 个角色，请继续选择`, 'error');
-      return;
+    if (enforceIndustryAssemblyRule) {
+      const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
+      if (minRoles > 0 && manualRoleIds.length < minRoles) {
+        addToast(`当前行业最少需要 ${minRoles} 个角色，请继续选择`, 'error');
+        return;
+      }
+    }
+    if (workflowTemplateKey !== 'none') {
+      const requiredPlannedRoles = applyTemplateRolePlan(manualRoleIds);
+      const missingTemplateRoles = requiredPlannedRoles.filter((roleId) => !manualRoleIds.includes(normalizeRoleId(roleId)));
+      if (missingTemplateRoles.length > 0) {
+        addToast(
+          `当前模板要求角色: ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}，请先补充对应 Agent`,
+          'error',
+        );
+        return;
+      }
     }
 
     setIsParsing(true);
@@ -896,6 +1116,7 @@ export function useNewProjectModalController({
         input: formData.description.trim(),
         industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
         sourceType: (issueSourceType === 'prd' ? 'prd' : 'text') as IssueSourceType,
+        workflowTemplateKey,
       });
     } catch (error) {
       addToast(`手动模式需求分析失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
@@ -921,16 +1142,24 @@ export function useNewProjectModalController({
         && (manualPreview.debateTask.status === 'queued' || manualPreview.debateTask.status === 'running'),
     ));
 
-    setAnalysisRecommendations(
-      manualSelected.map((agent) => ({
-        agentId: agent!.id,
-        roleId: getAgentRoleId(agent!),
-        name: agent!.name,
-        role: agent!.role,
-        score: 1,
-        reason: '手动指定参与该项目',
-      })),
-    );
+    const manualRecommendations = manualSelected.map((agent) => ({
+      agentId: agent!.id,
+      roleId: getAgentRoleId(agent!),
+      name: agent!.name,
+      role: agent!.role,
+      score: 1,
+      reason: '手动指定参与该项目',
+    }));
+    const plannedRoleIds = applyTemplateRolePlan(manualRoleIds);
+    const templateRecommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
+      allowedRoleIds,
+      mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+      soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
+    });
+    const mergedRecommendations = templateRecommendations.length > 0
+      ? templateRecommendations
+      : manualRecommendations;
+    setAnalysisRecommendations(mergedRecommendations);
     setDetectedDomains(detectDomains(formData.description.trim()));
     setClarification((prev) => ({
       ...prev,
@@ -941,9 +1170,11 @@ export function useNewProjectModalController({
       name: formData.name.trim(),
       description: formData.description.trim(),
       phase: '规划中',
-      agents: manualNames.length > 0 ? manualNames : agents.slice(0, 3).map((agent) => agent.name),
+      agents: mergedRecommendations.length > 0
+        ? mergedRecommendations.map((item) => item.name)
+        : (manualNames.length > 0 ? manualNames : agents.slice(0, 3).map((agent) => agent.name)),
       priority: formData.priority,
-      team: manualRoleIds,
+      team: uniqueNormalizedRoles(mergedRecommendations.map((item) => item.roleId)),
     });
     setDiscussionOverride('');
     setStep('team');
@@ -1135,6 +1366,8 @@ export function useNewProjectModalController({
     setParsedProject,
     issuePreview,
     setIssuePreview,
+    activeExpectedArtifacts,
+    activeWorkflowSop,
     editableDraft,
     setEditableDraft,
     issueAnswers,
@@ -1162,12 +1395,31 @@ export function useNewProjectModalController({
     isSavingAlignment,
     showManualForm,
     setShowManualForm,
+    projectType,
+    setProjectType,
+    parentProjectId,
+    setParentProjectId,
+    relaySourceStageId,
+    setRelaySourceStageId,
+    standaloneInputName,
+    setStandaloneInputName,
+    standaloneInputType,
+    setStandaloneInputType,
+    standaloneInputContent,
+    setStandaloneInputContent,
+    workflowTemplateKey,
+    setWorkflowTemplateKey,
+    requiredWorkflowRoles,
+    missingWorkflowRoles,
+    autoStartWorkflow,
+    setAutoStartWorkflow,
     formData,
     setFormData,
     allowedRoleIds,
     recommendedRoleIds,
     requiresSoulRole,
     soulRoleId,
+    enforceIndustryAssemblyRule,
     hrRoleEnabled,
     industryAgents,
     handleClose,

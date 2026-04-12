@@ -125,6 +125,14 @@ export interface IssueExpectedArtifact {
   ownerRoleId: RoleType;
 }
 
+export type IssueWorkflowTemplateKey =
+  | "standard_software_development"
+  | "requirements_design"
+  | "visual_design"
+  | "tech_design"
+  | "code_dev"
+  | "qa_acceptance";
+
 export interface IssueContextAlignment {
   productName: string;
   missionAnchor: string;
@@ -288,16 +296,25 @@ function inferTrafficTrigger(text: string) {
   return "当商品指标异常上涨时";
 }
 
+function toConciseMissionText(text: string, maxLength = 48) {
+  const sentence = trimSentenceTail(extractFirstSentence(text));
+  const normalized = sentence.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  return truncateText(normalized, maxLength);
+}
+
 function inferIssueMissionAnchor(rawInput: string) {
   const profile = detectScenarioProfile(rawInput);
   if (profile.isCrossBorderEcomSelection) {
-    return "让跨境团队更快发现爆品、持续跟踪商品变化，并基于数据证据完成跟品决策。";
+    return "跨境选品与跟品决策可追溯、可复盘、可快速响应。";
   }
-  const headline = truncateText(trimSentenceTail(extractFirstSentence(rawInput)), 50);
+  const headline = toConciseMissionText(rawInput, 42);
   if (!headline) {
-    return "让需求到研发闭环可追踪、可验收、可持续复用。";
+    return "需求到研发闭环可追踪、可验收。";
   }
-  return `围绕“${headline}”构建可追踪需求闭环，并确保交付可验收。`;
+  return headline;
 }
 
 function buildFallbackAlignmentSuggestions(rawInput: string) {
@@ -632,13 +649,12 @@ export function buildRequirementRefinement(rawInput: string): RequirementRefinem
     acceptanceDraft: [
       "关键需求点被结构化确认",
       "设计阶段必须提交并通过设计审查卡",
-      "团队已分配且含灵魂角色",
       "项目创建后可直接下发执行"
     ]
   };
 }
 
-function asUniqueRoleList(roleIds: RoleType[], soulRoleId: RoleType) {
+function asUniqueRoleList(roleIds: RoleType[], soulRoleId: RoleType, includeSoulRole: boolean) {
   const ordered: RoleType[] = [];
   const push = (roleId: RoleType) => {
     if (!ordered.includes(roleId)) {
@@ -646,7 +662,9 @@ function asUniqueRoleList(roleIds: RoleType[], soulRoleId: RoleType) {
     }
   };
 
-  push(soulRoleId);
+  if (includeSoulRole) {
+    push(soulRoleId);
+  }
   for (const roleId of roleIds) {
     push(roleId);
   }
@@ -851,12 +869,14 @@ function buildGenericDiscussion(
 export function buildIssueDiscussion(
   rawInput: string,
   roleIds: RoleType[],
-  soulRoleId: RoleType
+  soulRoleId: RoleType,
+  options?: { includeSoulRole?: boolean }
 ): IssueDiscussionItem[] {
   const issue = firstSentence(rawInput) || "当前需求";
   const profile = detectScenarioProfile(rawInput);
   const signals = inferDiscussionSignals(rawInput);
-  const focusedRoles = asUniqueRoleList(roleIds, soulRoleId)
+  const includeSoulRole = options?.includeSoulRole ?? true;
+  const focusedRoles = asUniqueRoleList(roleIds, soulRoleId, includeSoulRole)
     .filter((roleId) => ROLE_LABELS[roleId])
     .slice(0, 6);
 
@@ -868,8 +888,17 @@ export function buildIssueDiscussion(
   });
 }
 
-export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
-  return [
+const ISSUE_TEMPLATE_REQUIRED_ROLES: Record<IssueWorkflowTemplateKey, RoleType[]> = {
+  standard_software_development: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"],
+  requirements_design: ["ROLE_PM", "ROLE_ANALYST"],
+  visual_design: ["ROLE_ANALYST", "ROLE_DESIGN"],
+  tech_design: ["ROLE_ANALYST", "ROLE_ARCH"],
+  code_dev: ["ROLE_ANALYST", "ROLE_ARCH", "ROLE_DEV"],
+  qa_acceptance: ["ROLE_ANALYST", "ROLE_QA"]
+};
+
+const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedArtifact[]> = {
+  standard_software_development: [
     {
       id: "artifact-analysis-doc",
       name: "需求分析文档",
@@ -926,7 +955,297 @@ export function buildExpectedArtifacts(): IssueExpectedArtifact[] {
       stageType: "ACCEPT",
       ownerRoleId: "ROLE_QA"
     }
-  ];
+  ],
+  requirements_design: [
+    {
+      id: "artifact-analysis-doc",
+      name: "需求分析文档",
+      description: "面向后续阶段的结构化需求、边界、约束与风险分析。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_ANALYST"
+    },
+    {
+      id: "artifact-requirement-contract",
+      name: "需求确认单",
+      description: "明确目标、范围、验收标准与阶段交接条件。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_PM"
+    },
+    {
+      id: "artifact-schedule",
+      name: "阶段排期与里程碑",
+      description: "当前阶段的里程碑、负责人与风险缓冲计划。",
+      stageType: "ANALYSIS",
+      ownerRoleId: "ROLE_PM"
+    }
+  ],
+  visual_design: [
+    {
+      id: "artifact-design-review",
+      name: "设计审查卡",
+      description: "视觉方向、信息层级、可访问性检查与审查结论。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_DESIGN"
+    },
+    {
+      id: "artifact-visual-preview",
+      name: "视觉定稿单页",
+      description: "可直接用于评审与交接的静态图或 HTML 单页设计稿。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_DESIGN"
+    }
+  ],
+  tech_design: [
+    {
+      id: "artifact-tech-plan",
+      name: "技术方案与选型",
+      description: "系统边界、技术选型、风险取舍与非功能约束。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_ARCH"
+    },
+    {
+      id: "artifact-api-contract",
+      name: "接口与数据契约",
+      description: "API 契约、数据模型、错误语义与联调约定。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_ARCH"
+    }
+  ],
+  code_dev: [
+    {
+      id: "artifact-impl-result",
+      name: "实现结果说明",
+      description: "核心功能实现、代码变更摘要与关键验证证据。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_DEV"
+    },
+    {
+      id: "artifact-runtime-delivery",
+      name: "运行地址与部署说明",
+      description: "运行入口、部署方式、环境变量与联调步骤。",
+      stageType: "DEV",
+      ownerRoleId: "ROLE_DEV"
+    }
+  ],
+  qa_acceptance: [
+    {
+      id: "artifact-test-plan",
+      name: "测试计划与用例清单",
+      description: "覆盖范围、测试策略、关键用例与阻断项定义。",
+      stageType: "ACCEPT",
+      ownerRoleId: "ROLE_QA"
+    },
+    {
+      id: "artifact-test-report",
+      name: "测试报告",
+      description: "执行结果、缺陷结论、回归建议与发布建议。",
+      stageType: "ACCEPT",
+      ownerRoleId: "ROLE_QA"
+    }
+  ]
+};
+
+const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
+  roleId: RoleType;
+  title: string;
+  input: string;
+  output: string;
+}>> = {
+  standard_software_development: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "需求理解与边界识别",
+      input: "Issue + Product Spec + 历史变更",
+      output: "需求分析文档、关键风险与冲突点"
+    },
+    {
+      roleId: "ROLE_PM",
+      title: "阶段目标与排期确认",
+      input: "需求分析文档",
+      output: "里程碑计划、负责人与交接条件"
+    },
+    {
+      roleId: "ROLE_DESIGN",
+      title: "视觉与交互方案审查",
+      input: "需求确认单",
+      output: "设计审查卡、视觉定稿单页"
+    },
+    {
+      roleId: "ROLE_ARCH",
+      title: "技术方案与契约设计",
+      input: "需求确认单 + 设计审查卡",
+      output: "技术方案、接口与数据契约"
+    },
+    {
+      roleId: "ROLE_DEV",
+      title: "研发实现与联调",
+      input: "技术方案与任务拆解",
+      output: "实现结果说明、运行地址与部署说明"
+    },
+    {
+      roleId: "ROLE_QA",
+      title: "回归验收与发布建议",
+      input: "实现结果与验收口径",
+      output: "测试报告、发布建议"
+    }
+  ],
+  requirements_design: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "需求理解与边界识别",
+      input: "Issue + 业务背景 + 历史经验",
+      output: "需求分析文档（范围/约束/风险）"
+    },
+    {
+      roleId: "ROLE_PM",
+      title: "需求确认与阶段排期",
+      input: "需求分析文档",
+      output: "需求确认单、阶段排期与交接条件"
+    }
+  ],
+  visual_design: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "需求边界与验收口径复核",
+      input: "需求确认单 + 品牌约束",
+      output: "视觉阶段需求边界与验收口径"
+    },
+    {
+      roleId: "ROLE_DESIGN",
+      title: "视觉方向与信息架构",
+      input: "视觉阶段需求边界与验收口径",
+      output: "视觉框架、信息层级与交互草案"
+    },
+    {
+      roleId: "ROLE_DESIGN",
+      title: "交互细节与设计定稿",
+      input: "视觉框架与交互草案",
+      output: "设计审查卡、视觉定稿单页"
+    }
+  ],
+  tech_design: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "需求约束与技术边界复核",
+      input: "需求确认单 + 设计约束",
+      output: "技术设计阶段需求边界与约束清单"
+    },
+    {
+      roleId: "ROLE_ARCH",
+      title: "技术边界与架构设计",
+      input: "技术设计阶段需求边界与约束清单",
+      output: "技术方案与选型结论"
+    },
+    {
+      roleId: "ROLE_ARCH",
+      title: "接口与数据契约定义",
+      input: "技术方案与选型",
+      output: "API 契约、数据模型与联调规范"
+    }
+  ],
+  code_dev: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "业务目标与验收口径复核",
+      input: "技术方案与阶段目标",
+      output: "研发阶段业务目标与验收口径"
+    },
+    {
+      roleId: "ROLE_ARCH",
+      title: "研发任务拆解与技术守护线",
+      input: "研发阶段业务目标与验收口径",
+      output: "任务拆解、实现边界与技术约束"
+    },
+    {
+      roleId: "ROLE_DEV",
+      title: "代码实现与联调验证",
+      input: "任务拆解与技术约束",
+      output: "实现结果说明、代码与联调证据"
+    },
+    {
+      roleId: "ROLE_DEV",
+      title: "运行交付与部署准备",
+      input: "实现结果说明",
+      output: "运行地址、部署说明与回滚预案"
+    }
+  ],
+  qa_acceptance: [
+    {
+      roleId: "ROLE_ANALYST",
+      title: "验收标准与业务口径复核",
+      input: "需求确认单 + 实现结果",
+      output: "验收口径清单与测试关注点"
+    },
+    {
+      roleId: "ROLE_QA",
+      title: "测试计划与用例设计",
+      input: "验收口径清单与测试关注点",
+      output: "测试计划、覆盖矩阵与验收用例"
+    },
+    {
+      roleId: "ROLE_QA",
+      title: "回归验收与发布建议",
+      input: "测试执行结果",
+      output: "测试报告、阻断项与发布建议"
+    }
+  ]
+};
+
+export function resolveIssueWorkflowTemplateKey(input: unknown): IssueWorkflowTemplateKey {
+  const text = String(input ?? "").trim().toLowerCase();
+  if (!text || text === "none") {
+    return "standard_software_development";
+  }
+  if (
+    text === "standard_software_development"
+    || text === "requirements_design"
+    || text === "visual_design"
+    || text === "tech_design"
+    || text === "code_dev"
+    || text === "qa_acceptance"
+  ) {
+    return text;
+  }
+  return "standard_software_development";
+}
+
+export function getTemplateRequiredRoles(templateKey: unknown): RoleType[] {
+  const key = resolveIssueWorkflowTemplateKey(templateKey);
+  return [...(ISSUE_TEMPLATE_REQUIRED_ROLES[key] || [])];
+}
+
+export function buildIssueWorkflowSop(templateKey: unknown) {
+  const key = resolveIssueWorkflowTemplateKey(templateKey);
+  const workflowNameMap: Record<IssueWorkflowTemplateKey, string> = {
+    standard_software_development: "标准软件开发协作流程",
+    requirements_design: "需求设计阶段协作流程",
+    visual_design: "视觉设计阶段协作流程",
+    tech_design: "技术设计阶段协作流程",
+    code_dev: "代码研发阶段协作流程",
+    qa_acceptance: "QA 验收阶段协作流程"
+  };
+  const stepDefs = ISSUE_TEMPLATE_WORKFLOW_STEPS[key] || ISSUE_TEMPLATE_WORKFLOW_STEPS.standard_software_development;
+  return {
+    id: `workflow-${key}`,
+    name: workflowNameMap[key],
+    steps: stepDefs.map((step, index) => ({
+      order: index + 1,
+      roleId: step.roleId,
+      title: step.title,
+      input: step.input,
+      output: step.output
+    })),
+    requiredRoleIds: Array.from(new Set(stepDefs.map((step) => step.roleId))),
+    isDefault: key === "standard_software_development",
+    version: "v2",
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function buildExpectedArtifacts(templateKey?: unknown): IssueExpectedArtifact[] {
+  const key = resolveIssueWorkflowTemplateKey(templateKey);
+  const artifacts = ISSUE_TEMPLATE_ARTIFACTS[key] || ISSUE_TEMPLATE_ARTIFACTS.standard_software_development;
+  return artifacts.map((item) => ({ ...item }));
 }
 
 export function buildContextAlignment(
@@ -995,6 +1314,11 @@ export function buildContextAlignment(
       || hasContextTokenOverlap(rawInput, productContext.background)
     )
   );
+  const relevantConstraints = (productContext.constraints ?? [])
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .filter((item) => hasContextTokenOverlap(rawInput, item))
+    .slice(0, 3);
   const shouldPreferIssueMission = Boolean(
     !String(productContext.mission ?? "").trim()
     || hasIndustryMismatch
@@ -1005,35 +1329,28 @@ export function buildContextAlignment(
 
   const contextNotes = [
     shouldIncludeBackground ? `背景: ${productContext.background}` : "",
-    productContext.constraints.length > 0 ? `约束: ${productContext.constraints.slice(0, 3).join("、")}` : ""
+    relevantConstraints.length > 0 ? `约束: ${relevantConstraints.join("、")}` : ""
   ].filter(Boolean);
   if (hasIndustryMismatch) {
     const requestedLabel = INDUSTRY_LABELS[inputIndustry] ?? inputIndustry;
     const contextLabel = INDUSTRY_LABELS[contextIndustry] ?? contextIndustry;
     contextNotes.push(`检测到需求更偏向「${requestedLabel}」，当前产品说明文档背景更偏向「${contextLabel}」，建议先修正文档背景或确认本次跨行业策略。`);
   }
-  if (shouldPreferIssueMission) {
-    contextNotes.push("本次草案已优先按当前需求语义生成，未直接复用历史使命表述。");
-  }
-  if (missingContextGoals || missingContextPrinciples) {
-    contextNotes.push("当前产品说明文档尚未维护完整目标/原则，已基于本次需求自动生成初始对齐建议。");
-  }
-  if (requiresCrossBorderScene) {
-    contextNotes.push(
-      sceneHitPassed
-        ? "场景命中校验: 通过（已命中跨境选品/跟品关键词）。"
-        : "场景命中校验: 未通过（缺少跨境选品/跟品关键词，当前需求不可直接通过）。"
-    );
-  }
+
+  const conciseContextNotes = buildUniqueDrafts(
+    contextNotes.map((note) => truncateText(String(note || "").trim(), 120)).filter(Boolean),
+    4
+  );
+  const productMission = toConciseMissionText(String(productContext.mission ?? ""), 42);
 
   return {
     productName: productContext.productName || "未配置产品名称",
     missionAnchor: shouldPreferIssueMission
       ? inferIssueMissionAnchor(rawInput)
-      : (productContext.mission || inferIssueMissionAnchor(rawInput)),
+      : (productMission || inferIssueMissionAnchor(rawInput)),
     matchedGoals: sceneHitPassed ? effectiveMatchedGoals : [],
     matchedPrinciples: sceneHitPassed ? effectiveMatchedPrinciples : [],
-    contextNotes
+    contextNotes: conciseContextNotes
   };
 }
 
@@ -1319,17 +1636,16 @@ export function synthesizeIssueArtifactsFromDebate(input: {
 
   const contextAlignment: IssueContextAlignment = {
     ...input.draft.contextAlignment,
-    missionAnchor: productProposal || input.draft.contextAlignment.missionAnchor,
+    missionAnchor: toConciseMissionText(productProposal || input.draft.contextAlignment.missionAnchor || "", 42)
+      || input.draft.contextAlignment.missionAnchor,
     contextNotes: buildUniqueDrafts(
       [
         ...input.draft.contextAlignment.contextNotes,
-        input.productContext.productName ? `当前产品: ${input.productContext.productName}` : "",
-        input.industryCode ? `当前行业: ${input.industryCode}` : "",
         analystConcern ? `需求分析结论：${analystConcern}` : "",
         productProposal ? `产品对齐结论：${productProposal}` : "",
         archProposal ? `架构/研发约束：${archProposal}` : "",
         productOpenQuestions[0] ? `产品待确认项：${productOpenQuestions[0]}` : ""
-      ],
+      ].map((item) => truncateText(String(item || "").trim(), 120)),
       6
     )
   };

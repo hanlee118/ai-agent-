@@ -8,6 +8,7 @@ import {
   type ProjectMessageInput,
   type ParsedIntent,
   type ProjectDetail,
+  type ProjectExecutionMode,
   type ProjectStatus,
   type ProjectSummary,
   type RoleType,
@@ -95,7 +96,12 @@ import {
   createWorkflowFromTemplate as createWorkflowV2FromTemplate,
   startWorkflow as startWorkflowV2
 } from "../workflow-v2/workflow-orchestrator.js";
+import { ensureWorkflowV2DefaultTemplates } from "../workflow-v2/default-templates.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
+import {
+  createProjectInputs,
+  importRelayInputs
+} from "../workflow-v2/project-modes.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -157,6 +163,33 @@ const PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT =
 const PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT =
   String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_KEY ?? "standard_software_development").trim()
   || "standard_software_development";
+const PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED =
+  String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED ?? "true").trim().toLowerCase() !== "false";
+
+function normalizeProjectExecutionMode(value: unknown): ProjectExecutionMode {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (normalized === "standalone" || normalized === "relay") {
+    return normalized as ProjectExecutionMode;
+  }
+  return "complete";
+}
+
+function resolveWorkflowTemplateKeyForProjectMode(input: {
+  workflowTemplateKey?: unknown;
+  projectType: ProjectExecutionMode;
+}) {
+  const explicit = String(input.workflowTemplateKey ?? "").trim();
+  if (explicit.toLowerCase() === "none") {
+    return "";
+  }
+  if (explicit) {
+    return explicit;
+  }
+  if (input.projectType === "complete") {
+    return PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT;
+  }
+  return "requirements_design";
+}
 
 function splitProtocolHints(input: string) {
   return String(input || "")
@@ -511,6 +544,24 @@ function isRealModelGateEnabled() {
   return process.env.NODE_ENV === "production";
 }
 
+function parseBooleanFlag(value: string | undefined, defaultValue: boolean) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  return defaultValue;
+}
+
+function shouldEnforceStageRoleCollaborationGate() {
+  return parseBooleanFlag(process.env.STAGE_ROLE_COLLAB_GATE_ENABLED, isRealModelGateEnabled());
+}
+
 function isExecutionDegraded(metadata: Prisma.JsonValue | null) {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return false;
@@ -662,6 +713,21 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
     assertStageDegradedExecutionGate(project, normalizedStageExecutions);
   }
 
+  if (shouldEnforceStageRoleCollaborationGate()) {
+    const collaborationGate = evaluateStageRoleCollaborationGate({
+      stageType: project.currentStage,
+      stageExecutions: normalizedStageExecutions,
+      minRealModelRoles: Math.max(
+        2,
+        Number(process.env.STAGE_ROLE_COLLAB_MIN_REAL_MODEL_ROLES ?? 2)
+      ),
+      requireAnalyst: parseBooleanFlag(process.env.STAGE_ROLE_COLLAB_REQUIRE_ANALYST, true)
+    });
+    if (!collaborationGate.passed) {
+      throw new Error(`REAL_MODEL_GATE_FAILED: ${collaborationGate.issues.join(" | ")}`);
+    }
+  }
+
   assertPmExecutionGate(project, normalizedStageExecutions);
   await assertStageRoleModelWhitelistGate(project, normalizedStageExecutions);
   assertStageBestModelGate(project, normalizedStageExecutions);
@@ -751,6 +817,67 @@ export function evaluateStageBestModelGate(input: {
 
   return {
     passed: issues.length === 0,
+    issues
+  };
+}
+
+export function evaluateStageRoleCollaborationGate(input: {
+  stageType: StageType;
+  stageExecutions: Array<{
+    role: string;
+    status?: string | null | undefined;
+    provider?: string | null | undefined;
+    metadata?: unknown;
+  }>;
+  minRealModelRoles?: number;
+  requireAnalyst?: boolean;
+}) {
+  const requireAnalyst = input.requireAnalyst ?? true;
+  const minRealModelRoles = Math.max(2, Number(input.minRealModelRoles ?? 2));
+  const realModelRoles = new Set<RoleType>();
+
+  for (const row of input.stageExecutions) {
+    const status = String(row.status ?? "success").trim().toLowerCase();
+    if (status && status !== "success") {
+      continue;
+    }
+    if (isScriptedExecutionProvider(row.provider)) {
+      continue;
+    }
+    if (isExecutionDegraded((row.metadata as Prisma.JsonValue | null | undefined) ?? null)) {
+      continue;
+    }
+    const role = String(row.role || "").trim() as RoleType;
+    if (!role.startsWith("ROLE_")) {
+      continue;
+    }
+    realModelRoles.add(role);
+  }
+
+  const analystReady = realModelRoles.has("ROLE_ANALYST");
+  const nonAnalystReady = Array.from(realModelRoles).some((role) => role !== "ROLE_ANALYST");
+  const roleCountReady = realModelRoles.size >= minRealModelRoles;
+  const analystConstraintReady = requireAnalyst ? analystReady && nonAnalystReady : true;
+  const issues: string[] = [];
+
+  if (!roleCountReady) {
+    issues.push(
+      `${STAGE_LABELS[input.stageType]}阶段真实模型角色不足（实际 ${realModelRoles.size}，要求 >= ${minRealModelRoles}）。`
+    );
+  }
+  if (requireAnalyst && !analystReady) {
+    issues.push(`${STAGE_LABELS[input.stageType]}阶段缺少需求分析师的真实模型执行证据。`);
+  }
+  if (requireAnalyst && !nonAnalystReady) {
+    issues.push(`${STAGE_LABELS[input.stageType]}阶段缺少非需求分析师的真实模型执行证据。`);
+  }
+
+  return {
+    passed: roleCountReady && analystConstraintReady,
+    realModelCount: realModelRoles.size,
+    analystReady,
+    nonAnalystReady,
+    minRealModelRoles,
     issues
   };
 }
@@ -2226,6 +2353,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
 
 export async function ensureSeedData(runtimeMode: RuntimeMode) {
   await ensureProjectExecutionStorage();
+  await ensureWorkflowV2TemplatesIfReady();
 
   const existingAgents = await prisma.agentProfile.count();
   if (existingAgents === 0) {
@@ -2260,6 +2388,22 @@ export async function ensureSeedData(runtimeMode: RuntimeMode) {
 
   if (allowRealtimeBackfillOnBoot) {
     await reconcileAllProjectsDeliverables();
+  }
+}
+
+async function ensureWorkflowV2TemplatesIfReady() {
+  if (!PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED) {
+    return;
+  }
+  const workflowSchema = await getWorkflowV2SchemaStatus();
+  if (!workflowSchema.ready) {
+    return;
+  }
+  try {
+    await ensureWorkflowV2DefaultTemplates();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[seed] workflow-v2 template auto-seed skipped: ${message}`);
   }
 }
 
@@ -2386,6 +2530,22 @@ async function loadProjectRecord(id: string) {
         }
       },
       deliverables: { orderBy: [{ updatedAt: "desc" }] },
+      projectInputs: {
+        include: {
+          referenceDeliverable: {
+            select: {
+              id: true,
+              name: true,
+              type: true,
+              stageType: true,
+              projectId: true,
+              version: true,
+              status: true
+            }
+          }
+        },
+        orderBy: { createdAt: "asc" }
+      },
       timeline: { orderBy: { timestamp: "desc" } }
     }
   });
@@ -4061,6 +4221,16 @@ export async function createProject(
   runtimeMode: RuntimeMode
 ): Promise<ProjectDetail> {
   const parsedIntent = input.parsedIntent ?? previewRequirement(input.description);
+  const projectType = normalizeProjectExecutionMode(input.projectType);
+  const parentProjectId = String(input.parentProjectId ?? "").trim() || undefined;
+  const relaySourceStageId = String(input.relaySourceStageId ?? "").trim() || undefined;
+  const workflowTemplateKey = resolveWorkflowTemplateKeyForProjectMode({
+    workflowTemplateKey: input.workflowTemplateKey,
+    projectType
+  });
+  if (projectType === "relay" && !parentProjectId) {
+    throw new Error("relay mode requires parentProjectId");
+  }
   const id = await nextProjectId();
   const currentStage: StageType = "INIT";
   const currentRole = stageAssignees[currentStage];
@@ -4167,10 +4337,28 @@ export async function createProject(
     }
   ];
   enrichProjectWithRequirementContract(project, input.requirementContract);
+  project.projectType = projectType;
+  project.parentProjectId = parentProjectId;
+  project.relaySourceStageId = relaySourceStageId;
 
   await persistProject(project);
+  if (projectType === "relay" && parentProjectId) {
+    await importRelayInputs({
+      targetProjectId: project.id,
+      sourceProjectId: parentProjectId,
+      sourceStageId: relaySourceStageId,
+      relayType: "full"
+    });
+  }
+  if (Array.isArray(input.projectInputs) && input.projectInputs.length > 0) {
+    await createProjectInputs(project.id, input.projectInputs);
+  }
   const created = await findProject(id).then((value) => value as ProjectDetail);
-  await tryAutoInitializeProjectWorkflowV2(created, input);
+  await tryAutoInitializeProjectWorkflowV2(created, {
+    ...input,
+    workflowTemplateKey,
+    projectType
+  });
   return created;
 }
 
@@ -4187,12 +4375,11 @@ async function tryAutoInitializeProjectWorkflowV2(
   }
 
   const templateKey = String(input.workflowTemplateKey ?? PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT).trim();
-  if (!templateKey) {
+  if (!templateKey || templateKey.toLowerCase() === "none") {
     return;
   }
   const autoStart = input.autoStartWorkflow ?? PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT;
-
-  try {
+  const createAndMaybeStart = async () => {
     const workflow = await createWorkflowV2FromTemplate({
       projectId: project.id,
       templateKey
@@ -4200,6 +4387,11 @@ async function tryAutoInitializeProjectWorkflowV2(
     if (autoStart) {
       await startWorkflowV2(workflow.id);
     }
+    return workflow;
+  };
+
+  try {
+    const workflow = await createAndMaybeStart();
     await prisma.timelineEvent.create({
       data: {
         projectId: project.id,
@@ -4215,6 +4407,30 @@ async function tryAutoInitializeProjectWorkflowV2(
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    const missingTemplate = /template not found/i.test(message);
+    if (missingTemplate && PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED) {
+      try {
+        const seeded = await ensureWorkflowV2DefaultTemplates();
+        const recoveredWorkflow = await createAndMaybeStart();
+        await prisma.timelineEvent.create({
+          data: {
+            projectId: project.id,
+            timestamp: new Date(),
+            agentId: "ROLE_PM",
+            type: "system",
+            title: "V2 工作流模板已自动修复",
+            content: autoStart
+              ? `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并启动 workflow-v2（${recoveredWorkflow.id}）。`
+              : `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并创建 workflow-v2（${recoveredWorkflow.id}）。`,
+            priority: "normal"
+          }
+        });
+        return;
+      } catch (recoverError) {
+        const recoverMessage = recoverError instanceof Error ? recoverError.message : String(recoverError);
+        console.warn(`[project] workflow-v2 auto init retry failed for ${project.id}: ${recoverMessage}`);
+      }
+    }
     // 未迁移数据库或模板不存在时不阻断主项目创建流程。
     console.warn(`[project] workflow-v2 auto init skipped for ${project.id}: ${message}`);
   }
@@ -6065,7 +6281,10 @@ async function persistProject(project: ProjectDetail) {
         liveTitle: project.liveSession.title,
         liveBody: project.liveSession.body,
         liveStartedAt: new Date(project.liveSession.startedAt),
-        liveProvider: project.liveSession.provider
+        liveProvider: project.liveSession.provider,
+        projectType: normalizeProjectExecutionMode(project.projectType),
+        parentProjectId: String(project.parentProjectId ?? "").trim() || null,
+        relaySourceStageId: String(project.relaySourceStageId ?? "").trim() || null
       }
     });
 
@@ -6128,6 +6347,9 @@ async function persistProject(project: ProjectDetail) {
 function toProjectSummary(project: {
   id: string;
   name: string;
+  projectType: string;
+  parentProjectId: string | null;
+  relaySourceStageId: string | null;
   status: string;
   currentStage: string;
   progress: number;
@@ -6140,6 +6362,9 @@ function toProjectSummary(project: {
   return {
     id: project.id,
     name: project.name,
+    projectType: normalizeProjectExecutionMode(project.projectType),
+    parentProjectId: project.parentProjectId ?? undefined,
+    relaySourceStageId: project.relaySourceStageId ?? undefined,
     status: project.status as ProjectStatus,
     currentStage: project.currentStage as StageType,
     progress: project.progress,
@@ -6155,6 +6380,9 @@ function toProjectDetail(project: {
   id: string;
   name: string;
   description: string;
+  projectType: string;
+  parentProjectId: string | null;
+  relaySourceStageId: string | null;
   parsedKeywords: Prisma.JsonValue;
   parsedConstraints: Prisma.JsonValue;
   parsedRisks: Prisma.JsonValue;
@@ -6246,6 +6474,19 @@ function toProjectDetail(project: {
     createdBy: string;
     updatedAt: Date;
   }>;
+  projectInputs: Array<{
+    id: string;
+    name: string;
+    type: string;
+    description: string | null;
+    content: string | null;
+    filePath: string | null;
+    referenceDeliverableId: string | null;
+    validationStatus: string;
+    validationErrors: Prisma.JsonValue;
+    inputSource: string;
+    createdAt: Date;
+  }>;
   timeline: Array<{
     id: string;
     timestamp: Date;
@@ -6281,6 +6522,9 @@ function toProjectDetail(project: {
   return {
     id: project.id,
     name: project.name,
+    projectType: normalizeProjectExecutionMode(project.projectType),
+    parentProjectId: project.parentProjectId ?? undefined,
+    relaySourceStageId: project.relaySourceStageId ?? undefined,
     description: project.description,
     parsedIntent: {
       keywords: readStringArray(project.parsedKeywords),
@@ -6290,6 +6534,19 @@ function toProjectDetail(project: {
       summary: project.parsedSummary
     },
     team: readRoleArray(project.team),
+    projectInputs: project.projectInputs.map((item) => ({
+      id: item.id,
+      name: item.name,
+      type: item.type,
+      description: item.description ?? undefined,
+      content: item.content ?? undefined,
+      filePath: item.filePath ?? undefined,
+      referenceDeliverableId: item.referenceDeliverableId ?? undefined,
+      validationStatus: item.validationStatus,
+      validationErrors: readStringArray(item.validationErrors),
+      inputSource: item.inputSource,
+      createdAt: item.createdAt.toISOString()
+    })),
     currentStage: project.currentStage as StageType,
     currentRole: project.currentRole as RoleType,
     progress: project.progress,

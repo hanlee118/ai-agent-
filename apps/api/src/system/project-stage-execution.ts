@@ -80,16 +80,19 @@ export type ProjectStageExecutionStrategy = {
 };
 
 const STAGE_COMPANION_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
-  ANALYSIS: ["ROLE_PRODUCT"],
-  DESIGN: ["ROLE_PRODUCT"],
-  DEV: ["ROLE_ARCH"]
+  INIT: ["ROLE_ANALYST"],
+  ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
+  DESIGN: ["ROLE_ANALYST", "ROLE_PRODUCT"],
+  DEV: ["ROLE_ANALYST", "ROLE_ARCH"],
+  ACCEPT: ["ROLE_ANALYST", "ROLE_QA"]
 };
 
 const STAGE_REAL_MODEL_GATE_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
+  INIT: ["ROLE_ANALYST", "ROLE_PM"],
   ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
-  DESIGN: ["ROLE_PRODUCT", "ROLE_DESIGN"],
-  DEV: ["ROLE_ARCH", "ROLE_DEV"],
-  ACCEPT: ["ROLE_QA"]
+  DESIGN: ["ROLE_ANALYST", "ROLE_DESIGN"],
+  DEV: ["ROLE_ANALYST", "ROLE_DEV"],
+  ACCEPT: ["ROLE_ANALYST", "ROLE_QA"]
 };
 
 const ROLE_OPENCLAW_AGENT_MAP: Partial<Record<RoleType, string>> = {

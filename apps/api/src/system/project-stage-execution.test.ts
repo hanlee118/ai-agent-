@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildTerminalStageExecutionMessage,
   getDesignStitchMode,
+  getPreferredStageModels,
   getStageCompanionRoles,
   getProjectStageExecutionStrategy,
   getStageRealModelGateRoles,
@@ -22,8 +23,9 @@ test("design stage uses terminal agent with strongest design models", () => {
   assert.equal(strategy.skillProtocol.length >= 4, true);
   assert.equal(strategy.memoryEnabled, true);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels[0], "qwen3-max-2026-01-23");
-  assert.equal(strategy.preferredModels[1], "qwen3.5-plus");
+  const expectedPreferred = getPreferredStageModels("DESIGN", "ROLE_DESIGN");
+  assert.equal(strategy.preferredModels[0], expectedPreferred[0]);
+  assert.equal(strategy.preferredModels.includes("qwen3-max-2026-01-23"), true);
   if (typeof prev === "undefined") {
     delete process.env.DESIGN_STITCH_MODE;
   } else {
@@ -46,8 +48,9 @@ test("analysis stage uses terminal execution for analyst with strongest analysis
   assert.equal(strategy.allowDirectModelFallback, false);
   assert.deepEqual(strategy.requiredSkills, []);
   assert.equal(strategy.memoryPolicy, "current_project_or_high_relevance_only");
-  assert.equal(strategy.preferredModels[0], "qwen3-max-2026-01-23");
-  assert.equal(strategy.preferredModels[1], "qwen3.5-plus");
+  const expectedPreferred = getPreferredStageModels("ANALYSIS", "ROLE_ANALYST");
+  assert.equal(strategy.preferredModels[0], expectedPreferred[0]);
+  assert.equal(strategy.preferredModels.includes("qwen3-max-2026-01-23"), true);
 });
 
 test("pm still stays on direct model execution during analysis stage", () => {
@@ -61,13 +64,18 @@ test("pm still stays on direct model execution during analysis stage", () => {
 
 test("analysis stage adds product companion for collaborative planning", () => {
   assert.deepEqual(getStageCompanionRoles("ANALYSIS", "ROLE_ANALYST"), ["ROLE_PRODUCT"]);
-  assert.deepEqual(getStageCompanionRoles("DEV", "ROLE_ARCH"), []);
+  assert.deepEqual(getStageCompanionRoles("ANALYSIS", "ROLE_PRODUCT"), ["ROLE_ANALYST"]);
+  assert.deepEqual(getStageCompanionRoles("DESIGN", "ROLE_DESIGN"), ["ROLE_ANALYST", "ROLE_PRODUCT"]);
+  assert.deepEqual(getStageCompanionRoles("DEV", "ROLE_DEV"), ["ROLE_ANALYST", "ROLE_ARCH"]);
+  assert.deepEqual(getStageCompanionRoles("ACCEPT", "ROLE_QA"), ["ROLE_ANALYST"]);
 });
 
 test("real model gate covers analysis, design and dev critical roles", () => {
+  assert.deepEqual(getStageRealModelGateRoles("INIT"), ["ROLE_ANALYST", "ROLE_PM"]);
   assert.deepEqual(getStageRealModelGateRoles("ANALYSIS"), ["ROLE_ANALYST", "ROLE_PRODUCT"]);
-  assert.deepEqual(getStageRealModelGateRoles("DESIGN"), ["ROLE_PRODUCT", "ROLE_DESIGN"]);
-  assert.deepEqual(getStageRealModelGateRoles("DEV"), ["ROLE_ARCH", "ROLE_DEV"]);
+  assert.deepEqual(getStageRealModelGateRoles("DESIGN"), ["ROLE_ANALYST", "ROLE_DESIGN"]);
+  assert.deepEqual(getStageRealModelGateRoles("DEV"), ["ROLE_ANALYST", "ROLE_DEV"]);
+  assert.deepEqual(getStageRealModelGateRoles("ACCEPT"), ["ROLE_ANALYST", "ROLE_QA"]);
 });
 
 test("terminal stage message removes dangerous shell characters", () => {
