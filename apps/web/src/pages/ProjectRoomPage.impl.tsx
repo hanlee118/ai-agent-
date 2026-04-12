@@ -2663,7 +2663,7 @@ const ProjectRoom = ({
           : null,
       ].filter(Boolean).join('\n');
 
-      await projectsApi.update(effectiveProjectId, { description: nextDescription });
+      const updatedProject = await projectsApi.update(effectiveProjectId, { description: nextDescription }) as Partial<ProjectDetailResponse>;
       addToast('已写回项目描述', 'success');
 
       try {
@@ -2675,17 +2675,34 @@ const ProjectRoom = ({
           'info',
         );
       }
-      if (normalizeCoreStageType(detail.currentStage) === 'INIT' && !detail.pendingApproval) {
+      const latestDetail = await projectsApi.getDetail(effectiveProjectId).catch(() => null);
+      const latestStageType = normalizeCoreStageType(
+        latestDetail?.currentStage ?? updatedProject.currentStage ?? detail.currentStage,
+      );
+      const latestPendingApproval =
+        typeof latestDetail?.pendingApproval === 'boolean'
+          ? latestDetail.pendingApproval
+          : typeof updatedProject.pendingApproval === 'boolean'
+            ? updatedProject.pendingApproval
+            : Boolean(detail.pendingApproval);
+
+      if (latestStageType === 'INIT' && !latestPendingApproval) {
         try {
           setIsTriggeringStageExecution(true);
           setProjectActionHint('Step 1 已完成，正在自动触发 Step 2 阶段执行...');
           await projectsApi.advance(effectiveProjectId);
           addToast('已自动触发阶段执行（Step 2）', 'success');
         } catch (advanceError) {
+          if (advanceError instanceof ApiRequestError && advanceError.code === 'PROJECT_ADVANCE_IN_PROGRESS') {
+            addToast('Step 2 已在后台执行中，请稍后刷新查看进度', 'success');
+          } else if (advanceError instanceof ApiRequestError && advanceError.code === 'REQUIRES_USER_INTERVENTION') {
+            addToast('Step 2 已触发并进入人工确认节点，请按提示完成阶段验收', 'info');
+          } else {
           addToast(
             `已完成 Step 1，但自动启动 Step 2 失败: ${advanceError instanceof Error ? advanceError.message : '未知错误'}`,
             'info',
           );
+          }
         } finally {
           setIsTriggeringStageExecution(false);
           setProjectActionHint(null);
