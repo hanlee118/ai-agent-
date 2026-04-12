@@ -23,9 +23,12 @@ import { useSSE } from '../hooks/useSSE';
 import {
   tasksApi,
   projectsApi,
+  issuesApi,
+  gitlabHarnessApi,
   workflowsApi,
   ApiRequestError,
   type ProjectDetail,
+  type IssuePreview,
   type TaskDelegation,
   type TaskDelegationBundle,
   type TaskDependencySummary,
@@ -33,6 +36,7 @@ import {
   type ProjectExecutionRecord,
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
+  type ProjectIssueFirstStatus,
   type WorkflowProjectOverview,
 } from '../lib/api';
 import { agents, projects } from '../lib/runtimeCollections';
@@ -46,6 +50,15 @@ type ProjectRoomTabParam = 'tasks' | 'stages' | 'deliverables' | 'timeline';
 type CoreStageStatus = 'pending' | 'active' | 'completed' | 'blocked' | 'rejected';
 type ProjectDetailResponse = ProjectDetail & {
   requiredActions?: ProjectRequiredAction[];
+  issueFirst?: ProjectIssueFirstStatus;
+  workflowScope?: {
+    workflowId?: string;
+    workflowStatus?: string;
+    templateKey?: string;
+    templateKeys?: string[];
+    allowedStages?: string[];
+    mode?: 'full' | 'single' | 'custom' | string;
+  };
 };
 type CoreTaskStatus = ProjectDetailResponse['tasks'][number]['status'];
 type DeliverableStatus = ProjectDetailResponse['deliverables'][number]['status'];
@@ -313,6 +326,25 @@ const WORKFLOW_OVERVIEW_FILTER_OPTIONS: Array<{
 ];
 
 const STAGE_ORDER = ['INIT', 'ANALYSIS', 'DESIGN', 'DEV', 'ACCEPT'];
+const normalizeCoreStageType = (stageType?: string) => {
+  const normalized = String(stageType || '').trim().toUpperCase();
+  return STAGE_ORDER.includes(normalized) ? normalized : '';
+};
+const dedupeStageTypes = (items: Array<string | undefined | null>) => {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  items.forEach((item) => {
+    const normalized = normalizeCoreStageType(String(item || ''));
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  });
+  return result;
+};
+const isFullLifecycleTemplateKey = (templateKey?: string) =>
+  String(templateKey || '').trim().toLowerCase() === 'standard_software_development';
 const PROJECT_ROOM_TAB_TO_PARAM: Record<ProjectRoomTab, ProjectRoomTabParam> = {
   任务: 'tasks',
   阶段: 'stages',
@@ -325,6 +357,8 @@ const PROJECT_ROOM_PARAM_TO_TAB: Record<ProjectRoomTabParam, ProjectRoomTab> = {
   deliverables: '交付物',
   timeline: '时间线',
 };
+const POST_CREATE_DEBATE_MARKER = '## 多Agent需求讨论结论';
+const POST_CREATE_ANALYSIS_MARKER = '## 项目详情理解确认草案';
 
 const CORE_STAGE_STATUS_LABELS: Record<CoreStageStatus, string> = {
   pending: '待开始',
@@ -591,6 +625,42 @@ const formatLocalDateTime = (value?: string | null) => {
   return new Date(timestamp).toLocaleString('zh-CN');
 };
 
+const buildIssueDiscussionDigest = (preview: IssuePreview | null | undefined) => {
+  if (!preview) {
+    return [] as string[];
+  }
+
+  const fromDebate = (preview.debate?.opinions || [])
+    .slice(0, 4)
+    .map((item) => {
+      const role = item.roleLabel || roleLabel(item.roleId) || '角色';
+      const focus = String(item.focus || '').trim();
+      const concern = String(item.concern || '').trim();
+      const proposal = String(item.proposal || '').trim();
+      return [role, focus ? `关注: ${focus}` : '', concern ? `风险: ${concern}` : '', proposal ? `建议: ${proposal}` : '']
+        .filter(Boolean)
+        .join(' | ');
+    })
+    .filter(Boolean);
+
+  if (fromDebate.length > 0) {
+    return fromDebate;
+  }
+
+  return (preview.discussion || preview.discussionDraft || [])
+    .slice(0, 4)
+    .map((item) => {
+      const role = item.roleLabel || roleLabel(item.roleId) || '角色';
+      const focus = String(item.focus || '').trim();
+      const concern = String(item.concern || '').trim();
+      const proposal = String(item.proposal || '').trim();
+      return [role, focus ? `关注: ${focus}` : '', concern ? `风险: ${concern}` : '', proposal ? `建议: ${proposal}` : '']
+        .filter(Boolean)
+        .join(' | ');
+    })
+    .filter(Boolean);
+};
+
 const statusVariantByDeliverable = (status: DeliverableStatus) => {
   if (status === 'approved') return 'primary';
   if (status === 'submitted') return 'accent';
@@ -642,6 +712,13 @@ const ProjectRoom = ({
   const [isReviewingStage, setIsReviewingStage] = useState(false);
   const [stageReviewAction, setStageReviewAction] = useState<'approve' | 'reject' | null>(null);
   const [projectActionHint, setProjectActionHint] = useState<string | null>(null);
+  const [issueSupplementDraft, setIssueSupplementDraft] = useState('');
+  const [postCreateIssueDraft, setPostCreateIssueDraft] = useState<IssuePreview | null>(null);
+  const [isGeneratingPostCreateIssueDraft, setIsGeneratingPostCreateIssueDraft] = useState(false);
+  const [isApplyingPostCreateIssueDraft, setIsApplyingPostCreateIssueDraft] = useState(false);
+  const [isSyncingProjectMainIssue, setIsSyncingProjectMainIssue] = useState(false);
+  const [latestProjectMainIssue, setLatestProjectMainIssue] = useState<{ projectPath: string; issueIid?: number } | null>(null);
+  const [isTriggeringStageExecution, setIsTriggeringStageExecution] = useState(false);
   const [isSubmittingDesignReview, setIsSubmittingDesignReview] = useState(false);
   const [isDesignReviewOpen, setIsDesignReviewOpen] = useState(false);
   const [isAcceptanceReportOpen, setIsAcceptanceReportOpen] = useState(false);
@@ -696,6 +773,8 @@ const ProjectRoom = ({
   const missingProjectHandledRef = useRef<string | null>(null);
   const addToastRef = useRef(addToast);
   const onProjectMissingRef = useRef(onProjectMissing);
+  const autoIssueSyncProjectIdsRef = useRef(new Set<string>());
+  const autoIssueDraftProjectIdsRef = useRef(new Set<string>());
   const lastDetailErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
   const lastWorkflowErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
 
@@ -731,6 +810,9 @@ const ProjectRoom = ({
     setWorkflowOverviewFilter('all');
     setExpandedWorkflowStageIds([]);
     setWorkflowCollaborationRoleFilters({});
+    setIssueSupplementDraft('');
+    setPostCreateIssueDraft(null);
+    setLatestProjectMainIssue(null);
   }, [effectiveProjectId]);
 
   const loadProjectDetail = useCallback(async () => {
@@ -843,6 +925,55 @@ const ProjectRoom = ({
     [],
   );
 
+  const detailWorkflowScopeMode = String(detail?.workflowScope?.mode || '').trim().toLowerCase();
+  const detailWorkflowScopeTemplateKey = String(detail?.workflowScope?.templateKey || '').trim();
+  const detailWorkflowScopeAllowedStages = useMemo(
+    () => dedupeStageTypes(Array.isArray(detail?.workflowScope?.allowedStages) ? detail?.workflowScope?.allowedStages : []),
+    [detail?.workflowScope?.allowedStages],
+  );
+  const workflowNodeStageScope = useMemo(
+    () =>
+      dedupeStageTypes(
+        (workflowOverview?.nodes || []).map((node) => workflowTemplateToCoreStage(node.templateKey)),
+      ),
+    [workflowOverview?.nodes],
+  );
+  const workflowTemplateScopeStage = useMemo(
+    () => normalizeCoreStageType(workflowTemplateToCoreStage(workflowOverview?.template?.key)),
+    [workflowOverview?.template?.key],
+  );
+  const effectiveStageScope = useMemo(() => {
+    if (detailWorkflowScopeMode === 'full' || isFullLifecycleTemplateKey(detailWorkflowScopeTemplateKey)) {
+      return [] as string[];
+    }
+    if (detailWorkflowScopeAllowedStages.length > 0) {
+      return detailWorkflowScopeAllowedStages;
+    }
+    const workflowTemplateKey = String(workflowOverview?.template?.key || '').trim();
+    if (isFullLifecycleTemplateKey(workflowTemplateKey)) {
+      return [] as string[];
+    }
+    if (workflowNodeStageScope.length > 0) {
+      return workflowNodeStageScope;
+    }
+    if (workflowTemplateScopeStage) {
+      return [workflowTemplateScopeStage];
+    }
+    return [] as string[];
+  }, [
+    detailWorkflowScopeAllowedStages,
+    detailWorkflowScopeMode,
+    detailWorkflowScopeTemplateKey,
+    workflowNodeStageScope,
+    workflowOverview?.template?.key,
+    workflowTemplateScopeStage,
+  ]);
+  const effectiveStageScopeKey = useMemo(() => effectiveStageScope.join('|'), [effectiveStageScope]);
+  const effectiveStageScopeSet = useMemo(
+    () => new Set(effectiveStageScope),
+    [effectiveStageScopeKey],
+  );
+
   const detailTasks = useMemo(
     () =>
       Array.isArray(detail?.tasks)
@@ -879,7 +1010,12 @@ const ProjectRoom = ({
     [detail?.tasks],
   );
 
-  const effectiveProjectTasks = detailTasks;
+  const effectiveProjectTasks = useMemo(() => {
+    if (effectiveStageScopeSet.size === 0) {
+      return detailTasks;
+    }
+    return detailTasks.filter((task) => effectiveStageScopeSet.has(normalizeCoreStageType(task.stageType)));
+  }, [detailTasks, effectiveStageScopeSet]);
 
   useEffect(() => {
     if (effectiveProjectTasks.length === 0) {
@@ -1168,10 +1304,7 @@ const ProjectRoom = ({
   }, [effectiveProjectTasks]);
 
   const stageItems = useMemo(() => {
-    if (Array.isArray(detail?.stages) && detail.stages.length > 0) {
-      return [...detail.stages].sort((a, b) => STAGE_ORDER.indexOf(a.type) - STAGE_ORDER.indexOf(b.type));
-    }
-    return [
+    const fallbackStageItems = [
       {
         type: (detail?.currentStage || 'INIT') as ProjectDetailResponse['stages'][number]['type'],
         label: project.phase || '当前阶段',
@@ -1182,9 +1315,49 @@ const ProjectRoom = ({
         endedAt: undefined,
       },
     ];
-  }, [detail?.currentStage, detail?.stages, project.phase, project.owner, project.progress]);
+    const sourceItems = Array.isArray(detail?.stages) && detail.stages.length > 0
+      ? detail.stages
+      : fallbackStageItems;
+    const sorted = [...sourceItems].sort((a, b) => STAGE_ORDER.indexOf(a.type) - STAGE_ORDER.indexOf(b.type));
+    if (effectiveStageScopeSet.size === 0) {
+      return sorted;
+    }
 
-  const rawDeliverables = useMemo(() => (Array.isArray(detail?.deliverables) ? detail.deliverables : []), [detail?.deliverables]);
+    const filtered = sorted.filter((stage) => effectiveStageScopeSet.has(normalizeCoreStageType(stage.type)));
+    if (filtered.length > 0) {
+      return filtered;
+    }
+
+    return effectiveStageScope.map((stageType) => {
+      const matchedTask = detailTasks.find((task) => normalizeCoreStageType(task.stageType) === stageType);
+      return {
+        type: stageType as ProjectDetailResponse['stages'][number]['type'],
+        label: STAGE_LABELS[stageType] || stageType,
+        assignee: (matchedTask?.assigneeRoleId || 'ROLE_PM') as ProjectDetailResponse['stages'][number]['assignee'],
+        status: 'pending' as CoreStageStatus,
+        progress: 0,
+        startedAt: undefined,
+        endedAt: undefined,
+      };
+    });
+  }, [
+    detail?.currentStage,
+    detail?.stages,
+    detailTasks,
+    effectiveStageScope,
+    effectiveStageScopeSet,
+    project.phase,
+    project.owner,
+    project.progress,
+  ]);
+
+  const rawDeliverables = useMemo(() => {
+    const source = Array.isArray(detail?.deliverables) ? detail.deliverables : [];
+    if (effectiveStageScopeSet.size === 0) {
+      return source;
+    }
+    return source.filter((item) => effectiveStageScopeSet.has(normalizeCoreStageType(item.stageType)));
+  }, [detail?.deliverables, effectiveStageScopeSet]);
 
   const deliverables = useMemo(() => {
     if (rawDeliverables.length <= 1) {
@@ -1449,9 +1622,23 @@ const ProjectRoom = ({
       });
     };
 
-    detail?.team?.forEach((memberId) => registerById(memberId));
-    detail?.stages?.forEach((stage) => registerById(stage.assignee));
-    detail?.tasks?.forEach((task) => registerById(task.assignee));
+    if (effectiveStageScopeSet.size === 0) {
+      detail?.team?.forEach((memberId) => registerById(memberId));
+    }
+    detail?.stages
+      ?.filter((stage) => effectiveStageScopeSet.size === 0 || effectiveStageScopeSet.has(normalizeCoreStageType(stage.type)))
+      .forEach((stage) => registerById(stage.assignee));
+    detail?.tasks
+      ?.filter((task) => effectiveStageScopeSet.size === 0 || effectiveStageScopeSet.has(normalizeCoreStageType(task.stageType)))
+      .forEach((task) => registerById(task.assignee));
+    (workflowOverview?.stages || [])
+      .filter((stage) => {
+        if (effectiveStageScopeSet.size === 0) {
+          return true;
+        }
+        return effectiveStageScopeSet.has(normalizeCoreStageType(workflowTemplateToCoreStage(stage.templateKey)));
+      })
+      .forEach((stage) => stage.assignedAgents.forEach((agentId) => registerById(agentId)));
 
     if (selected.size === 0) {
       project.agents.forEach((memberId) => registerById(memberId));
@@ -1469,7 +1656,15 @@ const ProjectRoom = ({
     }
 
     return [...selected.values()];
-  }, [detail?.stages, detail?.tasks, detail?.team, effectiveProjectTasks, project.agents]);
+  }, [
+    detail?.stages,
+    detail?.tasks,
+    detail?.team,
+    effectiveProjectTasks,
+    effectiveStageScopeSet,
+    project.agents,
+    workflowOverview?.stages,
+  ]);
 
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
 
@@ -1489,6 +1684,87 @@ const ProjectRoom = ({
     () => requiredActions.find((action) => action.action === 'open_design_review') || null,
     [requiredActions],
   );
+
+  const projectIssueFirst = useMemo<ProjectIssueFirstStatus | null>(
+    () => (detail?.issueFirst ? detail.issueFirst : null),
+    [detail?.issueFirst],
+  );
+  const hasPersistedPostCreateDebate = useMemo(
+    () => String(detail?.description || '').includes(POST_CREATE_DEBATE_MARKER),
+    [detail?.description],
+  );
+  const hasPersistedPostCreateAnalysis = useMemo(
+    () => String(detail?.description || '').includes(POST_CREATE_ANALYSIS_MARKER),
+    [detail?.description],
+  );
+  const hasExecutionStarted = useMemo(() => {
+    const progressedStageExists = Boolean(
+      detail?.stages?.some((stage) => {
+        const stageType = normalizeCoreStageType(stage.type);
+        if (!stageType || stageType === 'INIT') {
+          return false;
+        }
+        return ['active', 'completed', 'blocked', 'rejected'].includes(String(stage.status || '').toLowerCase());
+      }),
+    );
+    const activeTaskExists = effectiveProjectTasks.some((task) => {
+      const stageType = normalizeCoreStageType(task.stageType);
+      if (!stageType || stageType === 'INIT') {
+        return false;
+      }
+      return !['draft', 'todo', 'ready', 'assigned'].includes(String(task.rawStatus || '').toLowerCase());
+    });
+    const deliverableExists = deliverables.some((item) => normalizeCoreStageType(item.stageType) !== 'INIT');
+    return progressedStageExists || activeTaskExists || deliverableExists;
+  }, [detail?.stages, deliverables, effectiveProjectTasks]);
+  const postCreateIssueGateEnabled = Boolean(projectIssueFirst?.enforced);
+  const postCreateIssueGatePassed = !postCreateIssueGateEnabled || Boolean(projectIssueFirst?.ok);
+  const shouldEnforcePostCreatePrep = postCreateIssueGateEnabled && !hasExecutionStarted;
+  const postCreatePrepChecks = useMemo(
+    () => [
+      {
+        key: 'issue',
+        label: 'GitLab 主 Issue 已建立',
+        done: postCreateIssueGatePassed,
+      },
+      {
+        key: 'debate',
+        label: '多 Agent 需求讨论已生成',
+        done: Boolean(postCreateIssueDraft || hasPersistedPostCreateDebate),
+      },
+      {
+        key: 'analysis',
+        label: '理解确认草案已写回项目',
+        done: hasPersistedPostCreateAnalysis,
+      },
+    ],
+    [
+      hasPersistedPostCreateAnalysis,
+      hasPersistedPostCreateDebate,
+      postCreateIssueDraft,
+      postCreateIssueGatePassed,
+    ],
+  );
+  const postCreatePrepDoneCount = postCreatePrepChecks.filter((item) => item.done).length;
+  const isPostCreatePrepCompleted = !shouldEnforcePostCreatePrep || postCreatePrepChecks.every((item) => item.done);
+  const postCreatePrepBlockReason = useMemo(() => {
+    if (isPostCreatePrepCompleted) {
+      return '';
+    }
+    const nextPending = postCreatePrepChecks.find((item) => !item.done);
+    return nextPending ? `请先完成：${nextPending.label}` : '请先完成需求补齐与理解确认。';
+  }, [isPostCreatePrepCompleted, postCreatePrepChecks]);
+
+  useEffect(() => {
+    if (isPostCreatePrepCompleted) {
+      return;
+    }
+    if (activeTab !== '任务') {
+      setActiveTab('任务');
+    }
+  }, [activeTab, isPostCreatePrepCompleted]);
+  const isInitPreparationStage = normalizeCoreStageType(detail?.currentStage) === 'INIT';
+  const canTriggerStageExecution = isPostCreatePrepCompleted && isInitPreparationStage && !detail?.pendingApproval;
 
   const latestDesignExecution = useMemo(() => {
     const designRuns = executionRecords
@@ -1741,7 +2017,20 @@ const ProjectRoom = ({
     return mapped.length > 0 ? mapped : [{ id: 'empty', name: '暂无交付物', type: '等待任务推进', size: '-' }];
   }, [deliverables, effectiveProjectTasks]);
 
-  const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+  const currentStageType = useMemo(() => {
+    const currentFromDetail = normalizeCoreStageType(detail?.currentStage);
+    if (effectiveStageScopeSet.size === 0) {
+      return currentFromDetail || normalizeCoreStageType(stageItems.find((stage) => stage.status === 'active')?.type) || stageItems[0]?.type;
+    }
+    if (currentFromDetail && effectiveStageScopeSet.has(currentFromDetail)) {
+      return currentFromDetail;
+    }
+    const activeScoped = stageItems.find((stage) => stage.status === 'active');
+    if (activeScoped) {
+      return normalizeCoreStageType(activeScoped.type) || activeScoped.type;
+    }
+    return effectiveStageScope[0] || stageItems[0]?.type || currentFromDetail;
+  }, [detail?.currentStage, effectiveStageScope, effectiveStageScopeSet, stageItems]);
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const workflowStageRows = workflowOverview?.stages || [];
@@ -2138,6 +2427,217 @@ const ProjectRoom = ({
     }
   }, [effectiveProjectId, addToast]);
 
+  const activeWorkflowTemplateKey = useMemo(() => {
+    const key = String(detail?.workflowScope?.templateKey || workflowOverview?.template?.key || '').trim();
+    return key || 'standard_software_development';
+  }, [detail?.workflowScope?.templateKey, workflowOverview?.template?.key]);
+
+  const requestPostCreateIssuePreview = useCallback(async (
+    source: string,
+    sourceType: 'text' | 'meeting_notes',
+    options?: { silentFallback?: boolean },
+  ) => {
+    try {
+      return await issuesApi.preview({
+        input: source,
+        industryCode: 'saas',
+        sourceType,
+        debateMode: 'model',
+        workflowTemplateKey: activeWorkflowTemplateKey,
+      });
+    } catch (error) {
+      const fallback = await issuesApi.preview({
+        input: source,
+        industryCode: 'saas',
+        sourceType,
+        debateMode: 'auto',
+        workflowTemplateKey: activeWorkflowTemplateKey,
+      });
+      if (!options?.silentFallback) {
+        addToast('真实多 Agent 讨论暂不可用，已降级为自动草案，你仍可继续补充后写回。', 'info');
+      }
+      return fallback;
+    }
+  }, [activeWorkflowTemplateKey, addToast]);
+
+  const handleSyncProjectMainIssue = useCallback(async (options?: { silent?: boolean }) => {
+    if (!effectiveProjectId) {
+      return null;
+    }
+    setIsSyncingProjectMainIssue(true);
+    try {
+      const synced = await gitlabHarnessApi.syncProject({ occProjectId: effectiveProjectId });
+      setLatestProjectMainIssue({ projectPath: synced.projectPath, issueIid: synced.projectIssueIid });
+      if (!options?.silent) {
+        if (synced.projectIssueIid) {
+          addToast(`GitLab 主 Issue 已同步 #${synced.projectIssueIid}`, 'success');
+        } else {
+          addToast('GitLab 同步成功，但未返回主 Issue IID', 'info');
+        }
+      }
+      await loadProjectDetail();
+      return synced;
+    } catch (error) {
+      if (!options?.silent) {
+        addToast(`同步 GitLab 主 Issue 失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+      return null;
+    } finally {
+      setIsSyncingProjectMainIssue(false);
+    }
+  }, [effectiveProjectId, addToast, loadProjectDetail]);
+
+  useEffect(() => {
+    if (!effectiveProjectId || !detail || !projectIssueFirst) {
+      return;
+    }
+
+    if (!projectIssueFirst.ok && !autoIssueSyncProjectIdsRef.current.has(effectiveProjectId)) {
+      autoIssueSyncProjectIdsRef.current.add(effectiveProjectId);
+      void (async () => {
+        const synced = await handleSyncProjectMainIssue({ silent: true });
+        if (synced?.projectIssueIid) {
+          addToastRef.current(`已自动补齐 GitLab 主 Issue #${synced.projectIssueIid}。`, 'info');
+          await loadProjectDetail();
+        }
+      })();
+      return;
+    }
+
+    if (!projectIssueFirst.ok || postCreateIssueDraft) {
+      return;
+    }
+
+    if (autoIssueDraftProjectIdsRef.current.has(effectiveProjectId)) {
+      return;
+    }
+
+    const source = String(detail.description || '').trim();
+    if (!source) {
+      return;
+    }
+
+    autoIssueDraftProjectIdsRef.current.add(effectiveProjectId);
+    void (async () => {
+      try {
+        const preview = await requestPostCreateIssuePreview(source, 'text', { silentFallback: true });
+        setPostCreateIssueDraft(preview);
+        addToastRef.current('已自动生成需求理解确认草案，请确认后写回项目。', 'info');
+      } catch {
+        autoIssueDraftProjectIdsRef.current.delete(effectiveProjectId);
+      }
+    })();
+  }, [
+    activeWorkflowTemplateKey,
+    detail,
+    effectiveProjectId,
+    handleSyncProjectMainIssue,
+    loadProjectDetail,
+    postCreateIssueDraft,
+    projectIssueFirst,
+    requestPostCreateIssuePreview,
+  ]);
+
+  const handleGeneratePostCreateIssueDraft = useCallback(async () => {
+    if (!detail) {
+      return;
+    }
+    const supplement = issueSupplementDraft.trim();
+    const source = [
+      detail.description || '',
+      supplement ? `\n补充信息:\n${supplement}` : '',
+    ].join('\n').trim();
+    if (!source) {
+      addToast('请先补充项目描述后再生成理解确认草案', 'error');
+      return;
+    }
+
+    setIsGeneratingPostCreateIssueDraft(true);
+    try {
+      const preview = await requestPostCreateIssuePreview(
+        source,
+        supplement ? 'meeting_notes' : 'text',
+      );
+      setPostCreateIssueDraft(preview);
+      addToast('已生成项目详情理解确认草案，请确认后写回并同步 GitLab', 'success');
+    } catch (error) {
+      addToast(`生成理解确认草案失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsGeneratingPostCreateIssueDraft(false);
+    }
+  }, [detail, issueSupplementDraft, addToast, requestPostCreateIssuePreview]);
+
+  const handleApplyPostCreateIssueDraft = useCallback(async () => {
+    if (!effectiveProjectId || !detail) {
+      return;
+    }
+    if (!postCreateIssueDraft) {
+      addToast('请先生成理解确认草案', 'info');
+      return;
+    }
+
+    setIsApplyingPostCreateIssueDraft(true);
+    try {
+      const discussionDigest = buildIssueDiscussionDigest(postCreateIssueDraft);
+      const nextDescription = [
+        detail.description || '',
+        '',
+        POST_CREATE_DEBATE_MARKER,
+        ...(
+          discussionDigest.length > 0
+            ? discussionDigest.map((item) => `- ${item}`)
+            : ['- 暂无讨论结论，建议重新触发「多Agent讨论并生成草案」']
+        ),
+        '',
+        POST_CREATE_ANALYSIS_MARKER,
+        '## 项目详情补充需求',
+        issueSupplementDraft.trim() || '无',
+        '',
+        `- 标题: ${postCreateIssueDraft.title}`,
+        `- 摘要: ${postCreateIssueDraft.summary}`,
+        postCreateIssueDraft.requirementContract?.objective
+          ? `- 目标: ${postCreateIssueDraft.requirementContract.objective}`
+          : null,
+        (postCreateIssueDraft.requirementContract?.acceptanceCriteria || []).length > 0
+          ? `- 验收: ${(postCreateIssueDraft.requirementContract?.acceptanceCriteria || []).slice(0, 5).join('；')}`
+          : null,
+      ].filter(Boolean).join('\n');
+
+      await projectsApi.update(effectiveProjectId, { description: nextDescription });
+      await handleSyncProjectMainIssue({ silent: true });
+      addToast('已写回项目描述并同步到 GitLab 主 Issue，后续可围绕该 Issue 讨论', 'success');
+      if (normalizeCoreStageType(detail.currentStage) === 'INIT' && !detail.pendingApproval) {
+        try {
+          setIsTriggeringStageExecution(true);
+          setProjectActionHint('Step 1 已完成，正在自动触发 Step 2 阶段执行...');
+          await projectsApi.advance(effectiveProjectId);
+          addToast('已自动触发阶段执行（Step 2）', 'success');
+        } catch (advanceError) {
+          addToast(
+            `已完成 Step 1，但自动启动 Step 2 失败: ${advanceError instanceof Error ? advanceError.message : '未知错误'}`,
+            'info',
+          );
+        } finally {
+          setIsTriggeringStageExecution(false);
+          setProjectActionHint(null);
+        }
+      }
+      await loadProjectDetail();
+    } catch (error) {
+      addToast(`写回项目并同步失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsApplyingPostCreateIssueDraft(false);
+    }
+  }, [
+    effectiveProjectId,
+    detail,
+    postCreateIssueDraft,
+    issueSupplementDraft,
+    addToast,
+    handleSyncProjectMainIssue,
+    loadProjectDetail,
+  ]);
+
   const refreshProjectView = useCallback(async () => {
     await onRefreshData?.();
     await Promise.all([
@@ -2147,6 +2647,31 @@ const ProjectRoom = ({
       loadExecutions({ silent: true }),
     ]);
   }, [onRefreshData, loadExecutions, loadFinalArtifacts, loadProjectDetail, loadWorkflowOverview]);
+
+  const handleTriggerStageExecution = useCallback(async () => {
+    if (!project.id) {
+      addToast('当前项目不可用，无法启动阶段执行', 'error');
+      return;
+    }
+    if (!canTriggerStageExecution) {
+      addToast(postCreatePrepBlockReason || '请先完成 Step 1 再开始阶段执行', 'info');
+      return;
+    }
+
+    setIsTriggeringStageExecution(true);
+    setProjectActionHint('正在触发阶段执行，请稍候...');
+    try {
+      await projectsApi.advance(project.id);
+      await refreshProjectView();
+      setActiveTab('任务');
+      addToast('阶段执行已启动（Step 2）', 'success');
+    } catch (error) {
+      addToast(`启动阶段执行失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setIsTriggeringStageExecution(false);
+      setProjectActionHint(null);
+    }
+  }, [addToast, canTriggerStageExecution, postCreatePrepBlockReason, project.id, refreshProjectView]);
 
   useEffect(() => {
     void loadFinalArtifacts({ silent: true });
@@ -3075,6 +3600,136 @@ const ProjectRoom = ({
             </div>
           </section>
 
+          <section className="rounded-2xl border border-accent/30 bg-accent/10 p-4 sm:p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-accent/80">Step 1</p>
+                <h3 className="text-sm font-semibold text-accent">需求补充与理解确认（项目创建后）</h3>
+                <p className="text-xs text-slate-300 mt-1">先由多 Agent 完成需求讨论与补齐，再进入对应阶段执行。</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={projectIssueFirst?.ok ? 'primary' : 'warning'}>
+                  {projectIssueFirst?.ok ? 'Issue 门禁已通过' : 'Issue 门禁待补足'}
+                </Badge>
+                <Badge variant={isPostCreatePrepCompleted ? 'primary' : 'warning'}>
+                  进度 {postCreatePrepDoneCount}/{postCreatePrepChecks.length}
+                </Badge>
+                {projectIssueFirst?.data?.issueIid ? (
+                  <Badge variant="accent">主 Issue #{projectIssueFirst.data.issueIid}</Badge>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+              {postCreatePrepChecks.map((item) => (
+                <div
+                  key={item.key}
+                  className={cn(
+                    'rounded-lg border px-3 py-2 text-[11px]',
+                    item.done
+                      ? 'border-primary/30 bg-primary/10 text-primary'
+                      : 'border-warning/40 bg-warning/10 text-warning',
+                  )}
+                >
+                  {item.done ? '已完成' : '待完成'} · {item.label}
+                </div>
+              ))}
+            </div>
+
+            <textarea
+              value={issueSupplementDraft}
+              onChange={(event) => setIssueSupplementDraft(event.target.value)}
+              rows={4}
+              placeholder="在这里补充需求细节、约束、验收标准，随后生成理解确认草案。"
+              className="w-full rounded-xl border border-border-subtle bg-surface-muted px-4 py-3 text-sm text-slate-100 focus:outline-none focus:ring-2 focus:ring-accent/50 resize-y"
+            />
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => void handleSyncProjectMainIssue()}
+                disabled={isSyncingProjectMainIssue}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60"
+              >
+                {isSyncingProjectMainIssue ? '同步中...' : '同步/刷新 GitLab 主 Issue'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleGeneratePostCreateIssueDraft()}
+                disabled={isGeneratingPostCreateIssueDraft}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-primary/90 disabled:opacity-60"
+              >
+                {isGeneratingPostCreateIssueDraft ? '生成中...' : '多Agent讨论并生成草案'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleApplyPostCreateIssueDraft()}
+                disabled={isApplyingPostCreateIssueDraft || !postCreateIssueDraft}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-accent/90 disabled:opacity-60"
+              >
+                {isApplyingPostCreateIssueDraft ? '写回中...' : '写回项目并同步 Issue'}
+              </button>
+            </div>
+
+            {postCreateIssueDraft ? (
+              <div className="rounded-xl border border-border-subtle bg-surface-soft/70 p-3 space-y-2">
+                <p className="text-xs text-slate-400">理解确认草案</p>
+                <p className="text-sm text-white font-medium">{postCreateIssueDraft.title}</p>
+                <p className="text-xs text-slate-300 whitespace-pre-wrap">{postCreateIssueDraft.summary}</p>
+                {(postCreateIssueDraft.debate?.consensus || []).length > 0 ? (
+                  <p className="text-xs text-slate-400">
+                    讨论共识: {(postCreateIssueDraft.debate?.consensus || []).slice(0, 2).join('；')}
+                  </p>
+                ) : null}
+                {(postCreateIssueDraft.requirementContract?.acceptanceCriteria || []).length > 0 ? (
+                  <p className="text-xs text-slate-400">
+                    验收建议: {(postCreateIssueDraft.requirementContract?.acceptanceCriteria || []).slice(0, 4).join('；')}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+
+            {latestProjectMainIssue?.issueIid ? (
+              <p className="text-[11px] text-slate-400">
+                最近同步: {latestProjectMainIssue.projectPath}#{latestProjectMainIssue.issueIid}
+              </p>
+            ) : null}
+            {postCreatePrepBlockReason ? (
+              <p className="text-[11px] text-warning">{postCreatePrepBlockReason}</p>
+            ) : null}
+          </section>
+
+          <section className="rounded-2xl border border-primary/30 bg-primary/10 p-4 sm:p-5 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-primary/80">Step 2</p>
+                <h3 className="text-sm font-semibold text-primary">阶段执行任务（按所选模板）</h3>
+                <p className="text-xs text-slate-300 mt-1">仅在完成 Step 1 后，进入当前阶段的任务执行、验收与交付。</p>
+              </div>
+              <Badge variant={isPostCreatePrepCompleted ? 'primary' : 'warning'}>
+                {isPostCreatePrepCompleted ? '执行阶段已解锁' : '执行阶段暂未解锁'}
+              </Badge>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void handleTriggerStageExecution()}
+                disabled={!canTriggerStageExecution || isTriggeringStageExecution}
+                className="inline-flex min-h-10 items-center justify-center rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-primary/90 disabled:opacity-60"
+              >
+                {isTriggeringStageExecution ? '启动中...' : '开始阶段执行'}
+              </button>
+              {canTriggerStageExecution ? (
+                <p className="text-[11px] text-slate-300">当前处于立项阶段，点击后将推进到模板对应执行阶段。</p>
+              ) : null}
+            </div>
+            {!isPostCreatePrepCompleted ? (
+              <div className="rounded-xl border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+                {postCreatePrepBlockReason || '请先完成需求补齐与理解确认，再进入阶段执行。'}
+              </div>
+            ) : null}
+          </section>
+
           {requiredActions.length > 0 ? (
             <section className="rounded-2xl border border-warning/40 bg-warning/10 p-4 sm:p-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3108,12 +3763,25 @@ const ProjectRoom = ({
             </section>
           ) : null}
 
+          {!isPostCreatePrepCompleted ? (
+            <section className="rounded-2xl border border-warning/40 bg-warning/10 p-4 text-xs text-warning">
+              第 2 步暂时锁定。请先在上方完成需求补充、多 Agent 讨论并写回理解确认草案，然后再执行阶段任务。
+            </section>
+          ) : null}
+
+          <div
+            className={cn(
+              'space-y-6',
+              !isPostCreatePrepCompleted ? 'pointer-events-none opacity-55 select-none' : '',
+            )}
+          >
           <div className="w-full overflow-x-auto scrollbar-hide">
             <div className="inline-flex min-w-max items-center gap-2 p-1 bg-white/5 rounded-xl border border-border-subtle">
               {(['任务', '阶段', '交付物', '时间线'] as ProjectRoomTab[]).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
+                  disabled={!isPostCreatePrepCompleted}
                   className={cn(
                     'px-4 py-1.5 rounded-lg text-xs font-bold transition-all whitespace-nowrap inline-flex items-center gap-1.5',
                     activeTab === tab ? 'bg-surface-muted text-white shadow-sm' : 'text-slate-500 hover:text-slate-300',
@@ -4099,6 +4767,7 @@ const ProjectRoom = ({
               </div>
             </section>
           ) : null}
+          </div>
         </main>
 
         <aside className="w-80 border-l border-border-subtle p-6 space-y-8 hidden lg:block bg-surface-soft/30">
