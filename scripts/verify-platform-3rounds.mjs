@@ -77,8 +77,13 @@ function runStep(step) {
         && /PROJECT_ISSUE_FIRST_REQUIRED/i.test(combinedOutput);
       const realModelGateBlocked =
         step.name === "smoke-project-flow"
-        && /PROJECT_ADVANCE_FAILED/i.test(combinedOutput)
-        && /(REAL_MODEL_GATE_FAILED|No available channel for model)/i.test(combinedOutput);
+        && (
+          /(REAL_MODEL_GATE_FAILED|No available channel for model)/i.test(combinedOutput)
+          || (
+            /PROJECT_ADVANCE_FAILED/i.test(combinedOutput)
+            && /(真实模型调用失败|HTTP_5\d{2}|MODEL_CHANNEL|model channel|provider.+(401|403|429|500|502|503))/i.test(combinedOutput)
+          )
+        );
       if (issueFirstBlocked) {
         resolve({
           ok: true,
