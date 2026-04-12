@@ -374,6 +374,35 @@ describe("Error Matrix: auth + projects", () => {
     assert.equal(typeof detailRes.body.postCreatePrep?.doneCount, "number");
     assert.ok(Array.isArray(detailRes.body.postCreatePrep?.checks));
 
+    const invalidPatchRes = await request(fullApp)
+      .patch(`/api/projects/${projectId}`)
+      .send({});
+    assert.equal(invalidPatchRes.status, 400);
+
+    const patchedDescription = [
+      String(detailRes.body.description || ""),
+      "",
+      "## 多Agent需求讨论结论",
+      "- 已完成需求讨论与共识",
+      "",
+      "## 项目详情理解确认草案",
+      "- 已写回并准备进入阶段执行",
+    ].join("\n");
+    const patchRes = await request(fullApp)
+      .patch(`/api/projects/${projectId}`)
+      .send({
+        description: patchedDescription,
+        team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DESIGN"],
+      });
+    assert.equal(patchRes.status, 200);
+    assert.equal(patchRes.body.id, projectId);
+    assert.match(String(patchRes.body.description || ""), /多Agent需求讨论结论/);
+
+    const detailAfterPatchRes = await request(fullApp).get(`/api/projects/${projectId}`);
+    assert.equal(detailAfterPatchRes.status, 200);
+    assert.equal(detailAfterPatchRes.body.postCreatePrep?.checks?.find((item: { key: string }) => item.key === "debate")?.done, true);
+    assert.equal(detailAfterPatchRes.body.postCreatePrep?.checks?.find((item: { key: string }) => item.key === "analysis")?.done, true);
+
     const deleteRes = await request(fullApp).delete(`/api/projects/${projectId}`);
     assert.equal(deleteRes.status, 200);
     assert.equal(deleteRes.body.success, true);

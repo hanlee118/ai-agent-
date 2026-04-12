@@ -2043,6 +2043,88 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
   res.status(201).json(project);
 }));
 
+router.patch("/api/projects/:id", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id || "").trim();
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+
+  const hasName = Object.prototype.hasOwnProperty.call(req.body || {}, "name");
+  const hasDescription = Object.prototype.hasOwnProperty.call(req.body || {}, "description");
+  const hasTeam = Object.prototype.hasOwnProperty.call(req.body || {}, "team");
+  if (!hasName && !hasDescription && !hasTeam) {
+    res.status(400).json({ message: "At least one of name/description/team is required" });
+    return;
+  }
+
+  const updateData: Record<string, unknown> = {};
+
+  if (hasName) {
+    const name = String(req.body?.name ?? "").trim();
+    if (!name) {
+      res.status(400).json({ message: "name cannot be empty" });
+      return;
+    }
+    updateData.name = name;
+  }
+
+  if (hasDescription) {
+    const description = String(req.body?.description ?? "").trim();
+    if (!description) {
+      res.status(400).json({ message: "description cannot be empty" });
+      return;
+    }
+    const parsedIntent = previewRequirement(description);
+    updateData.description = description;
+    updateData.parsedKeywords = parsedIntent.keywords;
+    updateData.parsedConstraints = parsedIntent.constraints;
+    updateData.parsedRisks = parsedIntent.risks;
+    updateData.parsedSuggestedTeam = parsedIntent.suggestedTeam;
+    updateData.parsedSummary = parsedIntent.summary;
+  }
+
+  if (hasTeam) {
+    if (!Array.isArray(req.body?.team)) {
+      res.status(400).json({ message: "team must be an array" });
+      return;
+    }
+    const team = (req.body.team as unknown[])
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean);
+    if (team.length === 0) {
+      res.status(400).json({ message: "team cannot be empty" });
+      return;
+    }
+    updateData.team = team;
+    if (!hasDescription) {
+      updateData.parsedSuggestedTeam = team;
+    }
+  }
+
+  await prisma.project.update({
+    where: { id: projectId },
+    data: updateData,
+  });
+  const updated = await findProject(projectId);
+  if (!updated) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+
+  await safeAudit(req, res, {
+    actorType: "admin",
+    actorLabel: "管理员",
+    action: "project.updated",
+    resourceType: "project",
+    resourceId: projectId,
+    summary: `更新项目 ${updated.name}`
+  });
+
+  res.json(updated);
+}));
+
 router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
 
