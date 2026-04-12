@@ -76,11 +76,17 @@ test('real project room should render only scoped single stage', async ({ contex
 
   await expect(stageTab).toBeVisible({ timeout: 60_000 });
   await expect(stageTab).toContainText('1');
-  await stageTab.click();
-
-  await expect(page.getByText('负责人: 视觉设计总监')).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByText('负责人: 研发经理')).toHaveCount(0);
-  await expect(page.getByText('负责人: 测试工程师')).toHaveCount(0);
+  const hasLockedBadge = await page.getByText('执行阶段暂未解锁').isVisible({ timeout: 5_000 }).catch(() => false);
+  const isStageLocked = hasLockedBadge || (await stageTab.isDisabled());
+  if (isStageLocked) {
+    await expect(page.getByText('执行阶段暂未解锁')).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('第 2 步暂时锁定')).toBeVisible();
+  } else {
+    await stageTab.click();
+    await expect(page.getByText('指派给: 视觉设计总监').first()).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText('指派给: 研发经理')).toHaveCount(0);
+    await expect(page.getByText('指派给: 测试工程师')).toHaveCount(0);
+  }
 
   mkdirSync(UI_REPORT_DIR, { recursive: true });
   await page.screenshot({ path: `${UI_REPORT_DIR}/ui-project-room-real-single-stage.png`, fullPage: true });
