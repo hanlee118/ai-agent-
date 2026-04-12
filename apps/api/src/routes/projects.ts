@@ -230,7 +230,7 @@ function buildProjectPostCreatePrep(project: any, issueFirst: any) {
   const executionStarted = hasPostCreateExecutionStarted(project);
   const shouldEnforce = issueGateEnabled && !executionStarted;
 
-  const checks = [
+  const rawChecks = [
     {
       key: "issue",
       label: "GitLab 主 Issue 已建立",
@@ -247,8 +247,11 @@ function buildProjectPostCreatePrep(project: any, issueFirst: any) {
       done: hasAnalysis
     }
   ];
+  const checks = shouldEnforce
+    ? rawChecks
+    : rawChecks.map((item) => ({ ...item, done: true }));
   const doneCount = checks.filter((item) => item.done).length;
-  const completed = !shouldEnforce || checks.every((item) => item.done);
+  const completed = checks.every((item) => item.done);
   const blockReason = completed
     ? undefined
     : (() => {
