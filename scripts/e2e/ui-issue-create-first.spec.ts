@@ -28,7 +28,7 @@ test('issue create-first gate should allow project creation while formal debate 
   test.setTimeout(180_000);
 
   const { prisma, token, hashSessionToken } = await createTemporarySessionCookie();
-  let capturedConfirmPayload: Record<string, unknown> | null = null;
+  let capturedCreatePayload: Record<string, unknown> | null = null;
 
   await context.addCookies([
     {
@@ -148,31 +148,37 @@ test('issue create-first gate should allow project creation while formal debate 
       });
     });
 
-    await page.route('**/api/issues/*/confirm', async (route) => {
+    await page.route('**/api/projects', async (route) => {
       const raw = route.request().postData() || '{}';
-      capturedConfirmPayload = JSON.parse(raw) as Record<string, unknown>;
+      capturedCreatePayload = JSON.parse(raw) as Record<string, unknown>;
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'P-CREATE-FIRST-001',
+          name: '创建优先验收项目',
+        }),
+      });
+    });
+
+    await page.route('**/api/gitlab/harness/projects/*/sync', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           success: true,
           data: {
-            issue: { id: 'ISSUE-CREATE-FIRST-001', status: 'confirmed', createdProjectId: 'P-CREATE-FIRST-001' },
-            project: { id: 'P-CREATE-FIRST-001', name: '创建优先验收项目' },
-            backfill: { summary: 'ok', teamRoleIds: ['ROLE_ANALYST', 'ROLE_DESIGN'] },
-            analysisGate: {
-              canProceed: false,
-              canCreateProject: true,
-              blockers: ['真实模型多角色讨论仍在进行中，需等待完成后再推进。'],
-              createBlockers: [],
-              checks: [],
-              runtimeMode: 'model',
-              requestedRuntimeMode: 'model',
-            },
-            deferredDebateTask: {
-              taskId: 'debate-ISSUE-CREATE-FIRST-001-zzzz9999',
-              status: 'queued',
-            },
+            projectId: 'P-CREATE-FIRST-001',
+            projectName: '创建优先验收项目',
+            projectPath: 'root/ai-agent-workbench',
+            projectIssueIid: 1001,
+            stageType: 'ANALYSIS',
+            closeOnComplete: false,
+            taskTotal: 0,
+            created: [],
+            updated: [],
+            reused: [],
+            failed: [],
           },
         }),
       });
@@ -189,7 +195,7 @@ test('issue create-first gate should allow project creation while formal debate 
     await page.getByRole('button', { name: /视觉设计阶段/ }).first().click();
     await page.getByPlaceholder('例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。')
       .fill('请按“先创建项目骨架，再后置正式辩论”的策略落地。');
-    await page.getByRole('button', { name: 'AI 分析并分配 Agent' }).click();
+    await page.getByRole('button', { name: '可选：生成 AI 建议' }).click();
 
     await expect(page.getByText('团队分配与扩展信息')).toBeVisible({ timeout: 30_000 });
     await page.getByRole('button', { name: '查看分析草案（可选）' }).click();
@@ -206,7 +212,7 @@ test('issue create-first gate should allow project creation while formal debate 
     await page.screenshot({ path: `${UI_REPORT_DIR}/ui-issue-create-first-team.png`, fullPage: true });
 
     await page.getByRole('button', { name: '下一步：创建确认卡' }).click();
-    await expect(page.getByText('创建前理解确认卡')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('创建确认卡（需求确认后置）')).toBeVisible({ timeout: 10_000 });
     await expect(page.getByText('Create-first 模式：项目骨架将先创建，正式辩论后置补齐')).toBeVisible();
     await page.screenshot({ path: `${UI_REPORT_DIR}/ui-issue-create-first-confirm.png`, fullPage: true });
 
@@ -214,8 +220,8 @@ test('issue create-first gate should allow project creation while formal debate 
     await expect(createButton).toBeEnabled();
     await createButton.click();
 
-    await expect.poll(() => capturedConfirmPayload !== null).toBeTruthy();
-    assert.equal(capturedConfirmPayload?.workflowTemplateKey, 'visual_design');
+    await expect.poll(() => capturedCreatePayload !== null).toBeTruthy();
+    assert.equal(capturedCreatePayload?.workflowTemplateKey, 'visual_design');
   } finally {
     await prisma.authSession.deleteMany({
       where: { tokenHash: await hashSessionToken(token) },

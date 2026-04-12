@@ -14,6 +14,7 @@ export const agentsApi = {
     name: string;
     role: string;
     modelId?: string;
+    integrationEngine?: 'hermes' | 'openclaw' | 'managed';
     soul?: string;
     sop?: string[];
   }) {
@@ -41,6 +42,13 @@ export const agentsApi = {
     return request(`/agents/${id}/model`, {
       method: 'PATCH',
       body: JSON.stringify({ modelId }),
+    });
+  },
+
+  async switchEngine(id: string, integrationEngine: 'hermes' | 'openclaw' | 'managed') {
+    return request(`/agents/${id}/engine`, {
+      method: 'PATCH',
+      body: JSON.stringify({ integrationEngine }),
     });
   },
 

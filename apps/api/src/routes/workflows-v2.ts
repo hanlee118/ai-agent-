@@ -70,7 +70,11 @@ function toPreviewText(value: unknown, limit = 220) {
   return `${normalized.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-function inferAgentEngine(input: { agentId: string; model?: string | null }) {
+function inferAgentEngine(input: { agentId: string; model?: string | null; integrationEngine?: string | null }) {
+  const integrationEngine = normalizeText(input.integrationEngine).toLowerCase();
+  if (integrationEngine === "hermes" || integrationEngine === "openclaw") {
+    return integrationEngine;
+  }
   const model = normalizeText(input.model).toLowerCase();
   const agentId = normalizeText(input.agentId).toLowerCase();
   if (model.includes("hermes") || agentId.includes("hermes")) {
@@ -612,6 +616,7 @@ export function createWorkflowsV2Router() {
         where: { agentId: { in: assignedAgentIds } },
         select: {
           agentId: true,
+          integrationEngine: true,
           selectedModel: true,
           defaultModel: true
         }
@@ -621,7 +626,7 @@ export function createWorkflowsV2Router() {
     for (const config of managedConfigs) {
       const model = normalizeText(config.selectedModel) || normalizeText(config.defaultModel) || null;
       agentProfileMap.set(config.agentId, {
-        engine: inferAgentEngine({ agentId: config.agentId, model }),
+        engine: inferAgentEngine({ agentId: config.agentId, model, integrationEngine: config.integrationEngine }),
         model
       });
     }

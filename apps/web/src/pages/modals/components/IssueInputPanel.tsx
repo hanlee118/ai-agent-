@@ -30,6 +30,7 @@ export default function IssueInputPanel({ controller }: Props) {
     sourceInput,
     importedFileName,
     handleImportProjectFile,
+    handleContinueToTeamDraft,
     handleParseInput,
     isParsing,
     isLoadingIndustryConfig,
@@ -159,19 +160,27 @@ export default function IssueInputPanel({ controller }: Props) {
 
       <div className="grid grid-cols-2 gap-3">
         <button
-          onClick={() => void handleParseInput()}
+          onClick={() => handleContinueToTeamDraft()}
           disabled={isParsing || isLoadingIndustryConfig || !sourceInput.trim()}
           className="py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
         >
-          {isParsing ? 'AI 分析中...' : isLoadingIndustryConfig ? '加载行业配置中...' : 'AI 分析并分配 Agent'}
+          {isParsing ? '处理中...' : isLoadingIndustryConfig ? '加载行业配置中...' : '继续：团队分配'}
         </button>
         <button
-          onClick={() => setShowManualForm((prev) => !prev)}
+          onClick={() => void handleParseInput()}
+          disabled={isParsing || isLoadingIndustryConfig || !sourceInput.trim()}
           className="py-3 bg-white/5 border border-border-subtle rounded-xl text-sm font-bold hover:bg-white/10 transition-all"
         >
-          {showManualForm ? '收起手动表单' : '手动填写'}
+          {isParsing ? 'AI 生成中...' : '可选：生成 AI 建议'}
         </button>
       </div>
+
+      <button
+        onClick={() => setShowManualForm((prev) => !prev)}
+        className="w-full py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
+      >
+        {showManualForm ? '收起手动表单' : '手动填写'}
+      </button>
 
       {showManualForm && (
         <div className="space-y-4 p-4 bg-white/5 border border-border-subtle rounded-2xl">

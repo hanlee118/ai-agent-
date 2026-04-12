@@ -51,17 +51,15 @@ export default function ProjectConfirmCard({ controller }: Props) {
 
   const canCreateProject = issuePreview?.analysisGate
     ? (issuePreview.analysisGate.canCreateProject ?? issuePreview.analysisGate.canProceed)
-    : false;
-  const canCreate = Boolean(issuePreview?.issueId) && canCreateProject && !isCreating;
-  const createBlockedHint = !issuePreview?.issueId
-    ? '请先回到需求输入步骤完成 Issue 分析。'
-    : !canCreateProject
-      ? (
-          issuePreview.analysisGate.createBlockers?.[0]
-          || issuePreview.analysisGate.blockers[0]
-          || '分析阶段尚未满足创建条件，请稍后重试。'
-        )
-      : '';
+    : true;
+  const canCreate = !isCreating;
+  const createBlockedHint = !canCreateProject && issuePreview?.analysisGate
+    ? (
+        issuePreview?.analysisGate.createBlockers?.[0]
+        || issuePreview?.analysisGate.blockers[0]
+        || '当前 AI 草案存在未完成检查项，但不阻塞创建；建议在项目详情页继续补齐。'
+      )
+    : '';
   const formalDebateDeferred = Boolean(
     issuePreview?.analysisGate
     && !(issuePreview.analysisGate.canProceed)
@@ -73,7 +71,7 @@ export default function ProjectConfirmCard({ controller }: Props) {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-warning">
           <Zap size={14} />
-          <span className="text-[10px] font-bold uppercase tracking-widest">创建前理解确认卡</span>
+          <span className="text-[10px] font-bold uppercase tracking-widest">创建确认卡（需求确认后置）</span>
         </div>
         <Badge variant="warning">待确认</Badge>
       </div>
@@ -227,7 +225,7 @@ export default function ProjectConfirmCard({ controller }: Props) {
           disabled={!canCreate}
           className="flex-1 py-2.5 bg-primary text-surface rounded-xl text-xs font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
         >
-          {isCreating ? '创建中...' : (canCreate ? '确认创建并启动执行' : '等待创建条件满足')}
+          {isCreating ? '创建中...' : '确认创建并启动执行'}
         </button>
       </div>
       {createBlockedHint ? (

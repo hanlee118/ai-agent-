@@ -280,8 +280,66 @@ export const buildRoleBasedAgentRecommendations = (
     allowedRoleIds?: string[];
     mustHaveSoulRole?: boolean;
     soulRoleId?: string;
+    preferredEnginesByRole?: Record<string, Array<'hermes' | 'openclaw' | 'managed'>>;
   },
 ) => {
+  const resolveAgentEngine = (agent: { integrationEngine?: string }) => {
+    const normalized = String(agent.integrationEngine || 'managed').trim().toLowerCase();
+    if (normalized === 'hermes' || normalized === 'openclaw') {
+      return normalized;
+    }
+    return 'managed';
+  };
+
+  const pickBestAgent = (
+    roleId: string,
+    usedAgentIds: Set<string>,
+  ): { agent: (typeof agents)[number]; mappedByEngineFallback: boolean } | null => {
+    const normalizedRoleId = normalizeRoleId(roleId);
+    const preferredEngines = options?.preferredEnginesByRole?.[normalizedRoleId] || [];
+    const directCandidates = agents
+      .filter((agent) => normalizeRoleId(getAgentRoleId(agent)) === normalizedRoleId)
+      .filter((agent) => !usedAgentIds.has(agent.id));
+
+    const sortByPreference = (list: typeof directCandidates) => list
+      .slice()
+      .sort((left, right) => {
+        const leftEngine = resolveAgentEngine(left);
+        const rightEngine = resolveAgentEngine(right);
+        const leftIndex = preferredEngines.indexOf(leftEngine);
+        const rightIndex = preferredEngines.indexOf(rightEngine);
+        const leftRank = leftIndex >= 0 ? leftIndex : 999;
+        const rightRank = rightIndex >= 0 ? rightIndex : 999;
+        if (leftRank !== rightRank) {
+          return leftRank - rightRank;
+        }
+        const leftIdle = left.status === 'Offline' ? 1 : 0;
+        const rightIdle = right.status === 'Offline' ? 1 : 0;
+        if (leftIdle !== rightIdle) {
+          return leftIdle - rightIdle;
+        }
+        return String(left.name || left.id).localeCompare(String(right.name || right.id));
+      });
+
+    const fallbackCandidates = normalizedRoleId === 'ROLE_DESIGN' && preferredEngines.includes('hermes')
+      ? agents
+        .filter((agent) => resolveAgentEngine(agent) === 'hermes')
+        .filter((agent) => !usedAgentIds.has(agent.id))
+      : [];
+
+    const allCandidates = [
+      ...directCandidates,
+      ...fallbackCandidates.filter((candidate) => !directCandidates.some((direct) => direct.id === candidate.id)),
+    ];
+    if (allCandidates.length === 0) {
+      return null;
+    }
+
+    const selected = sortByPreference(allCandidates)[0];
+    const mappedByEngineFallback = normalizeRoleId(getAgentRoleId(selected)) !== normalizedRoleId;
+    return { agent: selected, mappedByEngineFallback };
+  };
+
   const allowedRoleSet = new Set((options?.allowedRoleIds || []).map((role) => normalizeRoleId(role)));
   const normalizedRoles = Array.from(new Set(
     suggestedRoles
@@ -301,22 +359,25 @@ export const buildRoleBasedAgentRecommendations = (
     ? roleQueue.filter((role) => allowedRoleSet.has(role))
     : roleQueue;
 
-  const recommendations: AgentRecommendation[] = constrainedRoles
-    .map((roleId, index) => {
-      const matched = agents.find((agent) => normalizeRoleId(getAgentRoleId(agent)) === roleId);
-      if (!matched) {
-        return null;
-      }
-      return {
-        agentId: matched.id,
-        roleId,
-        name: matched.name,
-        role: matched.role,
-        score: Math.max(1, 100 - index),
-        reason: `来自 Issue 结论的角色映射：${roleLabel(roleId)}`,
-      } as AgentRecommendation;
-    })
-    .filter(Boolean) as AgentRecommendation[];
+  const usedAgentIds = new Set<string>();
+  const recommendations: AgentRecommendation[] = [];
+  constrainedRoles.forEach((roleId, index) => {
+    const picked = pickBestAgent(roleId, usedAgentIds);
+    if (!picked) {
+      return;
+    }
+    usedAgentIds.add(picked.agent.id);
+    recommendations.push({
+      agentId: picked.agent.id,
+      roleId,
+      name: picked.agent.name,
+      role: picked.agent.role,
+      score: Math.max(1, 100 - index),
+      reason: picked.mappedByEngineFallback
+        ? `模板要求 ${roleLabel(roleId)}，已由 Hermes Agent 承担该角色`
+        : `来自 Issue 结论的角色映射：${roleLabel(roleId)}`,
+    });
+  });
 
   if (recommendations.length > 0) {
     return recommendations.slice(0, 5);

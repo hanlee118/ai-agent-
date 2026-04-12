@@ -34,7 +34,7 @@ test('new project modal should follow selected stage template and submit none co
   test.setTimeout(180_000);
 
   const { prisma, token, hashSessionToken } = await createTemporarySessionCookie();
-  let capturedConfirmPayload: ConfirmPayload | null = null;
+  let capturedCreatePayload: ConfirmPayload | null = null;
 
   await context.addCookies([
     {
@@ -160,18 +160,37 @@ test('new project modal should follow selected stage template and submit none co
       });
     });
 
-    await page.route('**/api/issues/*/confirm', async (route) => {
+    await page.route('**/api/projects', async (route) => {
       const raw = route.request().postData() || '{}';
-      capturedConfirmPayload = JSON.parse(raw) as ConfirmPayload;
+      capturedCreatePayload = JSON.parse(raw) as ConfirmPayload;
+      await route.fulfill({
+        status: 201,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          id: 'P-UI-TEMPLATE-001',
+          name: 'UI 模板验收项目',
+        }),
+      });
+    });
+
+    await page.route('**/api/gitlab/harness/projects/*/sync', async (route) => {
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
         body: JSON.stringify({
           success: true,
           data: {
-            issue: { id: 'ISSUE-UI-TEMPLATE-001', status: 'confirmed', createdProjectId: 'P-UI-TEMPLATE-001' },
-            project: { id: 'P-UI-TEMPLATE-001', name: 'UI 模板验收项目' },
-            backfill: { summary: 'ok', teamRoleIds: ['ROLE_PM'] },
+            projectId: 'P-UI-TEMPLATE-001',
+            projectName: 'UI 模板验收项目',
+            projectPath: 'root/ai-agent-workbench',
+            projectIssueIid: 1002,
+            stageType: 'ANALYSIS',
+            closeOnComplete: false,
+            taskTotal: 0,
+            created: [],
+            updated: [],
+            reused: [],
+            failed: [],
           },
         }),
       });
@@ -188,13 +207,13 @@ test('new project modal should follow selected stage template and submit none co
     await page.getByRole('button', { name: /仅创建项目/ }).first().click();
     await page.getByPlaceholder('例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。')
       .fill('请验证创建项目弹窗中模板切换是否正确影响产出物与创建 payload。');
-    await page.getByRole('button', { name: 'AI 分析并分配 Agent' }).click();
+    await page.getByRole('button', { name: '继续：团队分配' }).click();
 
     await expect(page.getByText('团队分配与扩展信息')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText(/当前行业最少需要\s*\d+\s*个角色/)).toHaveCount(0);
     await page.getByRole('button', { name: '下一步：创建确认卡' }).click();
 
-    await expect(page.getByText('创建前理解确认卡')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('创建确认卡（需求确认后置）')).toBeVisible({ timeout: 10_000 });
     await page.getByRole('button', { name: /全流程编排（推荐）/ }).click();
 
     const artifactSectionLabel = page.getByText('目标产出物', { exact: true });
@@ -220,9 +239,9 @@ test('new project modal should follow selected stage template and submit none co
 
     await page.getByRole('button', { name: '确认创建并启动执行' }).click();
 
-    await expect.poll(() => capturedConfirmPayload !== null).toBeTruthy();
-    assert.equal(capturedConfirmPayload?.workflowTemplateKey, 'none');
-    assert.equal(capturedConfirmPayload?.autoStartWorkflow, false);
+    await expect.poll(() => capturedCreatePayload !== null).toBeTruthy();
+    assert.equal(capturedCreatePayload?.workflowTemplateKey, 'none');
+    assert.equal(capturedCreatePayload?.autoStartWorkflow, false);
   } finally {
     await prisma.authSession.deleteMany({
       where: { tokenHash: await hashSessionToken(token) },

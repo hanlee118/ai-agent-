@@ -57,11 +57,50 @@ export async function ensureProjectIssueFirst(input: {
         reason: "direct_project_creation_enabled_without_local_issue"
       } as const;
     }
+
+    if (!gitlabIssueFirstEnabled) {
+      return {
+        ok: false,
+        enforced: true,
+        code: "LOCAL_ISSUE_REQUIRED",
+        message: "当前项目未绑定需求 Issue。请先通过 New Project Issue 流程确认需求后再推进。"
+      } as const;
+    }
+
+    const binding = await findProjectMainIssueBinding(input.projectId);
+    if (binding?.issueIid && binding.gitlabProjectId) {
+      return {
+        ok: true,
+        enforced: true,
+        data: {
+          projectId: input.projectId,
+          projectPath: binding.gitlabProjectId,
+          issueIid: binding.issueIid,
+          source: "binding_without_local_issue"
+        }
+      } as const;
+    }
+
+    const ensured = await ensureProjectMainIssueSync({
+      projectId: input.projectId,
+      projectPath: input.projectPath || ISSUE_FIRST_GITLAB_PROJECT
+    });
+    if (!ensured.ok) {
+      return {
+        ok: false,
+        enforced: true,
+        code: ensured.code,
+        message: `当前项目未绑定本地需求 Issue，且 GitLab 主 issue 同步失败：${ensured.message}`
+      } as const;
+    }
+
     return {
-      ok: false,
+      ok: true,
       enforced: true,
-      code: "LOCAL_ISSUE_REQUIRED",
-      message: "当前项目未绑定需求 Issue。请先通过 New Project Issue 流程确认需求后再推进。"
+      data: {
+        ...ensured.data,
+        source: "gitlab_sync_without_local_issue"
+      }
     } as const;
   }
 

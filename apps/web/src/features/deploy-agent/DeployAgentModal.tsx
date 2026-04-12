@@ -77,6 +77,8 @@ export default function DeployAgentModal({
     setCustomTemplateRaw,
     agentName,
     setAgentName,
+    targetEngine,
+    setTargetEngine,
     selectedProjectId,
     setSelectedProjectId,
     isDeploying,
@@ -158,6 +160,18 @@ export default function DeployAgentModal({
                 placeholder="例如: Aegis-Alpha"
                 className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50"
               />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">执行主体</label>
+              <select
+                value={targetEngine}
+                onChange={(event) => setTargetEngine(event.target.value as 'openclaw' | 'hermes' | 'managed')}
+                className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+              >
+                <option value="openclaw">OpenClaw</option>
+                <option value="hermes">Hermes</option>
+                <option value="managed">Managed</option>
+              </select>
             </div>
             <div className="space-y-2">
               <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">分配项目</label>

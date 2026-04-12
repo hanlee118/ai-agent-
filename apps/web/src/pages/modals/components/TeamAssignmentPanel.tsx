@@ -91,7 +91,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
           </p>
           {missingWorkflowRoles.length > 0 ? (
             <p className="text-[11px] text-warning">
-              缺少角色: {missingWorkflowRoles.map((roleId) => roleLabel(roleId)).join('、')}。补齐后才能进入创建确认。
+              建议补充角色: {missingWorkflowRoles.map((roleId) => roleLabel(roleId)).join('、')}。当前不阻塞创建，可在项目详情继续调整。
             </p>
           ) : (
             <p className="text-[11px] text-emerald-300">
@@ -127,13 +127,16 @@ export default function TeamAssignmentPanel({ controller }: Props) {
       </div>
 
       <div className="space-y-3">
-        <p className="text-xs text-slate-400">自动分配的需求分析 Agent（可取消/补充）</p>
+        <p className="text-xs text-slate-400">可选执行 Agent（创建后可在项目详情继续调整）</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           {industryAgents.map((agent) => {
             const roleId = getAgentRoleId(agent);
             const selected = selectedAgentIds.has(agent.id);
             const isSoulRole = normalizeRoleId(roleId) === normalizeRoleId(soulRoleId);
             const engine = resolveEngineMeta(agent.integrationEngine);
+            const roleHint = engine.label === 'Hermes' && workflowTemplateKey === 'visual_design'
+              ? '视觉设计总监（Hermes 承担）'
+              : roleLabel(roleId);
             return (
               <label
                 key={agent.id}
@@ -158,7 +161,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
                   </div>
                 </div>
                 <p className="text-[11px] text-slate-400">
-                  {roleLabel(roleId)}{isSoulRole ? ' · 灵魂角色' : ''}
+                  {roleHint}{isSoulRole ? ' · 灵魂角色' : ''}
                 </p>
               </label>
             );

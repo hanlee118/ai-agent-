@@ -18,3 +18,4 @@ export * from './openclawAgentsApi';
 export * from './knowledgeApi';
 export * from './workflowsApi';
 export * from './hermesApi';
+export * from './gitlabHarnessApi';

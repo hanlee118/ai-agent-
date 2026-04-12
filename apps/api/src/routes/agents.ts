@@ -16,6 +16,7 @@ interface CreateAgentBody {
   name?: unknown;
   role?: unknown;
   modelId?: unknown;
+  integrationEngine?: unknown;
   soul?: unknown;
   sop?: unknown;
 }
@@ -30,6 +31,10 @@ interface UpdateSopBody {
 
 interface SwitchModelBody {
   modelId?: unknown;
+}
+
+interface SwitchIntegrationEngineBody {
+  integrationEngine?: unknown;
 }
 
 function toStringArrayFromJson(input: Prisma.JsonValue | null | undefined) {
@@ -59,7 +64,19 @@ function normalizeAgentStatus(status: string | null | undefined) {
   return status ?? "Idle";
 }
 
-function inferIntegrationEngine(parts: Array<string | null | undefined>) {
+function normalizeIntegrationEngine(input: unknown) {
+  const value = String(input ?? "").trim().toLowerCase();
+  if (value === "hermes" || value === "openclaw" || value === "managed") {
+    return value as "hermes" | "openclaw" | "managed";
+  }
+  return null;
+}
+
+function inferIntegrationEngine(parts: Array<string | null | undefined>, explicit?: unknown) {
+  const normalizedExplicit = normalizeIntegrationEngine(explicit);
+  if (normalizedExplicit) {
+    return normalizedExplicit;
+  }
   const joined = parts
     .map((item) => String(item ?? "").trim().toLowerCase())
     .filter(Boolean)
@@ -78,7 +95,8 @@ function isHermesIntegrationEnabled() {
   if (enabled) {
     return enabled !== "false" && enabled !== "0" && enabled !== "off";
   }
-  return Boolean(String(process.env.HERMES_MCP_ENDPOINT ?? process.env.HERMES_MCP ?? "").trim());
+  // Default to enabled so Hermes agent remains visible/selectable in UI unless explicitly turned off.
+  return true;
 }
 
 function buildBuiltinHermesAgentRow() {
@@ -195,7 +213,7 @@ async function getAgentDetail(agentId: string) {
       profile?.name,
       config?.title,
       config?.displayName
-    ])
+    ], config?.integrationEngine)
   };
 }
 
@@ -291,7 +309,7 @@ export function createAgentsRouter() {
             profile?.name,
             config?.title,
             config?.displayName
-          ])
+          ], config?.integrationEngine)
         };
       })
       .sort((a, b) => a.id.localeCompare(b.id));
@@ -311,6 +329,7 @@ export function createAgentsRouter() {
     const name = String(payload.name ?? "").trim();
     const role = String(payload.role ?? "").trim();
     const requestedModelId = String(payload.modelId ?? "").trim();
+    const integrationEngine = normalizeIntegrationEngine(payload.integrationEngine) || "managed";
     const soul = String(payload.soul ?? "").trim();
 
     if (!name || !role) {
@@ -379,6 +398,7 @@ export function createAgentsRouter() {
           title: role,
           intro,
           responsibility: role,
+          integrationEngine,
           selectedModel: modelId,
           defaultModel: modelId,
           fallbackModel: null,
@@ -582,6 +602,64 @@ export function createAgentsRouter() {
       agentId,
       modelId: updatedConfig.selectedModel,
       updatedAt: updatedConfig.updatedAt.toISOString()
+    });
+  }));
+
+  router.patch("/:id/engine", asyncRoute(async (req, res) => {
+    const agentId = String(req.params.id ?? "").trim();
+    const payload = (req.body ?? {}) as SwitchIntegrationEngineBody;
+    const integrationEngine = normalizeIntegrationEngine(payload.integrationEngine);
+    if (!integrationEngine) {
+      sendError(res, 400, "VALIDATION_ERROR", "integrationEngine must be hermes | openclaw | managed");
+      return;
+    }
+
+    if (!(await agentExists(agentId))) {
+      sendError(res, 404, "NOT_FOUND", "Agent not found");
+      return;
+    }
+
+    const profile = await prisma.agentProfile.findUnique({ where: { roleId: agentId } });
+    const current = await prisma.managedAgentConfig.findUnique({ where: { agentId } });
+    const currentModelId = String(current?.selectedModel ?? "").trim();
+    const fallbackModelId = String(current?.defaultModel ?? "").trim();
+    const preferredHermesModel = "hermes-v2.1";
+    const nextSelectedModel = currentModelId || fallbackModelId || preferredHermesModel;
+
+    const updated = await prisma.managedAgentConfig.upsert({
+      where: { agentId },
+      create: {
+        agentId,
+        displayName: profile?.name ?? agentId,
+        title: profile?.roleId ?? agentId,
+        intro: profile?.description ?? null,
+        responsibility: profile?.tagline ?? null,
+        integrationEngine,
+        selectedModel: nextSelectedModel,
+        defaultModel: nextSelectedModel,
+        fallbackModel: null,
+        executionMode: "confirm_first",
+        requireConfirmation: true,
+        autoApproveMinorSteps: false,
+        maxPromptTokens: DEFAULT_AGENT_TOKEN_LIMIT,
+        maxCompletionTokens: null,
+        maxDailyTokens: DEFAULT_AGENT_TOKEN_LIMIT,
+        memoryEnabled: true,
+        allowedAgentIds: [],
+        toolAllowlist: []
+      },
+      update: {
+        integrationEngine,
+        selectedModel: nextSelectedModel,
+        defaultModel: current?.defaultModel || nextSelectedModel
+      }
+    });
+
+    sendSuccess(res, {
+      agentId,
+      integrationEngine: updated.integrationEngine,
+      modelId: updated.selectedModel,
+      updatedAt: updated.updatedAt.toISOString()
     });
   }));
 

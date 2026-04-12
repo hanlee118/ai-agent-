@@ -77,6 +77,8 @@ export default function AgentConfigModal({
     setAgentRole,
     selectedModelId,
     setSelectedModelId,
+    selectedIntegrationEngine,
+    setSelectedIntegrationEngine,
     soulInput,
     setSoulInput,
     sopInput,
@@ -125,6 +127,19 @@ export default function AgentConfigModal({
         </div>
         <p className="text-[10px] text-slate-500 -mt-3">名称与角色当前为只读，支持在线修改 SOUL、SOP 和模型。</p>
         <p className="text-[10px] text-slate-500 -mt-3">配置源：{configSource === 'openclaw' ? 'OpenClaw 工作区 Agent' : '本地管理 Agent'}</p>
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">执行主体</label>
+          <select
+            value={selectedIntegrationEngine}
+            onChange={(event) => setSelectedIntegrationEngine(event.target.value as 'openclaw' | 'hermes' | 'managed')}
+            className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+          >
+            <option value="managed">Managed</option>
+            <option value="openclaw">OpenClaw</option>
+            <option value="hermes">Hermes</option>
+          </select>
+          <p className="text-[11px] text-slate-500">切换主体不会删除 Agent 资产；会更新后续编排和展示中的引擎归属。</p>
+        </div>
         <div className="space-y-2">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">运行模型</label>
           <select

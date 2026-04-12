@@ -14,7 +14,8 @@ const migrationPaths = [
   path.join(apiRoot, "prisma/migrations/20260411103000_add_knowledge_workflow_v2/migration.sql"),
   path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql"),
   path.join(apiRoot, "prisma/migrations/20260411193000_add_hermes_skill_sync/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql")
+  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql"),
+  path.join(apiRoot, "prisma/migrations/20260413091000_add_agent_integration_engine/migration.sql")
 ];
 
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-repo-workflow-link-"));
@@ -109,6 +110,9 @@ after(async () => {
 });
 
 test("createProject auto-recovers workflow-v2 templates when template registry is empty", async () => {
+  await prismaClient.workflowTransition.deleteMany({});
+  await prismaClient.workflowStage.deleteMany({});
+  await prismaClient.workflow.deleteMany({});
   await prismaClient.workflowTemplate.deleteMany({});
 
   const project = await createProjectFn(

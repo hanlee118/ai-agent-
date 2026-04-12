@@ -27,6 +27,7 @@ model ManagedAgentConfig {
   title                  String?
   intro                  String?
   responsibility         String?
+  integrationEngine      String            @default("managed")
   selectedModel          String
   defaultModel           String
   fallbackModel          String?

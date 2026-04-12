@@ -6,6 +6,7 @@ const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
 
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
 type ConfigSource = 'openclaw' | 'managed';
+type IntegrationEngine = 'openclaw' | 'hermes' | 'managed';
 
 type UseAgentConfigParams = {
   isOpen: boolean;
@@ -42,6 +43,12 @@ export function useAgentConfig({
   const [agentRole, setAgentRole] = useState(fallbackAgent.role);
   const [selectedModelId, setSelectedModelId] = useState(fallbackAgent.currentModelId || models[0]?.id || '');
   const [loadedModelRoute, setLoadedModelRoute] = useState(fallbackAgent.currentModelId || '');
+  const [selectedIntegrationEngine, setSelectedIntegrationEngine] = useState<IntegrationEngine>(
+    (String(fallbackAgent.integrationEngine || 'managed').trim().toLowerCase() as IntegrationEngine) || 'managed',
+  );
+  const [loadedIntegrationEngine, setLoadedIntegrationEngine] = useState<IntegrationEngine>(
+    (String(fallbackAgent.integrationEngine || 'managed').trim().toLowerCase() as IntegrationEngine) || 'managed',
+  );
   const [soulInput, setSoulInput] = useState('');
   const [loadedSoul, setLoadedSoul] = useState('');
   const [sopInput, setSopInput] = useState('');
@@ -92,16 +99,22 @@ export function useAgentConfig({
 
   useEffect(() => {
     const seedModelOptionId = resolveModelOptionId(fallbackAgent.currentModelId || models[0]?.id || '');
+    const normalizedEngine = String(fallbackAgent.integrationEngine || 'managed').trim().toLowerCase();
+    const seedIntegrationEngine: IntegrationEngine = normalizedEngine === 'hermes' || normalizedEngine === 'openclaw'
+      ? normalizedEngine
+      : 'managed';
     setAgentName(fallbackAgent.name);
     setAgentRole(fallbackAgent.role);
     setSelectedModelId(seedModelOptionId);
     setLoadedModelRoute(resolveModelRoute(seedModelOptionId));
+    setSelectedIntegrationEngine(seedIntegrationEngine);
+    setLoadedIntegrationEngine(seedIntegrationEngine);
     setSoulInput('');
     setLoadedSoul('');
     setSopInput('');
     setLoadedSop([]);
     setConfigSource('openclaw');
-  }, [fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, isOpen, models, resolveModelOptionId, resolveModelRoute]);
+  }, [fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, fallbackAgent.integrationEngine, isOpen, models, resolveModelOptionId, resolveModelRoute]);
 
   useEffect(() => {
     if (!isOpen || !fallbackAgent.id) {
@@ -133,6 +146,8 @@ export function useAgentConfig({
           setAgentRole(detail.title || fallbackAgent.role);
           setSelectedModelId(resolveModelOptionId(detailModelId));
           setLoadedModelRoute(resolveModelRoute(detailModelId));
+          setSelectedIntegrationEngine('openclaw');
+          setLoadedIntegrationEngine('openclaw');
           setSoulInput(detailSoul);
           setLoadedSoul(detailSoul);
           setSopInput(detailSop.join('\n'));
@@ -154,6 +169,12 @@ export function useAgentConfig({
         setAgentRole(detail.role || fallbackAgent.role);
         setSelectedModelId(resolveModelOptionId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || ''));
         setLoadedModelRoute(resolveModelRoute(detail.currentModelId || fallbackAgent.currentModelId || ''));
+        const normalizedEngine = String(detail.integrationEngine || fallbackAgent.integrationEngine || 'managed').trim().toLowerCase();
+        const nextEngine: IntegrationEngine = normalizedEngine === 'hermes' || normalizedEngine === 'openclaw'
+          ? normalizedEngine
+          : 'managed';
+        setSelectedIntegrationEngine(nextEngine);
+        setLoadedIntegrationEngine(nextEngine);
         setSoulInput(detailSoul);
         setLoadedSoul(detailSoul);
         setSopInput(detailSop.join('\n'));
@@ -202,16 +223,20 @@ export function useAgentConfig({
     const nextSop = parseSopInput();
     const selectedModelRoute = resolveModelRoute(selectedModelId);
     const hasModelChange = Boolean(selectedModelRoute) && selectedModelRoute !== loadedModelRoute;
+    const hasEngineChange = selectedIntegrationEngine !== loadedIntegrationEngine;
     const hasSoulChange = nextSoul !== loadedSoul.trim();
     const hasSopChange = !isSameStringArray(nextSop, loadedSop);
 
-    if (!hasModelChange && !hasSoulChange && !hasSopChange) {
+    if (!hasModelChange && !hasEngineChange && !hasSoulChange && !hasSopChange) {
       addToast('未检测到配置变更', 'info');
       return false;
     }
 
     setIsSaving(true);
     try {
+      if (hasEngineChange) {
+        await agentsApi.switchEngine(fallbackAgent.id, selectedIntegrationEngine);
+      }
       if (configSource === 'openclaw') {
         if (hasModelChange && selectedModelRoute) {
           await openclawAgentsApi.updateSettings(fallbackAgent.id, { selectedModel: selectedModelRoute });
@@ -262,7 +287,9 @@ export function useAgentConfig({
   }, [
     fallbackAgent.id,
     selectedModelId,
+    selectedIntegrationEngine,
     loadedModelRoute,
+    loadedIntegrationEngine,
     soulInput,
     loadedSoul,
     parseSopInput,
@@ -318,6 +345,8 @@ export function useAgentConfig({
     setAgentRole,
     selectedModelId,
     setSelectedModelId,
+    selectedIntegrationEngine,
+    setSelectedIntegrationEngine,
     soulInput,
     setSoulInput,
     sopInput,

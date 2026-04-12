@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +27,14 @@ let app: express.Express;
 
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
+  try {
+    execSync(
+      `sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(path.join(apiRoot, "prisma/migrations/20260413091000_add_agent_integration_engine/migration.sql"))}`,
+      { cwd: apiRoot, stdio: "pipe" }
+    );
+  } catch {
+    // ignore idempotent replay in case seed db already includes the column
+  }
   const [dbMod, agentsMod] = await Promise.all([
     import("../db.js"),
     import("./agents.js")
@@ -74,6 +83,7 @@ before(async () => {
       title: "OpenClaw Developer",
       intro: "runtime worker",
       responsibility: "dev",
+      integrationEngine: "openclaw",
       selectedModel: "gpt-4.1",
       defaultModel: "gpt-4.1",
       fallbackModel: null,

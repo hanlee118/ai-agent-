@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Agent, Model, Project } from '../../types';
-import { openclawAgentsApi } from '../../lib/api';
+import { agentsApi, openclawAgentsApi } from '../../lib/api';
 
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
 
@@ -17,6 +17,7 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
   const [isCustom, setIsCustom] = useState(false);
   const [customTemplateRaw, setCustomTemplateRaw] = useState('');
   const [agentName, setAgentName] = useState('');
+  const [targetEngine, setTargetEngine] = useState<'openclaw' | 'hermes' | 'managed'>('openclaw');
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [isDeploying, setIsDeploying] = useState(false);
 
@@ -55,6 +56,23 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     return normalized;
   }, [models]);
 
+  const resolveModelId = useCallback((modelIdOrRoute: string) => {
+    const normalized = String(modelIdOrRoute || '').trim();
+    if (!normalized) {
+      return '';
+    }
+    const matchedById = models.find((item) => String(item.id || '').trim() === normalized);
+    if (matchedById?.id) {
+      return String(matchedById.id).trim();
+    }
+    const normalizedLower = normalized.toLowerCase();
+    const matchedByName = models.find((item) => String(item.name || '').trim().toLowerCase() === normalizedLower);
+    if (matchedByName?.id) {
+      return String(matchedByName.id).trim();
+    }
+    return '';
+  }, [models]);
+
   const pickDefaultModelRoute = useCallback(() => {
     const preferred = models.find((item) => !String(item.id || '').startsWith('runtime-'));
     if (preferred?.name) {
@@ -73,6 +91,7 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     }
     setSelectedProjectId(projects[0]?.id || '');
     setAgentName('');
+    setTargetEngine('openclaw');
     setSelectedTemplate(null);
     setIsCustom(false);
     setCustomTemplateRaw('');
@@ -151,28 +170,49 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
       || parsedCustom.modelId
       || pickDefaultModelRoute(),
     ) || pickDefaultModelRoute();
+    const managedModelId = resolveModelId(
+      selectedTemplateConfig?.modelId
+      || parsedCustom.modelId
+      || models[0]?.id
+      || '',
+    ) || String(models[0]?.id || '').trim();
     const soul = parsedCustom.soul || undefined;
     const sop = parsedCustom.sop.length > 0 ? parsedCustom.sop : undefined;
     const agentId = buildAgentId(safeName);
 
     setIsDeploying(true);
     try {
-      await openclawAgentsApi.create({
-        agentId,
-        name: safeName,
-        title: role,
-        model: modelRoute,
-        intro: soul,
-        soul,
-        sop: sop && sop.length > 0 ? `# SOP\n\n${sop.map((step, index) => `${index + 1}. ${step}`).join('\n')}\n` : undefined,
-        responsibility: role,
-      });
+      if (targetEngine === 'openclaw') {
+        await openclawAgentsApi.create({
+          agentId,
+          name: safeName,
+          title: role,
+          model: modelRoute,
+          intro: soul,
+          soul,
+          sop: sop && sop.length > 0 ? `# SOP\n\n${sop.map((step, index) => `${index + 1}. ${step}`).join('\n')}\n` : undefined,
+          responsibility: role,
+        });
+      } else {
+        if (!managedModelId) {
+          addToast('当前没有可用模型，请先在模型中心创建模型后再部署 Managed/Hermes Agent', 'error');
+          return false;
+        }
+        await agentsApi.create({
+          name: safeName,
+          role: agentId,
+          modelId: managedModelId,
+          integrationEngine: targetEngine,
+          soul,
+          sop,
+        });
+      }
 
       if (onDeployed) {
         await onDeployed();
       }
 
-      addToast('Agent 部署成功，已加入团队', 'success');
+      addToast(`Agent 部署成功，执行主体：${targetEngine === 'openclaw' ? 'OpenClaw' : targetEngine === 'hermes' ? 'Hermes' : 'Managed'}`, 'success');
       if (selectedProjectId) {
         addToast('当前版本请在项目详情中手动关联 Agent', 'info');
       }
@@ -189,11 +229,14 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     parseCustomTemplate,
     selectedTemplateConfig?.role,
     selectedTemplateConfig?.modelId,
+    targetEngine,
     resolveModelRoute,
+    resolveModelId,
     pickDefaultModelRoute,
     buildAgentId,
     addToast,
     selectedProjectId,
+    models,
   ]);
 
   return {
@@ -205,6 +248,8 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     setCustomTemplateRaw,
     agentName,
     setAgentName,
+    targetEngine,
+    setTargetEngine,
     selectedProjectId,
     setSelectedProjectId,
     isDeploying,

@@ -1142,7 +1142,7 @@ export async function inspectOpenClawModelRouting(input?: {
   const items: Array<{
     source: "openclaw_config" | "managed_agent_config";
     agentId: string;
-    field: "model" | "selectedModel" | "defaultModel" | "fallbackModel";
+    field: "model" | "integrationEngine" | "selectedModel" | "defaultModel" | "fallbackModel";
     from: string | null;
     to: string;
     reason: string;
@@ -1198,6 +1198,7 @@ export async function inspectOpenClawModelRouting(input?: {
   const managedConfigs = await prisma.managedAgentConfig.findMany({
     select: {
       agentId: true,
+      integrationEngine: true,
       selectedModel: true,
       defaultModel: true,
       fallbackModel: true
@@ -1220,13 +1221,14 @@ export async function inspectOpenClawModelRouting(input?: {
     );
 
     const updateData: {
+      integrationEngine?: string;
       selectedModel?: string;
       defaultModel?: string;
       fallbackModel?: string;
     } = {};
 
     const track = (
-      field: "selectedModel" | "defaultModel" | "fallbackModel",
+      field: "integrationEngine" | "selectedModel" | "defaultModel" | "fallbackModel",
       from: string | null,
       to: string
     ) => {
@@ -1263,6 +1265,10 @@ export async function inspectOpenClawModelRouting(input?: {
     if ((row.defaultModel ?? null) !== nextDefaultModel) {
       track("defaultModel", row.defaultModel ?? null, nextDefaultModel);
       updateData.defaultModel = nextDefaultModel;
+    }
+    if ((row.integrationEngine ?? null) !== "openclaw") {
+      track("integrationEngine", row.integrationEngine ?? null, "openclaw");
+      updateData.integrationEngine = "openclaw";
     }
     const hasInvalidFallbackModel = Boolean(row.fallbackModel) && isRoutingPlaceholderModel(row.fallbackModel ?? undefined);
     if ((row.fallbackModel ?? null) !== nextFallbackModel && hasInvalidFallbackModel) {
@@ -1387,6 +1393,7 @@ export async function updateOpenClawAgentSettings(
       title: nextTitle,
       intro: nextIntro,
       responsibility: nextResponsibility,
+      integrationEngine: "openclaw",
       selectedModel: nextSettings.selectedModel,
       defaultModel: nextSettings.defaultModel,
       fallbackModel: nextSettings.fallbackModel,
@@ -1405,6 +1412,7 @@ export async function updateOpenClawAgentSettings(
       title: nextTitle,
       intro: nextIntro,
       responsibility: nextResponsibility,
+      integrationEngine: "openclaw",
       selectedModel: nextSettings.selectedModel,
       defaultModel: nextSettings.defaultModel,
       fallbackModel: nextSettings.fallbackModel,
@@ -1499,6 +1507,7 @@ export async function createOpenClawAgent(
       title,
       intro,
       responsibility,
+      integrationEngine: "openclaw",
       selectedModel: model,
       defaultModel: model,
       executionMode: governanceDefaults.executionMode,
@@ -1516,6 +1525,7 @@ export async function createOpenClawAgent(
       title,
       intro,
       responsibility,
+      integrationEngine: "openclaw",
       selectedModel: model,
       defaultModel: model,
       allowedAgentIds,
@@ -5136,6 +5146,7 @@ async function ensureManagedAgentConfigExists(
       title,
       intro: undefined,
       responsibility: undefined,
+      integrationEngine: "openclaw",
       selectedModel,
       defaultModel: selectedModel,
       fallbackModel: isDesignAgent ? designFallbackModel : undefined,
@@ -5152,6 +5163,7 @@ async function ensureManagedAgentConfigExists(
     update: {
       displayName,
       title,
+      integrationEngine: "openclaw",
       selectedModel,
       fallbackModel: isDesignAgent ? designFallbackModel : undefined
     }
@@ -5319,6 +5331,7 @@ async function switchAgentModelForRetry(
     where: { agentId },
     create: {
       agentId,
+      integrationEngine: "openclaw",
       selectedModel: normalizedModel,
       defaultModel: normalizedModel,
       fallbackModel: normalizedModel,
@@ -5327,6 +5340,7 @@ async function switchAgentModelForRetry(
       maxDailyTokens: DEFAULT_OPENCLAW_AGENT_TOKEN_LIMIT
     },
     update: {
+      integrationEngine: "openclaw",
       selectedModel: normalizedModel
     }
   });
