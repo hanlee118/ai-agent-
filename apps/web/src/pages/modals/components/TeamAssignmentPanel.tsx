@@ -26,6 +26,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
     selectedIndustryConfig,
     requiresSoulRole,
     soulRoleId,
+    enforceIndustryAssemblyRule,
     workflowTemplateKey,
     requiredWorkflowRoles,
     missingWorkflowRoles,
@@ -52,10 +53,16 @@ export default function TeamAssignmentPanel({ controller }: Props) {
           <p className="text-xs text-slate-300">
             行业角色集: {selectedIndustryConfig.roleSet.industryName} ({selectedIndustryConfig.roleSet.industryCode})
           </p>
-          <p className="text-[11px] text-slate-500">
-            灵魂角色: {roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}{requiresSoulRole ? '（必选）' : ''}
-            {' '}· 最少角色数: {selectedIndustryConfig.assemblyRule.minRoles}
-          </p>
+          {enforceIndustryAssemblyRule ? (
+            <p className="text-[11px] text-slate-500">
+              灵魂角色: {roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}{requiresSoulRole ? '（行业默认）' : ''}
+              {` · 最少角色数: ${selectedIndustryConfig.assemblyRule.minRoles}`}
+            </p>
+          ) : (
+            <p className="text-[11px] text-slate-500">
+              当前为阶段模板模式：仅按模板关键角色校验，不应用行业最少角色数/灵魂角色限制。
+            </p>
+          )}
         </div>
       )}
 
@@ -120,7 +127,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
         {analysisRecommendations.length === 0 && (
           <p className="text-xs text-warning">当前未选中任何 Agent。你可以从上方列表勾选后继续。</p>
         )}
-        {requiresSoulRole && soulRoleId && !selectedRoleIds.has(normalizeRoleId(soulRoleId)) && (
+        {enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !selectedRoleIds.has(normalizeRoleId(soulRoleId)) && (
           <p className="text-xs text-warning">
             当前行业要求包含灵魂角色 {roleLabel(soulRoleId)}，请先勾选对应 Agent。
           </p>

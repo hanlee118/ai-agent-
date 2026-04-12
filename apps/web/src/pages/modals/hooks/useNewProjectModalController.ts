@@ -12,6 +12,12 @@ import {
 } from '../../../lib/api';
 import { sendBatchAgentMessage } from '../../../lib/adapters';
 import { agents } from '../../../lib/runtimeCollections';
+import {
+  getTemplateExpectedArtifacts,
+  getTemplateInputPreset,
+  getTemplateRequiredRoles,
+  getTemplateWorkflowSop,
+} from '../utils/workflowTemplateMeta';
 import type {
   AgentRecommendation,
   ClarificationAnswers,
@@ -48,24 +54,6 @@ const INITIAL_FORM_DATA: NewProjectFormData = {
   priority: 'Medium',
   dueDate: '',
   agentIds: [],
-};
-
-const WORKFLOW_TEMPLATE_REQUIRED_ROLES: Record<string, string[]> = {
-  standard_software_development: ['ROLE_PM', 'ROLE_ANALYST', 'ROLE_DESIGN', 'ROLE_ARCH', 'ROLE_DEV', 'ROLE_QA'],
-  requirements_design: ['ROLE_PM', 'ROLE_ANALYST'],
-  visual_design: ['ROLE_DESIGN'],
-  tech_design: ['ROLE_ARCH'],
-  code_dev: ['ROLE_ARCH', 'ROLE_DEV'],
-  qa_acceptance: ['ROLE_QA'],
-};
-
-const WORKFLOW_TEMPLATE_INPUT_PRESETS: Record<string, { name: string; type: string }> = {
-  requirements_design: { name: 'prd_requirements', type: 'prd' },
-  visual_design: { name: 'design_brief', type: 'mockup' },
-  tech_design: { name: 'technical_spec', type: 'document' },
-  code_dev: { name: 'implementation_scope', type: 'code_repo' },
-  qa_acceptance: { name: 'qa_test_scope', type: 'document' },
-  standard_software_development: { name: 'raw_requirements', type: 'document' },
 };
 
 function uniqueNormalizedRoles(input: string[]) {
@@ -119,6 +107,7 @@ export function useNewProjectModalController({
   const [workflowTemplateKey, setWorkflowTemplateKey] = useState('standard_software_development');
   const [autoStartWorkflow, setAutoStartWorkflow] = useState(true);
   const [formData, setFormData] = useState<NewProjectFormData>(INITIAL_FORM_DATA);
+  const enforceIndustryAssemblyRule = workflowTemplateKey === 'none';
 
   const allowedRoleIds = useMemo(
     () => selectedIndustryConfig?.roleSet.roleIds || [],
@@ -167,16 +156,16 @@ export function useNewProjectModalController({
     if (workflowTemplateKey === 'none') {
       return [] as string[];
     }
-    const explicit = WORKFLOW_TEMPLATE_REQUIRED_ROLES[workflowTemplateKey] || [];
+    const explicit = getTemplateRequiredRoles(workflowTemplateKey);
     const fallbackByMode = projectType === 'complete'
-      ? WORKFLOW_TEMPLATE_REQUIRED_ROLES.standard_software_development
-      : WORKFLOW_TEMPLATE_REQUIRED_ROLES.requirements_design;
+      ? getTemplateRequiredRoles('standard_software_development')
+      : getTemplateRequiredRoles('requirements_design');
     const merged = uniqueNormalizedRoles(explicit.length > 0 ? explicit : fallbackByMode);
-    if (requiresSoulRole && soulRoleId) {
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId) {
       return uniqueNormalizedRoles([soulRoleId, ...merged]);
     }
     return merged;
-  }, [workflowTemplateKey, projectType, requiresSoulRole, soulRoleId]);
+  }, [workflowTemplateKey, projectType, enforceIndustryAssemblyRule, requiresSoulRole, soulRoleId]);
 
   const applyTemplateRolePlan = (seedRoleIds: string[]) => {
     const normalizedSeed = uniqueNormalizedRoles(seedRoleIds);
@@ -201,22 +190,21 @@ export function useNewProjectModalController({
     [requiredWorkflowRoles, selectedWorkflowRoleIds],
   );
 
-  useEffect(() => {
-    if (projectType === 'complete' && workflowTemplateKey !== 'standard_software_development' && workflowTemplateKey !== 'none') {
-      setWorkflowTemplateKey('standard_software_development');
-      return;
-    }
-    if ((projectType === 'standalone' || projectType === 'relay')
-      && workflowTemplateKey === 'standard_software_development') {
-      setWorkflowTemplateKey('requirements_design');
-    }
-  }, [projectType, workflowTemplateKey]);
+  const activeExpectedArtifacts = useMemo(
+    () => getTemplateExpectedArtifacts(workflowTemplateKey, issuePreview?.expectedArtifacts || []),
+    [workflowTemplateKey, issuePreview],
+  );
+
+  const activeWorkflowSop = useMemo(
+    () => getTemplateWorkflowSop(workflowTemplateKey, issuePreview?.workflow || null),
+    [workflowTemplateKey, issuePreview],
+  );
 
   useEffect(() => {
     if (!(projectType === 'standalone' || projectType === 'relay')) {
       return;
     }
-    const preset = WORKFLOW_TEMPLATE_INPUT_PRESETS[workflowTemplateKey] || WORKFLOW_TEMPLATE_INPUT_PRESETS.requirements_design;
+    const preset = getTemplateInputPreset(workflowTemplateKey);
     const normalizedName = String(standaloneInputName || '').trim().toLowerCase();
     if (!normalizedName || normalizedName === 'rawrequirements' || normalizedName === 'raw_requirements') {
       setStandaloneInputName(preset.name);
@@ -242,8 +230,8 @@ export function useNewProjectModalController({
 
     const nextRecommendations = buildRoleBasedAgentRecommendations(nextPlannedRoles, {
       allowedRoleIds,
-      mustHaveSoulRole: requiresSoulRole,
-      soulRoleId,
+      mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+      soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
     });
     if (nextRecommendations.length === 0) {
       return;
@@ -270,6 +258,7 @@ export function useNewProjectModalController({
     workflowTemplateKey,
     projectType,
     allowedRoleIds,
+    enforceIndustryAssemblyRule,
     requiresSoulRole,
     soulRoleId,
     parsedProject,
@@ -603,8 +592,8 @@ export function useNewProjectModalController({
         : refreshedRoleIds;
       const refreshedRecommendations = buildRoleBasedAgentRecommendations(applyTemplateRolePlan(constrainedRoleIds), {
         allowedRoleIds,
-        mustHaveSoulRole: requiresSoulRole,
-        soulRoleId,
+        mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+        soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
       });
 
       setIssuePreview(refreshed);
@@ -669,8 +658,8 @@ export function useNewProjectModalController({
       const plannedRoleIds = applyTemplateRolePlan(constrainedTeamRoleIds);
       const recommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
         allowedRoleIds,
-        mustHaveSoulRole: requiresSoulRole,
-        soulRoleId,
+        mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+        soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
       });
       const recommendedNames = recommendations.map((item) => item.name);
       const recommendationRoleIds = Array.from(new Set(recommendations.map((item) => normalizeRoleId(item.roleId))));
@@ -707,7 +696,7 @@ export function useNewProjectModalController({
       });
       setStep('analysis');
 
-      if (requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
+      if (enforceIndustryAssemblyRule && requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
         addToast(`已完成需求分析，但当前未匹配到灵魂角色 ${roleLabel(soulRoleId)}，请手动补充`, 'error');
       } else {
         addToast(
@@ -780,15 +769,17 @@ export function useNewProjectModalController({
     const names = analysisRecommendations.map((item) => item.name);
     const nextRoleIds = roleIds.length > 0 ? roleIds : parsedProject.team.map((role) => normalizeRoleId(role));
 
-    if (requiresSoulRole && soulRoleId && !nextRoleIds.includes(normalizeRoleId(soulRoleId))) {
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !nextRoleIds.includes(normalizeRoleId(soulRoleId))) {
       addToast(`当前行业团队必须包含灵魂角色 ${roleLabel(soulRoleId)}，请先补充后再继续`, 'error');
       return;
     }
 
-    const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
-    if (minRoles > 0 && nextRoleIds.length < minRoles) {
-      addToast(`当前行业最少需要 ${minRoles} 个角色，请继续补充团队`, 'error');
-      return;
+    if (enforceIndustryAssemblyRule) {
+      const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
+      if (minRoles > 0 && nextRoleIds.length < minRoles) {
+        addToast(`当前行业最少需要 ${minRoles} 个角色，请继续补充团队`, 'error');
+        return;
+      }
     }
 
     if (workflowTemplateKey !== 'none') {
@@ -866,6 +857,11 @@ export function useNewProjectModalController({
     const effectiveContextNotes = parseMultiline(
       editableDraft?.contextNotes ?? toMultilineText(issuePreview?.contextAlignment.contextNotes),
     );
+    const conciseContextNotes = effectiveContextNotes
+      .map((item) => String(item || '').replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .map((item) => (item.length > 90 ? `${item.slice(0, 89)}…` : item))
+      .slice(0, 2);
     const effectiveDesignTheme = String(editableDraft?.designTheme || issuePreview?.designBlueprint.designTheme || '').trim();
     const effectiveValueNarrative = String(
       editableDraft?.valueNarrative || issuePreview?.designBlueprint.valueNarrative || '',
@@ -904,17 +900,16 @@ export function useNewProjectModalController({
       ? `讨论分歧处理: ${discussionOverride.trim()}`
       : '';
 
-    const artifactsBlock = (issuePreview?.expectedArtifacts || [])
+    const artifactsBlock = activeExpectedArtifacts
       .map((artifact) => `- ${artifact.name}（${roleLabel(artifact.ownerRoleId)} / ${artifact.stageType}）`)
       .join('\n');
 
     const alignmentBlock = issuePreview
       ? [
-          `产品: ${issuePreview.contextAlignment.productName}`,
-          `使命锚点: ${effectiveMissionAnchor || '未填写'}`,
+          effectiveMissionAnchor ? `使命锚点: ${effectiveMissionAnchor}` : null,
           effectiveGoals.length > 0 ? `对齐目标: ${effectiveGoals.join('；')}` : null,
           effectivePrinciples.length > 0 ? `对齐原则: ${effectivePrinciples.join('；')}` : null,
-          effectiveContextNotes.length > 0 ? `上下文参考: ${effectiveContextNotes.join('；')}` : null,
+          conciseContextNotes.length > 0 ? `上下文参考: ${conciseContextNotes.join('；')}` : null,
         ]
           .filter(Boolean)
           .join('\n')
@@ -958,10 +953,10 @@ export function useNewProjectModalController({
             effectiveAcceptanceDraft.length > 0 ? `初始验收: ${effectiveAcceptanceDraft.join('；')}` : null,
           ].filter(Boolean).join('\n')
         : null,
-      selectedIndustryConfig
+      selectedIndustryConfig && enforceIndustryAssemblyRule
         ? `行业角色集: ${selectedIndustryConfig.roleSet.industryName} (${selectedIndustryConfig.roleSet.industryCode})`
         : null,
-      selectedIndustryConfig
+      selectedIndustryConfig && enforceIndustryAssemblyRule
         ? `灵魂角色: ${roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}`
         : null,
       issuePreview ? `Issue: ${issuePreview.title}` : null,
@@ -1028,7 +1023,7 @@ export function useNewProjectModalController({
       addToast(`项目已创建: ${created.name || parsedProject.name}`, 'success');
 
       if (assignedAgentIds.length > 0) {
-        const artifactsText = (issuePreview?.expectedArtifacts || [])
+        const artifactsText = activeExpectedArtifacts
           .map((artifact) => `- ${artifact.name}（${roleLabel(artifact.ownerRoleId)}）`)
           .join('\n');
         const executionInstruction = [
@@ -1090,15 +1085,17 @@ export function useNewProjectModalController({
       new Set(manualSelected.map((agent) => normalizeRoleId(getAgentRoleId(agent!)))),
     );
 
-    if (requiresSoulRole && soulRoleId && !manualRoleIds.includes(normalizeRoleId(soulRoleId))) {
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !manualRoleIds.includes(normalizeRoleId(soulRoleId))) {
       addToast(`当前行业团队必须包含灵魂角色 ${roleLabel(soulRoleId)}`, 'error');
       return;
     }
 
-    const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
-    if (minRoles > 0 && manualRoleIds.length < minRoles) {
-      addToast(`当前行业最少需要 ${minRoles} 个角色，请继续选择`, 'error');
-      return;
+    if (enforceIndustryAssemblyRule) {
+      const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
+      if (minRoles > 0 && manualRoleIds.length < minRoles) {
+        addToast(`当前行业最少需要 ${minRoles} 个角色，请继续选择`, 'error');
+        return;
+      }
     }
     if (workflowTemplateKey !== 'none') {
       const requiredPlannedRoles = applyTemplateRolePlan(manualRoleIds);
@@ -1156,8 +1153,8 @@ export function useNewProjectModalController({
     const plannedRoleIds = applyTemplateRolePlan(manualRoleIds);
     const templateRecommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
       allowedRoleIds,
-      mustHaveSoulRole: requiresSoulRole,
-      soulRoleId,
+      mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+      soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
     });
     const mergedRecommendations = templateRecommendations.length > 0
       ? templateRecommendations
@@ -1369,6 +1366,8 @@ export function useNewProjectModalController({
     setParsedProject,
     issuePreview,
     setIssuePreview,
+    activeExpectedArtifacts,
+    activeWorkflowSop,
     editableDraft,
     setEditableDraft,
     issueAnswers,
@@ -1420,6 +1419,7 @@ export function useNewProjectModalController({
     recommendedRoleIds,
     requiresSoulRole,
     soulRoleId,
+    enforceIndustryAssemblyRule,
     hrRoleEnabled,
     industryAgents,
     handleClose,

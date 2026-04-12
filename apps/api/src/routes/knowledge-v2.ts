@@ -238,6 +238,61 @@ function normalizeMemoryType(value: unknown) {
   return undefined;
 }
 
+function validateScopeBinding(input: {
+  scope: KnowledgeScope;
+  projectId?: string | null | undefined;
+  agentId?: string | null | undefined;
+}) {
+  const projectId = normalizeText(input.projectId);
+  const agentId = normalizeText(input.agentId);
+  if (input.scope === "project" && !projectId) {
+    return "project scope requires projectId";
+  }
+  if (input.scope === "agent" && !agentId) {
+    return "agent scope requires agentId";
+  }
+  return null;
+}
+
+function normalizeMetadataRecord(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {} as Record<string, unknown>;
+  }
+  return value as Record<string, unknown>;
+}
+
+function resolveKnowledgeSourceMeta(metadata: unknown) {
+  const record = normalizeMetadataRecord(metadata);
+  const source = normalizeText(
+    record.source
+    ?? record.integrationEngine
+    ?? record.provider
+    ?? ""
+  ).toLowerCase();
+  const hasSourceFile = Boolean(normalizeText(record.sourceFile));
+
+  if (source.includes("hermes")) {
+    return { sourceEngine: "hermes", sourceTag: source || "hermes" };
+  }
+  if (source.includes("stitch")) {
+    return { sourceEngine: "stitch", sourceTag: source || "stitch" };
+  }
+  if (
+    source.includes("openclaw")
+    || source.startsWith("workflow_v2_agent")
+    || source.startsWith("workflow_v2_companion")
+  ) {
+    return { sourceEngine: "openclaw", sourceTag: source || "openclaw" };
+  }
+  if (hasSourceFile) {
+    return { sourceEngine: "manual", sourceTag: "upload_document" };
+  }
+  if (source) {
+    return { sourceEngine: "system", sourceTag: source };
+  }
+  return { sourceEngine: "manual", sourceTag: "manual" };
+}
+
 export function createKnowledgeV2Router() {
   const router = express.Router();
 
@@ -275,12 +330,21 @@ export function createKnowledgeV2Router() {
       return;
     }
 
+    const scope = normalizeScope(payload.scope);
+    const projectId = normalizeText(payload.projectId) || undefined;
+    const agentId = normalizeText(payload.agentId) || undefined;
+    const scopeError = validateScopeBinding({ scope, projectId, agentId });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
+
     const items = await ingestDocumentText({
       fileName,
       fileContent,
-      scope: normalizeScope(payload.scope),
-      projectId: normalizeText(payload.projectId) || undefined,
-      agentId: normalizeText(payload.agentId) || undefined,
+      scope,
+      projectId,
+      agentId,
       tags: parseFlexibleStringArray(payload.tags),
       triggeredBy: normalizeText(payload.triggeredBy) || undefined
     });
@@ -308,12 +372,21 @@ export function createKnowledgeV2Router() {
       sendError(res, 400, "VALIDATION_ERROR", "title and content are required");
       return;
     }
+    const scope = normalizeScope(payload.scope);
+    const projectId = normalizeText(payload.projectId) || undefined;
+    const agentId = normalizeText(payload.agentId) || undefined;
+    const scopeError = validateScopeBinding({ scope, projectId, agentId });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
+
     const item = await ingestTextAsKnowledge({
       title,
       content,
-      scope: normalizeScope(payload.scope),
-      projectId: normalizeText(payload.projectId) || undefined,
-      agentId: normalizeText(payload.agentId) || undefined,
+      scope,
+      projectId,
+      agentId,
       tags: asStringArray(payload.tags),
       importanceScore: payload.importanceScore === undefined
         ? undefined
@@ -346,6 +419,12 @@ export function createKnowledgeV2Router() {
 
     const projectId = normalizeText(payload.projectId) || undefined;
     const scope = projectId ? "project" : normalizeScope(payload.scope);
+    const agentId = normalizeText(payload.agentId) || undefined;
+    const scopeError = validateScopeBinding({ scope, projectId, agentId });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
     const memoryType = normalizeMemoryType(payload.memoryType) || "semantic";
     const importanceScore = Number(payload.importanceScore ?? 0.5);
     const clampedImportance = Number.isFinite(importanceScore)
@@ -355,7 +434,7 @@ export function createKnowledgeV2Router() {
     const item = await ingestKnowledgeItem({
       scope,
       projectId,
-      agentId: normalizeText(payload.agentId) || undefined,
+      agentId,
       type: "text",
       title,
       content,
@@ -524,6 +603,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, {
       total: items.length,
       items: items.map((item) => ({
+        ...resolveKnowledgeSourceMeta(item.metadata),
         id: item.id,
         scope: item.scope,
         projectId: item.projectId,
@@ -666,10 +746,34 @@ export function createKnowledgeV2Router() {
       sendError(res, 400, "VALIDATION_ERROR", "memoryType must be episodic|semantic|procedural");
       return;
     }
+    const existing = await getKnowledgeItemById(knowledgeId);
+    if (!existing) {
+      sendError(res, 404, "NOT_FOUND", `knowledge not found: ${knowledgeId}`);
+      return;
+    }
+
+    const existingScope = normalizeOptionalScope(existing.scope) ?? "global";
+    const nextScope: KnowledgeScope = normalizeOptionalScope(payload.scope) ?? existingScope;
+    const nextProjectId = payload.projectId === undefined
+      ? existing.projectId
+      : (normalizeText(payload.projectId) || null);
+    const nextAgentId = payload.agentId === undefined
+      ? existing.agentId
+      : (normalizeText(payload.agentId) || null);
+    const scopeError = validateScopeBinding({
+      scope: nextScope,
+      projectId: nextProjectId,
+      agentId: nextAgentId
+    });
+    if (scopeError) {
+      sendError(res, 400, "VALIDATION_ERROR", scopeError);
+      return;
+    }
+
     const updated = await updateKnowledgeItemById(knowledgeId, {
-      scope: normalizeOptionalScope(payload.scope),
-      projectId: payload.projectId === undefined ? undefined : (normalizeText(payload.projectId) || null),
-      agentId: payload.agentId === undefined ? undefined : (normalizeText(payload.agentId) || null),
+      scope: nextScope,
+      projectId: nextProjectId,
+      agentId: nextAgentId,
       type: nextType,
       title: payload.title === undefined ? undefined : normalizeText(payload.title),
       content: payload.content === undefined ? undefined : String(payload.content ?? ""),

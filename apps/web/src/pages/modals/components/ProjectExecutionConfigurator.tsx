@@ -1,4 +1,6 @@
 import { useMemo, useState } from 'react';
+import { roleLabel } from '../utils/newProjectHelpers';
+import { getTemplateRequiredRoles, isSingleStageWorkflowTemplate } from '../utils/workflowTemplateMeta';
 
 type ProjectMode = 'complete' | 'standalone' | 'relay';
 
@@ -94,23 +96,11 @@ const STANDALONE_TEMPLATE_OPTIONS: Array<{ key: string; label: string; descripti
   },
 ];
 
-const TEMPLATE_REQUIRED_ROLES: Record<string, string[]> = {
-  standard_software_development: ['ROLE_PM', 'ROLE_ANALYST', 'ROLE_DESIGN', 'ROLE_ARCH', 'ROLE_DEV', 'ROLE_QA'],
-  requirements_design: ['ROLE_PM', 'ROLE_ANALYST'],
-  visual_design: ['ROLE_DESIGN'],
-  tech_design: ['ROLE_ARCH'],
-  code_dev: ['ROLE_ARCH', 'ROLE_DEV'],
-  qa_acceptance: ['ROLE_QA'],
-};
-
-const ROLE_LABELS: Record<string, string> = {
-  ROLE_PM: '项目经理',
-  ROLE_ANALYST: '需求分析',
-  ROLE_DESIGN: '视觉设计',
-  ROLE_ARCH: '架构设计',
-  ROLE_DEV: '研发实现',
-  ROLE_QA: 'QA 验收',
-};
+const ALL_WORKFLOW_TEMPLATE_OPTIONS: Array<{ key: string; label: string; description: string; stagePreview: string }> = [
+  FULL_WORKFLOW_TEMPLATE_OPTIONS[0],
+  ...STANDALONE_TEMPLATE_OPTIONS.filter((item) => item.key !== 'none'),
+  FULL_WORKFLOW_TEMPLATE_OPTIONS[1],
+];
 
 const STAGE_INPUT_TYPE_OPTIONS: Array<{ value: string; label: string; description: string }> = [
   { value: 'document', label: '文档说明', description: '结构化说明文档、方案、报告' },
@@ -186,9 +176,7 @@ export default function ProjectExecutionConfigurator({
 }: Props) {
   const [showContentOverride, setShowContentOverride] = useState(Boolean(standaloneInputContent.trim()));
 
-  const workflowOptions = projectType === 'complete'
-    ? FULL_WORKFLOW_TEMPLATE_OPTIONS
-    : STANDALONE_TEMPLATE_OPTIONS;
+  const workflowOptions = ALL_WORKFLOW_TEMPLATE_OPTIONS;
   const activeWorkflowOption = workflowOptions.find((item) => item.key === workflowTemplateKey) || workflowOptions[0];
 
   const activeInputGuide = useMemo(() => {
@@ -219,7 +207,17 @@ export default function ProjectExecutionConfigurator({
             <button
               key={option.key}
               type="button"
-              onClick={() => setProjectType(option.key)}
+              onClick={() => {
+                setProjectType(option.key);
+                if (option.key === 'complete' && isSingleStageWorkflowTemplate(workflowTemplateKey)) {
+                  setWorkflowTemplateKey('standard_software_development');
+                  return;
+                }
+                if ((option.key === 'standalone' || option.key === 'relay')
+                  && workflowTemplateKey === 'standard_software_development') {
+                  setWorkflowTemplateKey('requirements_design');
+                }
+              }}
               className={`text-left rounded-xl border px-3 py-2 transition-colors ${
                 active
                   ? 'border-primary/60 bg-primary/10'
@@ -332,16 +330,23 @@ export default function ProjectExecutionConfigurator({
               <button
                 key={option.key}
                 type="button"
-                onClick={() => {
-                  setWorkflowTemplateKey(option.key);
-                  if (option.key === 'none') {
-                    setAutoStartWorkflow(false);
-                  } else if (!autoStartWorkflow) {
-                    setAutoStartWorkflow(true);
-                  }
-                }}
-                className={`text-left rounded-xl border px-3 py-2 transition-colors ${
-                  active
+              onClick={() => {
+                setWorkflowTemplateKey(option.key);
+                if (option.key === 'none') {
+                  setAutoStartWorkflow(false);
+                } else if (!autoStartWorkflow) {
+                  setAutoStartWorkflow(true);
+                }
+                if (option.key === 'standard_software_development' && projectType !== 'complete') {
+                  setProjectType('complete');
+                  return;
+                }
+                if (isSingleStageWorkflowTemplate(option.key) && projectType === 'complete') {
+                  setProjectType('standalone');
+                }
+              }}
+              className={`text-left rounded-xl border px-3 py-2 transition-colors ${
+                active
                     ? 'border-accent/60 bg-accent/10'
                     : 'border-border-subtle bg-surface-muted hover:bg-white/10'
                 }`}
@@ -351,7 +356,7 @@ export default function ProjectExecutionConfigurator({
                 <p className="text-[11px] text-slate-400 mt-1">{option.stagePreview}</p>
                 {option.key !== 'none' ? (
                   <p className="text-[11px] text-slate-500 mt-1">
-                    关键角色: {(TEMPLATE_REQUIRED_ROLES[option.key] || []).map((roleId) => ROLE_LABELS[roleId] || roleId).join('、')}
+                    关键角色: {getTemplateRequiredRoles(option.key).map((roleId) => roleLabel(roleId)).join('、')}
                   </p>
                 ) : null}
               </button>
@@ -360,6 +365,9 @@ export default function ProjectExecutionConfigurator({
         </div>
         <p className="text-[11px] text-slate-500">
           当前选择：{activeWorkflowOption?.label || '未选择'} · {activeWorkflowOption?.stagePreview || '未配置阶段'}
+        </p>
+        <p className="text-[11px] text-slate-500">
+          说明：若在“完整流程”模式下选择单阶段模板，系统会自动切换到“单阶段交付”。
         </p>
         <label className="inline-flex items-center gap-2 text-xs text-slate-300">
           <input

@@ -16,9 +16,12 @@ export default function ProjectConfirmCard({ controller }: Props) {
     issueAnswers,
     clarification,
     issuePreview,
+    activeExpectedArtifacts,
     analysisRecommendations,
     selectedIndustryConfig,
     requiresSoulRole,
+    enforceIndustryAssemblyRule,
+    requiredWorkflowRoles,
     isCreating,
     projectType,
     setProjectType,
@@ -124,11 +127,11 @@ export default function ProjectConfirmCard({ controller }: Props) {
           </pre>
         </div>
 
-        {(issuePreview?.expectedArtifacts || []).length > 0 && (
+        {activeExpectedArtifacts.length > 0 && (
           <div className="space-y-2">
             <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">目标产出物</label>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {issuePreview!.expectedArtifacts.map((artifact) => (
+              {activeExpectedArtifacts.map((artifact) => (
                 <div key={artifact.id} className="px-3 py-2 rounded-xl bg-white/5 border border-border-subtle">
                   <p className="text-xs text-slate-200">{artifact.name}</p>
                   <p className="text-[10px] text-slate-500 mt-1">
@@ -155,12 +158,17 @@ export default function ProjectConfirmCard({ controller }: Props) {
                   </span>
                 ))}
           </div>
-          {selectedIndustryConfig && (
+          {selectedIndustryConfig && enforceIndustryAssemblyRule && (
             <p className="text-[11px] text-slate-500">
               行业: {selectedIndustryConfig.roleSet.industryName} · 灵魂角色: {roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}
               {requiresSoulRole ? '（必选）' : ''}
             </p>
           )}
+          {!enforceIndustryAssemblyRule && requiredWorkflowRoles.length > 0 ? (
+            <p className="text-[11px] text-slate-500">
+              当前阶段模板关键角色: {requiredWorkflowRoles.map((roleId) => roleLabel(roleId)).join('、')}
+            </p>
+          ) : null}
         </div>
 
         <ProjectExecutionConfigurator

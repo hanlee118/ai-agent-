@@ -862,6 +862,7 @@ export async function ingestKnowledgeFromStageOutput(input: {
   outputText: string;
   title?: string;
   agentId?: string;
+  metadata?: Record<string, unknown>;
 }) {
   const extraction = await extractKnowledgeFromStageOutput({
     projectName: input.projectName,
@@ -883,7 +884,8 @@ export async function ingestKnowledgeFromStageOutput(input: {
     memoryType: extraction.memoryType,
     importanceScore: extraction.importanceScore,
     metadata: {
-      extractedSummary: extraction.summary
+      extractedSummary: extraction.summary,
+      ...(input.metadata || {})
     }
   });
 }

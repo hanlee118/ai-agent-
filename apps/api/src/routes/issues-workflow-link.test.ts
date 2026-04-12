@@ -44,10 +44,14 @@ let upsertTemplateFn: any;
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   const [dbMod, issuesMod, storeMod, workflowMod] = await Promise.all([
@@ -113,7 +117,21 @@ test("issues preview should adapt artifacts and SOP by workflow template", async
     ? visualRes.body.data.workflow.steps as Array<{ roleId: string }>
     : [];
   assert.equal(visualWorkflowSteps.length >= 2, true);
-  assert.equal(visualWorkflowSteps.every((step) => step.roleId === "ROLE_DESIGN"), true);
+  assert.equal(visualWorkflowSteps.some((step) => step.roleId === "ROLE_ANALYST"), true);
+  assert.equal(visualWorkflowSteps.some((step) => step.roleId === "ROLE_DESIGN"), true);
+  assert.equal(
+    visualWorkflowSteps.every((step) => step.roleId === "ROLE_ANALYST" || step.roleId === "ROLE_DESIGN"),
+    true
+  );
+  const visualRecommendedRoles = Array.isArray(visualRes.body.data.recommendedRoleIds)
+    ? visualRes.body.data.recommendedRoleIds as string[]
+    : [];
+  assert.equal(visualRecommendedRoles.includes("ROLE_ANALYST"), true);
+  assert.equal(visualRecommendedRoles.includes("ROLE_DESIGN"), true);
+  assert.equal(
+    visualRecommendedRoles.every((roleId) => roleId === "ROLE_ANALYST" || roleId === "ROLE_DESIGN"),
+    true
+  );
 
   const qaRes = await request(app)
     .post("/api/issues/preview")
@@ -137,7 +155,28 @@ test("issues preview should adapt artifacts and SOP by workflow template", async
     ? qaRes.body.data.workflow.steps as Array<{ roleId: string }>
     : [];
   assert.equal(qaWorkflowSteps.length >= 2, true);
-  assert.equal(qaWorkflowSteps.every((step) => step.roleId === "ROLE_QA"), true);
+  assert.equal(qaWorkflowSteps.some((step) => step.roleId === "ROLE_ANALYST"), true);
+  assert.equal(qaWorkflowSteps.some((step) => step.roleId === "ROLE_QA"), true);
+  assert.equal(
+    qaWorkflowSteps.every((step) => step.roleId === "ROLE_ANALYST" || step.roleId === "ROLE_QA"),
+    true
+  );
+
+  const noneRes = await request(app)
+    .post("/api/issues/preview")
+    .send({
+      input: "当前仅需创建项目，不自动初始化任何 workflow。",
+      industryCode: "saas",
+      sourceType: "text",
+      debateMode: "off",
+      workflowTemplateKey: "none"
+    });
+
+  assert.equal(noneRes.status, 200);
+  assert.equal(noneRes.body.success, true);
+  assert.equal(Array.isArray(noneRes.body.data.expectedArtifacts), true);
+  assert.equal((noneRes.body.data.expectedArtifacts as unknown[]).length, 0);
+  assert.equal(noneRes.body.data.workflow, null);
 });
 
 test("issues confirm can pass workflow template fields and auto-link workflow-v2", async () => {
@@ -208,4 +247,64 @@ test("issues confirm can pass workflow template fields and auto-link workflow-v2
   assert.equal((workflow.currentStageIds as unknown[]).length > 0, true);
   assert.equal(Array.isArray(workflow.stages), true);
   assert.equal(workflow.stages.length >= 1, true);
+});
+
+test("issues confirm keeps workflowTemplateKey=none and skips workflow-v2 auto-init", async () => {
+  const previewRes = await request(app)
+    .post("/api/issues/preview")
+    .send({
+      input: "这个需求暂时只创建项目，不自动编排 workflow。",
+      industryCode: "saas",
+      sourceType: "text",
+      debateMode: "off"
+    });
+
+  assert.equal(previewRes.status, 200);
+  assert.equal(previewRes.body.success, true);
+  const issueId = String(previewRes.body.data.issueId);
+  assert.ok(issueId);
+
+  await updateIssueFn(issueId, (current: Record<string, any>) => ({
+    ...current,
+    debateStatus: "completed",
+    debateTaskId: current.debateTaskId || `debate-${issueId}`,
+    debateError: "",
+    debateUpdatedAt: new Date().toISOString(),
+    debate: {
+      mode: "model",
+      generatedAt: new Date().toISOString(),
+      consensus: ["需求目标一致"],
+      divergences: [],
+      opinions: []
+    }
+  }));
+
+  const requiredQuestions = (previewRes.body.data.questions as Array<{ id: string; required?: boolean }>)
+    .filter((item) => item.required)
+    .reduce<Record<string, string>>((acc, item) => {
+      acc[item.id] = "已确认";
+      return acc;
+    }, {});
+
+  const confirmRes = await request(app)
+    .post(`/api/issues/${issueId}/confirm`)
+    .send({
+      finalName: "Issue Confirm None Workflow",
+      finalDescription: "确认后只创建项目，不自动初始化 workflow-v2",
+      clarificationAnswers: requiredQuestions,
+      conflictResolution: "按当前边界推进。",
+      workflowTemplateKey: "none",
+      autoStartWorkflow: true
+    });
+
+  assert.equal(confirmRes.status, 200);
+  assert.equal(confirmRes.body.success, true);
+  const projectId = String(confirmRes.body.data.project?.id || "");
+  assert.ok(projectId);
+
+  const workflow = await prismaClient.workflow.findFirst({
+    where: { projectId },
+    orderBy: { createdAt: "desc" }
+  });
+  assert.equal(workflow, null);
 });

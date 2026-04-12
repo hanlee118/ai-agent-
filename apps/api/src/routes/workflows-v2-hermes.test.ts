@@ -43,10 +43,14 @@ let hermesServer: ReturnType<typeof createServer>;
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   hermesServer = createServer((req, res) => {
@@ -184,6 +188,21 @@ test("workflow-v2 design stage runs through hermes mcp and writes hermes artifac
   assert.equal(artifacts.some((item) => String(item.name) === "mockups"), true);
   assert.equal(
     artifacts.some((item) => String(item.metadata?.source) === "workflow_v2_hermes"),
+    true
+  );
+  assert.equal(
+    artifacts.some((item) =>
+      String(item.metadata?.source) === "workflow_v2_companion"
+      && String(item.metadata?.role) === "ROLE_ANALYST"
+    ),
+    true
+  );
+
+  const gateChecks = Array.isArray((stage.gateResults as { checks?: unknown[] } | null)?.checks)
+    ? (((stage.gateResults as { checks?: Array<{ type?: string; passed?: boolean }> }).checks) ?? [])
+    : [];
+  assert.equal(
+    gateChecks.some((item) => String(item.type || "") === "role_collaboration" && Boolean(item.passed)),
     true
   );
 });

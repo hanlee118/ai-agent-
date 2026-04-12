@@ -534,6 +534,63 @@ const statusVariantByWorkflowStage = (status: string) => {
   return 'default';
 };
 
+const workflowExecutionEngineLabel = (engine?: string) => {
+  const normalized = String(engine || '').trim().toLowerCase();
+  if (normalized === 'hybrid') return 'Hermes + OpenClaw';
+  if (normalized === 'hermes') return 'Hermes';
+  if (normalized === 'openclaw') return 'OpenClaw';
+  if (normalized === 'manual') return '手动';
+  return '未知';
+};
+
+const workflowExecutionEngineVariant = (engine?: string) => {
+  const normalized = String(engine || '').trim().toLowerCase();
+  if (normalized === 'hybrid') return 'accent';
+  if (normalized === 'hermes') return 'primary';
+  if (normalized === 'openclaw') return 'default';
+  if (normalized === 'manual') return 'warning';
+  return 'default';
+};
+
+const workflowAgentEngineLabel = (engine?: string) => {
+  const normalized = String(engine || '').trim().toLowerCase();
+  if (normalized === 'hermes') return 'Hermes';
+  if (normalized === 'openclaw') return 'OpenClaw';
+  return 'Unknown';
+};
+
+const workflowAgentEngineVariant = (engine?: string) => {
+  const normalized = String(engine || '').trim().toLowerCase();
+  if (normalized === 'hermes') return 'primary';
+  if (normalized === 'openclaw') return 'default';
+  return 'warning';
+};
+
+const workflowCollaborationStatusVariant = (status?: string) => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'failed') return 'danger';
+  return 'accent';
+};
+
+const workflowCollaborationSourceLabel = (source?: string) => {
+  const normalized = String(source || '').trim().toLowerCase();
+  if (normalized === 'workflow_v2_companion') return '协作复核';
+  if (normalized === 'workflow_v2_companion_error') return '协作复核异常';
+  return normalized || 'unknown';
+};
+
+const formatLocalDateTime = (value?: string | null) => {
+  const text = String(value || '').trim();
+  if (!text) {
+    return '-';
+  }
+  const timestamp = new Date(text).getTime();
+  if (!Number.isFinite(timestamp)) {
+    return text;
+  }
+  return new Date(timestamp).toLocaleString('zh-CN');
+};
+
 const statusVariantByDeliverable = (status: DeliverableStatus) => {
   if (status === 'approved') return 'primary';
   if (status === 'submitted') return 'accent';
@@ -608,6 +665,8 @@ const ProjectRoom = ({
   const [isCopyingSignoffLink, setIsCopyingSignoffLink] = useState(false);
   const [sseLogs, setSseLogs] = useState<ProjectRoomLogItem[]>([]);
   const [workflowOverviewFilter, setWorkflowOverviewFilter] = useState<'all' | 'current' | 'running' | 'reviewing' | 'completed' | 'failed' | 'gate_blocked'>('all');
+  const [expandedWorkflowStageIds, setExpandedWorkflowStageIds] = useState<string[]>([]);
+  const [workflowCollaborationRoleFilters, setWorkflowCollaborationRoleFilters] = useState<Record<string, string>>({});
   const signoffAutoOpenKeyRef = useRef<string | null>(null);
   const projectRoomUrlStateAppliedRef = useRef<string | null>(null);
   const lastConnectedLogAtRef = useRef<number>(0);
@@ -670,6 +729,8 @@ const ProjectRoom = ({
     setDesignReviewForm(createDefaultDesignReviewForm());
     setIsDesignReviewOpen(false);
     setWorkflowOverviewFilter('all');
+    setExpandedWorkflowStageIds([]);
+    setWorkflowCollaborationRoleFilters({});
   }, [effectiveProjectId]);
 
   const loadProjectDetail = useCallback(async () => {
@@ -1704,6 +1765,20 @@ const ProjectRoom = ({
     }
     return workflowStageRows.filter((item) => item.status === workflowOverviewFilter);
   }, [workflowOverviewFilter, workflowStageRows]);
+  const toggleWorkflowStageDetails = useCallback((stageId: string) => {
+    setExpandedWorkflowStageIds((current) => {
+      if (current.includes(stageId)) {
+        return current.filter((item) => item !== stageId);
+      }
+      return [...current, stageId];
+    });
+  }, []);
+  const setWorkflowStageCollaborationRoleFilter = useCallback((stageId: string, roleId: string) => {
+    setWorkflowCollaborationRoleFilters((current) => ({
+      ...current,
+      [stageId]: roleId,
+    }));
+  }, []);
   const handleFocusWorkflowStageDeliverables = useCallback((templateKey: string) => {
     const stageType = workflowTemplateToCoreStage(templateKey);
     if (!stageType) {
@@ -1719,7 +1794,10 @@ const ProjectRoom = ({
     setPreviewDeliverable(items[0]);
     addToastRef.current(`已定位到 ${STAGE_LABELS[stageType] || stageType} 阶段交付物`, 'success');
   }, [deliverablesByStage]);
-  const handleFocusWorkflowStageKnowledge = useCallback((templateKey: string) => {
+  const handleFocusWorkflowStageKnowledge = useCallback((
+    templateKey: string,
+    options?: { query?: string; agentId?: string; focusId?: string; focusTitle?: string; focusRole?: string },
+  ) => {
     if (typeof window === 'undefined') {
       return;
     }
@@ -1733,7 +1811,36 @@ const ProjectRoom = ({
     params.set('kb_scope', 'project');
     params.set('kb_project_id', project.id);
     params.set('kb_stage', templateKey);
-    params.delete('kb_query');
+    const query = String(options?.query || '').trim();
+    const agentId = String(options?.agentId || '').trim();
+    const focusId = String(options?.focusId || '').trim();
+    const focusTitle = String(options?.focusTitle || '').trim();
+    const focusRole = String(options?.focusRole || '').trim();
+    if (query) {
+      params.set('kb_query', query);
+    } else {
+      params.delete('kb_query');
+    }
+    if (agentId) {
+      params.set('kb_agent_id', agentId);
+    } else {
+      params.delete('kb_agent_id');
+    }
+    if (focusId) {
+      params.set('kb_focus_id', focusId);
+    } else {
+      params.delete('kb_focus_id');
+    }
+    if (focusTitle) {
+      params.set('kb_focus_title', focusTitle);
+    } else {
+      params.delete('kb_focus_title');
+    }
+    if (focusRole) {
+      params.set('kb_focus_role', focusRole);
+    } else {
+      params.delete('kb_focus_role');
+    }
     const nextUrl = `${url.pathname}${url.search ? url.search : ''}${url.hash}`;
     window.history.replaceState(window.history.state, '', nextUrl);
     if (typeof PopStateEvent === 'function') {
@@ -1741,7 +1848,10 @@ const ProjectRoom = ({
     } else {
       window.dispatchEvent(new Event('popstate'));
     }
-    addToastRef.current(`已切换到知识中心（阶段: ${workflowTemplateLabel(templateKey)}）`, 'success');
+    addToastRef.current(
+      `已切换到知识中心（阶段: ${workflowTemplateLabel(templateKey)}${query ? ` / query: ${query}` : ''}）`,
+      'success',
+    );
   }, [project.id]);
   const getDeliverableContentLength = (item: Pick<ProjectDeliverable, 'content'>) => String(item.content || '').trim().length;
   const isDeliverableReadable = (item: Pick<ProjectDeliverable, 'content'>) => getDeliverableContentLength(item) >= 120;
@@ -3549,7 +3659,7 @@ const ProjectRoom = ({
                                 {index + 1}. {workflowTemplateLabel(item.templateKey)}
                               </p>
                               <p className="text-[11px] text-slate-500 mt-1">
-                                node: {item.nodeId || '-'} · agents: {item.assignedAgents.length > 0 ? item.assignedAgents.map((agentId) => roleLabel(agentId)).join(' / ') : '未分配'}
+                                node: {item.nodeId || '-'} · 角色证据: {item.collaboration?.roleCount ?? 0} · {item.collaboration?.analystInvolved ? '含需求分析师' : '缺需求分析师'}
                               </p>
                             </div>
                             <div className="flex items-center gap-2">
@@ -3560,9 +3670,36 @@ const ProjectRoom = ({
                             </div>
                           </div>
 
+                          {(item.assignedAgentProfiles || []).length > 0 ? (
+                            <div className="flex flex-wrap items-center gap-2">
+                              {(item.assignedAgentProfiles || []).map((agent) => (
+                                <Badge key={`${item.id}-${agent.agentId}`} variant={workflowAgentEngineVariant(agent.engine)}>
+                                  {roleLabel(agent.agentId)} · {workflowAgentEngineLabel(agent.engine)}{agent.model ? ` · ${agent.model}` : ''}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="text-[11px] text-slate-500">当前阶段暂未分配执行 Agent</p>
+                          )}
+
                           <div className="flex flex-wrap items-center gap-2">
                             <Badge variant="default">产物 {item.outputArtifactCount}</Badge>
                             <Badge variant="default">上下文 {item.contextMemoryCount}</Badge>
+                            <Badge variant={workflowExecutionEngineVariant(item.executionEngine)}>
+                              执行引擎 {workflowExecutionEngineLabel(item.executionEngine)}
+                            </Badge>
+                            <Badge variant={item.collaboration?.analystInvolved ? 'primary' : 'warning'}>
+                              {item.collaboration?.analystInvolved ? '分析师复核已覆盖' : '分析师复核缺失'}
+                            </Badge>
+                            <Badge variant="default">
+                              协作产物 {item.artifactSources?.companion ?? 0}
+                            </Badge>
+                            <button
+                              onClick={() => toggleWorkflowStageDetails(item.id)}
+                              className="px-2 py-1 rounded-lg text-[11px] border bg-white/5 text-slate-300 border-border-subtle hover:bg-white/10"
+                            >
+                              {expandedWorkflowStageIds.includes(item.id) ? '收起协作明细' : `协作明细 ${(item.collaborationArtifacts || []).length}`}
+                            </button>
                             <Badge variant={item.gate.passed ? 'primary' : item.gate.violationCount > 0 ? 'warning' : 'default'}>
                               {item.gate.passed ? '门禁通过' : `门禁问题 ${item.gate.violationCount}`}
                             </Badge>
@@ -3579,6 +3716,104 @@ const ProjectRoom = ({
                               查看知识
                             </button>
                           </div>
+
+                          <p className="text-[11px] text-slate-500">
+                            来源: Hermes {item.artifactSources?.hermes ?? 0} · OpenClaw {item.artifactSources?.openclaw ?? 0} · Companion {item.artifactSources?.companion ?? 0} · Stitch {item.artifactSources?.stitch ?? 0}
+                          </p>
+
+                          {expandedWorkflowStageIds.includes(item.id) ? (() => {
+                            const collaborationArtifacts = item.collaborationArtifacts || [];
+                            const roleOptions = Array.from(
+                              new Set(
+                                collaborationArtifacts
+                                  .map((artifact) => String(artifact.role || '').trim())
+                                  .filter(Boolean),
+                              ),
+                            );
+                            const selectedRole = workflowCollaborationRoleFilters[item.id] || 'all';
+                            const visibleArtifacts = selectedRole === 'all'
+                              ? collaborationArtifacts
+                              : collaborationArtifacts.filter((artifact) => String(artifact.role || '').trim() === selectedRole);
+                            return (
+                              <div className="rounded-xl border border-border-subtle bg-surface-soft p-3 space-y-2">
+                                <div className="flex items-center justify-between gap-2">
+                                  <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-500">协作复核明细</p>
+                                  <p className="text-[11px] text-slate-500">共 {visibleArtifacts.length} 条</p>
+                                </div>
+
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <button
+                                    onClick={() => setWorkflowStageCollaborationRoleFilter(item.id, 'all')}
+                                    className={cn(
+                                      'px-2 py-1 rounded-lg text-[11px] border transition-colors',
+                                      selectedRole === 'all'
+                                        ? 'bg-primary/20 text-primary border-primary/30'
+                                        : 'bg-white/5 text-slate-400 border-border-subtle hover:bg-white/10',
+                                    )}
+                                  >
+                                    全部角色
+                                  </button>
+                                  {roleOptions.map((roleId) => (
+                                    <button
+                                      key={`${item.id}-role-${roleId}`}
+                                      onClick={() => setWorkflowStageCollaborationRoleFilter(item.id, roleId)}
+                                      className={cn(
+                                        'px-2 py-1 rounded-lg text-[11px] border transition-colors',
+                                        selectedRole === roleId
+                                          ? 'bg-primary/20 text-primary border-primary/30'
+                                          : 'bg-white/5 text-slate-400 border-border-subtle hover:bg-white/10',
+                                      )}
+                                    >
+                                      {roleLabel(roleId)}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                {visibleArtifacts.length > 0 ? (
+                                  <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                                    {visibleArtifacts.map((artifact) => (
+                                      <div key={artifact.id} className="rounded-lg border border-border-subtle bg-white/5 p-2 space-y-1">
+                                        <div className="flex flex-wrap items-center gap-2">
+                                          <Badge variant={workflowCollaborationStatusVariant(artifact.status)}>
+                                            {artifact.status === 'failed' ? 'FAILED' : 'SUCCESS'}
+                                          </Badge>
+                                          <Badge variant="default">{workflowCollaborationSourceLabel(artifact.source)}</Badge>
+                                          <Badge variant="default">{roleLabel(artifact.role || artifact.agentId || 'unknown')}</Badge>
+                                          {artifact.provider ? <Badge variant="default">{artifact.provider}</Badge> : null}
+                                          {artifact.model ? <Badge variant="default">{artifact.model}</Badge> : null}
+                                        </div>
+                                        <div className="flex items-center justify-between gap-2">
+                                          <p className="text-[11px] text-slate-300">
+                                            {artifact.name} · {formatLocalDateTime(artifact.generatedAt)}
+                                          </p>
+                                          <button
+                                            onClick={() => handleFocusWorkflowStageKnowledge(
+                                              item.templateKey,
+                                              {
+                                                query: [artifact.role, artifact.primaryRole, artifact.name].filter(Boolean).join(' '),
+                                                agentId: artifact.agentId || undefined,
+                                                focusId: artifact.knowledgeId || artifact.id || undefined,
+                                                focusTitle: artifact.name || undefined,
+                                                focusRole: artifact.role || artifact.primaryRole || undefined,
+                                              },
+                                            )}
+                                            className="px-2 py-1 rounded-lg text-[11px] border bg-white/5 text-slate-300 border-border-subtle hover:bg-white/10"
+                                          >
+                                            跳转知识
+                                          </button>
+                                        </div>
+                                        <p className="text-[11px] text-slate-500 leading-relaxed">
+                                          {artifact.preview || '暂无摘要内容'}
+                                        </p>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="text-[11px] text-slate-500">当前筛选条件下暂无协作复核明细。</p>
+                                )}
+                              </div>
+                            );
+                          })() : null}
 
                           {item.gate.violations.length > 0 ? (
                             <p className="text-[11px] text-warning">

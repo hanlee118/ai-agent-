@@ -6,6 +6,8 @@ export type MemoryType = 'episodic' | 'semantic' | 'procedural';
 
 export type KnowledgeListItem = {
   id: string;
+  sourceEngine?: 'hermes' | 'openclaw' | 'stitch' | 'manual' | 'system' | string;
+  sourceTag?: string;
   scope: KnowledgeScope;
   projectId: string | null;
   agentId: string | null;

@@ -35,6 +35,8 @@ export default function IssueAnalysisPanel({ controller }: Props) {
     parsedProject,
     detectedDomains,
     issuePreview,
+    activeExpectedArtifacts,
+    activeWorkflowSop,
     editableDraft,
     setEditableDraft,
     handleSaveAlignmentToMemory,
@@ -581,11 +583,11 @@ export default function IssueAnalysisPanel({ controller }: Props) {
             </div>
           )}
 
-          {issuePreview.expectedArtifacts.length > 0 && (
+          {activeExpectedArtifacts.length > 0 && (
             <div className="space-y-3">
               <p className="text-xs text-slate-400">预期产出物（创建后自动进入任务）</p>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {issuePreview.expectedArtifacts.map((artifact) => (
+                {activeExpectedArtifacts.map((artifact) => (
                   <div key={artifact.id} className="p-3 rounded-xl bg-white/5 border border-border-subtle">
                     <p className="text-xs font-semibold text-white">{artifact.name}</p>
                     <p className="text-[11px] text-slate-400 mt-1">{artifact.description}</p>
@@ -702,11 +704,11 @@ export default function IssueAnalysisPanel({ controller }: Props) {
             </div>
           )}
 
-          {issuePreview.workflow && (
+          {activeWorkflowSop && (
             <div className="space-y-3">
               <p className="text-xs text-slate-400">推荐协作 SOP</p>
               <div className="space-y-2">
-                {issuePreview.workflow.steps.slice(0, 5).map((step) => (
+                {activeWorkflowSop.steps.slice(0, 5).map((step) => (
                   <div key={step.order} className="p-3 rounded-xl bg-white/5 border border-border-subtle">
                     <p className="text-xs font-semibold text-white">
                       {step.order}. {step.title} · {roleLabel(step.roleId)}

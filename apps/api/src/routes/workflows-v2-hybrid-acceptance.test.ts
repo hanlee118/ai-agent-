@@ -62,10 +62,14 @@ async function upsertTemplate(payload: Record<string, unknown>) {
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   hermesServer = createServer((req, res) => {
@@ -383,7 +387,23 @@ test("workflow-v2 hybrid acceptance: hermes + openclaw stage execution and knowl
     true
   );
   assert.equal(
+    visualArtifacts.some((item) =>
+      String(item.metadata?.source || "") === "workflow_v2_companion"
+      && String(item.metadata?.role || "") === "ROLE_ANALYST"
+      && String(item.metadata?.knowledgeId || "").length > 0
+    ),
+    true
+  );
+  assert.equal(
     devArtifacts.some((item) => String(item.metadata?.source || "") === "workflow_v2_agent"),
+    true
+  );
+  assert.equal(
+    devArtifacts.some((item) =>
+      String(item.metadata?.source || "") === "workflow_v2_companion"
+      && String(item.metadata?.role || "") === "ROLE_ANALYST"
+      && String(item.metadata?.knowledgeId || "").length > 0
+    ),
     true
   );
 

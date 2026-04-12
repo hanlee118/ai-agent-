@@ -16,6 +16,7 @@
     "verify:real-data:round2": "node scripts/verify-real-data-round2.mjs",
     "verify:repeatable:018": "node scripts/verify-repeatable-018.mjs",
     "verify:platform:3rounds": "node scripts/verify-platform-3rounds.mjs",
+    "test:ui:workflow-template": "pnpm dlx playwright test scripts/e2e/ui-workflow-template.spec.ts --workers=1 --reporter=line",
     "verify:closure": "node --input-type=module -e \"import('./scripts/verify-closure.mjs')\"",
     "verify:task-delegation": "pnpm --filter @occ/api exec tsx ../../scripts/verify-task-delegation.ts",
     "verify:task-delegation:migration": "pnpm --filter @occ/api exec tsx ../../scripts/verify-task-delegation-migration.ts",

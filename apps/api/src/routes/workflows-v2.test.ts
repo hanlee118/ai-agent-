@@ -64,10 +64,14 @@ async function createProject(projectId: string) {
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   const [dbMod, workflowsMod] = await Promise.all([
@@ -228,6 +232,23 @@ test("workflow-v2 can autonomously execute stage with agent and produce artifact
   assert.equal(stage.status, "reviewing");
   assert.equal(Array.isArray(stage.outputArtifacts), true);
   assert.equal((stage.outputArtifacts as unknown[]).length > 0, true);
+  const artifacts = Array.isArray(stage.outputArtifacts)
+    ? (stage.outputArtifacts as Array<{ metadata?: Record<string, unknown> }>)
+    : [];
+  assert.equal(
+    artifacts.some((item) =>
+      String(item.metadata?.source || "") === "workflow_v2_companion"
+      && String(item.metadata?.role || "") === "ROLE_ANALYST"
+    ),
+    true
+  );
+  const gateChecks = Array.isArray((stage.gateResults as { checks?: unknown[] } | null)?.checks)
+    ? (((stage.gateResults as { checks?: Array<{ type?: string; passed?: boolean }> }).checks) ?? [])
+    : [];
+  assert.equal(
+    gateChecks.some((item) => String(item.type || "") === "role_collaboration" && Boolean(item.passed)),
+    true
+  );
 
   const overviewRes = await request(app)
     .get("/api/v1/workflows/projects/WFV2-PROJECT-001/overview");
@@ -237,6 +258,21 @@ test("workflow-v2 can autonomously execute stage with agent and produce artifact
   assert.equal(Array.isArray(overviewRes.body.data.stages), true);
   assert.equal(overviewRes.body.data.stages.length >= 1, true);
   assert.equal(overviewRes.body.data.stages.some((item: { isCurrent?: boolean }) => Boolean(item.isCurrent)), true);
+  const overviewStage = (overviewRes.body.data.stages as Array<Record<string, unknown>>)[0] || {};
+  const overviewCollaboration = (overviewStage.collaboration || {}) as Record<string, unknown>;
+  const overviewSources = (overviewStage.artifactSources || {}) as Record<string, unknown>;
+  const overviewCollaborationArtifacts = Array.isArray(overviewStage.collaborationArtifacts)
+    ? (overviewStage.collaborationArtifacts as Array<Record<string, unknown>>)
+    : [];
+  assert.equal(Array.isArray(overviewStage.assignedAgentProfiles), true);
+  assert.equal(String(overviewStage.executionEngine || "").length > 0, true);
+  assert.equal(Boolean(overviewCollaboration.analystInvolved), true);
+  assert.equal(Number(overviewSources.companion || 0) >= 1, true);
+  assert.equal(overviewCollaborationArtifacts.length >= 1, true);
+  assert.equal(
+    overviewCollaborationArtifacts.some((item) => String(item.role || "") === "ROLE_ANALYST"),
+    true
+  );
 
   const transitionRes = await request(app)
     .post(`/api/v1/workflows/stages/${stage.id}/transition`)
@@ -248,6 +284,21 @@ test("workflow-v2 can autonomously execute stage with agent and produce artifact
   assert.equal(transitionRes.status, 200);
   assert.equal(transitionRes.body.data.success, true);
   assert.deepEqual(transitionRes.body.data.nextStageIds, []);
+
+  const stageAfterProceed = await prismaClient.workflowStage.findUnique({
+    where: { id: stage.id }
+  });
+  assert.ok(stageAfterProceed);
+  const proceededArtifacts = Array.isArray(stageAfterProceed.outputArtifacts)
+    ? (stageAfterProceed.outputArtifacts as Array<{ metadata?: Record<string, unknown> }>)
+    : [];
+  assert.equal(
+    proceededArtifacts.some((item) =>
+      String(item.metadata?.source || "") === "workflow_v2_companion"
+      && String(item.metadata?.knowledgeId || "").length > 0
+    ),
+    true
+  );
 });
 
 test("workflow-v2 input endpoint can unblock inputContract-gated stage", async () => {

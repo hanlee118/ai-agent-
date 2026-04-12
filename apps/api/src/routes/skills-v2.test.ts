@@ -32,10 +32,14 @@ let app: express.Express;
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   const [dbMod, skillsMod] = await Promise.all([

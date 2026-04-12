@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Database,
   Download,
@@ -36,6 +36,9 @@ type KnowledgeHubDeepLinkState = {
   agentId: string;
   query: string;
   stageContext: string;
+  focusId: string;
+  focusTitle: string;
+  focusRole: string;
   fromDeepLink: boolean;
 };
 
@@ -62,6 +65,130 @@ const HUMAN_DATE = (value: string | null | undefined) => {
   return date.toLocaleString('zh-CN', { hour12: false });
 };
 
+const MATCH_TEXT = (value: unknown) => String(value ?? '').trim().toLowerCase();
+
+const validateScopeBinding = (scope: KnowledgeScope, projectId: string, agentId: string) => {
+  const normalizedProjectId = String(projectId || '').trim();
+  const normalizedAgentId = String(agentId || '').trim();
+  if (scope === 'project' && !normalizedProjectId) {
+    return 'project 作用域必须填写 projectId';
+  }
+  if (scope === 'agent' && !normalizedAgentId) {
+    return 'agent 作用域必须填写 agentId';
+  }
+  return null;
+};
+
+const resolveSourceMeta = (item: KnowledgeListItem) => {
+  const sourceEngine = MATCH_TEXT(item.sourceEngine || 'manual');
+  if (sourceEngine === 'hermes') {
+    return { label: 'Hermes', className: 'bg-primary/15 border-primary/40 text-primary' };
+  }
+  if (sourceEngine === 'openclaw') {
+    return { label: 'OpenClaw', className: 'bg-accent/15 border-accent/40 text-accent' };
+  }
+  if (sourceEngine === 'stitch') {
+    return { label: 'Stitch', className: 'bg-warning/20 border-warning/40 text-warning' };
+  }
+  if (sourceEngine === 'system') {
+    return { label: 'System', className: 'bg-white/10 border-border-subtle text-slate-300' };
+  }
+  return { label: 'Manual', className: 'bg-white/10 border-border-subtle text-slate-300' };
+};
+
+const SEARCH_TOKENS = (value: string) =>
+  MATCH_TEXT(value)
+    .split(/\s+/)
+    .filter((token) => token.length >= 2);
+
+const parseDateMs = (value: string) => {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const scoreDeepLinkFocusMatch = (item: KnowledgeListItem, deepLink: KnowledgeHubDeepLinkState) => {
+  let score = 0;
+  const itemId = MATCH_TEXT(item.id);
+  const itemTitle = MATCH_TEXT(item.title);
+  const focusId = MATCH_TEXT(deepLink.focusId);
+  const focusTitle = MATCH_TEXT(deepLink.focusTitle);
+  const focusRole = MATCH_TEXT(deepLink.focusRole);
+  const agentId = MATCH_TEXT(deepLink.agentId);
+  const stageContext = MATCH_TEXT(deepLink.stageContext);
+
+  if (focusId && itemId === focusId) {
+    score += 10_000;
+  }
+  if (focusTitle) {
+    if (itemTitle === focusTitle) {
+      score += 2_500;
+    } else if (itemTitle.includes(focusTitle) || focusTitle.includes(itemTitle)) {
+      score += 1_600;
+    }
+    const titleTokens = SEARCH_TOKENS(focusTitle);
+    if (titleTokens.length > 0 && titleTokens.every((token) => itemTitle.includes(token))) {
+      score += 320;
+    }
+  }
+  if (focusRole) {
+    const normalizedFocusRole = focusRole.replace(/^role[_:-]?/, '');
+    const tags = (item.tags || []).map(MATCH_TEXT);
+    const stage = (item.stageContext || []).map(MATCH_TEXT);
+    const roleMatched = tags.some((tag) => tag === focusRole || tag === normalizedFocusRole || tag.includes(normalizedFocusRole))
+      || stage.some((value) => value === focusRole || value.includes(normalizedFocusRole))
+      || itemTitle.includes(focusRole)
+      || itemTitle.includes(normalizedFocusRole);
+    if (roleMatched) {
+      score += 760;
+    }
+  }
+  if (agentId && MATCH_TEXT(item.agentId) === agentId) {
+    score += 700;
+  }
+  if (stageContext) {
+    const stageMatched = (item.stageContext || []).map(MATCH_TEXT).some((value) => value === stageContext || value.includes(stageContext));
+    if (stageMatched) {
+      score += 560;
+    }
+  }
+  const queryTokens = SEARCH_TOKENS(deepLink.query);
+  if (queryTokens.length > 0) {
+    score += queryTokens.filter((token) => itemTitle.includes(token)).length * 50;
+  }
+  return score;
+};
+
+const resolveDeepLinkFocusedItem = (items: KnowledgeListItem[], deepLink: KnowledgeHubDeepLinkState) => {
+  if (!deepLink.fromDeepLink || items.length === 0) {
+    return null;
+  }
+  const hasSignal = Boolean(
+    deepLink.focusId
+    || deepLink.focusTitle
+    || deepLink.focusRole
+    || deepLink.query
+    || deepLink.agentId
+    || deepLink.stageContext,
+  );
+  if (!hasSignal) {
+    return null;
+  }
+
+  let bestItem: KnowledgeListItem | null = null;
+  let bestScore = -1;
+  for (const item of items) {
+    const score = scoreDeepLinkFocusMatch(item, deepLink);
+    if (
+      score > bestScore
+      || (score === bestScore && bestItem && parseDateMs(item.createdAt) > parseDateMs(bestItem.createdAt))
+    ) {
+      bestItem = item;
+      bestScore = score;
+    }
+  }
+  return bestScore > 0 ? bestItem : null;
+};
+
 const readDeepLinkState = (): KnowledgeHubDeepLinkState => {
   if (typeof window === 'undefined') {
     return {
@@ -70,6 +197,9 @@ const readDeepLinkState = (): KnowledgeHubDeepLinkState => {
       agentId: '',
       query: '',
       stageContext: '',
+      focusId: '',
+      focusTitle: '',
+      focusRole: '',
       fromDeepLink: false,
     };
   }
@@ -83,23 +213,33 @@ const readDeepLinkState = (): KnowledgeHubDeepLinkState => {
   const agentId = String(params.get('kb_agent_id') || '').trim();
   const query = String(params.get('kb_query') || '').trim();
   const stageContext = String(params.get('kb_stage') || '').trim();
+  const focusId = String(params.get('kb_focus_id') || '').trim();
+  const focusTitle = String(params.get('kb_focus_title') || '').trim();
+  const focusRole = String(params.get('kb_focus_role') || '').trim();
   return {
     scope,
     projectId,
     agentId,
     query,
     stageContext,
-    fromDeepLink: tab === 'knowledge-hub' && Boolean(projectId || agentId || query || stageContext || scopeRaw),
+    focusId,
+    focusTitle,
+    focusRole,
+    fromDeepLink: tab === 'knowledge-hub' && Boolean(
+      projectId || agentId || query || stageContext || scopeRaw || focusId || focusTitle || focusRole,
+    ),
   };
 };
 
 export default function KnowledgeHubPage({ addToast }: Props) {
   const deepLinkState = useMemo(() => readDeepLinkState(), []);
+  const deepLinkFocusConsumedRef = useRef(false);
   const [scopeFilter, setScopeFilter] = useState<KnowledgeScope | 'all'>(deepLinkState.scope);
   const [projectIdFilter, setProjectIdFilter] = useState(deepLinkState.projectId);
   const [agentIdFilter, setAgentIdFilter] = useState(deepLinkState.agentId);
   const [query, setQuery] = useState(deepLinkState.query);
   const [stageContextFilter, setStageContextFilter] = useState(deepLinkState.stageContext);
+  const [sourceEngineFilter, setSourceEngineFilter] = useState<'all' | 'hermes' | 'openclaw' | 'stitch' | 'manual' | 'system'>('all');
 
   const [items, setItems] = useState<KnowledgeListItem[]>([]);
   const [loadingList, setLoadingList] = useState(false);
@@ -146,6 +286,11 @@ export default function KnowledgeHubPage({ addToast }: Props) {
   const [loadingSummary, setLoadingSummary] = useState(false);
 
   const selectedBulkSet = useMemo(() => new Set(selectedBulkIds), [selectedBulkIds]);
+  const visibleItems = useMemo(() => (
+    sourceEngineFilter === 'all'
+      ? items
+      : items.filter((item) => MATCH_TEXT(item.sourceEngine || 'manual') === sourceEngineFilter)
+  ), [items, sourceEngineFilter]);
 
   useEffect(() => {
     if (!deepLinkState.fromDeepLink) {
@@ -156,6 +301,8 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       deepLinkState.stageContext ? `stage=${deepLinkState.stageContext}` : null,
       deepLinkState.agentId ? `agent=${deepLinkState.agentId}` : null,
       deepLinkState.query ? `query=${deepLinkState.query}` : null,
+      deepLinkState.focusTitle ? `focus=${deepLinkState.focusTitle}` : null,
+      deepLinkState.focusRole ? `role=${deepLinkState.focusRole}` : null,
     ].filter(Boolean);
     addToast(`已按深链条件加载知识：${filters.join(' / ') || '默认筛选'}`, 'info');
   }, [addToast, deepLinkState]);
@@ -171,18 +318,40 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         query: query.trim() || undefined,
         limit: 100,
       });
-      setItems(result.items || []);
-      setSelectedBulkIds((prev) => prev.filter((id) => result.items.some((item) => item.id === id)));
-      if (selectedId && !result.items.some((item) => item.id === selectedId)) {
-        setSelectedId(null);
-        setSelectedDetail(null);
+      const nextItems = result.items || [];
+      setItems(nextItems);
+      setSelectedBulkIds((prev) => prev.filter((id) => nextItems.some((item) => item.id === id)));
+
+      let nextSelectedId = selectedId;
+      if (nextSelectedId && !nextItems.some((item) => item.id === nextSelectedId)) {
+        nextSelectedId = null;
+      }
+
+      if (!deepLinkFocusConsumedRef.current && deepLinkState.fromDeepLink) {
+        const focused = resolveDeepLinkFocusedItem(nextItems, deepLinkState);
+        if (focused) {
+          nextSelectedId = focused.id;
+          deepLinkFocusConsumedRef.current = true;
+          addToast(`已自动定位知识条目：${focused.title}`, 'success');
+        } else if (!nextSelectedId && nextItems.length > 0) {
+          nextSelectedId = nextItems[0].id;
+          deepLinkFocusConsumedRef.current = true;
+          addToast('未命中精确条目，已定位到当前筛选首条知识。', 'info');
+        }
+      }
+
+      if (nextSelectedId !== selectedId) {
+        setSelectedId(nextSelectedId);
+        if (!nextSelectedId) {
+          setSelectedDetail(null);
+        }
       }
     } catch (error) {
       addToast(error instanceof Error ? error.message : '加载知识列表失败', 'error');
     } finally {
       setLoadingList(false);
     }
-  }, [addToast, agentIdFilter, projectIdFilter, query, scopeFilter, selectedId, stageContextFilter]);
+  }, [addToast, agentIdFilter, deepLinkState, projectIdFilter, query, scopeFilter, selectedId, stageContextFilter]);
 
   useEffect(() => {
     void listKnowledge();
@@ -331,6 +500,11 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       addToast('标题和内容不能为空', 'info');
       return;
     }
+    const scopeError = validateScopeBinding(newScope, newProjectId, newAgentId);
+    if (scopeError) {
+      addToast(scopeError, 'error');
+      return;
+    }
     setCreatingText(true);
     try {
       await knowledgeApi.createText({
@@ -355,6 +529,11 @@ export default function KnowledgeHubPage({ addToast }: Props) {
   const handleUploadDocument = async () => {
     if (!uploadFile) {
       addToast('请先选择文件', 'info');
+      return;
+    }
+    const scopeError = validateScopeBinding(newScope, newProjectId, newAgentId);
+    if (scopeError) {
+      addToast(scopeError, 'error');
       return;
     }
     setUploadingFile(true);
@@ -467,13 +646,13 @@ export default function KnowledgeHubPage({ addToast }: Props) {
   };
 
   const summaryStats = useMemo(() => {
-    const scopedCount = items.length;
+    const scopedCount = visibleItems.length;
     const selectedCount = selectedBulkIds.length;
     const duplicateGroups = curationPreview?.duplicateGroups.length || 0;
     const normalizeSuggestions = curationPreview?.normalizationSuggestions.length || 0;
     const selectedDuplicateGroups = selectedDuplicateCanonicalIds.length;
     return { scopedCount, selectedCount, duplicateGroups, normalizeSuggestions, selectedDuplicateGroups };
-  }, [curationPreview, items.length, selectedBulkIds.length, selectedDuplicateCanonicalIds.length]);
+  }, [curationPreview, visibleItems.length, selectedBulkIds.length, selectedDuplicateCanonicalIds.length]);
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-6">
@@ -520,7 +699,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
           <Filter size={14} />
           检索范围
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-6 gap-3">
           <select
             value={scopeFilter}
             onChange={(e) => setScopeFilter(e.target.value as KnowledgeScope | 'all')}
@@ -554,6 +733,18 @@ export default function KnowledgeHubPage({ addToast }: Props) {
             placeholder="stageContext（如 requirements_design）"
             className="bg-surface-muted border border-border-subtle rounded-lg px-3 py-2 text-sm text-slate-200"
           />
+          <select
+            value={sourceEngineFilter}
+            onChange={(e) => setSourceEngineFilter(e.target.value as 'all' | 'hermes' | 'openclaw' | 'stitch' | 'manual' | 'system')}
+            className="bg-surface-muted border border-border-subtle rounded-lg px-3 py-2 text-sm text-slate-200"
+          >
+            <option value="all">来源：全部</option>
+            <option value="hermes">来源：Hermes</option>
+            <option value="openclaw">来源：OpenClaw</option>
+            <option value="stitch">来源：Stitch</option>
+            <option value="manual">来源：Manual</option>
+            <option value="system">来源：System</option>
+          </select>
         </div>
         <div className="flex flex-wrap gap-2">
           <button
@@ -578,7 +769,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
           <div className="rounded-2xl border border-border-subtle bg-surface-soft overflow-hidden">
             <div className="px-5 py-4 border-b border-border-subtle flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">知识条目列表</h2>
-              <span className="text-xs text-slate-400">{items.length} 条</span>
+              <span className="text-xs text-slate-400">{visibleItems.length} 条</span>
             </div>
             <div className="max-h-[420px] overflow-auto">
               <table className="w-full text-sm">
@@ -586,13 +777,14 @@ export default function KnowledgeHubPage({ addToast }: Props) {
                   <tr>
                     <th className="px-4 py-3 text-left">选择</th>
                     <th className="px-4 py-3 text-left">标题</th>
+                    <th className="px-4 py-3 text-left">来源</th>
                     <th className="px-4 py-3 text-left">作用域</th>
                     <th className="px-4 py-3 text-left">标签</th>
                     <th className="px-4 py-3 text-left">创建时间</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {items.map((item) => (
+                  {visibleItems.map((item) => (
                     <tr
                       key={item.id}
                       className={`border-t border-border-subtle/60 hover:bg-white/5 cursor-pointer ${selectedId === item.id ? 'bg-primary/10' : ''}`}
@@ -606,6 +798,16 @@ export default function KnowledgeHubPage({ addToast }: Props) {
                         />
                       </td>
                       <td className="px-4 py-3 text-slate-100">{item.title}</td>
+                      <td className="px-4 py-3">
+                        {(() => {
+                          const sourceMeta = resolveSourceMeta(item);
+                          return (
+                            <span className={`px-1.5 py-0.5 rounded-md border text-[10px] font-semibold tracking-wide ${sourceMeta.className}`}>
+                              {sourceMeta.label}
+                            </span>
+                          );
+                        })()}
+                      </td>
                       <td className="px-4 py-3 text-slate-300">{item.scope}</td>
                       <td className="px-4 py-3 text-slate-400">{CSV_JOIN(item.tags.slice(0, 3)) || '-'}</td>
                       <td className="px-4 py-3 text-slate-500">{HUMAN_DATE(item.createdAt)}</td>
@@ -613,7 +815,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
                   ))}
                 </tbody>
               </table>
-              {!loadingList && items.length === 0 && (
+              {!loadingList && visibleItems.length === 0 && (
                 <div className="p-8 text-center text-sm text-slate-500">当前筛选范围暂无知识条目</div>
               )}
             </div>

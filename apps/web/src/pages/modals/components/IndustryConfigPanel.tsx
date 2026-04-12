@@ -15,6 +15,9 @@ export default function IndustryConfigPanel({ controller }: Props) {
     selectedIndustryConfig,
     hrRoleEnabled,
     recommendedRoleIds,
+    enforceIndustryAssemblyRule,
+    workflowTemplateKey,
+    requiredWorkflowRoles,
   } = controller;
 
   return (
@@ -36,17 +39,29 @@ export default function IndustryConfigPanel({ controller }: Props) {
 
       {selectedIndustryConfig && (
         <div className="p-3 bg-white/5 border border-border-subtle rounded-xl space-y-2">
-          <p className="text-[11px] text-slate-400">
-            灵魂角色: <span className="text-primary font-semibold">{roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}</span>
-            {selectedIndustryConfig.assemblyRule.mustHaveSoulRole ? '（必选）' : ''}
-          </p>
+          {enforceIndustryAssemblyRule ? (
+            <p className="text-[11px] text-slate-400">
+              灵魂角色: <span className="text-primary font-semibold">{roleLabel(selectedIndustryConfig.assemblyRule.soulRoleId)}</span>
+              {selectedIndustryConfig.assemblyRule.mustHaveSoulRole ? '（必选）' : ''}
+            </p>
+          ) : (
+            <p className="text-[11px] text-slate-400">
+              当前模板模式: <span className="text-primary font-semibold">{workflowTemplateKey || 'standard_software_development'}</span>，按模板关键角色执行
+            </p>
+          )}
           <p className="text-[11px] text-slate-400 flex items-center gap-2">
             ROLE_HR 扩展入口:
             <Badge variant={hrRoleEnabled ? 'accent' : 'default'}>{hrRoleEnabled ? '已启用' : '未启用'}</Badge>
           </p>
-          <p className="text-[11px] text-slate-500">
-            团队规模建议: {selectedIndustryConfig.assemblyRule.minRoles} - {selectedIndustryConfig.assemblyRule.maxRoles ?? 'N'}
-          </p>
+          {enforceIndustryAssemblyRule ? (
+            <p className="text-[11px] text-slate-500">
+              团队规模建议: {selectedIndustryConfig.assemblyRule.minRoles} - {selectedIndustryConfig.assemblyRule.maxRoles ?? 'N'}
+            </p>
+          ) : (
+            <p className="text-[11px] text-slate-500">
+              模板关键角色: {requiredWorkflowRoles.map((role) => roleLabel(role)).join('、') || '未配置'}
+            </p>
+          )}
           <p className="text-[11px] text-slate-500">行业可选角色池</p>
           <div className="flex flex-wrap gap-1.5">
             {selectedIndustryConfig.roleSet.roleIds.map((role) => (

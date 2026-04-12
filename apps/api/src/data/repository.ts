@@ -179,6 +179,9 @@ function resolveWorkflowTemplateKeyForProjectMode(input: {
   projectType: ProjectExecutionMode;
 }) {
   const explicit = String(input.workflowTemplateKey ?? "").trim();
+  if (explicit.toLowerCase() === "none") {
+    return "";
+  }
   if (explicit) {
     return explicit;
   }
@@ -541,6 +544,24 @@ function isRealModelGateEnabled() {
   return process.env.NODE_ENV === "production";
 }
 
+function parseBooleanFlag(value: string | undefined, defaultValue: boolean) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  return defaultValue;
+}
+
+function shouldEnforceStageRoleCollaborationGate() {
+  return parseBooleanFlag(process.env.STAGE_ROLE_COLLAB_GATE_ENABLED, isRealModelGateEnabled());
+}
+
 function isExecutionDegraded(metadata: Prisma.JsonValue | null) {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return false;
@@ -692,6 +713,21 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
     assertStageDegradedExecutionGate(project, normalizedStageExecutions);
   }
 
+  if (shouldEnforceStageRoleCollaborationGate()) {
+    const collaborationGate = evaluateStageRoleCollaborationGate({
+      stageType: project.currentStage,
+      stageExecutions: normalizedStageExecutions,
+      minRealModelRoles: Math.max(
+        2,
+        Number(process.env.STAGE_ROLE_COLLAB_MIN_REAL_MODEL_ROLES ?? 2)
+      ),
+      requireAnalyst: parseBooleanFlag(process.env.STAGE_ROLE_COLLAB_REQUIRE_ANALYST, true)
+    });
+    if (!collaborationGate.passed) {
+      throw new Error(`REAL_MODEL_GATE_FAILED: ${collaborationGate.issues.join(" | ")}`);
+    }
+  }
+
   assertPmExecutionGate(project, normalizedStageExecutions);
   await assertStageRoleModelWhitelistGate(project, normalizedStageExecutions);
   assertStageBestModelGate(project, normalizedStageExecutions);
@@ -781,6 +817,67 @@ export function evaluateStageBestModelGate(input: {
 
   return {
     passed: issues.length === 0,
+    issues
+  };
+}
+
+export function evaluateStageRoleCollaborationGate(input: {
+  stageType: StageType;
+  stageExecutions: Array<{
+    role: string;
+    status?: string | null | undefined;
+    provider?: string | null | undefined;
+    metadata?: unknown;
+  }>;
+  minRealModelRoles?: number;
+  requireAnalyst?: boolean;
+}) {
+  const requireAnalyst = input.requireAnalyst ?? true;
+  const minRealModelRoles = Math.max(2, Number(input.minRealModelRoles ?? 2));
+  const realModelRoles = new Set<RoleType>();
+
+  for (const row of input.stageExecutions) {
+    const status = String(row.status ?? "success").trim().toLowerCase();
+    if (status && status !== "success") {
+      continue;
+    }
+    if (isScriptedExecutionProvider(row.provider)) {
+      continue;
+    }
+    if (isExecutionDegraded((row.metadata as Prisma.JsonValue | null | undefined) ?? null)) {
+      continue;
+    }
+    const role = String(row.role || "").trim() as RoleType;
+    if (!role.startsWith("ROLE_")) {
+      continue;
+    }
+    realModelRoles.add(role);
+  }
+
+  const analystReady = realModelRoles.has("ROLE_ANALYST");
+  const nonAnalystReady = Array.from(realModelRoles).some((role) => role !== "ROLE_ANALYST");
+  const roleCountReady = realModelRoles.size >= minRealModelRoles;
+  const analystConstraintReady = requireAnalyst ? analystReady && nonAnalystReady : true;
+  const issues: string[] = [];
+
+  if (!roleCountReady) {
+    issues.push(
+      `${STAGE_LABELS[input.stageType]}阶段真实模型角色不足（实际 ${realModelRoles.size}，要求 >= ${minRealModelRoles}）。`
+    );
+  }
+  if (requireAnalyst && !analystReady) {
+    issues.push(`${STAGE_LABELS[input.stageType]}阶段缺少需求分析师的真实模型执行证据。`);
+  }
+  if (requireAnalyst && !nonAnalystReady) {
+    issues.push(`${STAGE_LABELS[input.stageType]}阶段缺少非需求分析师的真实模型执行证据。`);
+  }
+
+  return {
+    passed: roleCountReady && analystConstraintReady,
+    realModelCount: realModelRoles.size,
+    analystReady,
+    nonAnalystReady,
+    minRealModelRoles,
     issues
   };
 }
@@ -4278,7 +4375,7 @@ async function tryAutoInitializeProjectWorkflowV2(
   }
 
   const templateKey = String(input.workflowTemplateKey ?? PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT).trim();
-  if (!templateKey) {
+  if (!templateKey || templateKey.toLowerCase() === "none") {
     return;
   }
   const autoStart = input.autoStartWorkflow ?? PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT;

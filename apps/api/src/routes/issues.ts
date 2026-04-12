@@ -139,15 +139,20 @@ function applyTemplateRolePlan(input: {
   workflowTemplateKey: unknown;
   mustHaveSoulRole: boolean;
   soulRoleId: RoleType;
+  enforceIndustryAssemblyRule?: boolean;
 }) {
+  if (input.enforceIndustryAssemblyRule) {
+    const planned = [...input.recommendedRoleIds];
+    if (input.mustHaveSoulRole && input.soulRoleId && !planned.includes(input.soulRoleId)) {
+      planned.unshift(input.soulRoleId);
+    }
+    return planned.length > 0 ? Array.from(new Set(planned)) : input.recommendedRoleIds;
+  }
   const resolvedTemplateKey = resolveIssueWorkflowTemplateKey(input.workflowTemplateKey);
   const requiredRoles = getTemplateRequiredRoles(resolvedTemplateKey);
   const planned = resolvedTemplateKey === "standard_software_development"
     ? Array.from(new Set([...requiredRoles, ...input.recommendedRoleIds]))
     : [...requiredRoles];
-  if (input.mustHaveSoulRole && input.soulRoleId && !planned.includes(input.soulRoleId)) {
-    planned.unshift(input.soulRoleId);
-  }
   return planned.length > 0 ? Array.from(new Set(planned)) : input.recommendedRoleIds;
 }
 
@@ -824,7 +829,10 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const industryCode = String(payload.industryCode ?? "").trim().toLowerCase();
     const sourceType = normalizeSourceType(payload.sourceType);
     const debateMode = normalizeDebateMode(payload.debateMode);
+    const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim().toLowerCase();
     const workflowTemplateKey = resolveIssueWorkflowTemplateKey(payload.workflowTemplateKey);
+    const enforceIndustryAssemblyRule = workflowTemplateKeyRaw === "none";
+    const hasWorkflowTemplate = !enforceIndustryAssemblyRule;
 
     if (!input) {
       sendError(res, 400, "VALIDATION_ERROR", "input is required");
@@ -860,12 +868,14 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       recommendedRoleIds: recommendRoles(input, config),
       workflowTemplateKey,
       mustHaveSoulRole: config.assemblyRule.mustHaveSoulRole,
-      soulRoleId: config.assemblyRule.soulRoleId
+      soulRoleId: config.assemblyRule.soulRoleId,
+      enforceIndustryAssemblyRule
     });
     const ruleDiscussion = buildIssueDiscussion(
       input,
       recommendedRoleIds as RoleType[],
-      config.assemblyRule.soulRoleId
+      config.assemblyRule.soulRoleId,
+      { includeSoulRole: enforceIndustryAssemblyRule }
     );
     const discussion = ruleDiscussion;
     const suggestedAnswers = buildSuggestedAnswers({
@@ -877,7 +887,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       discussion
     });
     const relatedHistory = buildRelatedHistory(input, productContext.requirementHistory ?? []);
-    const expectedArtifacts = buildExpectedArtifacts(workflowTemplateKey);
+    const expectedArtifacts = hasWorkflowTemplate ? buildExpectedArtifacts(workflowTemplateKey) : [];
     const requirementContract = buildRequirementContract({
       suggestedAnswers,
       refinement,
@@ -982,7 +992,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       contentProvenance,
       analysisGate,
       expectedArtifacts,
-      workflow: buildIssueWorkflowSop(workflowTemplateKey)
+      workflow: hasWorkflowTemplate ? buildIssueWorkflowSop(workflowTemplateKey) : null
     });
   }));
 
@@ -1014,9 +1024,8 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const relaySourceStageId = String(payload.relaySourceStageId ?? "").trim() || undefined;
     const projectInputs = normalizeProjectInputs(payload.projectInputs);
     const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim();
-    const workflowTemplateKey = workflowTemplateKeyRaw && workflowTemplateKeyRaw !== "none"
-      ? workflowTemplateKeyRaw
-      : undefined;
+    const workflowTemplateKey = workflowTemplateKeyRaw || undefined;
+    const enforceIndustryAssemblyRule = workflowTemplateKeyRaw.toLowerCase() === "none";
     const autoStartWorkflow = normalizeOptionalBoolean(payload.autoStartWorkflow);
     if (projectType === "relay" && !parentProjectId) {
       sendError(res, 400, "VALIDATION_ERROR", "relay mode requires parentProjectId");
@@ -1072,7 +1081,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const allowedRoleSet = new Set(config.roleSet.roleIds);
     const constrainedRoleIds = selectedRoleIds.filter((roleId) => allowedRoleSet.has(roleId));
 
-    if (config.assemblyRule.mustHaveSoulRole && !constrainedRoleIds.includes(config.assemblyRule.soulRoleId)) {
+    if (enforceIndustryAssemblyRule && config.assemblyRule.mustHaveSoulRole && !constrainedRoleIds.includes(config.assemblyRule.soulRoleId)) {
       constrainedRoleIds.unshift(config.assemblyRule.soulRoleId);
     }
 

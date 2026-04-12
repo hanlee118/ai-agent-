@@ -38,10 +38,14 @@ let upsertTemplateFn: any;
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   const [dbMod, repoMod, workflowMod] = await Promise.all([
@@ -165,6 +169,25 @@ test("createProject auto-initializes and starts workflow-v2", async () => {
   assert.equal(workflow.status, "active");
   assert.equal(Array.isArray(workflow.currentStageIds), true);
   assert.equal((workflow.currentStageIds as unknown[]).length > 0, true);
+});
+
+test("createProject skips workflow-v2 auto-init when workflowTemplateKey is none", async () => {
+  const project = await createProjectFn(
+    {
+      name: "Workflow Disabled Test",
+      description: "验证 workflowTemplateKey=none 时不会自动初始化 workflow-v2",
+      projectType: "complete",
+      workflowTemplateKey: "none",
+      autoStartWorkflow: true
+    },
+    "scripted"
+  );
+
+  const workflow = await prismaClient.workflow.findFirst({
+    where: { projectId: project.id },
+    orderBy: { createdAt: "desc" }
+  });
+  assert.equal(workflow, null);
 });
 
 test("standalone project binds projectInputs into entry stage and uses standalone template", async () => {

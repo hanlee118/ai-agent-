@@ -289,32 +289,77 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   }
 }
 
-function getDebateRoles(input: { recommendedRoleIds: RoleType[]; soulRoleId: RoleType }) {
-  // 默认至少覆盖分析、PM、产品、设计、研发等关键视角，避免设计/产品产物继续由 draft 补位。
-  const maxRoles = Math.max(4, Number(process.env.ISSUE_DEBATE_MAX_ROLES ?? 6));
+function parseEnvFlag(value: string | undefined, defaultValue: boolean) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  return defaultValue;
+}
+
+export function selectIssueDebateRoles(input: { recommendedRoleIds: RoleType[]; soulRoleId: RoleType; maxRoles?: number }) {
+  // 每次讨论至少保留「需求分析师 + 一个非分析角色」视角，避免单角色结论。
+  const maxRoles = Math.max(2, Number(input.maxRoles ?? process.env.ISSUE_DEBATE_MAX_ROLES ?? 3));
   const ordered: RoleType[] = [];
   const push = (roleId: RoleType) => {
     if (!ordered.includes(roleId)) {
       ordered.push(roleId);
     }
   };
-  const preferredOrder: RoleType[] = [
-    input.soulRoleId,
+  // 强制分析师始终参与，并优先保留模板/推荐角色，再补齐常见协作角色。
+  push(input.soulRoleId);
+  push("ROLE_ANALYST");
+  for (const roleId of input.recommendedRoleIds) {
+    push(roleId);
+  }
+  const fallbackOrder: RoleType[] = [
     "ROLE_PM",
-    "ROLE_ANALYST",
     "ROLE_PRODUCT",
     "ROLE_DESIGN",
     "ROLE_ARCH",
     "ROLE_DEV",
     "ROLE_QA"
   ];
-  for (const roleId of preferredOrder) {
-    push(roleId);
-  }
-  for (const roleId of input.recommendedRoleIds) {
+  for (const roleId of fallbackOrder) {
     push(roleId);
   }
   return ordered.slice(0, maxRoles);
+}
+
+export function evaluateDebateModelSufficiency(input: {
+  selectedRoles: RoleType[];
+  opinions: IssueDebateOpinion[];
+  minRealModelRoles?: number;
+  requireAnalyst?: boolean;
+}) {
+  const requireAnalyst = input.requireAnalyst ?? true;
+  const minRealModelRoles = Math.max(2, Number(input.minRealModelRoles ?? 2));
+  const realModelRoles = new Set(
+    input.opinions
+      .filter((item) => item.mode === "model")
+      .map((item) => item.roleId)
+  );
+  const analystReady = realModelRoles.has("ROLE_ANALYST");
+  const nonAnalystReady = Array.from(realModelRoles).some((roleId) => roleId !== "ROLE_ANALYST");
+  const effectiveMinRoles = Math.min(
+    Math.max(2, input.selectedRoles.length),
+    minRealModelRoles
+  );
+  const countReady = realModelRoles.size >= effectiveMinRoles;
+  const analystConstraintReady = requireAnalyst ? analystReady && nonAnalystReady : true;
+  return {
+    passed: countReady && analystConstraintReady,
+    realModelCount: realModelRoles.size,
+    analystReady,
+    nonAnalystReady,
+    effectiveMinRoles
+  };
 }
 
 async function runDebateRoleBatch(
@@ -429,7 +474,7 @@ function buildDebateSummaryPrompt(input: {
 
 export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promise<IssueDebateResult> {
   const runtime = await getRuntimeStatus();
-  const selectedRoles = getDebateRoles({
+  const selectedRoles = selectIssueDebateRoles({
     recommendedRoleIds: input.recommendedRoleIds,
     soulRoleId: input.soulRoleId
   });
@@ -524,9 +569,15 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
       rawPreview: "模型调用失败，已降级。"
     };
   });
-  const realModelCount = opinions.filter((item) => item.mode === "model").length;
-  // Require full real-model completion for issue debate to avoid partial fallback passing as formal output.
-  const hasRealModel = realModelCount === selectedRoles.length;
+  const minRealModelRoles = Math.max(2, Number(process.env.ISSUE_DEBATE_MIN_REAL_MODEL_ROLES ?? 2));
+  const requireAnalyst = parseEnvFlag(process.env.ISSUE_DEBATE_REQUIRE_ANALYST, true);
+  const sufficiency = evaluateDebateModelSufficiency({
+    selectedRoles,
+    opinions,
+    minRealModelRoles,
+    requireAnalyst
+  });
+  const hasRealModel = sufficiency.passed;
   const derived = toConsensusAndDivergences(opinions);
 
   return {
@@ -537,7 +588,9 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
     opinions,
     note: [
       runtime.mode === "scripted" ? "当前运行模式为 scripted，已使用降级辩论输出。" : "",
-      realModelCount > 0 && !hasRealModel ? `仅 ${realModelCount} 个角色完成真实模型输出，未达到最小讨论阈值。` : "",
+      sufficiency.realModelCount > 0 && !hasRealModel
+        ? `仅 ${sufficiency.realModelCount} 个角色完成真实模型输出，最低要求 ${sufficiency.effectiveMinRoles} 个且需包含需求分析师与至少 1 个非分析角色。`
+        : "",
       failed > 0 ? `${failed} 个角色辩论调用失败，已用可用结果继续。` : ""
     ]
       .filter(Boolean)

@@ -36,10 +36,14 @@ let app: express.Express;
 before(async () => {
   copyFileSync(seedDbPath, dbPath);
   for (const migrationPath of migrationPaths) {
-    execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
-      cwd: apiRoot,
-      stdio: "pipe"
-    });
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore idempotent replay errors when seed DB already contains newer schema columns.
+    }
   }
 
   const [dbMod, knowledgeMod] = await Promise.all([
@@ -111,6 +115,17 @@ test("knowledge-v2 ingests text and can search/context/summary", async () => {
   assert.equal(Array.isArray(searchRes.body.data.results), true);
   assert.equal(searchRes.body.data.results.length > 0, true);
 
+  const listRes = await request(app)
+    .get("/api/v1/knowledge")
+    .query({ projectId: "KBV2-PROJECT-001", limit: 10 });
+  assert.equal(listRes.status, 200);
+  assert.equal(listRes.body.success, true);
+  const listItems = Array.isArray(listRes.body.data.items)
+    ? listRes.body.data.items as Array<{ sourceEngine?: string }>
+    : [];
+  assert.equal(listItems.length > 0, true);
+  assert.equal(typeof listItems[0]?.sourceEngine, "string");
+
   const contextRes = await request(app)
     .post("/api/v1/knowledge/context")
     .send({
@@ -142,6 +157,51 @@ test("knowledge-v2 ingests text and can search/context/summary", async () => {
   assert.equal(summaryRes.status, 200);
   assert.equal(summaryRes.body.success, true);
   assert.match(String(summaryRes.body.data.summary), /阶段复盘/);
+});
+
+test("knowledge-v2 enforces scope binding for create/upload/update", async () => {
+  const createMissingProject = await request(app)
+    .post("/api/v1/knowledge/text")
+    .send({
+      title: "缺少 projectId 的项目知识",
+      content: "这条应该被拒绝",
+      scope: "project"
+    });
+  assert.equal(createMissingProject.status, 400);
+  assert.equal(createMissingProject.body.success, false);
+  assert.match(String(createMissingProject.body.error?.message || ""), /project scope requires projectId/);
+
+  const uploadMissingAgent = await request(app)
+    .post("/api/v1/knowledge/upload")
+    .send({
+      scope: "agent",
+      fileName: "agent-note.txt",
+      fileContent: "agent scope without agentId",
+      tags: ["scope-check"]
+    });
+  assert.equal(uploadMissingAgent.status, 400);
+  assert.equal(uploadMissingAgent.body.success, false);
+  assert.match(String(uploadMissingAgent.body.error?.message || ""), /agent scope requires agentId/);
+
+  const createGlobal = await request(app)
+    .post("/api/v1/knowledge/text")
+    .send({
+      title: "可更新条目",
+      content: "用于 scope 更新校验",
+      scope: "global"
+    });
+  assert.equal(createGlobal.status, 201);
+  const id = String(createGlobal.body.data.id || "");
+  assert.ok(id);
+
+  const patchInvalidScope = await request(app)
+    .patch(`/api/v1/knowledge/${id}`)
+    .send({
+      scope: "agent"
+    });
+  assert.equal(patchInvalidScope.status, 400);
+  assert.equal(patchInvalidScope.body.success, false);
+  assert.match(String(patchInvalidScope.body.error?.message || ""), /agent scope requires agentId/);
 });
 
 test("knowledge-v2 supports multipart file upload for document ingestion", async () => {
