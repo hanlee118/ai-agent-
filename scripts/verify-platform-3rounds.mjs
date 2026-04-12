@@ -71,14 +71,14 @@ function runStep(step) {
       const ok = !timedOut && code === 0;
       const summarizedStdout = summarizeOutput(stdout);
       const summarizedStderr = summarizeOutput(stderr);
-      const combinedSummary = `${summarizedStdout}\n${summarizedStderr}`;
+      const combinedOutput = `${stdout}\n${stderr}`;
       const issueFirstBlocked =
         step.name === "smoke-project-flow"
-        && /PROJECT_ISSUE_FIRST_REQUIRED/i.test(combinedSummary);
+        && /PROJECT_ISSUE_FIRST_REQUIRED/i.test(combinedOutput);
       const realModelGateBlocked =
         step.name === "smoke-project-flow"
-        && /PROJECT_ADVANCE_FAILED/i.test(combinedSummary)
-        && /(REAL_MODEL_GATE_FAILED|No available channel for model)/i.test(combinedSummary);
+        && /PROJECT_ADVANCE_FAILED/i.test(combinedOutput)
+        && /(REAL_MODEL_GATE_FAILED|No available channel for model)/i.test(combinedOutput);
       if (issueFirstBlocked) {
         resolve({
           ok: true,
