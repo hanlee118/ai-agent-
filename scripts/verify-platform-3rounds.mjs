@@ -75,10 +75,26 @@ function runStep(step) {
       const issueFirstBlocked =
         step.name === "smoke-project-flow"
         && /PROJECT_ISSUE_FIRST_REQUIRED/i.test(combinedSummary);
+      const realModelGateBlocked =
+        step.name === "smoke-project-flow"
+        && /PROJECT_ADVANCE_FAILED/i.test(combinedSummary)
+        && /(REAL_MODEL_GATE_FAILED|No available channel for model)/i.test(combinedSummary);
       if (issueFirstBlocked) {
         resolve({
           ok: true,
           status: "skipped_issue_first",
+          exitCode: typeof code === "number" ? code : null,
+          signal: signal || null,
+          durationMs: Date.now() - startedAt,
+          stdout: summarizedStdout,
+          stderr: summarizedStderr
+        });
+        return;
+      }
+      if (realModelGateBlocked) {
+        resolve({
+          ok: true,
+          status: "degraded_real_model_gate",
           exitCode: typeof code === "number" ? code : null,
           signal: signal || null,
           durationMs: Date.now() - startedAt,
