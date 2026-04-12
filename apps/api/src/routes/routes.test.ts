@@ -411,6 +411,39 @@ describe("Error Matrix: auth + projects", () => {
     const notFoundRes = await request(fullApp).get(`/api/projects/${projectId}`);
     assert.equal(notFoundRes.status, 404);
     });
+
+    it("[200][PROJECTS] postCreatePrep should auto-complete when execution already started", async () => {
+    const createRes = await request(fullApp)
+      .post("/api/projects")
+      .send({
+        name: "测试项目-执行已启动不应卡 Step1",
+        description: "用于验证进入执行阶段后，postCreatePrep 不再阻塞。",
+        team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DESIGN", "ROLE_DEV"]
+      });
+
+    assert.equal(createRes.status, 201);
+    const projectId = String(createRes.body.id);
+
+    await prismaClient.task.updateMany({
+      where: { projectId, stageType: "ANALYSIS" },
+      data: { status: "in_progress" },
+    });
+
+    const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+    assert.equal(detailRes.status, 200);
+    assert.equal(detailRes.body.postCreatePrep?.executionStarted, true);
+    assert.equal(detailRes.body.postCreatePrep?.shouldEnforce, false);
+    assert.equal(detailRes.body.postCreatePrep?.completed, true);
+    assert.equal(
+      Array.isArray(detailRes.body.postCreatePrep?.checks)
+      && detailRes.body.postCreatePrep.checks.every((item: { done: boolean }) => item.done),
+      true,
+    );
+
+    const deleteRes = await request(fullApp).delete(`/api/projects/${projectId}`);
+    assert.equal(deleteRes.status, 200);
+    assert.equal(deleteRes.body.success, true);
+    });
   });
 
   describe("400/404/409 PROJECT_ACTIONS", () => {
