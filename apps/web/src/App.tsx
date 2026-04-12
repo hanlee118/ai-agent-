@@ -53,6 +53,23 @@ const APP_TABS = [
 
 const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
   Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
+const resolveInitialSearchParams = () =>
+  typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : new URLSearchParams();
+const resolveInitialAppTab = (): (typeof APP_TABS)[number] => {
+  const params = resolveInitialSearchParams();
+  const appTabParam = params.get('app_tab');
+  return isAppTab(appTabParam) ? appTabParam : 'dashboard';
+};
+const resolveInitialProjectId = (): string | null => {
+  const params = resolveInitialSearchParams();
+  const value = String(params.get('signoff_project_id') || params.get('project_id') || '').trim();
+  return value || null;
+};
+const resolveInitialAgentId = (): string | null => {
+  const params = resolveInitialSearchParams();
+  const value = String(params.get('agent_id') || '').trim();
+  return value || null;
+};
 const PROJECT_ROOM_URL_KEYS = [
   'project_id',
   'signoff_project_id',
@@ -123,7 +140,7 @@ export default function App() {
     }, 3000);
   };
 
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState<string>(() => resolveInitialAppTab());
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isInitialized, setIsInitialized] = useState<boolean>(
     AUTH_BYPASS_IN_DEV ? true : (cachedAuthState?.setupComplete ?? true),
@@ -251,8 +268,8 @@ export default function App() {
     }
   };
 
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(() => resolveInitialProjectId());
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(() => resolveInitialAgentId());
   const [recentProjectId, setRecentProjectId] = useState<string | null>(null);
   const [urlSearch, setUrlSearch] = useState<string>(() => (typeof window !== 'undefined' ? window.location.search : ''));
   const deepLinkRouteHandledRef = useRef<string | null>(null);
@@ -302,13 +319,34 @@ export default function App() {
     const handleLocationChange = () => {
       setUrlSearch(window.location.search);
     };
+    const LOCATION_CHANGE_EVENT = 'occ:locationchange';
+    const rawPushState = window.history.pushState;
+    const rawReplaceState = window.history.replaceState;
+
+    const emitLocationChange = () => {
+      window.dispatchEvent(new Event(LOCATION_CHANGE_EVENT));
+    };
+
+    window.history.pushState = function pushState(...args) {
+      rawPushState.apply(this, args as [data: unknown, unused: string, url?: string | URL | null]);
+      emitLocationChange();
+    };
+
+    window.history.replaceState = function replaceState(...args) {
+      rawReplaceState.apply(this, args as [data: unknown, unused: string, url?: string | URL | null]);
+      emitLocationChange();
+    };
 
     window.addEventListener('popstate', handleLocationChange);
     window.addEventListener('hashchange', handleLocationChange);
+    window.addEventListener(LOCATION_CHANGE_EVENT, handleLocationChange);
 
     return () => {
+      window.history.pushState = rawPushState;
+      window.history.replaceState = rawReplaceState;
       window.removeEventListener('popstate', handleLocationChange);
       window.removeEventListener('hashchange', handleLocationChange);
+      window.removeEventListener(LOCATION_CHANGE_EVENT, handleLocationChange);
     };
   }, []);
 
