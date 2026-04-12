@@ -779,6 +779,7 @@ const ProjectRoom = ({
   const autoIssueDraftProjectIdsRef = useRef(new Set<string>());
   const lastDetailErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
   const lastWorkflowErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
+  const lastExternalDetailSyncKeyRef = useRef<string>('');
 
   useEffect(() => {
     addToastRef.current = addToast;
@@ -805,6 +806,7 @@ const ProjectRoom = ({
   );
 
   const effectiveProjectId = projectId || project.id;
+  const externalProjectUpdatedAt = String((project as { updatedAt?: string } | null)?.updatedAt || '');
 
   useEffect(() => {
     setDesignReviewForm(createDefaultDesignReviewForm());
@@ -856,6 +858,22 @@ const ProjectRoom = ({
   useEffect(() => {
     void loadProjectDetail();
   }, [loadProjectDetail]);
+
+  useEffect(() => {
+    if (!effectiveProjectId || !externalProjectUpdatedAt) {
+      return;
+    }
+    const currentDetailUpdatedAt = String((detail as { updatedAt?: string } | null)?.updatedAt || '');
+    const syncKey = `${effectiveProjectId}:${externalProjectUpdatedAt}`;
+    if (lastExternalDetailSyncKeyRef.current === syncKey) {
+      return;
+    }
+    lastExternalDetailSyncKeyRef.current = syncKey;
+    if (currentDetailUpdatedAt === externalProjectUpdatedAt) {
+      return;
+    }
+    void loadProjectDetail();
+  }, [detail, effectiveProjectId, externalProjectUpdatedAt, loadProjectDetail]);
 
   const loadWorkflowOverview = useCallback(async () => {
     if (!effectiveProjectId) {
@@ -1760,23 +1778,34 @@ const ProjectRoom = ({
   const postCreatePrepChecks = useMemo(
     () => (
       serverPostCreatePrep && Array.isArray(serverPostCreatePrep.checks) && serverPostCreatePrep.checks.length > 0
-        ? serverPostCreatePrep.checks.map((item) => ({
-          key: String(item.key || ''),
-          label: String(item.label || ''),
-          done: Boolean(item.done),
-        }))
+        ? serverPostCreatePrep.checks.map((item) => {
+          const key = String(item.key || '');
+          const doneFromServer = Boolean(item.done);
+          const done = key === 'debate' && postCreateIssueDraft
+            ? true
+            : doneFromServer;
+          return {
+            key,
+            label: String(item.label || ''),
+            done,
+          };
+        })
         : fallbackPostCreatePrepChecks
     ),
-    [fallbackPostCreatePrepChecks, serverPostCreatePrep],
+    [fallbackPostCreatePrepChecks, postCreateIssueDraft, serverPostCreatePrep],
   );
-  const postCreatePrepDoneCount = serverPostCreatePrep
-    ? Number(serverPostCreatePrep.doneCount || 0)
-    : postCreatePrepChecks.filter((item) => item.done).length;
+  const postCreatePrepDoneCount = postCreatePrepChecks.filter((item) => item.done).length;
   const isPostCreatePrepCompleted = serverPostCreatePrep
     ? Boolean(serverPostCreatePrep.completed)
     : !shouldEnforcePostCreatePrep || postCreatePrepChecks.every((item) => item.done);
   const postCreatePrepBlockReason = useMemo(() => {
     if (serverPostCreatePrep?.blockReason) {
+      if (
+        postCreateIssueDraft
+        && /多\s*Agent.*讨论/.test(String(serverPostCreatePrep.blockReason))
+      ) {
+        return '请先完成：理解确认草案已写回项目';
+      }
       return String(serverPostCreatePrep.blockReason);
     }
     if (isPostCreatePrepCompleted) {
@@ -1784,7 +1813,7 @@ const ProjectRoom = ({
     }
     const nextPending = postCreatePrepChecks.find((item) => !item.done);
     return nextPending ? `请先完成：${nextPending.label}` : '请先完成需求补齐与理解确认。';
-  }, [isPostCreatePrepCompleted, postCreatePrepChecks, serverPostCreatePrep?.blockReason]);
+  }, [isPostCreatePrepCompleted, postCreateIssueDraft, postCreatePrepChecks, serverPostCreatePrep?.blockReason]);
 
   useEffect(() => {
     if (isPostCreatePrepCompleted) {
@@ -2635,8 +2664,17 @@ const ProjectRoom = ({
       ].filter(Boolean).join('\n');
 
       await projectsApi.update(effectiveProjectId, { description: nextDescription });
-      await handleSyncProjectMainIssue({ silent: true });
-      addToast('已写回项目描述并同步到 GitLab 主 Issue，后续可围绕该 Issue 讨论', 'success');
+      addToast('已写回项目描述', 'success');
+
+      try {
+        await handleSyncProjectMainIssue({ silent: true });
+        addToast('已同步到 GitLab 主 Issue，后续可围绕该 Issue 讨论', 'success');
+      } catch (syncError) {
+        addToast(
+          `项目已写回，但 GitLab 同步失败：${syncError instanceof Error ? syncError.message : '未知错误'}`,
+          'info',
+        );
+      }
       if (normalizeCoreStageType(detail.currentStage) === 'INIT' && !detail.pendingApproval) {
         try {
           setIsTriggeringStageExecution(true);
@@ -2655,7 +2693,7 @@ const ProjectRoom = ({
       }
       await loadProjectDetail();
     } catch (error) {
-      addToast(`写回项目并同步失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      addToast(`写回项目失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setIsApplyingPostCreateIssueDraft(false);
     }
