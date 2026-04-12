@@ -49,12 +49,24 @@ export default function ProjectConfirmCard({ controller }: Props) {
     return null;
   }
 
-  const canCreate = Boolean(issuePreview?.issueId) && Boolean(issuePreview?.analysisGate.canProceed) && !isCreating;
+  const canCreateProject = issuePreview?.analysisGate
+    ? (issuePreview.analysisGate.canCreateProject ?? issuePreview.analysisGate.canProceed)
+    : false;
+  const canCreate = Boolean(issuePreview?.issueId) && canCreateProject && !isCreating;
   const createBlockedHint = !issuePreview?.issueId
     ? '请先回到需求输入步骤完成 Issue 分析。'
-    : !issuePreview.analysisGate.canProceed
-      ? (issuePreview.analysisGate.blockers[0] || '正式讨论尚未完成，请稍后重试。')
+    : !canCreateProject
+      ? (
+          issuePreview.analysisGate.createBlockers?.[0]
+          || issuePreview.analysisGate.blockers[0]
+          || '分析阶段尚未满足创建条件，请稍后重试。'
+        )
       : '';
+  const formalDebateDeferred = Boolean(
+    issuePreview?.analysisGate
+    && !(issuePreview.analysisGate.canProceed)
+    && (issuePreview.analysisGate.canCreateProject ?? issuePreview.analysisGate.canProceed),
+  );
 
   return (
     <div className="bg-surface-soft border border-warning/20 rounded-2xl p-5 space-y-5">
@@ -65,6 +77,11 @@ export default function ProjectConfirmCard({ controller }: Props) {
         </div>
         <Badge variant="warning">待确认</Badge>
       </div>
+      {formalDebateDeferred ? (
+        <div className="rounded-xl border border-accent/30 bg-accent/10 px-3 py-2">
+          <p className="text-[11px] text-accent font-semibold">Create-first 模式：项目骨架将先创建，正式辩论后置补齐</p>
+        </div>
+      ) : null}
 
       <div className="space-y-3">
         <div className="space-y-2">
@@ -210,7 +227,7 @@ export default function ProjectConfirmCard({ controller }: Props) {
           disabled={!canCreate}
           className="flex-1 py-2.5 bg-primary text-surface rounded-xl text-xs font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
         >
-          {isCreating ? '创建中...' : (canCreate ? '确认创建并启动执行' : '等待分析完成')}
+          {isCreating ? '创建中...' : (canCreate ? '确认创建并启动执行' : '等待创建条件满足')}
         </button>
       </div>
       {createBlockedHint ? (

@@ -307,6 +307,12 @@ const ISSUE_DEBATE_STALE_TIMEOUT_OVERRIDE_MS = Number(process.env.ISSUE_DEBATE_S
 const ISSUE_DEBATE_STALE_TIMEOUT_MS = Number.isFinite(ISSUE_DEBATE_STALE_TIMEOUT_OVERRIDE_MS) && ISSUE_DEBATE_STALE_TIMEOUT_OVERRIDE_MS > 0
   ? Math.max(60_000, ISSUE_DEBATE_STALE_TIMEOUT_OVERRIDE_MS)
   : Math.max(90_000, ISSUE_DEBATE_EXPECTED_MAX_MS + 60_000);
+const ISSUE_CONFIRM_REQUIRE_FORMAL_DEBATE =
+  String(process.env.ISSUE_CONFIRM_REQUIRE_FORMAL_DEBATE ?? "false").trim().toLowerCase() === "true";
+const ISSUE_CONFIRM_AUTO_DEFERRED_DEBATE =
+  String(process.env.ISSUE_CONFIRM_AUTO_DEFERRED_DEBATE ?? "true").trim().toLowerCase() !== "false"
+  && process.env.NODE_ENV !== "test";
+const ISSUE_DEBATE_HEARTBEAT_MS = Math.max(8_000, Number(process.env.ISSUE_DEBATE_HEARTBEAT_MS ?? 15_000));
 const issueDebateTaskStore = new Map<string, DebateTaskState>();
 const issueLatestDebateTask = new Map<string, string>();
 
@@ -566,9 +572,15 @@ function buildIssueAnalysisGate(input: {
             : "尚未产生真实模型多角色讨论结果。"
   });
 
+  const canProceed = checks.every((item) => item.passed);
+  const blockers = checks.filter((item) => !item.passed).map((item) => item.detail);
+  const canCreateProject = ISSUE_CONFIRM_REQUIRE_FORMAL_DEBATE ? canProceed : true;
+
   return {
-    canProceed: checks.every((item) => item.passed),
-    blockers: checks.filter((item) => !item.passed).map((item) => item.detail),
+    canProceed,
+    canCreateProject,
+    blockers,
+    createBlockers: canCreateProject ? [] : blockers,
     checks,
     runtimeMode: input.runtime.mode,
     requestedRuntimeMode: String(input.runtime.requestedMode ?? input.runtime.mode)
@@ -620,6 +632,18 @@ function startIssueDebateTask(input: {
       debateError: "",
       debateUpdatedAt: runningAt
     }));
+
+    const heartbeat = setInterval(() => {
+      const current = issueDebateTaskStore.get(input.taskId);
+      if (!current || (current.status !== "queued" && current.status !== "running")) {
+        return;
+      }
+      issueDebateTaskStore.set(input.taskId, {
+        ...current,
+        updatedAt: nowIso()
+      });
+    }, ISSUE_DEBATE_HEARTBEAT_MS);
+    heartbeat.unref?.();
 
     try {
       const debate = await buildIssueRoleDebate({
@@ -709,6 +733,8 @@ function startIssueDebateTask(input: {
         debateError: message,
         debateUpdatedAt: failedAt
       }));
+    } finally {
+      clearInterval(heartbeat);
     }
   })();
 }
@@ -1062,12 +1088,13 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       debate: issue.debate ?? null,
       shouldCreateDebateTask: Boolean(issue.debateTaskId)
     });
-    if (!analysisGate.canProceed) {
+    const canCreateProject = analysisGate.canCreateProject ?? analysisGate.canProceed;
+    if (!canCreateProject) {
       res.status(409).json({
         success: false,
         error: {
           code: "VALIDATION_ERROR",
-          message: analysisGate.blockers[0] || "分析阶段尚未满足推进条件。",
+          message: analysisGate.createBlockers?.[0] || analysisGate.blockers[0] || "分析阶段尚未满足推进条件。",
           analysisGate
         }
       });
@@ -1159,6 +1186,39 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       requirementContract: confirmedContract
     });
 
+    let deferredDebateTaskId: string | null = null;
+    if (!analysisGate.canProceed && ISSUE_CONFIRM_AUTO_DEFERRED_DEBATE) {
+      const latestTaskId = issueLatestDebateTask.get(issue.id) || issue.debateTaskId || "";
+      const latestTask = latestTaskId ? issueDebateTaskStore.get(latestTaskId) : null;
+      const hasActiveTask = Boolean(
+        latestTask
+        && (latestTask.status === "queued" || latestTask.status === "running")
+        && !isDebateTaskStale(latestTask)
+      );
+      if (!hasActiveTask) {
+        deferredDebateTaskId = createDebateTaskId(issue.id);
+        startIssueDebateTask({
+          taskId: deferredDebateTaskId,
+          issueId: issue.id,
+          rawInput: finalProjectDescription,
+          title: finalName,
+          summary: issue.summary,
+          workflowTemplateKey: resolveIssueWorkflowTemplateKey(workflowTemplateKey),
+          industryCode: issue.industryCode,
+          recommendedRoleIds: constrainedRoleIds as RoleType[],
+          soulRoleId: config.assemblyRule.soulRoleId,
+          fallbackDiscussion: issue.discussionDraft?.length
+            ? issue.discussionDraft
+            : buildIssueDiscussion(
+              finalProjectDescription,
+              constrainedRoleIds as RoleType[],
+              config.assemblyRule.soulRoleId,
+              { includeSoulRole: enforceIndustryAssemblyRule }
+            )
+        });
+      }
+    }
+
     await options.onProjectCreated?.(project.id);
     sendSuccess(res, {
       issue: updated,
@@ -1166,7 +1226,14 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       backfill: {
         summary: `需求已落地为项目 ${project.name}，并写入团队角色编排。`,
         teamRoleIds: constrainedRoleIds
-      }
+      },
+      analysisGate,
+      deferredDebateTask: deferredDebateTaskId
+        ? {
+            taskId: deferredDebateTaskId,
+            status: "queued"
+          }
+        : null
     });
   }));
 

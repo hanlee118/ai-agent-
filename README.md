@@ -136,6 +136,19 @@ pnpm dev:web
 - Web: `http://localhost:5173`
 - API: `http://localhost:8787`
 
+如果你习惯从 `http://127.0.0.1:80` 访问，需要先确认入口是否指向 OCC（避免误打到其他本地容器服务）：
+
+```bash
+pnpm web:entry:status
+pnpm web:entry:occ
+```
+
+常用入口切换命令：
+
+- `pnpm web:entry:status` 查看当前 `:80` 实际命中服务与页面标题
+- `pnpm web:entry:occ` 切换 `:80` 到 OCC Web（代理 `:5173`）
+- `pnpm web:entry:trading` 切回 TradingAgents 入口（若本机在并行使用）
+
 ### 4. 守护方式启动
 
 ```bash

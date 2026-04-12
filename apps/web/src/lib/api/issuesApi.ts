@@ -13,7 +13,9 @@ export type IssueContentSource = 'model_debate' | 'rule_draft' | 'fallback';
 
 export interface IssueAnalysisGate {
   canProceed: boolean;
+  canCreateProject: boolean;
   blockers: string[];
+  createBlockers: string[];
   checks: Array<{
     id: string;
     label: string;
@@ -253,6 +255,11 @@ export const issuesApi = {
         summary: string;
         teamRoleIds: string[];
       };
+      analysisGate?: IssueAnalysisGate;
+      deferredDebateTask?: {
+        taskId: string;
+        status: IssueDebateTaskStatus;
+      } | null;
     }>(`/issues/${encodeURIComponent(issueId)}/confirm`, {
       method: 'POST',
       body: JSON.stringify(payload),

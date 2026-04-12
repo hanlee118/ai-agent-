@@ -1050,7 +1050,7 @@ describe("Error Matrix: issues + role-sets", () => {
   });
 
   describe("400 VALIDATION_ERROR", () => {
-    it("[400][VALIDATION_ERROR] issue preview + confirm required-boundary", async () => {
+    it("[200][OK] issue preview + confirm create-first with deferred debate", async () => {
     const missingInput = await request(app)
       .post("/api/issues/preview")
       .send({});
@@ -1077,6 +1077,8 @@ describe("Error Matrix: issues + role-sets", () => {
     assert.ok(Array.isArray(matchedPrinciples));
     const missionAnchor = String(previewRes.body.data.contextAlignment?.missionAnchor || "").trim();
     assert.ok(missionAnchor.length > 0 || matchedGoals.length + matchedPrinciples.length > 0);
+    assert.equal(previewRes.body.data.analysisGate?.canProceed, false);
+    assert.equal(previewRes.body.data.analysisGate?.canCreateProject, true);
 
     const issueId = String(previewRes.body.data.issueId);
     const missingRequiredConfirm = await request(app)
@@ -1105,12 +1107,16 @@ describe("Error Matrix: issues + role-sets", () => {
         conflictResolution: "以当前 issue 场景为准，覆盖长期记忆中的冲突项。"
       });
 
-    assert.equal(confirmRes.status, 409);
-    assert.equal(confirmRes.body.success, false);
-    assert.equal(confirmRes.body.error.code, "VALIDATION_ERROR");
-    assert.ok(String(confirmRes.body.error.message || "").trim().length > 0);
-    assert.ok(Array.isArray(confirmRes.body.error.analysisGate?.checks));
-    assert.ok((confirmRes.body.error.analysisGate?.checks || []).some((item: { passed?: boolean }) => item.passed === false));
+    assert.equal(confirmRes.status, 200);
+    assert.equal(confirmRes.body.success, true);
+    assert.ok(String(confirmRes.body.data?.project?.id || "").trim().length > 0);
+    assert.equal(confirmRes.body.data?.issue?.status, "confirmed");
+    assert.equal(confirmRes.body.data?.analysisGate?.canProceed, false);
+    assert.equal(confirmRes.body.data?.analysisGate?.canCreateProject, true);
+    if (confirmRes.body.data?.deferredDebateTask) {
+      assert.equal(confirmRes.body.data.deferredDebateTask.status, "queued");
+      assert.ok(String(confirmRes.body.data.deferredDebateTask.taskId || "").trim().length > 0);
+    }
     });
   });
 

@@ -141,7 +141,7 @@ export default function TeamAssignmentPanel({ controller }: Props) {
           onClick={() => setStep('analysis')}
           className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold hover:bg-white/10 transition-all"
         >
-          返回讨论结论
+          查看分析草案（可选）
         </button>
         <button
           onClick={handleContinueFromTeam}

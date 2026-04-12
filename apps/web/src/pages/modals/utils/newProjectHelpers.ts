@@ -675,9 +675,11 @@ export const buildLocalIssuePreview = (input: string, industryCode: string, role
     },
     analysisGate: {
       canProceed: false,
+      canCreateProject: true,
       blockers: [
         '当前仅生成本地分析草稿，尚未获得真实模型多角色讨论结果。',
       ],
+      createBlockers: [],
       checks: [
         {
           id: 'runtime-real-model',

@@ -424,7 +424,7 @@ export function useNewProjectModalController({
         }
         if (result.status === 'failed') {
           setIsPollingDebate(false);
-          addToast(`真实多角色讨论失败，当前阶段已阻断: ${result.error || '未知错误'}`, 'error');
+          addToast(`真实多角色讨论失败，已转为后置重试，不影响项目骨架创建: ${result.error || '未知错误'}`, 'error');
           return;
         }
 
@@ -694,16 +694,21 @@ export function useNewProjectModalController({
         priority,
         team: recommendationRoleIds,
       });
-      setStep('analysis');
+      setStep('team');
 
       if (enforceIndustryAssemblyRule && requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
         addToast(`已完成需求分析，但当前未匹配到灵魂角色 ${roleLabel(soulRoleId)}，请手动补充`, 'error');
       } else {
+        const canProceed = preview.analysisGate.canProceed;
+        const canCreateProject = preview.analysisGate.canCreateProject ?? canProceed;
+        const createBlocker = preview.analysisGate.createBlockers?.[0] || preview.analysisGate.blockers[0] || '分析阶段尚未满足创建条件';
         addToast(
-          preview.analysisGate.canProceed
-            ? '已完成需求分析并生成正式讨论结论，请继续澄清确认'
-            : `已生成分析草案，但当前不可推进: ${preview.analysisGate.blockers[0] || '缺少真实讨论结果'}`,
-          preview.analysisGate.canProceed ? 'success' : 'info',
+          canProceed
+            ? '已完成需求分析并生成正式讨论结论，已进入团队分配'
+            : canCreateProject
+              ? '已生成分析草案并进入团队分配，可先创建项目骨架；正式多角色辩论将后置并自动补齐'
+              : `已生成分析草案，但当前仍不可创建: ${createBlocker}`,
+          canProceed ? 'success' : (canCreateProject ? 'info' : 'error'),
         );
       }
     } catch (error) {
@@ -745,8 +750,9 @@ export function useNewProjectModalController({
         return;
       }
 
-      if (!issuePreview.analysisGate.canProceed) {
-        addToast(issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足推进条件', 'error');
+      const canCreateProject = issuePreview.analysisGate.canCreateProject ?? issuePreview.analysisGate.canProceed;
+      if (!canCreateProject) {
+        addToast(issuePreview.analysisGate.createBlockers?.[0] || issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足创建条件', 'error');
         return;
       }
 
@@ -757,7 +763,17 @@ export function useNewProjectModalController({
     }
 
     setStep('team');
-    addToast('分析完成，请确认团队分配与可选扩展信息', 'success');
+    if (issuePreview?.analysisGate) {
+      const canProceed = issuePreview.analysisGate.canProceed;
+      addToast(
+        canProceed
+          ? '分析完成，请确认团队分配与可选扩展信息'
+          : '已进入团队分配；项目可先创建，正式辩论将后置补齐',
+        canProceed ? 'success' : 'info',
+      );
+    } else {
+      addToast('分析完成，请确认团队分配与可选扩展信息', 'success');
+    }
   };
 
   const handleContinueFromTeam = () => {
@@ -815,8 +831,14 @@ export function useNewProjectModalController({
       addToast('当前缺少需求 Issue 上下文，请先完成需求分析后再创建项目', 'error');
       return;
     }
-    if (!issuePreview.analysisGate.canProceed) {
-      addToast(issuePreview.analysisGate.blockers[0] || '分析阶段尚未满足推进条件，请等待正式讨论完成', 'info');
+    const canCreateProject = issuePreview.analysisGate.canCreateProject ?? issuePreview.analysisGate.canProceed;
+    if (!canCreateProject) {
+      addToast(
+        issuePreview.analysisGate.createBlockers?.[0]
+          || issuePreview.analysisGate.blockers[0]
+          || '分析阶段尚未满足创建条件',
+        'info',
+      );
       return;
     }
     if (workflowTemplateKey !== 'none') {
@@ -1021,6 +1043,12 @@ export function useNewProjectModalController({
       });
       const created = confirmation.project;
       addToast(`项目已创建: ${created.name || parsedProject.name}`, 'success');
+      if (confirmation.deferredDebateTask) {
+        addToast(
+          `正式多角色辩论已后置排队（${confirmation.deferredDebateTask.taskId}），结论生成后将自动回填`,
+          'info',
+        );
+      }
 
       if (assignedAgentIds.length > 0) {
         const artifactsText = activeExpectedArtifacts
@@ -1057,7 +1085,10 @@ export function useNewProjectModalController({
         addToast('项目已创建，但当前未匹配到可直接启动的 Agent', 'info');
       }
 
-      await onProjectCreated?.(created);
+      await onProjectCreated?.(created, {
+        issueId: issuePreview.issueId,
+        deferredDebateTask: confirmation.deferredDebateTask ?? null,
+      });
       handleClose();
     } catch (error: any) {
       addToast(`创建失败: ${error?.message || '未知错误'}`, 'error');
@@ -1178,11 +1209,19 @@ export function useNewProjectModalController({
     });
     setDiscussionOverride('');
     setStep('team');
+    const manualCanProceed = manualPreview.analysisGate.canProceed;
+    const manualCanCreateProject = manualPreview.analysisGate.canCreateProject ?? manualCanProceed;
+    const manualCreateBlocker =
+      manualPreview.analysisGate.createBlockers?.[0]
+      || manualPreview.analysisGate.blockers[0]
+      || '分析阶段尚未满足创建条件';
     addToast(
-      manualPreview.analysisGate.canProceed
+      manualCanProceed
         ? '已生成项目草案并完成正式分析，请确认团队分配后继续'
-        : `已生成项目草案，正式讨论仍在进行：${manualPreview.analysisGate.blockers[0] || '请稍后继续'}`,
-      manualPreview.analysisGate.canProceed ? 'success' : 'info',
+        : manualCanCreateProject
+          ? '已生成项目草案，正式讨论将后置补齐，请先确认团队分配'
+          : `已生成项目草案，但当前仍不可创建：${manualCreateBlocker}`,
+      manualCanProceed ? 'success' : (manualCanCreateProject ? 'info' : 'error'),
     );
     setIsParsing(false);
   };

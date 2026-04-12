@@ -70,6 +70,9 @@ export default function IssueAnalysisPanel({ controller }: Props) {
   const discussionDraft = issuePreview?.discussionDraft || [];
   const analysisGate = issuePreview?.analysisGate;
   const primaryAnalysisBlocker = analysisGate?.blockers?.[0] || '';
+  const canProceed = Boolean(analysisGate?.canProceed);
+  const canCreateProject = Boolean(analysisGate && (analysisGate.canCreateProject ?? analysisGate.canProceed));
+  const primaryCreateBlocker = analysisGate?.createBlockers?.[0] || primaryAnalysisBlocker;
   const contentProvenance = issuePreview?.contentProvenance;
 
   return (
@@ -85,13 +88,14 @@ export default function IssueAnalysisPanel({ controller }: Props) {
       <div className="rounded-xl border border-primary/20 bg-primary/8 p-3 space-y-2">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="primary">Issue-first</Badge>
-          <Badge variant={analysisGate?.canProceed ? 'primary' : 'warning'}>
-            {analysisGate?.canProceed ? '模型正式结论' : '等待模型结论'}
+          <Badge variant="accent">Create-first 已启用</Badge>
+          <Badge variant={canProceed ? 'primary' : (canCreateProject ? 'accent' : 'warning')}>
+            {canProceed ? '正式结论已就绪' : (canCreateProject ? '可先创建项目骨架' : '等待创建条件满足')}
           </Badge>
           {analysisGate?.runtimeMode ? <Badge variant="accent">runtime: {analysisGate.runtimeMode}</Badge> : null}
         </div>
         <p className="text-xs leading-6 text-slate-300">
-          新建流程默认不使用模拟数据。只有“模型正式结论”才可推进创建；草稿与降级结果会被明确标记并阻断推进。
+          新建流程默认不使用模拟数据。若正式辩论未完成，允许先创建项目骨架并后置补齐；正式结论到达后会自动回填。
         </p>
         <p className="text-[11px] leading-5 text-slate-400">
           若你另开到 <span className="font-semibold text-white">`/generated/*.html`</span>、`4173` 或其他静态页面，
@@ -425,8 +429,8 @@ export default function IssueAnalysisPanel({ controller }: Props) {
                     </Badge>
                   )}
                   {analysisGate && (
-                    <Badge variant={analysisGate.canProceed ? 'primary' : 'danger'}>
-                      {analysisGate.canProceed ? '可推进' : '阻断中'}
+                    <Badge variant={canProceed ? 'primary' : (canCreateProject ? 'accent' : 'danger')}>
+                      {canProceed ? '正式结论可推进' : (canCreateProject ? '可创建骨架' : '创建阻断中')}
                     </Badge>
                   )}
                 </div>
@@ -434,15 +438,21 @@ export default function IssueAnalysisPanel({ controller }: Props) {
               {analysisGate && (
                 <div className={cn(
                   'rounded-xl border p-3 space-y-2',
-                  analysisGate.canProceed
+                  canProceed
                     ? 'border-primary/30 bg-primary/10'
-                    : 'border-danger/40 bg-danger/10',
+                    : canCreateProject
+                      ? 'border-accent/30 bg-accent/10'
+                      : 'border-danger/40 bg-danger/10',
                 )}>
-                  <p className={cn('text-xs font-semibold', analysisGate.canProceed ? 'text-primary' : 'text-danger')}>
-                    {analysisGate.canProceed ? '分析阶段已满足推进条件' : '分析阶段阻断'}
+                  <p className={cn('text-xs font-semibold', canProceed ? 'text-primary' : (canCreateProject ? 'text-accent' : 'text-danger'))}>
+                    {canProceed
+                      ? '分析阶段已满足推进条件'
+                      : canCreateProject
+                        ? '可先创建项目骨架，正式辩论后置'
+                        : '分析阶段阻断'}
                   </p>
-                  {!analysisGate.canProceed && primaryAnalysisBlocker ? (
-                    <p className="text-[11px] text-slate-200 leading-relaxed">{primaryAnalysisBlocker}</p>
+                  {!canProceed && primaryCreateBlocker ? (
+                    <p className="text-[11px] text-slate-200 leading-relaxed">{primaryCreateBlocker}</p>
                   ) : null}
                   <div className="space-y-1">
                     {analysisGate.checks.map((check) => (
@@ -455,12 +465,12 @@ export default function IssueAnalysisPanel({ controller }: Props) {
               )}
               {issuePreview.debateTask && (debateTaskStatus === 'queued' || debateTaskStatus === 'running' || isPollingDebate) ? (
                 <p className="text-[11px] text-accent">
-                  正在异步生成真实多角色辩论结果。下方草稿只作参考，不能作为正式推进依据。
+                  正在异步生成真实多角色辩论结果。下方草稿仅作参考；你可以先创建项目骨架，正式结论会后置补齐。
                 </p>
               ) : null}
               {issuePreview.debate && issuePreview.debate.mode !== 'model' ? (
                 <p className="text-[11px] text-warning">
-                  当前为降级讨论（scripted/fallback），角色观点仅用于草稿提示，不可作为正式分析结论。
+                  当前为降级讨论（scripted/fallback），角色观点仅用于草稿提示；正式结论将通过后置辩论补齐。
                 </p>
               ) : null}
               {debatePollingError ? <p className="text-[11px] text-warning">辩论轮询异常: {debatePollingError}</p> : null}
@@ -555,7 +565,7 @@ export default function IssueAnalysisPanel({ controller }: Props) {
               ) : null}
               <div className="space-y-2">
                 <p className="text-[11px] text-slate-500">
-                  如果你不同意正式结论，可补充修正意见；若当前仍是阻断状态，请先重新触发真实多角色讨论。
+                  如果你不同意正式结论，可补充修正意见；若当前阻断创建，请先重新触发真实多角色讨论。
                 </p>
                 <textarea
                   rows={2}

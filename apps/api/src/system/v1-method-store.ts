@@ -136,7 +136,9 @@ export interface IssueAnalysisGateCheck {
 
 export interface IssueAnalysisGate {
   canProceed: boolean;
+  canCreateProject: boolean;
   blockers: string[];
+  createBlockers: string[];
   checks: IssueAnalysisGateCheck[];
   runtimeMode: string;
   requestedRuntimeMode: string;

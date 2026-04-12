@@ -190,10 +190,7 @@ test('new project modal should follow selected stage template and submit none co
       .fill('请验证创建项目弹窗中模板切换是否正确影响产出物与创建 payload。');
     await page.getByRole('button', { name: 'AI 分析并分配 Agent' }).click();
 
-    await expect(page.getByText('需求分析与自动分配')).toBeVisible({ timeout: 30_000 });
-    await page.getByRole('button', { name: '下一步：团队分配与扩展信息' }).click();
-
-    await expect(page.getByText('团队分配与扩展信息')).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText('团队分配与扩展信息')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText(/当前行业最少需要\s*\d+\s*个角色/)).toHaveCount(0);
     await page.getByRole('button', { name: '下一步：创建确认卡' }).click();
 

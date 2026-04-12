@@ -848,11 +848,17 @@ export default function App() {
               {isTopologyOpen && <TeamTopologyModal isOpen={isTopologyOpen} onClose={() => setIsTopologyOpen(false)} />}
               {isDeployOpen && <DeployAgentModal isOpen={isDeployOpen} onClose={() => setIsDeployOpen(false)} addToast={addToast} onDeployed={refreshAllData} />}
               {isRoleSetsOpen && <IndustryRoleSetsModal isOpen={isRoleSetsOpen} onClose={() => setIsRoleSetsOpen(false)} addToast={addToast} onUpdated={refreshAllData} />}
-              {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={async (project) => {
+              {isNewProjectOpen && <NewProjectModal isOpen={isNewProjectOpen} onClose={() => setIsNewProjectOpen(false)} addToast={addToast} onProjectCreated={async (project, meta) => {
                 setRecentProjectId(project.id);
                 await refreshAllData();
                 setSelectedProjectId(project.id);
                 setActiveTab('project-room');
+                if (meta?.deferredDebateTask && (meta.deferredDebateTask.status === 'queued' || meta.deferredDebateTask.status === 'running')) {
+                  addToast(
+                    `已进入项目详情页；Issue 正式辩论仍在进行（${meta.deferredDebateTask.taskId}）`,
+                    'info',
+                  );
+                }
               }} />}
               {isDecisionCenterOpen && <DecisionCenterModal isOpen={isDecisionCenterOpen} onClose={() => setIsDecisionCenterOpen(false)} addToast={addToast} />}
             </AnimatePresence>

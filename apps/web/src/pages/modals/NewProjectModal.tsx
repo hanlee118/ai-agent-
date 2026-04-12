@@ -19,13 +19,15 @@ export default function NewProjectModal(props: NewProjectModalProps) {
     handleImportProjectFile,
     parsedProject,
   } = controller;
-  const steps: Array<{ id: typeof step; label: string }> = [
+  const steps: Array<{ id: 'input' | 'team' | 'confirm'; label: string }> = [
     { id: 'input', label: '需求输入' },
-    { id: 'analysis', label: '分析讨论' },
     { id: 'team', label: '团队分配' },
     { id: 'confirm', label: '确认创建' },
   ];
-  const currentIndex = steps.findIndex((item) => item.id === step);
+  const mainStep: 'input' | 'team' | 'confirm' = step === 'input' || step === 'team' || step === 'confirm'
+    ? step
+    : 'team';
+  const currentIndex = steps.findIndex((item) => item.id === mainStep);
 
   return (
     <SurfaceModal isOpen={isOpen} onClose={handleClose} title="创建新项目">
@@ -67,6 +69,9 @@ export default function NewProjectModal(props: NewProjectModalProps) {
                   );
                 })}
               </div>
+              <p className="text-[11px] text-slate-500">
+                主流程已切换为创建优先：先完成团队分配并创建项目骨架，分析草案为可选补充步骤。
+              </p>
             </div>
 
             {step === 'input' && (
