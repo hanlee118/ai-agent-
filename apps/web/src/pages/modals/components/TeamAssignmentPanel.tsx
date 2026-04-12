@@ -1,6 +1,7 @@
 import { Users } from 'lucide-react';
 import type { NewProjectModalController } from '../hooks/useNewProjectModalController';
 import { getAgentRoleId, normalizeRoleId, roleLabel } from '../utils/newProjectHelpers';
+import { templatePrefersHybridEngine } from '../utils/workflowTemplateMeta';
 import Badge from './Badge';
 import ClarificationForm from './ClarificationForm';
 
@@ -37,6 +38,23 @@ export default function TeamAssignmentPanel({ controller }: Props) {
 
   const selectedAgentIds = new Set(analysisRecommendations.map((item) => item.agentId));
   const selectedRoleIds = new Set(analysisRecommendations.map((item) => normalizeRoleId(item.roleId)));
+  const selectedAgents = industryAgents.filter((agent) => selectedAgentIds.has(agent.id));
+  const engineCounts = selectedAgents.reduce(
+    (acc, agent) => {
+      const normalized = String(agent.integrationEngine || 'managed').trim().toLowerCase();
+      if (normalized === 'hermes') {
+        acc.hermes += 1;
+      } else if (normalized === 'openclaw') {
+        acc.openclaw += 1;
+      } else {
+        acc.managed += 1;
+      }
+      return acc;
+    },
+    { hermes: 0, openclaw: 0, managed: 0 },
+  );
+  const hybridPreferred = templatePrefersHybridEngine(workflowTemplateKey);
+  const hybridCoverageReady = engineCounts.hermes > 0 && engineCounts.openclaw > 0;
 
   return (
     <div className="space-y-5 p-5 bg-surface-soft border border-accent/30 rounded-2xl">
@@ -82,6 +100,31 @@ export default function TeamAssignmentPanel({ controller }: Props) {
           )}
         </div>
       ) : null}
+
+      <div className={`p-3 rounded-xl border space-y-1 ${
+        hybridPreferred
+          ? (hybridCoverageReady ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-warning/10 border-warning/30')
+          : 'bg-white/5 border-border-subtle'
+      }`}>
+        <p className="text-xs text-slate-200">
+          当前选中引擎分布: Hermes {engineCounts.hermes} · OpenClaw {engineCounts.openclaw} · Managed {engineCounts.managed}
+        </p>
+        {hybridPreferred ? (
+          hybridCoverageReady ? (
+            <p className="text-[11px] text-emerald-300">
+              当前模板建议混合执行，已覆盖 Hermes 与 OpenClaw。
+            </p>
+          ) : (
+            <p className="text-[11px] text-warning">
+              当前模板建议混合执行，建议补充 {engineCounts.hermes === 0 ? 'Hermes' : ''}{engineCounts.hermes === 0 && engineCounts.openclaw === 0 ? ' 与 ' : ''}{engineCounts.openclaw === 0 ? 'OpenClaw' : ''} Agent。
+            </p>
+          )
+        ) : (
+          <p className="text-[11px] text-slate-500">
+            当前模板可单引擎执行；如需跨引擎协作可额外勾选 Hermes/OpenClaw 角色。
+          </p>
+        )}
+      </div>
 
       <div className="space-y-3">
         <p className="text-xs text-slate-400">自动分配的需求分析 Agent（可取消/补充）</p>

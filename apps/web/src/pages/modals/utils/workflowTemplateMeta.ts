@@ -18,6 +18,12 @@ type TemplateInputPreset = {
   type: string;
 };
 
+export type TemplateEngineGuidance = {
+  mode: 'hybrid' | 'hermes' | 'openclaw' | 'manual';
+  label: string;
+  note: string;
+};
+
 const DEFAULT_TEMPLATE_KEY: WorkflowTemplateKey = 'standard_software_development';
 
 const TEMPLATE_KEYS = new Set<WorkflowTemplateKey>([
@@ -357,6 +363,39 @@ const TEMPLATE_INPUT_PRESETS: Record<WorkflowTemplateKey, TemplateInputPreset> =
   qa_acceptance: { name: 'qa_test_scope', type: 'document' },
 };
 
+const TEMPLATE_ENGINE_GUIDANCE: Record<WorkflowTemplateKey, TemplateEngineGuidance> = {
+  standard_software_development: {
+    mode: 'hybrid',
+    label: 'Hermes + OpenClaw',
+    note: '全流程建议混合执行：设计类优先 Hermes，研发/交付优先 OpenClaw。',
+  },
+  requirements_design: {
+    mode: 'openclaw',
+    label: 'OpenClaw',
+    note: '需求澄清与范围边界沉淀通常由 OpenClaw 角色链路执行。',
+  },
+  visual_design: {
+    mode: 'hybrid',
+    label: 'Hermes + OpenClaw',
+    note: '视觉阶段建议 Hermes 产出设计，再由 OpenClaw 角色复核交接。',
+  },
+  tech_design: {
+    mode: 'openclaw',
+    label: 'OpenClaw',
+    note: '技术方案与架构契约以 OpenClaw 技术角色为主。',
+  },
+  code_dev: {
+    mode: 'openclaw',
+    label: 'OpenClaw',
+    note: '代码研发阶段默认由 OpenClaw 研发角色主导。',
+  },
+  qa_acceptance: {
+    mode: 'hybrid',
+    label: 'Hermes + OpenClaw',
+    note: 'QA 阶段可采用 Hermes 自动化辅助 + OpenClaw 角色复核闭环。',
+  },
+};
+
 function cloneArtifacts(artifacts: Artifact[]): Artifact[] {
   return artifacts.map((item) => ({ ...item, stageType: item.stageType as StageType }));
 }
@@ -398,6 +437,25 @@ export function getTemplateInputPreset(templateKey: string | undefined | null): 
     return { ...TEMPLATE_INPUT_PRESETS[DEFAULT_TEMPLATE_KEY] };
   }
   return { ...(TEMPLATE_INPUT_PRESETS[resolved] || TEMPLATE_INPUT_PRESETS[DEFAULT_TEMPLATE_KEY]) };
+}
+
+export function getTemplateEngineGuidance(templateKey: string | undefined | null): TemplateEngineGuidance {
+  const resolved = normalizeWorkflowTemplateKey(templateKey);
+  if (resolved === 'none') {
+    return {
+      mode: 'manual',
+      label: '手动初始化',
+      note: '仅创建项目，不自动启动 workflow，后续可在项目内选择引擎与阶段。',
+    };
+  }
+  return {
+    ...(TEMPLATE_ENGINE_GUIDANCE[resolved] || TEMPLATE_ENGINE_GUIDANCE[DEFAULT_TEMPLATE_KEY]),
+  };
+}
+
+export function templatePrefersHybridEngine(templateKey: string | undefined | null): boolean {
+  const guidance = getTemplateEngineGuidance(templateKey);
+  return guidance.mode === 'hybrid';
 }
 
 export function getTemplateExpectedArtifacts(

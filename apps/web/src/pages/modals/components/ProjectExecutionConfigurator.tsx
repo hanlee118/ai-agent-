@@ -1,6 +1,10 @@
 import { useMemo, useState } from 'react';
 import { roleLabel } from '../utils/newProjectHelpers';
-import { getTemplateRequiredRoles, isSingleStageWorkflowTemplate } from '../utils/workflowTemplateMeta';
+import {
+  getTemplateEngineGuidance,
+  getTemplateRequiredRoles,
+  isSingleStageWorkflowTemplate,
+} from '../utils/workflowTemplateMeta';
 
 type ProjectMode = 'complete' | 'standalone' | 'relay';
 
@@ -178,6 +182,7 @@ export default function ProjectExecutionConfigurator({
 
   const workflowOptions = ALL_WORKFLOW_TEMPLATE_OPTIONS;
   const activeWorkflowOption = workflowOptions.find((item) => item.key === workflowTemplateKey) || workflowOptions[0];
+  const activeEngineGuidance = getTemplateEngineGuidance(workflowTemplateKey);
 
   const activeInputGuide = useMemo(() => {
     if (workflowTemplateKey === 'none') {
@@ -359,12 +364,18 @@ export default function ProjectExecutionConfigurator({
                     关键角色: {getTemplateRequiredRoles(option.key).map((roleId) => roleLabel(roleId)).join('、')}
                   </p>
                 ) : null}
+                <p className="text-[11px] text-slate-500 mt-1">
+                  引擎策略: {getTemplateEngineGuidance(option.key).label}
+                </p>
               </button>
             );
           })}
         </div>
         <p className="text-[11px] text-slate-500">
           当前选择：{activeWorkflowOption?.label || '未选择'} · {activeWorkflowOption?.stagePreview || '未配置阶段'}
+        </p>
+        <p className="text-[11px] text-slate-500">
+          当前引擎建议：{activeEngineGuidance.label} · {activeEngineGuidance.note}
         </p>
         <p className="text-[11px] text-slate-500">
           说明：若在“完整流程”模式下选择单阶段模板，系统会自动切换到“单阶段交付”。

@@ -403,6 +403,50 @@ export default function KnowledgeHubPage({ addToast }: Props) {
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  const focusOnCreatedKnowledge = useCallback(async (input: {
+    id?: string;
+    title?: string;
+    scope: KnowledgeScope;
+    projectId?: string;
+    agentId?: string;
+  }) => {
+    const normalizedScope = input.scope;
+    const normalizedProjectId = normalizedScope === 'project' ? String(input.projectId || '').trim() : '';
+    const normalizedAgentId = normalizedScope === 'agent' ? String(input.agentId || '').trim() : '';
+    const normalizedTitle = String(input.title || '').trim();
+
+    setScopeFilter(normalizedScope);
+    setProjectIdFilter(normalizedProjectId);
+    setAgentIdFilter(normalizedAgentId);
+    setQuery('');
+    setStageContextFilter('');
+    setSourceEngineFilter('all');
+
+    const listed = await knowledgeApi.list({
+      scope: normalizedScope,
+      projectId: normalizedProjectId || undefined,
+      agentId: normalizedAgentId || undefined,
+      limit: 100,
+    });
+    const nextItems = listed.items || [];
+    setItems(nextItems);
+    setSelectedBulkIds([]);
+
+    const byId = input.id ? nextItems.find((item) => item.id === input.id) : undefined;
+    const byTitle = !byId && normalizedTitle
+      ? nextItems.find((item) => MATCH_TEXT(item.title).includes(MATCH_TEXT(normalizedTitle)))
+      : undefined;
+    const focus = byId || byTitle || nextItems[0] || null;
+
+    if (focus) {
+      setSelectedId(focus.id);
+      await loadDetail(focus.id);
+    } else {
+      setSelectedId(null);
+      setSelectedDetail(null);
+    }
+  }, [loadDetail]);
+
   const toggleBulkSelect = (id: string) => {
     setSelectedBulkIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
   };
@@ -507,7 +551,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
     }
     setCreatingText(true);
     try {
-      await knowledgeApi.createText({
+      const created = await knowledgeApi.createText({
         title: newTitle.trim(),
         content: newContent,
         scope: newScope,
@@ -518,7 +562,18 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       addToast('文本知识已创建', 'success');
       setNewTitle('');
       setNewContent('');
-      await listKnowledge();
+      try {
+        await focusOnCreatedKnowledge({
+          id: created.id,
+          title: newTitle.trim(),
+          scope: newScope,
+          projectId: newProjectId.trim() || undefined,
+          agentId: newAgentId.trim() || undefined,
+        });
+        addToast('已自动切换到新增条目作用域并定位到该知识', 'info');
+      } catch (focusError) {
+        addToast(focusError instanceof Error ? focusError.message : '新增后定位失败，请手动刷新列表', 'info');
+      }
     } catch (error) {
       addToast(error instanceof Error ? error.message : '创建文本知识失败', 'error');
     } finally {
@@ -548,8 +603,20 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         triggeredBy: 'knowledge_hub_ui',
       });
       addToast(`文档已导入，共切分 ${result.count} 条知识`, 'success');
+      const firstItem = (result.items || [])[0];
       setUploadFile(null);
-      await listKnowledge();
+      try {
+        await focusOnCreatedKnowledge({
+          id: firstItem?.id,
+          title: firstItem?.title || uploadFile.name,
+          scope: newScope,
+          projectId: newProjectId.trim() || undefined,
+          agentId: newAgentId.trim() || undefined,
+        });
+        addToast('已自动切换到导入文档作用域并定位最新条目', 'info');
+      } catch (focusError) {
+        addToast(focusError instanceof Error ? focusError.message : '导入后定位失败，请手动刷新列表', 'info');
+      }
       await loadOperationLogs();
     } catch (error) {
       addToast(error instanceof Error ? error.message : '文档导入失败', 'error');

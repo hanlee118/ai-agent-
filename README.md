@@ -167,6 +167,7 @@ pnpm --filter @occ/api test:routes
 pnpm health:check
 pnpm verify:local
 pnpm verify:smoke
+pnpm test:ui:knowledge-hub
 ```
 
 GitLab webhook 检查与自愈：
