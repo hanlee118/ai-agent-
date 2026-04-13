@@ -109,6 +109,10 @@ after(async () => {
 });
 
 test("createProject auto-recovers workflow-v2 templates when template registry is empty", async () => {
+  // Seed DB may already contain workflows referencing templates; clear dependents first.
+  await prismaClient.workflowTransition.deleteMany({});
+  await prismaClient.workflowStage.deleteMany({});
+  await prismaClient.workflow.deleteMany({});
   await prismaClient.workflowTemplate.deleteMany({});
 
   const project = await createProjectFn(
