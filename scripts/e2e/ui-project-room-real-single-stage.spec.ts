@@ -51,6 +51,84 @@ async function apiRequest<T>(
   return await response.json() as T;
 }
 
+async function createProjectWithIssueFallback(
+  token: string,
+  payload: {
+    name: string;
+    description: string;
+    workflowTemplateKey: string;
+    autoStartWorkflow: boolean;
+    projectType?: 'complete' | 'standalone' | 'relay';
+  },
+): Promise<{ id: string; name: string }> {
+  try {
+    return await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
+      method: 'POST',
+      body: payload,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/PROJECT_ISSUE_FIRST_REQUIRED/.test(message)) {
+      throw error;
+    }
+  }
+
+  const preview = await apiRequest<any>(token, '/api/issues/preview', {
+    method: 'POST',
+    body: {
+      input: payload.description || payload.name,
+      industryCode: 'saas',
+      sourceType: 'text',
+      debateMode: 'off',
+      workflowTemplateKey: payload.workflowTemplateKey,
+    },
+  });
+  const previewData = preview?.data || preview;
+  const issueId = String(previewData?.issueId || '').trim();
+  if (!issueId) {
+    throw new Error('issue-first preview did not return issueId');
+  }
+
+  const questions = Array.isArray(previewData?.questions) ? previewData.questions : [];
+  const clarificationAnswers = questions.reduce((acc: Record<string, string>, item: any) => {
+    if (!item?.required) {
+      return acc;
+    }
+    const id = String(item.id || '').trim();
+    if (!id) {
+      return acc;
+    }
+    if (/goal/i.test(id)) {
+      acc[id] = '完成阶段交付并可验收';
+    } else if (/scope/i.test(id)) {
+      acc[id] = '仅覆盖当前阶段模板对应范围';
+    } else if (/accept/i.test(id)) {
+      acc[id] = '产出物满足模板要求并可通过门禁';
+    } else {
+      acc[id] = '已确认';
+    }
+    return acc;
+  }, {});
+
+  const confirm = await apiRequest<any>(token, `/api/issues/${encodeURIComponent(issueId)}/confirm`, {
+    method: 'POST',
+    body: {
+      finalName: payload.name,
+      finalDescription: payload.description,
+      clarificationAnswers,
+      projectType: payload.projectType || 'complete',
+      workflowTemplateKey: payload.workflowTemplateKey,
+      autoStartWorkflow: payload.autoStartWorkflow,
+    },
+  });
+  const confirmData = confirm?.data || confirm;
+  const project = confirmData?.project || confirmData;
+  return {
+    id: String(project?.id || '').trim(),
+    name: String(project?.name || payload.name),
+  };
+}
+
 test('real project room should render only scoped single stage', async ({ context, page }) => {
   test.setTimeout(180_000);
 
@@ -60,14 +138,11 @@ test('real project room should render only scoped single stage', async ({ contex
   const projectName = `真实单阶段验收-${Date.now()}`;
 
   try {
-    const project = await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
-      method: 'POST',
-      body: {
-        name: projectName,
-        description: '请创建单阶段视觉设计项目，并验证项目房间仅渲染目标阶段。',
-        workflowTemplateKey: 'visual_design',
-        autoStartWorkflow: false,
-      },
+    const project = await createProjectWithIssueFallback(token, {
+      name: projectName,
+      description: '请创建单阶段视觉设计项目，并验证项目房间仅渲染目标阶段。',
+      workflowTemplateKey: 'visual_design',
+      autoStartWorkflow: false,
     });
     projectId = String(project.id || '').trim();
     expect(projectId).toBeTruthy();

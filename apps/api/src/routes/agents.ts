@@ -11,6 +11,7 @@ import {
 
 const DEFAULT_AGENT_TOKEN_LIMIT = 100_000_000;
 const HERMES_AGENT_DEFAULT_ID = String(process.env.HERMES_AGENT_ID ?? "hermes-agent-1").trim() || "hermes-agent-1";
+const HERMES_DESIGN_ROLE_ID = "ROLE_DESIGN";
 
 interface CreateAgentBody {
   name?: unknown;
@@ -81,12 +82,28 @@ function isHermesIntegrationEnabled() {
   return Boolean(String(process.env.HERMES_MCP_ENDPOINT ?? process.env.HERMES_MCP ?? "").trim());
 }
 
+function isDesignRoleLabel(value: string | null | undefined) {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  if (normalized === HERMES_DESIGN_ROLE_ID) {
+    return true;
+  }
+  const text = String(value ?? "").trim().toLowerCase();
+  return /视觉|设计|design|ui|ux/.test(text);
+}
+
+function normalizeHermesDefaultRole(agentId: string, role: string, integrationEngine: string) {
+  if (agentId === HERMES_AGENT_DEFAULT_ID && integrationEngine === "hermes") {
+    return HERMES_DESIGN_ROLE_ID;
+  }
+  return role;
+}
+
 function buildBuiltinHermesAgentRow() {
   const nowIso = new Date().toISOString();
   return {
     id: HERMES_AGENT_DEFAULT_ID,
-    name: "Hermes Agent",
-    role: "Hermes 协作引擎",
+    name: "Hermes 视觉设计总监",
+    role: HERMES_DESIGN_ROLE_ID,
     status: "Idle" as const,
     load: 0,
     currentModelId: "hermes-v2.1",
@@ -171,10 +188,19 @@ async function getAgentDetail(agentId: string) {
   );
   const tokensUsed = usageLogs.reduce((sum, item) => sum + item.totalTokens, 0);
 
+  const integrationEngine = inferIntegrationEngine([
+    agentId,
+    profile?.roleId,
+    profile?.name,
+    config?.title,
+    config?.displayName
+  ]);
+  const rawRole = profile?.roleId || config?.title || agentId;
+
   return {
     id: agentId,
     name: config?.displayName?.trim() || profile?.name || agentId,
-    role: profile?.roleId || config?.title || agentId,
+    role: normalizeHermesDefaultRole(agentId, rawRole, integrationEngine),
     status: normalizeAgentStatus(profile?.status),
     load: profile?.workload ?? 0,
     currentModelId,
@@ -189,13 +215,7 @@ async function getAgentDetail(agentId: string) {
     createdAt: (config?.createdAt ?? profile?.createdAt ?? new Date()).toISOString(),
     updatedAt: (config?.updatedAt ?? profile?.updatedAt ?? new Date()).toISOString(),
     allowedAgentIds: toStringArrayFromJson(config?.allowedAgentIds),
-    integrationEngine: inferIntegrationEngine([
-      agentId,
-      profile?.roleId,
-      profile?.name,
-      config?.title,
-      config?.displayName
-    ])
+    integrationEngine
   };
 }
 
@@ -267,10 +287,19 @@ export function createAgentsRouter() {
         const usage = usageMap.get(agentId);
         const currentModelId = config?.selectedModel ?? "";
 
+        const integrationEngine = inferIntegrationEngine([
+          agentId,
+          profile?.roleId,
+          profile?.name,
+          config?.title,
+          config?.displayName
+        ]);
+        const rawRole = profile?.roleId || config?.title || agentId;
+
         return {
           id: agentId,
           name: config?.displayName?.trim() || profile?.name || agentId,
-          role: profile?.roleId || config?.title || agentId,
+          role: normalizeHermesDefaultRole(agentId, rawRole, integrationEngine),
           status: normalizeAgentStatus(profile?.status),
           load: profile?.workload ?? 0,
           currentModelId,
@@ -285,21 +314,25 @@ export function createAgentsRouter() {
             modelLimitByName
           ),
           sessionCount: usage?.sessionCount ?? 0,
-          integrationEngine: inferIntegrationEngine([
-            agentId,
-            profile?.roleId,
-            profile?.name,
-            config?.title,
-            config?.displayName
-          ])
+          integrationEngine
         };
       })
       .sort((a, b) => a.id.localeCompare(b.id));
 
     if (isHermesIntegrationEnabled()) {
-      const hasHermes = list.some((item) => item.id === HERMES_AGENT_DEFAULT_ID || item.integrationEngine === "hermes");
-      if (!hasHermes) {
-        list.unshift(buildBuiltinHermesAgentRow());
+      const hasHermesDesign = list.some((item) => item.integrationEngine === "hermes" && (
+        isDesignRoleLabel(item.role) || isDesignRoleLabel(item.name)
+      ));
+      if (!hasHermesDesign) {
+        const defaultIndex = list.findIndex((item) => item.id === HERMES_AGENT_DEFAULT_ID);
+        if (defaultIndex >= 0) {
+          list[defaultIndex] = {
+            ...list[defaultIndex],
+            ...buildBuiltinHermesAgentRow()
+          };
+        } else {
+          list.unshift(buildBuiltinHermesAgentRow());
+        }
       }
     }
 
