@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import express from "express";
 import request from "supertest";
+import { snapshotSqliteSeedDatabase } from "../test/sqlite-snapshot.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,7 +26,11 @@ let prismaClient: any;
 let app: express.Express;
 
 before(async () => {
-  copyFileSync(seedDbPath, dbPath);
+  snapshotSqliteSeedDatabase({
+    seedDbPath,
+    dbPath,
+    cwd: apiRoot
+  });
   const [dbMod, agentsMod] = await Promise.all([
     import("../db.js"),
     import("./agents.js")

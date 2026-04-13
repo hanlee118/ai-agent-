@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 import { after, before, test } from "node:test";
+import { snapshotSqliteSeedDatabase } from "../test/sqlite-snapshot.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,7 +37,11 @@ let createProjectFn: any;
 let upsertTemplateFn: any;
 
 before(async () => {
-  copyFileSync(seedDbPath, dbPath);
+  snapshotSqliteSeedDatabase({
+    seedDbPath,
+    dbPath,
+    cwd: apiRoot
+  });
   for (const migrationPath of migrationPaths) {
     try {
       execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {

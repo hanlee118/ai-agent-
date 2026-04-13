@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import os from "node:os";
@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 import express from "express";
 import request from "supertest";
+import { snapshotSqliteSeedDatabase } from "../test/sqlite-snapshot.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,7 +42,11 @@ let app: express.Express;
 let hermesServer: ReturnType<typeof createServer>;
 
 before(async () => {
-  copyFileSync(seedDbPath, dbPath);
+  snapshotSqliteSeedDatabase({
+    seedDbPath,
+    dbPath,
+    cwd: apiRoot
+  });
   for (const migrationPath of migrationPaths) {
     try {
       execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {

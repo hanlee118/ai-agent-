@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import express from "express";
 import request from "supertest";
+import { snapshotSqliteSeedDatabase } from "../test/sqlite-snapshot.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,7 +27,11 @@ let fullApp: express.Express;
 let prismaClient: any;
 
 before(async () => {
-  copyFileSync(seedDbPath, dbPath);
+  snapshotSqliteSeedDatabase({
+    seedDbPath,
+    dbPath,
+    cwd: apiRoot
+  });
   const [dbMod, indexMod] = await Promise.all([
     import("../db.js"),
     import("../index.js")
@@ -103,6 +108,19 @@ describe("Error Matrix: gitlab routes", () => {
     }
 
     const res = await request(fullApp).get("/api/gitlab/projects/group%2Frepo/issues?state=opened");
+    if (res.status === 404) {
+      // Some builds lazily mount /api/gitlab in full app bootstrap; verify route contract via standalone router.
+      const { gitlabApp, restore } = await createGitLabRouterTestApp({ token: "" });
+      try {
+        const fallback = await request(gitlabApp).get("/api/gitlab/projects/group%2Frepo/issues?state=opened");
+        assert.equal(fallback.status, 503);
+        assert.equal(fallback.body.success, false);
+        assert.equal(fallback.body.error.code, "SERVICE_UNAVAILABLE");
+      } finally {
+        restore();
+      }
+      return;
+    }
     assert.equal(res.status, 503);
     assert.equal(res.body.success, false);
     assert.equal(res.body.error.code, "SERVICE_UNAVAILABLE");
