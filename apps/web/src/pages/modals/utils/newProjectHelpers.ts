@@ -15,7 +15,7 @@ export const ROLE_HINTS: Record<string, RegExp[]> = {
   ROLE_PM: [/pm|项目|经理|协调|管理/i],
   ROLE_ANALYST: [/分析|需求|业务|analyst/i],
   ROLE_PRODUCT: [/产品|prd|体验|设计|ui|ux/i],
-  ROLE_DESIGN: [/视觉|品牌|页面|官网|landing|design|designer|ui|ux/i],
+  ROLE_DESIGN: [/视觉|品牌|页面|官网|landing|design|designer|ui|ux|hermes/i],
   ROLE_ARCH: [/架构|architect|系统|后端|服务/i],
   ROLE_DEV: [/开发|研发|工程|dev|前端|后端|代码/i],
   ROLE_QA: [/测试|qa|质量|验收/i],
@@ -163,6 +163,54 @@ export const getAgentRoleId = (agent: { id: string; role: string; name?: string 
 
 export const roleLabel = (roleId: string) => ROLE_LABELS[normalizeRoleId(roleId)] || roleId;
 
+function getEngineValue(agent: { integrationEngine?: string }) {
+  return String(agent.integrationEngine || '').trim().toLowerCase();
+}
+
+function getRoleEnginePriority(roleId: string, engine: string) {
+  const normalizedRole = normalizeRoleId(roleId);
+  const normalizedEngine = String(engine || '').trim().toLowerCase();
+
+  if (normalizedRole === 'ROLE_DESIGN') {
+    if (normalizedEngine === 'hermes') return 30;
+    if (normalizedEngine === 'managed') return 20;
+    if (normalizedEngine === 'openclaw') return 10;
+    return 0;
+  }
+
+  if (normalizedEngine === 'managed') return 20;
+  if (normalizedEngine === 'openclaw') return 10;
+  if (normalizedEngine === 'hermes') return 5;
+  return 0;
+}
+
+function pickPreferredAgentForRole(
+  roleId: string,
+  candidates: Array<{ id: string; name: string; role: string; status?: string; integrationEngine?: string }>,
+) {
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const scored = [...candidates].sort((left, right) => {
+    const engineDiff = getRoleEnginePriority(roleId, getEngineValue(right))
+      - getRoleEnginePriority(roleId, getEngineValue(left));
+    if (engineDiff !== 0) {
+      return engineDiff;
+    }
+
+    const leftOnline = String(left.status || '').toLowerCase() !== 'offline';
+    const rightOnline = String(right.status || '').toLowerCase() !== 'offline';
+    if (leftOnline !== rightOnline) {
+      return rightOnline ? 1 : -1;
+    }
+
+    return String(left.name || left.id).localeCompare(String(right.name || right.id));
+  });
+
+  return scored[0];
+}
+
 export const buildAgentRecommendations = (
   input: string,
   suggestedTeam: string[] = [],
@@ -303,17 +351,25 @@ export const buildRoleBasedAgentRecommendations = (
 
   const recommendations: AgentRecommendation[] = constrainedRoles
     .map((roleId, index) => {
-      const matched = agents.find((agent) => normalizeRoleId(getAgentRoleId(agent)) === roleId);
+      const candidates = agents.filter((agent) => normalizeRoleId(getAgentRoleId(agent)) === roleId);
+      const matched = pickPreferredAgentForRole(roleId, candidates);
       if (!matched) {
         return null;
       }
+
+      const integrationEngine = getEngineValue(matched);
+      const engineLabel = integrationEngine === 'hermes'
+        ? 'Hermes'
+        : integrationEngine === 'openclaw'
+          ? 'OpenClaw'
+          : 'Managed';
       return {
         agentId: matched.id,
         roleId,
         name: matched.name,
         role: matched.role,
         score: Math.max(1, 100 - index),
-        reason: `来自 Issue 结论的角色映射：${roleLabel(roleId)}`,
+        reason: `来自 Issue 结论的角色映射：${roleLabel(roleId)}（${engineLabel}）`,
       } as AgentRecommendation;
     })
     .filter(Boolean) as AgentRecommendation[];
