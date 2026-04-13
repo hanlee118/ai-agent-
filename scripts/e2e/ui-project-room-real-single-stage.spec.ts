@@ -107,7 +107,9 @@ test('real project room should render only scoped single stage', async ({ contex
     }
 
     mkdirSync(UI_REPORT_DIR, { recursive: true });
-    await page.screenshot({ path: `${UI_REPORT_DIR}/ui-project-room-real-single-stage.png`, fullPage: true });
+    await page.screenshot({ path: `${UI_REPORT_DIR}/ui-project-room-real-single-stage.png`, fullPage: false }).catch(() => {
+      // Screenshot is auxiliary evidence and should not make the real-flow assertion flaky.
+    });
   } finally {
     if (projectId) {
       try {
