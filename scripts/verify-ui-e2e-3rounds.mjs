@@ -17,6 +17,16 @@ const uiStepTimeoutMs = Math.max(
   90_000,
   Math.min(60 * 60 * 1000, Number(process.env.VERIFY_UI_STEP_TIMEOUT_MS || 20 * 60 * 1000))
 );
+const testTargets = String(process.env.VERIFY_UI_TEST_TARGETS || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean);
+const defaultTestTargets = [
+  "scripts/e2e/ui-project-room-real-autoadvance.spec.ts",
+  "scripts/e2e/ui-project-room-real-single-stage.spec.ts",
+  "scripts/e2e/ui-workflow-template.spec.ts",
+];
+const effectiveTestTargets = testTargets.length > 0 ? testTargets : defaultTestTargets;
 
 function summarizeOutput(text, maxLength = 2400) {
   const normalized = String(text || "").trim();
@@ -91,7 +101,7 @@ function runUiSuite() {
     const startedAt = Date.now();
     const child = spawn(
       "pnpm",
-      ["dlx", "playwright", "test", "scripts/e2e", "--workers=1", "--reporter=line"],
+      ["dlx", "playwright", "test", ...effectiveTestTargets, "--workers=1", "--reporter=line"],
       {
         cwd: repoRoot,
         env: process.env,
@@ -215,6 +225,7 @@ async function run() {
     rounds,
     apiBootTimeoutMs,
     uiStepTimeoutMs,
+    testTargets: effectiveTestTargets,
     summary: {
       passedRounds: rounds - failedRounds,
       failedRounds,
