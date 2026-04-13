@@ -41,6 +41,10 @@ test('visual design template prefers Hermes agent selection for design role', as
   try {
     await page.goto(WEB_URL, { waitUntil: 'domcontentloaded' });
     const openProjectModal = async () => {
+      const modalVisible = await page.getByText('创建新项目').isVisible({ timeout: 1_000 }).catch(() => false);
+      if (modalVisible) {
+        return;
+      }
       await expect(page.getByRole('button', { name: '新建项目' })).toBeVisible({ timeout: 60_000 });
       await page.getByRole('button', { name: '新建项目' }).click();
       await expect(page.getByText('创建新项目')).toBeVisible({ timeout: 30_000 });
@@ -48,8 +52,12 @@ test('visual design template prefers Hermes agent selection for design role', as
 
     let teamStepReady = false;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const modalVisible = await page.getByText('创建新项目').isVisible({ timeout: 3_000 }).catch(() => false);
-      if (!modalVisible) {
+      await openProjectModal();
+      const visualStageButton = page.getByRole('button', { name: /视觉设计阶段/ }).first();
+      const hasVisualStageButton = await visualStageButton.isVisible({ timeout: 3_000 }).catch(() => false);
+      if (!hasVisualStageButton) {
+        await page.keyboard.press('Escape').catch(() => undefined);
+        await page.getByText('创建新项目').waitFor({ state: 'hidden', timeout: 10_000 }).catch(() => undefined);
         await openProjectModal();
       }
 
@@ -57,9 +65,23 @@ test('visual design template prefers Hermes agent selection for design role', as
       await page
         .getByPlaceholder('例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。')
         .fill('验证视觉阶段默认由 Hermes 承担视觉设计角色');
-      await page.getByRole('button', { name: '继续：团队分配' }).click();
+      const toTeamButton = page.getByRole('button', {
+        name: /继续：团队分配|AI 分析并分配 Agent|AI 分析中|加载行业配置中/,
+      });
+      await expect(toTeamButton).toBeVisible({ timeout: 30_000 });
+      const enabledNow = await toTeamButton.isEnabled().catch(() => false);
+      if (enabledNow) {
+        await toTeamButton.click();
+      }
 
-      teamStepReady = await page.getByText('可选执行 Agent').isVisible({ timeout: 8_000 }).catch(() => false);
+      teamStepReady = await page.getByText('可选执行 Agent').isVisible({ timeout: 15_000 }).catch(() => false);
+      if (!teamStepReady && !enabledNow) {
+        const enabledLater = await expect(toTeamButton).toBeEnabled({ timeout: 45_000 }).then(() => true).catch(() => false);
+        if (enabledLater) {
+          await toTeamButton.click();
+          teamStepReady = await page.getByText('可选执行 Agent').isVisible({ timeout: 15_000 }).catch(() => false);
+        }
+      }
       if (teamStepReady) {
         break;
       }
