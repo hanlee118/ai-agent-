@@ -12,6 +12,14 @@ export type LlmKnowledgeExtraction = {
   techStack: string[];
 };
 
+const KNOWLEDGE_LLM_ENABLED = String(process.env.WORKFLOW_V2_KNOWLEDGE_LLM_ENABLED ?? "true")
+  .trim()
+  .toLowerCase() !== "false";
+const KNOWLEDGE_LLM_TIMEOUT_MS = Math.max(
+  1500,
+  Number(process.env.WORKFLOW_V2_KNOWLEDGE_LLM_TIMEOUT_MS ?? 12000)
+);
+
 function extractJsonObject(raw: string) {
   const normalized = String(raw ?? "").trim();
   if (!normalized) {
@@ -59,6 +67,24 @@ function fallbackExtraction(input: { stageKey: string; outputText: string }): Ll
   };
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`knowledge llm timeout after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 export async function extractKnowledgeFromStageOutput(input: {
   projectName: string;
   projectDescription: string;
@@ -68,6 +94,9 @@ export async function extractKnowledgeFromStageOutput(input: {
 }): Promise<LlmKnowledgeExtraction> {
   const trimmed = normalizeText(input.outputText);
   if (!trimmed) {
+    return fallbackExtraction(input);
+  }
+  if (!KNOWLEDGE_LLM_ENABLED) {
     return fallbackExtraction(input);
   }
 
@@ -91,14 +120,17 @@ export async function extractKnowledgeFromStageOutput(input: {
 
   try {
     const parsedIntent = previewRequirement(`${input.projectDescription}\n${trimmed.slice(0, 1500)}`);
-    const run = await runStageAgent({
-      projectName: input.projectName || "workflow-project",
-      projectDescription: input.projectDescription || "workflow-stage-knowledge-extraction",
-      parsedIntent,
-      stageType: "ANALYSIS",
-      role: "ROLE_ANALYST",
-      summary: prompt
-    });
+    const run = await withTimeout(
+      runStageAgent({
+        projectName: input.projectName || "workflow-project",
+        projectDescription: input.projectDescription || "workflow-stage-knowledge-extraction",
+        parsedIntent,
+        stageType: "ANALYSIS",
+        role: "ROLE_ANALYST",
+        summary: prompt
+      }),
+      KNOWLEDGE_LLM_TIMEOUT_MS
+    );
     const parsed = extractJsonObject(run.body);
     const record = asRecord(parsed);
     if (!record) {

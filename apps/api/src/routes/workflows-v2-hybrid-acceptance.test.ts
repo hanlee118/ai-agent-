@@ -24,6 +24,23 @@ const migrationPaths = [
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-workflow-v2-hybrid-"));
 const dbPath = path.join(tempDir, "test.db");
 
+function snapshotSeedDatabase(): void {
+  rmSync(dbPath, { force: true });
+  const escapedDbPath = dbPath.replace(/'/g, "''");
+  try {
+    execSync(
+      `sqlite3 ${JSON.stringify(seedDbPath)} ${JSON.stringify(`VACUUM INTO '${escapedDbPath}';`)}`,
+      {
+        cwd: apiRoot,
+        stdio: "pipe"
+      }
+    );
+  } catch {
+    // Fallback for environments where sqlite VACUUM INTO is unavailable.
+    copyFileSync(seedDbPath, dbPath);
+  }
+}
+
 process.env.NODE_ENV = "test";
 process.env.MODEL_PROVIDER = "scripted";
 process.env.DATABASE_URL = `file:${dbPath}`;
@@ -36,6 +53,7 @@ process.env.WORKFLOW_V2_AGENT_AUTO_EXECUTE = "true";
 process.env.WORKFLOW_V2_STAGE_AUTO_PROCEED = "true";
 process.env.WORKFLOW_V2_HERMES_ENABLED = "true";
 process.env.WORKFLOW_V2_HERMES_STAGE_MATCH = "design";
+process.env.WORKFLOW_V2_KNOWLEDGE_LLM_ENABLED = "false";
 
 const projectId = "WFV2-HYBRID-001";
 const hermesAgentId = "hermes-agent-1";
@@ -60,7 +78,7 @@ async function upsertTemplate(payload: Record<string, unknown>) {
 }
 
 before(async () => {
-  copyFileSync(seedDbPath, dbPath);
+  snapshotSeedDatabase();
   for (const migrationPath of migrationPaths) {
     try {
       execSync(`sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`, {

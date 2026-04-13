@@ -22,6 +22,23 @@ const migrationPaths = [
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-routes-"));
 const dbPath = path.join(tempDir, "test.db");
 
+function snapshotSeedDatabase(): void {
+  rmSync(dbPath, { force: true });
+  const escapedDbPath = dbPath.replace(/'/g, "''");
+  try {
+    execSync(
+      `sqlite3 ${JSON.stringify(seedDbPath)} ${JSON.stringify(`VACUUM INTO '${escapedDbPath}';`)}`,
+      {
+        cwd: apiRoot,
+        stdio: "pipe"
+      }
+    );
+  } catch {
+    // Fallback for environments where sqlite VACUUM INTO is unavailable.
+    copyFileSync(seedDbPath, dbPath);
+  }
+}
+
 process.env.NODE_ENV = "test";
 process.env.MODEL_PROVIDER = "scripted";
 process.env.DATABASE_URL = `file:${dbPath}`;
@@ -48,7 +65,7 @@ after(async () => {
 });
 
 before(async () => {
-  copyFileSync(seedDbPath, dbPath);
+  snapshotSeedDatabase();
 
   execSync(
     [

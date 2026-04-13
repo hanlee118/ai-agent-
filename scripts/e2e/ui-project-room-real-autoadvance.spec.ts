@@ -1,4 +1,5 @@
 import { test, expect } from 'playwright/test';
+import { apiRequest, createProjectWithIssueFirstFallback } from './helpers/project-create';
 
 const WEB_URL = process.env.UI_WEB_URL || 'http://127.0.0.1:5173';
 const API_URL = process.env.UI_API_URL || 'http://127.0.0.1:8787';
@@ -26,29 +27,6 @@ async function createTemporarySessionCookie(): Promise<SessionBundle> {
   return { prisma, token, hashSessionToken };
 }
 
-async function apiRequest<T>(
-  token: string,
-  path: string,
-  init?: { method?: string; body?: unknown },
-): Promise<T> {
-  const response = await fetch(`${API_URL}${path}`, {
-    method: init?.method || 'GET',
-    headers: {
-      'Content-Type': 'application/json',
-      Cookie: `occ_session=${token}`,
-    },
-    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
-  });
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(
-      `api ${init?.method || 'GET'} ${path} failed: ${response.status}${detail ? ` body=${detail}` : ''}`,
-    );
-  }
-  return await response.json() as T;
-}
-
 async function createProjectWithRetry(
   token: string,
   payload: {
@@ -62,16 +40,10 @@ async function createProjectWithRetry(
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      return await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
-        method: 'POST',
-        body: payload,
-      });
+      return await createProjectWithIssueFirstFallback(API_URL, token, payload);
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
-      if (/PROJECT_ISSUE_FIRST_REQUIRED/.test(message)) {
-        return await createProjectViaIssueFlow(token, payload);
-      }
       const isServerError = /failed:\s*5\d\d/.test(message);
       if (!isServerError || attempt >= 3) {
         break;
@@ -80,72 +52,6 @@ async function createProjectWithRetry(
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-async function createProjectViaIssueFlow(
-  token: string,
-  payload: {
-    name: string;
-    description: string;
-    workflowTemplateKey: string;
-    autoStartWorkflow: boolean;
-    projectType?: 'complete' | 'standalone' | 'relay';
-  },
-): Promise<{ id: string; name: string }> {
-  const preview = await apiRequest<any>(token, '/api/issues/preview', {
-    method: 'POST',
-    body: {
-      input: payload.description || payload.name,
-      industryCode: 'saas',
-      sourceType: 'text',
-      debateMode: 'off',
-      workflowTemplateKey: payload.workflowTemplateKey,
-    },
-  });
-  const previewData = preview?.data || preview;
-  const issueId = String(previewData?.issueId || '').trim();
-  if (!issueId) {
-    throw new Error('issue-first preview did not return issueId');
-  }
-
-  const questions = Array.isArray(previewData?.questions) ? previewData.questions : [];
-  const clarificationAnswers = questions.reduce((acc: Record<string, string>, item: any) => {
-    if (!item?.required) {
-      return acc;
-    }
-    const id = String(item.id || '').trim();
-    if (!id) {
-      return acc;
-    }
-    if (/goal/i.test(id)) {
-      acc[id] = '完成阶段交付并可验收';
-    } else if (/scope/i.test(id)) {
-      acc[id] = '仅覆盖当前阶段模板对应范围';
-    } else if (/accept/i.test(id)) {
-      acc[id] = '产出物满足模板要求并可通过门禁';
-    } else {
-      acc[id] = '已确认';
-    }
-    return acc;
-  }, {});
-
-  const confirm = await apiRequest<any>(token, `/api/issues/${encodeURIComponent(issueId)}/confirm`, {
-    method: 'POST',
-    body: {
-      finalName: payload.name,
-      finalDescription: payload.description,
-      clarificationAnswers,
-      projectType: payload.projectType || 'complete',
-      workflowTemplateKey: payload.workflowTemplateKey,
-      autoStartWorkflow: payload.autoStartWorkflow,
-    },
-  });
-  const confirmData = confirm?.data || confirm;
-  const project = confirmData?.project || confirmData;
-  return {
-    id: String(project?.id || '').trim(),
-    name: String(project?.name || payload.name),
-  };
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -201,7 +107,7 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
         id?: string;
         currentStage?: string;
         description?: string;
-      }>(token, `/api/projects/${encodeURIComponent(projectId)}`);
+      }>(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`);
       await expect(String(detail.id || '')).toBe(projectId);
       await expect(String(detail.currentStage || '')).not.toBe('');
       await expect(String(detail.description || '')).toContain('单阶段视觉设计项目');
@@ -239,7 +145,7 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
       const detail = await apiRequest<{
         description?: string;
         postCreatePrep?: { completed?: boolean };
-      }>(token, `/api/projects/${encodeURIComponent(projectId)}`);
+      }>(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`);
       const description = String(detail.description || '');
       const hasDebate = description.includes('## 多Agent需求讨论结论');
       const hasAnalysis = description.includes('## 项目详情理解确认草案');
@@ -257,7 +163,7 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
   } finally {
     if (projectId) {
       try {
-        await apiRequest(token, `/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+        await apiRequest(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
       } catch {
         // ignore cleanup failure
       }
