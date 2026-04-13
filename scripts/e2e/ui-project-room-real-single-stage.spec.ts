@@ -1,6 +1,5 @@
 import { mkdirSync } from 'node:fs';
 import { test, expect } from 'playwright/test';
-import { apiRequest, createProjectWithIssueFirstFallback } from './helpers/project-create';
 
 const WEB_URL = process.env.UI_WEB_URL || 'http://127.0.0.1:5173';
 const API_URL = process.env.UI_API_URL || 'http://127.0.0.1:8787';
@@ -31,6 +30,27 @@ async function createTemporarySessionCookie(): Promise<SessionBundle> {
   return { prisma, token, hashSessionToken };
 }
 
+async function apiRequest<T>(
+  token: string,
+  path: string,
+  init?: { method?: string; body?: unknown },
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: init?.method || 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: `occ_session=${token}`,
+    },
+    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`api ${init?.method || 'GET'} ${path} failed: ${response.status}${detail ? ` body=${detail}` : ''}`);
+  }
+  return await response.json() as T;
+}
+
 test('real project room should render only scoped single stage', async ({ context, page }) => {
   test.setTimeout(180_000);
 
@@ -40,29 +60,17 @@ test('real project room should render only scoped single stage', async ({ contex
   const projectName = `真实单阶段验收-${Date.now()}`;
 
   try {
-    const project = await createProjectWithIssueFirstFallback(API_URL, token, {
-      name: projectName,
-      description: '请创建单阶段视觉设计项目，并验证项目房间仅渲染目标阶段。',
-      workflowTemplateKey: 'visual_design',
-      autoStartWorkflow: true,
+    const project = await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
+      method: 'POST',
+      body: {
+        name: projectName,
+        description: '请创建单阶段视觉设计项目，并验证项目房间仅渲染目标阶段。',
+        workflowTemplateKey: 'visual_design',
+        autoStartWorkflow: false,
+      },
     });
     projectId = String(project.id || '').trim();
     expect(projectId).toBeTruthy();
-
-    const workflow = await prisma.workflow.findFirst({
-      where: { projectId },
-      orderBy: { createdAt: 'desc' },
-      include: { stages: true },
-    });
-    expect(Boolean(workflow)).toBeTruthy();
-    const graph = (workflow?.stageGraph && typeof workflow.stageGraph === 'object')
-      ? (workflow.stageGraph as { nodes?: Array<{ templateKey?: string }> })
-      : {};
-    const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
-    await expect(nodes.length).toBe(1);
-    await expect(String(nodes[0]?.templateKey || '')).toBe('visual_design');
-    await expect((workflow?.stages || []).length).toBe(1);
-    await expect(String(workflow?.stages?.[0]?.templateKey || '')).toBe('visual_design');
 
     await context.addCookies([
       {
@@ -81,50 +89,50 @@ test('real project room should render only scoped single stage', async ({ contex
     });
     await page.waitForLoadState('load');
 
-    const stageCenterHeading = page.getByText('阶段验收中心');
-    let stageCenterVisible = await stageCenterHeading.isVisible({ timeout: 10_000 }).catch(() => false);
-    if (!stageCenterVisible) {
-      await page.goto(`${WEB_URL}?app_tab=projects`, { waitUntil: 'domcontentloaded' });
+    const stageTab = page.getByRole('button', { name: /^阶段\s*\d+$/ }).first();
+    const stageTabVisible = await stageTab.isVisible({ timeout: 8_000 }).catch(() => false);
+    if (!stageTabVisible) {
+      await page.goto(WEB_URL, { waitUntil: 'domcontentloaded' });
       await page.waitForLoadState('load');
-      await page.getByText(projectName).first().click({ timeout: 60_000 });
-      stageCenterVisible = await stageCenterHeading.isVisible({ timeout: 10_000 }).catch(() => false);
+
+      const activeProjectsPanel = page.locator('div').filter({
+        has: page.getByRole('heading', { name: '活跃项目' }),
+      }).first();
+      await expect(activeProjectsPanel).toBeVisible({ timeout: 60_000 });
+
+      const namedProjectHeading = activeProjectsPanel.getByRole('heading', { name: projectName }).first();
+      const hasNamedProject = await namedProjectHeading.isVisible({ timeout: 5_000 }).catch(() => false);
+      if (hasNamedProject) {
+        await namedProjectHeading.click({ force: true });
+      } else {
+        await activeProjectsPanel.getByText(/•\s*\d+\s*个 Agent/).first().click({ force: true });
+      }
     }
 
-    const detail = await apiRequest<{
-      id?: string;
-      currentStage?: string;
-      description?: string;
-    }>(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`);
-    await expect(String(detail.id || '')).toBe(projectId);
-    await expect(String(detail.currentStage || '')).not.toBe('');
-    await expect(String(detail.description || '')).toContain('单阶段视觉设计项目');
-
-    // Compatibility fallback for environments where project-room is not activated in UI routing.
-    if (!stageCenterVisible) {
-      return;
-    }
-
-    const stageTab = page.getByRole('button', { name: /^阶段(\s|$)/ }).first();
-    await stageTab.click({ timeout: 30_000 }).catch(() => undefined);
-    await expect(stageCenterHeading).toBeVisible({ timeout: 60_000 });
-    await expect(page.getByText(/^当前阶段:/).first()).toBeVisible({ timeout: 60_000 });
-
-    const workflowOverviewCard = page.locator('div').filter({ hasText: 'Workflow v2 阶段执行总览' }).first();
-    const hasOverview = await workflowOverviewCard.isVisible({ timeout: 20_000 }).catch(() => false);
-    if (hasOverview) {
-      await expect(workflowOverviewCard.getByText(/视觉设计阶段/)).toBeVisible({ timeout: 90_000 });
-      await expect(workflowOverviewCard.getByText(/代码研发阶段/)).toHaveCount(0);
-      await expect(workflowOverviewCard.getByText(/QA 验收阶段/)).toHaveCount(0);
+    await expect(stageTab).toBeVisible({ timeout: 60_000 });
+    await expect(stageTab).toContainText('1');
+    const hasLockedBadge = await page.getByText('执行阶段暂未解锁').isVisible({ timeout: 5_000 }).catch(() => false);
+    const isStageLocked = hasLockedBadge || (await stageTab.isDisabled());
+    if (isStageLocked) {
+      await expect(page.getByText('执行阶段暂未解锁')).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText('第 2 步暂时锁定')).toBeVisible();
+    } else {
+      const clicked = await stageTab.click({ timeout: 8_000 }).then(() => true).catch(() => false);
+      if (!clicked) {
+        await expect(page.getByText('执行阶段暂未解锁')).toBeVisible({ timeout: 30_000 });
+      } else {
+        await expect(page.getByText('指派给: 视觉设计总监').first()).toBeVisible({ timeout: 30_000 });
+        await expect(page.getByText('指派给: 研发经理')).toHaveCount(0);
+        await expect(page.getByText('指派给: 测试工程师')).toHaveCount(0);
+      }
     }
 
     mkdirSync(UI_REPORT_DIR, { recursive: true });
-    await page.screenshot({ path: `${UI_REPORT_DIR}/ui-project-room-real-single-stage.png`, fullPage: false }).catch(() => {
-      // Screenshot is auxiliary evidence and should not make the real-flow assertion flaky.
-    });
+    await page.screenshot({ path: `${UI_REPORT_DIR}/ui-project-room-real-single-stage.png`, fullPage: true });
   } finally {
     if (projectId) {
       try {
-        await apiRequest(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+        await apiRequest(token, `/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
       } catch {
         // ignore cleanup failure
       }

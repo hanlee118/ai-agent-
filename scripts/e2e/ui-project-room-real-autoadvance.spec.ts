@@ -1,5 +1,4 @@
 import { test, expect } from 'playwright/test';
-import { apiRequest, createProjectWithIssueFirstFallback } from './helpers/project-create';
 
 const WEB_URL = process.env.UI_WEB_URL || 'http://127.0.0.1:5173';
 const API_URL = process.env.UI_API_URL || 'http://127.0.0.1:8787';
@@ -27,6 +26,29 @@ async function createTemporarySessionCookie(): Promise<SessionBundle> {
   return { prisma, token, hashSessionToken };
 }
 
+async function apiRequest<T>(
+  token: string,
+  path: string,
+  init?: { method?: string; body?: unknown },
+): Promise<T> {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: init?.method || 'GET',
+    headers: {
+      'Content-Type': 'application/json',
+      Cookie: `occ_session=${token}`,
+    },
+    body: init?.body === undefined ? undefined : JSON.stringify(init.body),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(
+      `api ${init?.method || 'GET'} ${path} failed: ${response.status}${detail ? ` body=${detail}` : ''}`,
+    );
+  }
+  return await response.json() as T;
+}
+
 async function createProjectWithRetry(
   token: string,
   payload: {
@@ -34,13 +56,15 @@ async function createProjectWithRetry(
     description: string;
     workflowTemplateKey: string;
     autoStartWorkflow: boolean;
-    projectType?: 'complete' | 'standalone' | 'relay';
   },
 ): Promise<{ id: string; name: string }> {
   let lastError: unknown;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      return await createProjectWithIssueFirstFallback(API_URL, token, payload);
+      return await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
+        method: 'POST',
+        body: payload,
+      });
     } catch (error) {
       lastError = error;
       const message = error instanceof Error ? error.message : String(error);
@@ -93,25 +117,21 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
     await page.waitForLoadState('load');
 
     const stepOneHeading = page.getByText('需求补充与理解确认（项目创建后）');
-    let stepVisible = await stepOneHeading.isVisible({ timeout: 10_000 }).catch(() => false);
+    const stepVisible = await stepOneHeading.isVisible({ timeout: 10_000 }).catch(() => false);
     if (!stepVisible) {
-      await page.goto(`${WEB_URL}?app_tab=projects`, { waitUntil: 'domcontentloaded' });
+      await page.goto(WEB_URL, { waitUntil: 'domcontentloaded' });
       await page.waitForLoadState('load');
-      await page.getByText(projectName).first().click({ timeout: 60_000 });
-      stepVisible = await stepOneHeading.isVisible({ timeout: 10_000 }).catch(() => false);
-    }
-
-    // Compatibility fallback for environments where project-room Step1 card is not rendered.
-    if (!stepVisible) {
-      const detail = await apiRequest<{
-        id?: string;
-        currentStage?: string;
-        description?: string;
-      }>(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`);
-      await expect(String(detail.id || '')).toBe(projectId);
-      await expect(String(detail.currentStage || '')).not.toBe('');
-      await expect(String(detail.description || '')).toContain('单阶段视觉设计项目');
-      return;
+      const activeProjectsPanel = page.locator('div').filter({
+        has: page.getByRole('heading', { name: '活跃项目' }),
+      }).first();
+      await expect(activeProjectsPanel).toBeVisible({ timeout: 60_000 });
+      const targetHeading = activeProjectsPanel.getByRole('heading', { name: projectName }).first();
+      const targetVisible = await targetHeading.isVisible({ timeout: 5_000 }).catch(() => false);
+      if (targetVisible) {
+        await targetHeading.click({ force: true });
+      } else {
+        await activeProjectsPanel.getByText(/•\s*\d+\s*个 Agent/).first().click({ force: true });
+      }
     }
 
     await expect(stepOneHeading).toBeVisible({ timeout: 60_000 });
@@ -145,7 +165,7 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
       const detail = await apiRequest<{
         description?: string;
         postCreatePrep?: { completed?: boolean };
-      }>(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`);
+      }>(token, `/api/projects/${encodeURIComponent(projectId)}`);
       const description = String(detail.description || '');
       const hasDebate = description.includes('## 多Agent需求讨论结论');
       const hasAnalysis = description.includes('## 项目详情理解确认草案');
@@ -163,7 +183,7 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
   } finally {
     if (projectId) {
       try {
-        await apiRequest(API_URL, token, `/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
+        await apiRequest(token, `/api/projects/${encodeURIComponent(projectId)}`, { method: 'DELETE' });
       } catch {
         // ignore cleanup failure
       }
