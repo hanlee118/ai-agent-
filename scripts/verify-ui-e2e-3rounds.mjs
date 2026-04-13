@@ -17,17 +17,6 @@ const uiStepTimeoutMs = Math.max(
   90_000,
   Math.min(60 * 60 * 1000, Number(process.env.VERIFY_UI_STEP_TIMEOUT_MS || 20 * 60 * 1000))
 );
-const testTargets = String(process.env.VERIFY_UI_TEST_TARGETS || "")
-  .split(",")
-  .map((item) => item.trim())
-  .filter(Boolean);
-const defaultTestTargets = [
-  "scripts/e2e/ui-project-room-real-autoadvance.spec.ts",
-  "scripts/e2e/ui-project-room-real-single-stage.spec.ts",
-  "scripts/e2e/ui-workflow-template.spec.ts",
-  "scripts/e2e/ui-visual-hermes-prefer.spec.ts",
-];
-const effectiveTestTargets = testTargets.length > 0 ? testTargets : defaultTestTargets;
 
 function summarizeOutput(text, maxLength = 2400) {
   const normalized = String(text || "").trim();
@@ -102,7 +91,7 @@ function runUiSuite() {
     const startedAt = Date.now();
     const child = spawn(
       "pnpm",
-      ["dlx", "playwright", "test", ...effectiveTestTargets, "--workers=1", "--reporter=line"],
+      ["dlx", "playwright", "test", "scripts/e2e", "--workers=1", "--reporter=line"],
       {
         cwd: repoRoot,
         env: process.env,
@@ -156,15 +145,9 @@ function runUiSuite() {
 
 async function runRound(round) {
   const roundStartedAt = new Date().toISOString();
-  const apiEnv = {
-    ...process.env,
-    PROJECT_DIRECT_CREATE_ENABLED: process.env.VERIFY_PROJECT_DIRECT_CREATE_ENABLED || "true",
-    ENFORCE_REAL_MODEL_GATE: process.env.VERIFY_ENFORCE_REAL_MODEL_GATE || "false",
-    HERMES_ENABLED: process.env.VERIFY_HERMES_ENABLED || "true",
-  };
   const apiProcess = spawn("node", ["apps/api/dist/index.js"], {
     cwd: repoRoot,
-    env: apiEnv,
+    env: process.env,
     stdio: ["ignore", "pipe", "pipe"]
   });
 
@@ -232,7 +215,6 @@ async function run() {
     rounds,
     apiBootTimeoutMs,
     uiStepTimeoutMs,
-    testTargets: effectiveTestTargets,
     summary: {
       passedRounds: rounds - failedRounds,
       failedRounds,
