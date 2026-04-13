@@ -25,6 +25,7 @@ const defaultTestTargets = [
   "scripts/e2e/ui-project-room-real-autoadvance.spec.ts",
   "scripts/e2e/ui-project-room-real-single-stage.spec.ts",
   "scripts/e2e/ui-workflow-template.spec.ts",
+  "scripts/e2e/ui-visual-hermes-prefer.spec.ts",
 ];
 const effectiveTestTargets = testTargets.length > 0 ? testTargets : defaultTestTargets;
 
