@@ -16,6 +16,7 @@
     "verify:real-data:round2": "node scripts/verify-real-data-round2.mjs",
     "verify:repeatable:018": "node scripts/verify-repeatable-018.mjs",
     "verify:platform:3rounds": "node scripts/verify-platform-3rounds.mjs",
+    "verify:ui:e2e:3rounds": "node scripts/verify-ui-e2e-3rounds.mjs",
     "test:ui:workflow-template": "pnpm dlx playwright test scripts/e2e/ui-workflow-template.spec.ts --workers=1 --reporter=line",
     "test:ui:knowledge-hub": "pnpm dlx playwright test scripts/e2e/ui-knowledge-hub-crud.spec.ts --workers=1 --reporter=line",
     "test:ui:platform-pages": "pnpm dlx playwright test scripts/e2e/ui-platform-pages-acceptance.spec.ts --workers=1 --reporter=line",

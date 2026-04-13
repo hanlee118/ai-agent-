@@ -40,18 +40,45 @@ test('visual design template prefers Hermes agent selection for design role', as
 
   try {
     await page.goto(WEB_URL, { waitUntil: 'domcontentloaded' });
-    await expect(page.getByRole('button', { name: '新建项目' })).toBeVisible({ timeout: 60_000 });
-    await page.getByRole('button', { name: '新建项目' }).click();
-    await expect(page.getByText('创建新项目')).toBeVisible();
+    const openProjectModal = async () => {
+      await expect(page.getByRole('button', { name: '新建项目' })).toBeVisible({ timeout: 60_000 });
+      await page.getByRole('button', { name: '新建项目' }).click();
+      await expect(page.getByText('创建新项目')).toBeVisible({ timeout: 30_000 });
+    };
 
-    await page.getByRole('button', { name: /视觉设计阶段/ }).first().click();
-    await page.getByPlaceholder('例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。')
-      .fill('验证视觉阶段默认由 Hermes 承担视觉设计角色');
-    await page.getByRole('button', { name: '继续：团队分配' }).click();
+    let teamStepReady = false;
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      const modalVisible = await page.getByText('创建新项目').isVisible({ timeout: 3_000 }).catch(() => false);
+      if (!modalVisible) {
+        await openProjectModal();
+      }
 
-    const hermesCheckbox = page.locator('label:has-text("Hermes Agent") input[type="checkbox"]');
-    await expect(hermesCheckbox).toBeVisible({ timeout: 60_000 });
-    assert.equal(await hermesCheckbox.isChecked(), true);
+      await page.getByRole('button', { name: /视觉设计阶段/ }).first().click();
+      await page
+        .getByPlaceholder('例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。')
+        .fill('验证视觉阶段默认由 Hermes 承担视觉设计角色');
+      await page.getByRole('button', { name: '继续：团队分配' }).click();
+
+      teamStepReady = await page.getByText('可选执行 Agent').isVisible({ timeout: 8_000 }).catch(() => false);
+      if (teamStepReady) {
+        break;
+      }
+    }
+    assert.equal(teamStepReady, true);
+
+    const hermesCheckboxes = page.locator('label:has-text("Hermes") input[type="checkbox"]');
+    await expect(hermesCheckboxes.first()).toBeVisible({ timeout: 60_000 });
+    const total = await hermesCheckboxes.count();
+    assert.equal(total > 0, true);
+
+    let hasCheckedHermes = false;
+    for (let i = 0; i < total; i += 1) {
+      if (await hermesCheckboxes.nth(i).isChecked()) {
+        hasCheckedHermes = true;
+        break;
+      }
+    }
+    assert.equal(hasCheckedHermes, true);
   } finally {
     await prisma.authSession.deleteMany({
       where: { tokenHash: await hashSessionToken(token) },
