@@ -156,9 +156,15 @@ function runUiSuite() {
 
 async function runRound(round) {
   const roundStartedAt = new Date().toISOString();
+  const apiEnv = {
+    ...process.env,
+    PROJECT_DIRECT_CREATE_ENABLED: process.env.VERIFY_PROJECT_DIRECT_CREATE_ENABLED || "true",
+    ENFORCE_REAL_MODEL_GATE: process.env.VERIFY_ENFORCE_REAL_MODEL_GATE || "false",
+    HERMES_ENABLED: process.env.VERIFY_HERMES_ENABLED || "true",
+  };
   const apiProcess = spawn("node", ["apps/api/dist/index.js"], {
     cwd: repoRoot,
-    env: process.env,
+    env: apiEnv,
     stdio: ["ignore", "pipe", "pipe"]
   });
 

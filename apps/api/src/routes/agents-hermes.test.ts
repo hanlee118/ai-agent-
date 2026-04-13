@@ -112,6 +112,7 @@ test("agents route exposes hermes fallback row and integration engine labels", a
   assert.ok(hermes);
   assert.equal(hermes?.integrationEngine, "hermes");
   assert.equal(hermes?.builtin, true);
+  assert.equal(hermes?.role, "ROLE_DESIGN");
 
   const openclaw = rows.find((item) => String(item.id) === "openclaw_dev_agent");
   assert.ok(openclaw);
@@ -125,4 +126,5 @@ test("agents detail returns synthetic hermes agent when not persisted", async ()
   assert.equal(detailRes.body.data.id, "hermes-agent-1");
   assert.equal(detailRes.body.data.integrationEngine, "hermes");
   assert.equal(detailRes.body.data.builtin, true);
+  assert.equal(detailRes.body.data.role, "ROLE_DESIGN");
 });
