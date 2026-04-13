@@ -30,34 +30,6 @@ type ProjectCreatePayload = {
   projectType?: 'complete' | 'standalone' | 'relay';
 };
 
-async function waitIssueDebateReady(
-  apiUrl: string,
-  token: string,
-  issueId: string,
-  timeoutMs = 180_000,
-): Promise<void> {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const response = await apiRequest<any>(
-      apiUrl,
-      token,
-      `/api/issues/${encodeURIComponent(issueId)}/debate`,
-    );
-    const data = response?.data || response;
-    const status = String(data?.status || '').trim().toLowerCase();
-    const canProceed = Boolean(data?.analysisGate?.canProceed);
-    if (canProceed && status === 'completed') {
-      return;
-    }
-    if (status === 'failed') {
-      throw new Error(`issue debate failed: ${String(data?.error || 'unknown')}`);
-    }
-    const pollAfterMs = Number(data?.pollAfterMs ?? 2000);
-    await new Promise((resolve) => setTimeout(resolve, Math.max(800, Math.min(5000, pollAfterMs || 2000))));
-  }
-  throw new Error(`issue debate timeout after ${timeoutMs}ms for ${issueId}`);
-}
-
 function buildClarificationAnswers(questions: Array<{ id?: string; required?: boolean }> = []) {
   return questions.reduce((acc: Record<string, string>, item) => {
     if (!item?.required) {
@@ -80,32 +52,20 @@ function buildClarificationAnswers(questions: Array<{ id?: string; required?: bo
   }, {});
 }
 
-function isDebateStillRunningConfirmError(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error || '');
-  return /VALIDATION_ERROR/i.test(message)
-    && /真实模型多角色讨论仍在进行中|debate.*进行中|discussion.*in progress/i.test(message);
-}
-
 export async function createProjectWithIssueFirstFallback(
   apiUrl: string,
   token: string,
   payload: ProjectCreatePayload,
-  options?: {
-    forceIssueFirst?: boolean;
-  },
 ): Promise<{ id: string; name: string }> {
-  const forceIssueFirst = Boolean(options?.forceIssueFirst);
-  if (!forceIssueFirst) {
-    try {
-      return await apiRequest<{ id: string; name: string }>(apiUrl, token, '/api/projects', {
-        method: 'POST',
-        body: payload,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/PROJECT_ISSUE_FIRST_REQUIRED/.test(message)) {
-        throw error;
-      }
+  try {
+    return await apiRequest<{ id: string; name: string }>(apiUrl, token, '/api/projects', {
+      method: 'POST',
+      body: payload,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/PROJECT_ISSUE_FIRST_REQUIRED/.test(message)) {
+      throw error;
     }
   }
 
@@ -115,7 +75,7 @@ export async function createProjectWithIssueFirstFallback(
       input: payload.description || payload.name,
       industryCode: 'saas',
       sourceType: 'text',
-      debateMode: 'model',
+      debateMode: 'off',
       workflowTemplateKey: payload.workflowTemplateKey,
     },
   });
@@ -124,37 +84,21 @@ export async function createProjectWithIssueFirstFallback(
   if (!issueId) {
     throw new Error('issue-first preview did not return issueId');
   }
-  await waitIssueDebateReady(apiUrl, token, issueId);
 
   const questions = Array.isArray(previewData?.questions) ? previewData.questions : [];
   const clarificationAnswers = buildClarificationAnswers(questions);
 
-  let confirm: any = null;
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
-    try {
-      confirm = await apiRequest<any>(apiUrl, token, `/api/issues/${encodeURIComponent(issueId)}/confirm`, {
-        method: 'POST',
-        body: {
-          finalName: payload.name,
-          finalDescription: payload.description,
-          clarificationAnswers,
-          projectType: payload.projectType || 'complete',
-          workflowTemplateKey: payload.workflowTemplateKey,
-          autoStartWorkflow: payload.autoStartWorkflow,
-        },
-      });
-      break;
-    } catch (error) {
-      if (attempt >= 6 || !isDebateStillRunningConfirmError(error)) {
-        throw error;
-      }
-      await waitIssueDebateReady(apiUrl, token, issueId, 120_000);
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-    }
-  }
-  if (!confirm) {
-    throw new Error(`issue confirm timeout for ${issueId}`);
-  }
+  const confirm = await apiRequest<any>(apiUrl, token, `/api/issues/${encodeURIComponent(issueId)}/confirm`, {
+    method: 'POST',
+    body: {
+      finalName: payload.name,
+      finalDescription: payload.description,
+      clarificationAnswers,
+      projectType: payload.projectType || 'complete',
+      workflowTemplateKey: payload.workflowTemplateKey,
+      autoStartWorkflow: payload.autoStartWorkflow,
+    },
+  });
   const confirmData = confirm?.data || confirm;
   const project = confirmData?.project || confirmData;
   return {
