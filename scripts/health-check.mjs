@@ -79,14 +79,19 @@ async function run() {
     const mode = String(runtime?.mode ?? "unknown");
     const requestedMode = String(runtime?.requestedMode ?? "unknown");
     const configured = Boolean(runtime?.configured);
-    const realModelReady = mode === "openai-compatible" && requestedMode === "openai-compatible" && configured;
+    const lastValidationStatus = String(runtime?.lastValidationStatus ?? "unknown");
+    const validationHealthy = lastValidationStatus === "healthy";
+    const realModelReady = mode === "openai-compatible"
+      && requestedMode === "openai-compatible"
+      && configured
+      && validationHealthy;
 
     if (requireRealModelForHealth) {
       return {
         ok: realModelReady,
         detail: realModelReady
           ? "real-model ready"
-          : `real-model not ready (mode=${mode}, requestedMode=${requestedMode}, configured=${configured})`,
+          : `real-model not ready (mode=${mode}, requestedMode=${requestedMode}, configured=${configured}, validation=${lastValidationStatus})`,
       };
     }
 
@@ -94,7 +99,7 @@ async function run() {
       ok: true,
       detail: realModelReady
         ? "real-model ready"
-        : `non-blocking: mode=${mode}, requestedMode=${requestedMode}, configured=${configured}`,
+        : `non-blocking: mode=${mode}, requestedMode=${requestedMode}, configured=${configured}, validation=${lastValidationStatus}`,
     };
   }));
 
@@ -259,9 +264,11 @@ async function buildRealModelSelfCheck(authContext) {
   }
 
   const authUnavailableButExpected = !authContext?.authenticated && runtimeAuthRequired;
+  const hasKnownValidationFailure = runtime.lastValidationStatus === 'failed';
   const ready = runtime.requestedMode === 'openai-compatible'
     && runtime.mode === 'openai-compatible'
     && runtime.configured
+    && !hasKnownValidationFailure
     && (lastValidateOk || runtime.lastValidationStatus === 'healthy' || authUnavailableButExpected);
 
   return {
