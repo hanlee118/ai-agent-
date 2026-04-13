@@ -15,7 +15,7 @@ export const ROLE_HINTS: Record<string, RegExp[]> = {
   ROLE_PM: [/pm|项目|经理|协调|管理/i],
   ROLE_ANALYST: [/分析|需求|业务|analyst/i],
   ROLE_PRODUCT: [/产品|prd|体验|设计|ui|ux/i],
-  ROLE_DESIGN: [/视觉|品牌|页面|官网|landing|design|designer|ui|ux/i],
+  ROLE_DESIGN: [/视觉|品牌|页面|官网|landing|design|designer|ui|ux|hermes/i],
   ROLE_ARCH: [/架构|architect|系统|后端|服务/i],
   ROLE_DEV: [/开发|研发|工程|dev|前端|后端|代码/i],
   ROLE_QA: [/测试|qa|质量|验收/i],
