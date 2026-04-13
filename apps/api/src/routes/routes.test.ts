@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import express from "express";
 import request from "supertest";
+import { snapshotSqliteSeedDatabase } from "../test/sqlite-snapshot.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,23 +22,6 @@ const migrationPaths = [
 
 const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-routes-"));
 const dbPath = path.join(tempDir, "test.db");
-
-function snapshotSeedDatabase(): void {
-  rmSync(dbPath, { force: true });
-  const escapedDbPath = dbPath.replace(/'/g, "''");
-  try {
-    execSync(
-      `sqlite3 ${JSON.stringify(seedDbPath)} ${JSON.stringify(`VACUUM INTO '${escapedDbPath}';`)}`,
-      {
-        cwd: apiRoot,
-        stdio: "pipe"
-      }
-    );
-  } catch {
-    // Fallback for environments where sqlite VACUUM INTO is unavailable.
-    copyFileSync(seedDbPath, dbPath);
-  }
-}
 
 process.env.NODE_ENV = "test";
 process.env.MODEL_PROVIDER = "scripted";
@@ -65,7 +49,11 @@ after(async () => {
 });
 
 before(async () => {
-  snapshotSeedDatabase();
+  snapshotSqliteSeedDatabase({
+    seedDbPath,
+    dbPath,
+    cwd: apiRoot
+  });
 
   execSync(
     [
