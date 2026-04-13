@@ -273,9 +273,9 @@ export function useDecisions() {
     try {
       const result = await api.decisionsApi.list();
       setDecisions(result);
-    } catch (err: any) {
-      console.warn('Using mock data for decisions:', err.message);
-      setDecisions(getMockDecisions());
+    } catch (err: unknown) {
+      setDecisions([]);
+      setError(getErrorMessage(err, 'Failed to load decisions'));
     } finally {
       setLoading(false);
     }
@@ -327,9 +327,9 @@ export function useNotifications() {
     try {
       const result = await api.notificationsApi.list();
       setNotifications(result);
-    } catch (err: any) {
-      console.warn('Using mock data for notifications:', err.message);
+    } catch (err: unknown) {
       setNotifications([]);
+      setError(getErrorMessage(err, 'Failed to load notifications'));
     } finally {
       setLoading(false);
     }
@@ -358,38 +358,4 @@ export function useNotifications() {
   };
 
   return { notifications, setNotifications, loading, error, refetch: fetchNotifications, markAsRead, markAllRead };
-}
-
-// ============ Mock Data Fallbacks ============
-function getMockModels(): api.Model[] {
-  return [
-    { id: 'm1', name: 'Codex-4.0', provider: 'OpenAI', status: 'Healthy', totalTokens: 1250000, dailyTokens: 45000, tokenLimit: 10000000, createdAt: '2026-03-01T10:00:00Z', updatedAt: '2026-03-27T10:00:00Z' },
-    { id: 'm2', name: 'MiniMax-6.5', provider: 'MiniMax', status: 'Healthy', totalTokens: 890000, dailyTokens: 32000, tokenLimit: 5000000, createdAt: '2026-03-01T10:00:00Z', updatedAt: '2026-03-27T10:00:00Z' },
-    { id: 'm3', name: 'Kimi-Long', provider: 'Moonshot', status: 'Degraded', totalTokens: 650000, dailyTokens: 28000, tokenLimit: 3000000, createdAt: '2026-03-01T10:00:00Z', updatedAt: '2026-03-27T10:00:00Z' },
-  ];
-}
-
-function getMockAgents(): api.Agent[] {
-  return [
-    { id: 'a1', name: '产品经理 Agent', role: 'ProductManager', status: 'Thinking', load: 65, currentModelId: 'm1', tasks: 3, tokensUsed: 520000, tokenLimit: 1000000, createdAt: '2026-03-01T10:00:00Z' },
-    { id: 'a2', name: '架构师 Agent', role: 'Architect', status: 'Idle', load: 30, currentModelId: 'm1', tasks: 1, tokensUsed: 380000, tokenLimit: 1000000, createdAt: '2026-03-01T10:00:00Z' },
-    { id: 'a3', name: '研发 Agent', role: 'Developer', status: 'Executing', load: 85, currentModelId: 'm2', tasks: 5, tokensUsed: 890000, tokenLimit: 1000000, createdAt: '2026-03-01T10:00:00Z' },
-    { id: 'a4', name: '测试 Agent', role: 'QA', status: 'Idle', load: 20, currentModelId: 'm1', tasks: 0, tokensUsed: 210000, tokenLimit: 1000000, createdAt: '2026-03-01T10:00:00Z' },
-    { id: 'a5', name: '运维 Agent', role: 'DevOps', status: 'Offline', load: 0, currentModelId: 'm1', tasks: 0, tokensUsed: 150000, tokenLimit: 1000000, createdAt: '2026-03-01T10:00:00Z' },
-  ];
-}
-
-function getMockProjects(): api.Project[] {
-  return [
-    { id: 'p1', name: 'SaaS 管理工作台演示', description: 'Agent 团队从需求、设计、架构、研发到测试闭环的真实项目', status: 'active', phase: '开发中', progress: 45, owner: '研发经理', agents: ['a1', 'a2', 'a3', 'a5'], createdAt: '2026-03-01T10:00:00Z', updatedAt: '2026-03-27T10:00:00Z' },
-    { id: 'p2', name: 'OpenClaw 核心', description: 'OpenClaw 核心框架升级与优化', status: 'active', phase: '规划中', progress: 15, owner: '架构师', agents: ['a1', 'a4'], createdAt: '2026-03-01T10:00:00Z', updatedAt: '2026-03-27T10:00:00Z' },
-    { id: 'p3', name: 'Aegis OS UI', description: 'Aegis Agent OS 界面重构与体验优化', status: 'active', phase: '设计中', progress: 60, owner: 'Jeremy', agents: ['a2', 'a3'], createdAt: '2026-03-01T10:00:00Z', updatedAt: '2026-03-27T10:00:00Z' },
-  ];
-}
-
-function getMockDecisions(): api.Decision[] {
-  return [
-    { id: 'd1', type: 'stage_approval', title: '需求分析确认', description: '产品经理 Agent 已完成需求分析，请确认执行计划', projectId: 'p1', stage: 'ANALYSIS', status: 'pending', createdAt: '2026-03-27T10:00:00Z' },
-    { id: 'd2', type: 'model_switch', title: '模型切换建议', description: 'GPT-4 Turbo 负载过高，建议切换到 Claude', status: 'pending', createdAt: '2026-03-27T10:00:00Z' },
-  ];
 }
