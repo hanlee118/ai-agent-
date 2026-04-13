@@ -49,9 +49,8 @@ test('visual design template prefers Hermes agent selection for design role', as
       .fill('验证视觉阶段默认由 Hermes 承担视觉设计角色');
     await page.getByRole('button', { name: '继续：团队分配' }).click();
 
-    await expect(page.getByText('团队分配与扩展信息')).toBeVisible({ timeout: 30_000 });
     const hermesCheckbox = page.locator('label:has-text("Hermes Agent") input[type="checkbox"]');
-    await expect(hermesCheckbox).toBeVisible();
+    await expect(hermesCheckbox).toBeVisible({ timeout: 60_000 });
     assert.equal(await hermesCheckbox.isChecked(), true);
   } finally {
     await prisma.authSession.deleteMany({

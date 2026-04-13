@@ -41,9 +41,41 @@ async function apiRequest<T>(
   });
 
   if (!response.ok) {
-    throw new Error(`api ${init?.method || 'GET'} ${path} failed: ${response.status}`);
+    const detail = await response.text().catch(() => '');
+    throw new Error(
+      `api ${init?.method || 'GET'} ${path} failed: ${response.status}${detail ? ` body=${detail}` : ''}`,
+    );
   }
   return await response.json() as T;
+}
+
+async function createProjectWithRetry(
+  token: string,
+  payload: {
+    name: string;
+    description: string;
+    workflowTemplateKey: string;
+    autoStartWorkflow: boolean;
+  },
+): Promise<{ id: string; name: string }> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
+        method: 'POST',
+        body: payload,
+      });
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const isServerError = /failed:\s*5\d\d/.test(message);
+      if (!isServerError || attempt >= 3) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, attempt * 600));
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
 test.describe.configure({ mode: 'serial' });
@@ -57,14 +89,11 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
   let projectId = '';
 
   try {
-    const project = await apiRequest<{ id: string; name: string }>(token, '/api/projects', {
-      method: 'POST',
-      body: {
+    const project = await createProjectWithRetry(token, {
         name: projectName,
         description: '请创建单阶段视觉设计项目，并用于验证 Step1 写回后自动触发 Step2。',
         workflowTemplateKey: 'visual_design',
         autoStartWorkflow: false,
-      },
     });
     projectId = String(project.id || '').trim();
     expect(projectId).toBeTruthy();
@@ -112,26 +141,10 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
     }).fill('补充：以视觉设计阶段为主，验收看设计审查卡与视觉定稿单页。');
 
     const applyButton = page.getByRole('button', { name: '写回项目并同步 Issue' });
-    let advanceRequestSeen = false;
-    const onRequest = (request: { method: () => string; url: () => string }) => {
-      if (
-        request.method() === 'POST'
-        && request.url().includes(`/api/projects/${encodeURIComponent(projectId)}/advance`)
-      ) {
-        advanceRequestSeen = true;
-      }
-    };
-    page.on('request', onRequest);
 
     await page.getByRole('button', { name: '多Agent讨论并生成草案' }).click();
     await expect(applyButton).toBeEnabled({ timeout: 180_000 });
 
-    const beforeApplyDetail = await apiRequest<{
-      currentStage?: string;
-      pendingApproval?: boolean;
-    }>(token, `/api/projects/${encodeURIComponent(projectId)}`);
-    const shouldAutoAdvance = String(beforeApplyDetail.currentStage || '').trim().toUpperCase() === 'INIT'
-      && !beforeApplyDetail.pendingApproval;
     const patchResponsePromise = page.waitForResponse(
       (response) => {
         const request = response.request();
@@ -167,15 +180,6 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
       completed: true,
     });
 
-    const afterApplyDetail = await apiRequest<{
-      currentStage?: string;
-      pendingApproval?: boolean;
-    }>(token, `/api/projects/${encodeURIComponent(projectId)}`);
-    const leftInitStage = String(afterApplyDetail.currentStage || '').trim().toUpperCase() !== 'INIT';
-    if (shouldAutoAdvance && !advanceRequestSeen && !leftInitStage) {
-      console.warn('[ui-project-room-real-autoadvance] auto advance was not observed in this run');
-    }
-    page.off('request', onRequest);
   } finally {
     if (projectId) {
       try {

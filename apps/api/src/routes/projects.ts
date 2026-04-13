@@ -2030,7 +2030,12 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     summary: `创建项目 ${project.name}`
   });
 
-  const issueFirst = await ensureProjectIssueFirst({ projectId: project.id });
+  const issueFirst = await ensureProjectIssueFirst({ projectId: project.id }).catch((error) => ({
+    ok: false,
+    enforced: true,
+    code: "ISSUE_FIRST_CHECK_FAILED",
+    message: error instanceof Error ? error.message : String(error)
+  }));
   if (issueFirst.ok) {
     void startProjectWarmupAfterCreate(project).catch((error) => {
       console.warn(
@@ -2170,7 +2175,12 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
     return;
   }
 
-  const issueFirst = await ensureProjectIssueFirst({ projectId });
+  const issueFirst = await ensureProjectIssueFirst({ projectId }).catch((error) => ({
+    ok: false,
+    enforced: true,
+    code: "ISSUE_FIRST_CHECK_FAILED",
+    message: error instanceof Error ? error.message : String(error)
+  }));
   if (!issueFirst.ok) {
     resetProjectAdvancePollHint(projectId);
     res.status(409).json({
@@ -2319,7 +2329,12 @@ router.post("/api/projects/:id/reconcile-deliverables", asyncRoute(async (req, r
   });
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
-  const issueFirst = await ensureProjectIssueFirst({ projectId });
+  const issueFirst = await ensureProjectIssueFirst({ projectId }).catch((error) => ({
+    ok: false,
+    enforced: true,
+    code: "ISSUE_FIRST_CHECK_FAILED",
+    message: error instanceof Error ? error.message : String(error)
+  }));
   res.json({
     ...project,
     requiredActions,
