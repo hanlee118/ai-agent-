@@ -697,7 +697,7 @@ export function useNewProjectModalController({
     const projectDomains = detectDomains(projectDescription);
 
     const effectiveStandaloneInputContent = standaloneInputContent.trim()
-      || (workflowTemplateKey !== 'none' ? projectDescription : '');
+      || ((projectType === 'standalone' || projectType === 'relay') ? projectDescription : '');
     const projectInputs: NonNullable<Parameters<typeof projectsApi.create>[0]['projectInputs']> = effectiveStandaloneInputContent
       ? [{
           name: standaloneInputName.trim() || 'raw_requirements',
@@ -705,7 +705,7 @@ export function useNewProjectModalController({
           content: effectiveStandaloneInputContent,
           inputSource: standaloneInputContent.trim()
             ? (projectType === 'relay' ? 'imported_from_project' : 'manual')
-            : (projectType === 'relay' ? 'imported_from_project' : 'template_generated'),
+            : 'manual',
         }]
       : [];
 

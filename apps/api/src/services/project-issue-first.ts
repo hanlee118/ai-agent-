@@ -9,7 +9,7 @@ const ISSUE_FIRST_GITLAB_PROJECT = String(
 ).trim();
 const ISSUE_FIRST_GITLAB_TOKEN = String(process.env.GITLAB_TOKEN || "").trim();
 const ISSUE_FIRST_LOCAL_ENFORCED = process.env.PROJECT_ISSUE_FIRST_LOCAL_ENFORCED !== "false";
-const DIRECT_PROJECT_CREATE_ENABLED = String(process.env.PROJECT_DIRECT_CREATE_ENABLED ?? "false").trim().toLowerCase() === "true";
+const DIRECT_PROJECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED !== "false";
 
 function isMissingGitLabSyncBindingTableError(error: unknown) {
   if (!error || typeof error !== "object") {
@@ -61,12 +61,7 @@ export async function ensureProjectIssueFirst(input: {
       ok: false,
       enforced: true,
       code: "LOCAL_ISSUE_REQUIRED",
-      message:
-        "当前项目未绑定需求 Issue，无法直接创建。\n\n"
-        + "解决方案：\n"
-        + "1. 先通过「New Project Issue」流程提交并确认需求\n"
-        + "2. 或使用已有 Issue ID 关联当前项目\n\n"
-        + "如需关闭此检查，管理员可设置 PROJECT_ISSUE_FIRST_LOCAL_ENFORCED=false"
+      message: "当前项目未绑定需求 Issue。请先通过 New Project Issue 流程确认需求后再推进。"
     } as const;
   }
 
@@ -109,23 +104,6 @@ export async function ensureProjectIssueFirst(input: {
     projectPath: input.projectPath || ISSUE_FIRST_GITLAB_PROJECT
   });
   if (!ensured.ok) {
-    // GitLab 同步异常时，若本地 issue-first 已满足，则降级为本地门禁通过，
-    // 避免外部 GitLab 波动导致项目推进长期阻塞。
-    if (localIssueReady) {
-      return {
-        ok: true,
-        enforced: true,
-        data: {
-          projectId: input.projectId,
-          issueId: localIssue?.id,
-          source: "local_issue_store_fallback"
-        },
-        warning: {
-          code: ensured.code,
-          message: ensured.message
-        }
-      } as const;
-    }
     return {
       ok: false,
       enforced: true,

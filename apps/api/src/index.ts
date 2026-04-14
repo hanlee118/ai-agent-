@@ -1,8 +1,10 @@
 import express from "express";
+import cors from "cors";
+import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { prisma } from "./db.js";
@@ -83,6 +85,7 @@ import {
 } from "./system/deliverable-templates.js";
 import {
   buildRequirementAwareDesignSections,
+  buildRequirementAwareVisualPreviewHtml,
   evaluateVisualDesignRequirementAlignment,
   resolveDesignRequirementProfile
 } from "./system/design-preview.js";
@@ -95,12 +98,9 @@ import {
   clearSessionCookie,
   createSessionCookie,
   getAuthStatus,
-  getCurrentUser,
-  loginUserByEmail,
   loginAdmin,
   logoutAdmin,
   parseSessionToken,
-  registerUserByAdmin,
   setupAdmin,
   validateSession
 } from "./security/auth.js";
@@ -132,7 +132,7 @@ import { createTeamRouter } from "./routes/team.js";
 import { createRoleSetsRouter } from "./routes/role-sets.js";
 import { createProductContextRouter } from "./routes/product-context.js";
 import { createIssuesRouter } from "./routes/issues.js";
-import { createSystemRouter, getObservabilitySummarySnapshot } from "./routes/system.js";
+import { createSystemRouter } from "./routes/system.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createOpenClawRouter } from "./routes/openclaw.js";
 import { createProjectsRouter } from "./routes/projects.js";
@@ -141,10 +141,6 @@ import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js
 import { createKnowledgeV2Router } from "./routes/knowledge-v2.js";
 import { createSkillsV2Router } from "./routes/skills-v2.js";
 import { createWorkflowsV2Router } from "./routes/workflows-v2.js";
-import { createUsersRouter } from "./routes/users.js";
-import { configureSecurityMiddleware } from "./middleware/security.js";
-import { requestLogger } from "./middleware/request-logger.js";
-import { validateJsonMutationBody } from "./validation/middleware.js";
 import {
   buildProjectIssueFirstMessage,
   ensureProjectIssueFirst
@@ -155,10 +151,8 @@ const app = express();
 const port = Number(process.env.PORT ?? 8787);
 const host = String(process.env.HOST ?? "127.0.0.1").trim() || "127.0.0.1";
 const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
+const webGeneratedPath = fileURLToPath(new URL("../../web/public/generated", import.meta.url));
 const siteGeneratedPath = fileURLToPath(new URL("../../../site/generated", import.meta.url));
-const workspaceGeneratedPath = fileURLToPath(new URL("../../../generated", import.meta.url));
-const cloudflaredTunnelLogPath = fileURLToPath(new URL("../../../.runtime/cloudflared-tunnel.log", import.meta.url));
-const runtimeDirectoryPath = fileURLToPath(new URL("../../../.runtime", import.meta.url));
 const projectAutoAdvanceIntervalMs = Math.max(5000, Number(process.env.PROJECT_AUTO_ADVANCE_INTERVAL_MS ?? 12000));
 const GITLAB_HARNESS_SYNC_STAGES = new Set<StageType>(["DEV", "ACCEPT"]);
 
@@ -227,55 +221,6 @@ const STAGE_PROTOCOL_SKILLS: Partial<Record<StageType, string[]>> = {
   DEV: ["coding-agent"],
   ACCEPT: ["qa-validation"]
 };
-const NON_FATAL_RUNTIME_ERROR_PATTERNS = [
-  /resource has been exhausted/i,
-  /check quota/i,
-  /rate limit/i,
-  /stitch/i,
-  /this operation was aborted/i,
-  /aborted due to timeout/i
-];
-let runtimeErrorGuardsInstalled = false;
-
-function normalizeRuntimeErrorMessage(reason: unknown) {
-  if (reason instanceof Error) {
-    return String(reason.message || "").trim();
-  }
-  return String(reason ?? "").trim();
-}
-
-function isKnownNonFatalRuntimeError(reason: unknown) {
-  const message = normalizeRuntimeErrorMessage(reason);
-  if (!message) {
-    return false;
-  }
-  return NON_FATAL_RUNTIME_ERROR_PATTERNS.some((pattern) => pattern.test(message));
-}
-
-function installRuntimeErrorGuards() {
-  if (runtimeErrorGuardsInstalled) {
-    return;
-  }
-  runtimeErrorGuardsInstalled = true;
-
-  process.on("unhandledRejection", (reason) => {
-    const message = normalizeRuntimeErrorMessage(reason);
-    if (isKnownNonFatalRuntimeError(reason)) {
-      console.warn(`[runtime.guard] non-fatal unhandledRejection ignored: ${message}`);
-      return;
-    }
-    console.error("[runtime.guard] unhandledRejection:", reason);
-  });
-
-  process.on("uncaughtException", (error) => {
-    const message = normalizeRuntimeErrorMessage(error);
-    if (isKnownNonFatalRuntimeError(error)) {
-      console.warn(`[runtime.guard] non-fatal uncaughtException ignored: ${message}`);
-      return;
-    }
-    console.error("[runtime.guard] uncaughtException:", error);
-  });
-}
 
 function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
   if (!STAGE_AUTO_REAL_MODEL_REQUIRED.has(stageType)) {
@@ -288,7 +233,7 @@ function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return false;
+  return isRealModelGateEnabled();
 }
 
 type StageRunAttempt = {
@@ -340,14 +285,7 @@ type ProjectRequiredAction = {
   severity: "critical" | "warning" | "info";
   title: string;
   detail: string;
-  action:
-    | "submit_stage_deliverable"
-    | "open_design_review"
-    | "review_pending_stage"
-    | "resolve_blocked_tasks"
-    | "reconcile_deliverables"
-    | "refresh_runtime"
-    | "run_post_create_prep";
+  action: "submit_stage_deliverable" | "open_design_review" | "review_pending_stage" | "resolve_blocked_tasks" | "reconcile_deliverables" | "refresh_runtime";
   ctaLabel: string;
   reasonCode?: "design_ambiguity";
   prefillContent?: string;
@@ -361,7 +299,7 @@ function isRealModelGateEnabled() {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return process.env.NODE_ENV === "production";
+  return process.env.NODE_ENV !== "test";
 }
 
 const GENERIC_OUTPUT_PATTERNS = [
@@ -376,14 +314,14 @@ const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|lorem ipsum|\bxxx\b/gi;
 const DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN = /(^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/gi;
 
-const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
+const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 1));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
   Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 60_000)
 );
 const MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS = Math.max(
-  5_000,
-  Number(process.env.MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS ?? 30_000)
+  10_000,
+  Number(process.env.MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS ?? 90_000)
 );
 const MANUAL_ADVANCE_BACKOFF_BASE_MS = Math.max(
   900,
@@ -396,29 +334,11 @@ function sleep(ms: number) {
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const taskResult = task.then(
-    (value) => ({ type: "task" as const, ok: true as const, value }),
-    (error) => ({ type: "task" as const, ok: false as const, error })
-  );
-  const timeout = new Promise<{ type: "timeout" }>((resolve) => {
-    timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs);
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
   });
   try {
-    const winner = await Promise.race([taskResult, timeout] as const);
-    if (winner.type === "timeout") {
-      // 超时后继续吸收任务晚到错误，防止未处理拒绝导致进程退出。
-      void taskResult.then((late) => {
-        if (!late.ok) {
-          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
-          console.warn(`[withTimeout] late rejection after timeout ignored: ${lateMessage}`);
-        }
-      });
-      throw new Error(message);
-    }
-    if (!winner.ok) {
-      throw winner.error;
-    }
-    return winner.value;
+    return await Promise.race([task, timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -439,12 +359,12 @@ function resolveManualAdvanceBuildTimeoutMs(project: NonNullable<Awaited<ReturnT
     project.currentRole as RoleType
   );
   const repositoryStageAgentTimeoutMs = Math.max(
-    45_000,
-    Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 120_000)
+    60_000,
+    Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 420_000)
   );
   const perSubmissionBudgetCapMs = Math.max(
-    30_000,
-    Number(process.env.MANUAL_ADVANCE_PER_SUBMISSION_TIMEOUT_MS ?? 120_000)
+    45_000,
+    Number(process.env.MANUAL_ADVANCE_PER_SUBMISSION_TIMEOUT_MS ?? 180_000)
   );
   const effectivePerSubmissionBudgetMs = Math.min(
     Math.max(stageBudgetMs, repositoryStageAgentTimeoutMs),
@@ -452,7 +372,7 @@ function resolveManualAdvanceBuildTimeoutMs(project: NonNullable<Awaited<ReturnT
   );
   const buildTimeoutCapMs = Math.max(
     MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
-    Number(process.env.MANUAL_ADVANCE_BUILD_TIMEOUT_CAP_MS ?? 180_000)
+    Number(process.env.MANUAL_ADVANCE_BUILD_TIMEOUT_CAP_MS ?? 480_000)
   );
   const submissionCount = Math.max(
     1,
@@ -625,16 +545,6 @@ async function executeManualAdvanceCycle(projectId: string) {
           if (!(await canContinueProjectAdvance(projectId))) {
             return;
           }
-          const latestBeforeSubmit = await findProject(projectId);
-          if (
-            !latestBeforeSubmit
-            || latestBeforeSubmit.status !== "active"
-            || latestBeforeSubmit.pendingApproval
-            || latestBeforeSubmit.currentStage !== current.currentStage
-            || latestBeforeSubmit.currentRole !== current.currentRole
-          ) {
-            return;
-          }
           await withTimeout(
             submitStageSubmissionBundle(projectId, submissions),
             MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
@@ -767,18 +677,24 @@ function buildDesignRequiredSections(
     return sections;
   }
 
+  const previewHtml = buildRequirementAwareVisualPreviewHtml({
+    projectName: project.name,
+    projectDescription: project.description,
+    keywords: project.parsedIntent.keywords
+  });
+
   return [
     sections,
+    "",
+    "## 单页预览代码（HTML）",
+    "```html",
+    previewHtml,
+    "```",
     "",
     "## 交互与状态说明",
     "- 主 CTA、次 CTA、告警提示需在视觉稿中可识别。",
     "- 需覆盖默认态、加载态、异常态至少三类关键状态。",
-    "- 交付文案需与当前业务关键词保持一致，避免泛化模板语义。",
-    "",
-    "## 视觉预览来源约束",
-    "- 禁止自动注入泛化模板 HTML 作为最终视觉定稿。",
-    "- 视觉定稿需来自真实设计执行结果（Stitch 可访问链接 / 图片链接 / 人工确认可渲染 HTML）。",
-    "- 若仅有文字说明而缺少可渲染预览，应保持待完善并继续迭代。"
+    "- 交付文案需与当前业务关键词保持一致，避免泛化模板语义。"
   ].join("\n");
 }
 
@@ -853,115 +769,6 @@ function sanitizeModelDeliverableBody(content: string) {
   normalized = normalized.replace(DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN, "$1已补全");
 
   return normalized.replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function hasMarkdownTable(content: string) {
-  const lines = String(content || "")
-    .split("\n")
-    .map((line) => line.trim());
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const current = lines[index];
-    const next = lines[index + 1];
-    if (
-      /\|/.test(current)
-      && /^\|?\s*[-:]{3,}\s*(\|\s*[-:]{3,}\s*)+\|?$/.test(next)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function buildAutoSubmissionMatrixSection(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
-  stageType: StageType,
-  title: string
-) {
-  const tasks = project.tasks
-    .filter((task) => task.stageType === stageType)
-    .slice(0, 3)
-    .map((task) => task.title);
-  const keywords = project.parsedIntent.keywords.slice(0, 3);
-
-  return [
-    "## 交付追踪矩阵（需求-任务-验收）",
-    "| 需求关键词 | 对应任务 | 验收口径 |",
-    "| --- | --- | --- |",
-    `| ${keywords[0] || project.name} | ${tasks[0] || `${STAGE_LABELS[stageType]}阶段核心任务`} | 交付章节完整且模板门禁通过 |`,
-    `| ${keywords[1] || "范围边界稳定"} | ${tasks[1] || "阶段关键任务收敛"} | 核心证据可追溯到阶段任务与需求输入 |`,
-    `| ${keywords[2] || title} | ${tasks[2] || "审批输入材料齐备"} | 可进入阶段审批并形成下一阶段输入 |`
-  ].join("\n");
-}
-
-function buildVisualMockupFallbackPreview(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
-) {
-  const heroTitle = project.parsedIntent.keywords[0] || project.name;
-  const heroSubtitle = project.parsedIntent.summary || project.description || "围绕当前项目目标构建的视觉定稿预览";
-
-  return [
-    "## 单页预览代码（HTML）",
-    "```html",
-    "<!doctype html>",
-    "<html lang=\"zh-CN\">",
-    "<head>",
-    "  <meta charset=\"UTF-8\" />",
-    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
-    `  <title>${heroTitle} · 视觉定稿</title>`,
-    "  <style>",
-    "    :root { --bg:#f7f2e8; --ink:#1a1a1a; --accent:#e44c2a; --panel:#fff9ef; --line:#2f241f22; }",
-    "    * { box-sizing:border-box; }",
-    "    body { margin:0; font-family:'Hiragino Mincho ProN','Yu Mincho',serif; background:radial-gradient(circle at 10% 10%, #fff8dc, #efe2c8); color:var(--ink); }",
-    "    main { max-width:960px; margin:0 auto; padding:48px 20px 72px; }",
-    "    .hero { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:24px; box-shadow:0 20px 40px #00000014; }",
-    "    h1 { margin:0 0 8px; font-size:40px; line-height:1.08; letter-spacing:.02em; }",
-    "    p { margin:0; line-height:1.8; }",
-    "    .grid { margin-top:18px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }",
-    "    .card { border:1px solid var(--line); border-radius:14px; background:#fff; padding:14px; }",
-    "    .cta { display:inline-flex; margin-top:18px; padding:10px 16px; border-radius:999px; background:var(--accent); color:#fff; text-decoration:none; font-weight:700; }",
-    "    @media (max-width:780px) { h1 { font-size:30px; } .grid { grid-template-columns:1fr; } }",
-    "  </style>",
-    "</head>",
-    "<body>",
-    "  <main>",
-    "    <section class=\"hero\">",
-    `      <h1>${heroTitle}</h1>`,
-    `      <p>${heroSubtitle}</p>`,
-    "      <div class=\"grid\">",
-    "        <article class=\"card\">默认态：信息完整展示，主 CTA 可见。</article>",
-    "        <article class=\"card\">悬停态：主卡片抬升并突出高亮边框。</article>",
-    "        <article class=\"card\">异常态：展示告警提示与补救入口。</article>",
-    "      </div>",
-    "      <a class=\"cta\" href=\"#\">立即进入核心流程</a>",
-    "    </section>",
-    "  </main>",
-    "</body>",
-    "</html>",
-    "```"
-  ].join("\n");
-}
-
-function ensureAutoSubmissionTemplateReadiness(input: {
-  content: string;
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
-  stageType: StageType;
-  title: string;
-  templateKind: ReturnType<typeof resolveDeliverableTemplate>["kind"];
-}) {
-  let normalized = String(input.content || "").trim();
-  if (!normalized) {
-    return normalized;
-  }
-
-  if (!hasMarkdownTable(normalized)) {
-    normalized = `${normalized}\n\n${buildAutoSubmissionMatrixSection(input.project, input.stageType, input.title)}`;
-  }
-
-  if (input.stageType === "DESIGN" && input.templateKind === "visual_mockup" && !hasVisualDesignPreview(normalized)) {
-    normalized = `${normalized}\n\n${buildVisualMockupFallbackPreview(input.project)}`;
-  }
-
-  return normalized;
 }
 
 function countHits(source: string, items: string[]) {
@@ -1116,11 +923,11 @@ function buildDeliverableSpecificSections(
       "| OPENAI_API_BASE_URL | http://127.0.0.1:1234/v1 | 模型网关地址（按环境替换） |",
       "| OPENAI_API_KEY | sk-live-redacted | 模型调用凭证 |",
       "| MODEL_PROVIDER | openai-compatible | 运行模式开关 |",
-      "| PROJECT_DIRECT_CREATE_ENABLED | false | 默认强制 issue-first（设为 true 才允许直接创建项目） |",
+      "| PROJECT_DIRECT_CREATE_ENABLED | true | 先创建项目再执行 issue-first 分析门禁（设为 false 可回退旧流程） |",
       "- OPENAI_API_BASE_URL=http://127.0.0.1:1234/v1",
       "- OPENAI_API_KEY=sk-live-redacted",
       "- MODEL_PROVIDER=openai-compatible",
-      "- PROJECT_DIRECT_CREATE_ENABLED=false",
+      "- PROJECT_DIRECT_CREATE_ENABLED=true",
       "",
       "## 部署检查清单（Pre-flight / Post-check）",
       "- Pre-flight: 校验数据库迁移状态与 Prisma schema 一致。",
@@ -1156,18 +963,18 @@ function buildDeliverableSpecificSections(
     .slice(0, 4)
     .map((task) => task.title);
 
-    const analysisRequirementEvidenceSections = [
-      "",
-      "## 事实依据与来源（Source of Truth）",
-      "| 来源 | 类型 | 当前结论 |",
-      "| --- | --- | --- |",
-      `| 原始需求 | 用户输入 | ${project.name} |`,
-      `| 项目描述 | 需求摘要 | ${project.parsedIntent.summary || project.description.slice(0, 60)} |`,
-      `| 阶段任务 | ANALYSIS | ${analysisTasks.join("、") || "暂无阶段任务"} |`,
-      "",
-      "## 需求追踪矩阵（目标-功能-验收）",
-      "| 目标 | 对应功能/任务 | 验收方式 |",
-      "| --- | --- | --- |",
+  const analysisRequirementEvidenceSections = [
+    "",
+    "## 事实依据与来源（Source of Truth）",
+    "| 来源 | 类型 | 当前结论 |",
+    "| --- | --- | --- |",
+    `| 原始需求 | 用户输入 | ${project.name} |`,
+    `| 项目描述 | 需求摘要 | ${project.parsedIntent.summary || project.description.slice(0, 60)} |`,
+    `| 阶段任务 | ANALYSIS | ${analysisTasks.join("、") || "待补充任务"} |`,
+    "",
+    "## 需求追踪矩阵（目标-功能-验收）",
+    "| 目标 | 对应功能/任务 | 验收方式 |",
+    "| --- | --- | --- |",
     `| ${project.parsedIntent.keywords[0] || "明确 MVP 目标"} | ${analysisTasks[0] || "提炼目标与边界"} | 评审通过后进入下一阶段 |`,
     `| ${project.parsedIntent.keywords[1] || "收敛需求范围"} | ${analysisTasks[1] || "输出项目排期"} | 需求、排期、风险可回溯 |`,
     `| ${project.parsedIntent.keywords[2] || "建立审批基线"} | ${analysisTasks[2] || "形成审批版分析稿"} | 存在清晰验收与待确认项 |`,
@@ -1254,8 +1061,7 @@ function evaluateAutoSubmissionQuality(input: {
   const issues: string[] = [];
   const diagnostics: string[] = [];
   let score = 100;
-  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true"
-    || shouldEnforceAutoStageRealModelGate(input.stageType);
+  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true" || isRealModelGateEnabled();
   const allowInitScriptedBootstrap =
     input.stageType === "INIT"
     && input.run.provider === "scripted"
@@ -1501,9 +1307,9 @@ function buildProjectRequiredActions(
         id: "missing-stage-deliverable",
         severity: "critical",
         title: "当前阶段缺少交付物，无法验收",
-        detail: `检测到 ${STAGE_LABELS[project.currentStage] || project.currentStage} 阶段处于待验收但无交付物，建议先一键重建交付物后再验收。`,
-        action: "reconcile_deliverables",
-        ctaLabel: "一键重建阶段交付物"
+        detail: `请先提交 ${STAGE_LABELS[project.currentStage] || project.currentStage} 阶段交付物，再执行审批。`,
+        action: "submit_stage_deliverable",
+        ctaLabel: "前往提交交付物"
       });
     }
 
@@ -1651,30 +1457,7 @@ function buildProjectRequiredActions(
     }
   }
 
-  if (project.currentStage === "DEV") {
-    const devEvidenceSource = currentStageDeliverables
-      .map((item) => String(item.content || ""))
-      .join("\n\n");
-    const hasWorkspaceEvidence = /##\s*(研发落地证据（自动收集）|项目工作区证据)/i.test(devEvidenceSource);
-    const hasCodePathEvidence = /(?:apps?|src|packages|server|client|web|api)\/[a-z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sql|prisma|yml|yaml|sh)/i.test(devEvidenceSource);
-    const hasCommandEvidence = /(?:pnpm|npm|yarn)\s+(?:dev|build|test|typecheck)|docker\s+compose|curl\s+https?:\/\/|http\s*200|exit code/i.test(devEvidenceSource);
-    if (!hasWorkspaceEvidence || !hasCodePathEvidence || !hasCommandEvidence) {
-      actions.push({
-        id: "dev-hard-evidence-missing",
-        severity: "critical",
-        title: "开发阶段缺少真实落地证据",
-        detail: [
-          !hasWorkspaceEvidence ? "缺少项目工作区证据" : null,
-          !hasCodePathEvidence ? "缺少代码文件路径证据" : null,
-          !hasCommandEvidence ? "缺少验证命令证据" : null
-        ].filter(Boolean).join("；"),
-        action: "submit_stage_deliverable",
-        ctaLabel: "补齐开发证据"
-      });
-    }
-  }
-
-  if (!project.pendingApproval && actions.length === 0 && currentStageDeliverables.length === 0) {
+  if (!project.pendingApproval && actions.length === 0) {
     const summary = String(project.summary || "");
     if (/核心交付物未齐|继续补充后再进入审批|未通过模板门禁/.test(summary)) {
       actions.push({
@@ -1853,13 +1636,6 @@ async function buildAutoStageSubmissions(
     if (project.currentStage === "DEV") {
       content = `${content}\n\n${await buildDevGateEvidenceAppendix(project)}`;
     }
-    content = ensureAutoSubmissionTemplateReadiness({
-      content,
-      project,
-      stageType: project.currentStage as StageType,
-      title,
-      templateKind: template.kind
-    });
 
     const quality = evaluateAutoSubmissionQuality({
       project,
@@ -1885,9 +1661,7 @@ async function buildAutoStageSubmissions(
     };
 
     if (project.currentStage === "DESIGN") {
-      if (!content.includes("## 视觉预览来源约束")) {
-        content = `${content}\n\n${buildDesignRequiredSections(project, title)}`;
-      }
+      content = `${content}\n\n${buildDesignRequiredSections(project, title)}`;
       submission.content = content;
       submission.designReview = buildDesignReviewPayload(project, run.model);
     }
@@ -2187,16 +1961,6 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
               const built = await buildAutoStageSubmissions(project, {
                 action: "stage.auto_submission.automation"
               });
-              const latestBeforeSubmit = await findProject(project.id);
-              if (
-                !latestBeforeSubmit
-                || latestBeforeSubmit.status !== "active"
-                || latestBeforeSubmit.pendingApproval
-                || latestBeforeSubmit.currentStage !== project.currentStage
-                || latestBeforeSubmit.currentRole !== project.currentRole
-              ) {
-                return built;
-              }
               await submitStageSubmissionBundle(project.id, built);
               return built;
             })();
@@ -2448,8 +2212,6 @@ type FinalArtifactRecord = {
   content?: string;
   excerpt?: string;
   url?: string;
-  localUrl?: string;
-  publicUrl?: string;
   filePath?: string;
 };
 
@@ -2788,333 +2550,6 @@ function buildExcerpt(content: string, limit = 120) {
   return normalized.length > limit ? `${normalized.slice(0, limit)}...` : normalized;
 }
 
-function normalizeExtractedUrl(raw: string) {
-  return String(raw || "")
-    .trim()
-    .replace(/[),.;]+$/g, "");
-}
-
-function extractGeneratedHtmlUrlsFromContent(content: string) {
-  const text = String(content || "");
-  if (!text.trim()) {
-    return [];
-  }
-  const matches = text.match(/https?:\/\/[^\s"'`<>)\]]+|\/generated\/[^\s"'`<>)\]]+\.html/gi) || [];
-  return Array.from(new Set(matches.map((item) => normalizeExtractedUrl(item)).filter(Boolean)));
-}
-
-function pickRuntimeDeliveryAccessUrl(content: string) {
-  const urls = extractGeneratedHtmlUrlsFromContent(content);
-  if (urls.length === 0) {
-    return undefined;
-  }
-
-  const scored = urls.map((url) => {
-    let score = 0;
-    if (isGeneratedHtmlUrl(url)) {
-      score += 120;
-    }
-
-    if (/^https?:\/\//i.test(url)) {
-      try {
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        const pathName = parsed.pathname.toLowerCase();
-        const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-        const isLocalHost = host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0";
-        if (isLocalHost) {
-          if (port === "5173") {
-            score += 90;
-          } else if (port === "4173") {
-            score += 70;
-          } else if (port === "3000") {
-            score += 60;
-          } else if (port === "8080") {
-            score += 35;
-          } else if (port === "8787") {
-            score += 5;
-          } else {
-            score += 20;
-          }
-        }
-
-        if (pathName === "/" || pathName.endsWith(".html")) {
-          score += 20;
-        }
-        if (pathName.startsWith("/generated/")) {
-          score += 30;
-        }
-        if (pathName.startsWith("/api/") || pathName === "/ready" || pathName === "/health") {
-          score -= 60;
-        }
-      } catch {
-        // ignore malformed absolute URL and keep base score
-      }
-    }
-
-    return { url, score };
-  });
-
-  return scored.sort((left, right) => right.score - left.score)[0]?.url;
-}
-
-function isDappMvpPrototypeUrl(url: string) {
-  const normalized = String(url || "").toLowerCase();
-  return /\/generated\/liquidity-dapp-mvp\/[a-z0-9._-]+\.html/.test(normalized)
-    || (/\/generated\//.test(normalized) && /dapp/.test(normalized) && /mvp/.test(normalized) && /\.html$/.test(normalized));
-}
-
-function isGeneratedHtmlUrl(url: string) {
-  const normalized = String(url || "").toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  if (/^https?:\/\//.test(normalized)) {
-    try {
-      const pathname = new URL(normalized).pathname.toLowerCase();
-      return pathname.startsWith("/generated/") && pathname.endsWith(".html");
-    } catch {
-      return false;
-    }
-  }
-  return normalized.startsWith("/generated/") && normalized.endsWith(".html");
-}
-
-function resolveGeneratedFilePathFromUrl(url: string) {
-  const trimmed = String(url || "").trim();
-  if (!trimmed) {
-    return undefined;
-  }
-
-  let pathname = trimmed;
-  if (/^https?:\/\//i.test(trimmed)) {
-    try {
-      pathname = new URL(trimmed).pathname || "";
-    } catch {
-      pathname = trimmed;
-    }
-  }
-
-  if (!pathname.startsWith("/generated/")) {
-    return undefined;
-  }
-
-  const relativePath = pathname.replace(/^\/+/, "");
-  return path.join(process.cwd(), relativePath);
-}
-
-function normalizeGeneratedPublicPath(input: string) {
-  const trimmed = String(input || "").trim();
-  if (!trimmed) {
-    return undefined;
-  }
-
-  let pathname = trimmed;
-  if (/^https?:\/\//i.test(trimmed)) {
-    try {
-      pathname = new URL(trimmed).pathname || "";
-    } catch {
-      pathname = trimmed;
-    }
-  }
-
-  if (pathname.startsWith("/generated/")) {
-    return pathname;
-  }
-  if (pathname.startsWith("generated/")) {
-    return `/${pathname}`;
-  }
-  return undefined;
-}
-
-function resolveFinalArtifactLocalBaseUrl() {
-  const candidates = [
-    process.env.FINAL_ARTIFACT_LOCAL_BASE_URL,
-    process.env.OCC_BASE_URL,
-    process.env.API_BASE,
-    "http://127.0.0.1:8787"
-  ];
-
-  for (const candidate of candidates) {
-    const raw = String(candidate || "").trim();
-    if (!raw) {
-      continue;
-    }
-    if (!/^https?:\/\//i.test(raw)) {
-      continue;
-    }
-    try {
-      const parsed = new URL(raw);
-      return `${parsed.protocol}//${parsed.host}`.replace(/\/+$/, "");
-    } catch {
-      // ignore invalid candidate and continue fallback
-    }
-  }
-  return "http://127.0.0.1:8787";
-}
-
-function resolveFinalArtifactPublicBaseUrl() {
-  const envBase = String(process.env.FINAL_ARTIFACT_PUBLIC_BASE_URL || "").trim();
-  if (envBase && /^https?:\/\//i.test(envBase)) {
-    try {
-      const parsed = new URL(envBase);
-      return `${parsed.protocol}//${parsed.host}`.replace(/\/+$/, "");
-    } catch {
-      // ignore malformed env and continue
-    }
-  }
-
-  if (existsSync(cloudflaredTunnelLogPath)) {
-    try {
-      const logText = readFileSync(cloudflaredTunnelLogPath, "utf8");
-      const matches = [...logText.matchAll(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/gi)].map((item) => item[0]);
-      if (matches.length > 0) {
-        return matches[matches.length - 1].replace(/\/+$/, "");
-      }
-    } catch {
-      // ignore log parsing failures
-    }
-  }
-
-  if (existsSync(runtimeDirectoryPath)) {
-    try {
-      const logFiles = readdirSync(runtimeDirectoryPath)
-        .filter((name) => /cloudflared|tunnel/i.test(name) && /\.log$/i.test(name))
-        .map((name) => path.join(runtimeDirectoryPath, name));
-      const candidates: Array<{ url: string; mtimeMs: number }> = [];
-      for (const filePath of logFiles) {
-        try {
-          const stat = statSync(filePath);
-          if (!stat.isFile()) {
-            continue;
-          }
-          const logText = readFileSync(filePath, "utf8");
-          const matches = [...logText.matchAll(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/gi)].map((item) =>
-            String(item[0] || "").replace(/\/+$/, "")
-          );
-          if (matches.length === 0) {
-            continue;
-          }
-          candidates.push({
-            url: matches[matches.length - 1],
-            mtimeMs: stat.mtimeMs || 0
-          });
-        } catch {
-          // ignore unreadable runtime log files and continue
-        }
-      }
-      if (candidates.length > 0) {
-        candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
-        return candidates[0].url;
-      }
-    } catch {
-      // ignore runtime directory scan failures
-    }
-  }
-
-  return undefined;
-}
-
-function buildArtifactAccessUrls(inputUrl?: string) {
-  const raw = String(inputUrl || "").trim();
-  const pathName = normalizeGeneratedPublicPath(raw);
-  const localBase = resolveFinalArtifactLocalBaseUrl();
-  const publicBase = resolveFinalArtifactPublicBaseUrl();
-
-  const result: { localUrl?: string; publicUrl?: string } = {};
-  if (/^https?:\/\//i.test(raw)) {
-    try {
-      const parsed = new URL(raw);
-      if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "0.0.0.0") {
-        result.localUrl = parsed.toString();
-        if (!result.publicUrl && publicBase) {
-          const pathSuffix = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
-          result.publicUrl = `${publicBase}${pathSuffix.startsWith("/") ? pathSuffix : `/${pathSuffix}`}`;
-        }
-      } else {
-        result.publicUrl = parsed.toString();
-      }
-    } catch {
-      // ignore malformed absolute URL
-    }
-  }
-
-  if (pathName) {
-    if (!result.localUrl) {
-      result.localUrl = `${localBase}${pathName}`;
-    }
-    if (!result.publicUrl && publicBase) {
-      result.publicUrl = `${publicBase}${pathName}`;
-    }
-  }
-
-  if (result.localUrl && result.publicUrl && result.localUrl === result.publicUrl) {
-    result.publicUrl = undefined;
-  }
-
-  return result;
-}
-
-function formatArtifactAccessExcerpt(baseExcerpt: string, accessUrls: { localUrl?: string; publicUrl?: string }) {
-  const lines = [String(baseExcerpt || "").trim()].filter(Boolean);
-  if (accessUrls.localUrl) {
-    lines.push(`本地访问地址：${accessUrls.localUrl}`);
-  }
-  if (accessUrls.publicUrl) {
-    lines.push(`外网访问地址：${accessUrls.publicUrl}`);
-  }
-  return Array.from(new Set(lines)).join("\n");
-}
-
-function pickPrototypeLinkCandidate(
-  deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"]
-) {
-  type Candidate = {
-    url: string;
-    isDappMvp: boolean;
-    deliverable: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"][number];
-  };
-  const candidates: Candidate[] = [];
-
-  for (const item of deliverables) {
-    const urls = extractGeneratedHtmlUrlsFromContent(String(item.content || ""));
-    for (const url of urls) {
-      if (!isGeneratedHtmlUrl(url)) {
-        continue;
-      }
-      candidates.push({
-        url,
-        isDappMvp: isDappMvpPrototypeUrl(url),
-        deliverable: item
-      });
-    }
-  }
-
-  if (candidates.length === 0) {
-    return undefined;
-  }
-
-  return candidates.sort((left, right) => {
-    if (left.isDappMvp !== right.isDappMvp) {
-      return Number(right.isDappMvp) - Number(left.isDappMvp);
-    }
-    const leftIndexScore = /\/index\.html$/i.test(left.url) ? 1 : 0;
-    const rightIndexScore = /\/index\.html$/i.test(right.url) ? 1 : 0;
-    if (rightIndexScore !== leftIndexScore) {
-      return rightIndexScore - leftIndexScore;
-    }
-    const statusDelta = deliverableStatusScore(right.deliverable.status) - deliverableStatusScore(left.deliverable.status);
-    if (statusDelta !== 0) {
-      return statusDelta;
-    }
-    const versionDelta = (right.deliverable.version || 0) - (left.deliverable.version || 0);
-    if (versionDelta !== 0) {
-      return versionDelta;
-    }
-    return new Date(right.deliverable.updatedAt).getTime() - new Date(left.deliverable.updatedAt).getTime();
-  })[0];
-}
-
 function evaluateDevImplementationEvidenceForAcceptance(input: {
   projectName?: string;
   projectDescription?: string;
@@ -3265,73 +2700,15 @@ function deliverableQualityScore(content: string) {
   return score;
 }
 
-const FINAL_ARTIFACT_TEMPLATE_BIAS_PATTERNS = [
-  /项目协作平台视觉定稿/i,
-  /立即进入执行看板/i,
-  /核心能力：阶段编排/i,
-  /创建项目并选择阶段模板/i,
-  /需求输入|执行证据回写|阶段验收与回填/i
-];
-
-function isTemplateLikeDeliverableForFinalArtifacts(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
-  item: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"][number]
-) {
-  const content = String(item.content || "").trim();
-  if (!content) {
-    return true;
-  }
-  if (FINAL_ARTIFACT_TEMPLATE_BIAS_PATTERNS.some((pattern) => pattern.test(content))) {
-    return true;
-  }
-  const suspicionReasons = detectSuspiciousDeliverableReasons(content);
-  if (suspicionReasons.some((reason) => reason.includes("模板/占位"))) {
-    return true;
-  }
-  if (item.stageType === "DESIGN" && isVisualMockupDeliverableTitle(String(item.name || ""))) {
-    const alignment = evaluateVisualDesignRequirementAlignment({
-      projectName: project.name,
-      projectDescription: project.description,
-      keywords: project.parsedIntent.keywords,
-      content
-    });
-    if (!alignment.pass) {
-      return true;
-    }
-  }
-  return false;
-}
-
 function pickBestDeliverable(
   deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"],
-  patterns: RegExp[],
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
+  patterns: RegExp[]
 ) {
   const candidates = deliverables.filter((item) => patterns.some((pattern) => pattern.test(item.name)));
   if (candidates.length === 0) {
     return undefined;
   }
-  const preferredCandidates = candidates.filter((item) => !isTemplateLikeDeliverableForFinalArtifacts(project, item));
-  const rankedPool = preferredCandidates.length > 0 ? preferredCandidates : candidates;
-
-  return rankedPool.sort((left, right) => {
-    const rightReady = isDeliverableReadyForAcceptance({
-      status: right.status,
-      content: right.content,
-      project,
-      stageType: right.stageType,
-      deliverableName: right.name
-    });
-    const leftReady = isDeliverableReadyForAcceptance({
-      status: left.status,
-      content: left.content,
-      project,
-      stageType: left.stageType,
-      deliverableName: left.name
-    });
-    if (rightReady !== leftReady) {
-      return Number(rightReady) - Number(leftReady);
-    }
+  return candidates.sort((left, right) => {
     const statusDelta = deliverableStatusScore(right.status) - deliverableStatusScore(left.status);
     if (statusDelta !== 0) {
       return statusDelta;
@@ -3352,44 +2729,6 @@ function pickBestDeliverable(
   })[0];
 }
 
-function pickRuntimeDeliveryDeliverable(
-  deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"],
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
-) {
-  const devDeliverables = deliverables.filter((item) => item.stageType === "DEV");
-  return pickBestDeliverable(devDeliverables, [/运行地址|部署说明|联调说明|运行说明/i], project)
-    || pickBestDeliverable(devDeliverables, [/实现结果|技术方案|运行地址|运行说明|部署说明|联调说明/i], project)
-    || pickBestDeliverable(deliverables, [/实现结果|技术方案|运行地址|运行说明|部署说明|联调说明/i], project);
-}
-
-function pickRuntimeDeliveryAccessUrlFromDeliverables(
-  deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"]
-) {
-  const devDeliverables = deliverables
-    .filter((item) => item.stageType === "DEV")
-    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
-
-  const priorities = [
-    /运行地址|部署说明|联调说明|运行说明/i,
-    /实现结果|技术方案/i,
-    /.*/
-  ];
-
-  for (const pattern of priorities) {
-    for (const item of devDeliverables) {
-      if (!pattern.test(String(item.name || ""))) {
-        continue;
-      }
-      const picked = pickRuntimeDeliveryAccessUrl(String(item.content || ""));
-      if (picked) {
-        return picked;
-      }
-    }
-  }
-
-  return undefined;
-}
-
 function buildFinalArtifactsBlockingIssues(input: {
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
   executions: Awaited<ReturnType<typeof listProjectExecutions>>;
@@ -3401,12 +2740,10 @@ function buildFinalArtifactsBlockingIssues(input: {
   };
 }) {
   const issues: string[] = [];
-  const qaExecutions = input.executions.filter((item) =>
+  const latestQaExecution = input.executions.find((item) =>
     item.stageType === "ACCEPT" && item.role === "ROLE_QA"
   );
-  const latestQaExecution = qaExecutions[0];
-  const hasQaSuccess = qaExecutions.some((item) => item.status === "success");
-  if (latestQaExecution?.status === "failed" && !hasQaSuccess) {
+  if (latestQaExecution?.status === "failed") {
     issues.push(`QA 最新一次验收执行失败：${latestQaExecution.errorMessage || "未返回具体错误"}`);
   }
 
@@ -3456,28 +2793,11 @@ function buildProjectFinalArtifactsReport(
       return (right.version || 0) - (left.version || 0);
     });
 
-  const hasAnalysisEvidence = deliverables.some((item) =>
-    item.stageType === "ANALYSIS"
-    && /(排期|里程碑|schedule|需求分析|分析文档|prd|requirement)/i.test(String(item.name || ""))
-  );
-  const requirePlanningArtifacts = String(process.env.FINAL_ARTIFACT_REQUIRE_ANALYSIS_DOCS ?? "false").trim().toLowerCase() === "true";
-  const requiredArtifacts = FINAL_REQUIRED_ARTIFACTS.map((target) => {
-    if ((target.key === "schedule" || target.key === "analysis_doc") && !requirePlanningArtifacts && !hasAnalysisEvidence) {
-      return {
-        ...target,
-        required: false
-      };
-    }
-    return target;
-  });
-
   const artifacts: FinalArtifactRecord[] = [];
   const missingRequired: string[] = [];
 
-  for (const target of requiredArtifacts) {
-    const matched = target.key === "runtime_delivery"
-      ? pickRuntimeDeliveryDeliverable(deliverables, project)
-      : pickBestDeliverable(deliverables, target.patterns, project);
+  for (const target of FINAL_REQUIRED_ARTIFACTS) {
+    const matched = pickBestDeliverable(deliverables, target.patterns);
     if (!matched) {
       if (target.required) {
         missingRequired.push(target.category);
@@ -3496,14 +2816,6 @@ function buildProjectFinalArtifactsReport(
       missingRequired.push(target.category);
     }
 
-    const runtimeAccessSource = target.key === "runtime_delivery"
-      ? pickRuntimeDeliveryAccessUrl(String(matched.content || "")) || pickRuntimeDeliveryAccessUrlFromDeliverables(deliverables)
-      : undefined;
-    const runtimeAccessUrls: { localUrl?: string; publicUrl?: string } = target.key === "runtime_delivery"
-      ? buildArtifactAccessUrls(runtimeAccessSource)
-      : {};
-    const runtimeFilePath = runtimeAccessSource ? resolveGeneratedFilePathFromUrl(runtimeAccessSource) : undefined;
-
     artifacts.push({
       key: target.key,
       category: target.category,
@@ -3518,13 +2830,7 @@ function buildProjectFinalArtifactsReport(
       version: matched.version,
       updatedAt: matched.updatedAt,
       content: matched.content,
-      url: runtimeAccessUrls.publicUrl || runtimeAccessUrls.localUrl || runtimeAccessSource,
-      localUrl: runtimeAccessUrls.localUrl,
-      publicUrl: runtimeAccessUrls.publicUrl,
-      filePath: runtimeFilePath,
-      excerpt: target.key === "runtime_delivery"
-        ? formatArtifactAccessExcerpt(buildExcerpt(matched.content), runtimeAccessUrls)
-        : buildExcerpt(matched.content)
+      excerpt: buildExcerpt(matched.content)
     });
   }
 
@@ -3553,113 +2859,33 @@ function buildProjectFinalArtifactsReport(
     });
   }
 
-  if (artifacts.length === 0 && deliverables.length > 0) {
-    const fallbackArtifacts = deliverables
-      .slice(0, 5)
-      .map((item, index) => ({
-        key: `fallback_${index + 1}`,
-        category: `阶段交付快照（${STAGE_LABELS[item.stageType as StageType] || item.stageType}）`,
-        required: false,
-        ready: isDeliverableReadyForAcceptance({
-          status: item.status,
-          content: item.content,
-          project,
-          stageType: item.stageType,
-          deliverableName: item.name
-        }),
-        issue: "该交付物暂未映射到标准最终产物分类，请补齐命名或继续推进阶段产出。",
-        source: "deliverable" as const,
-        deliverableId: item.id,
-        name: item.name,
-        stageType: item.stageType,
-        status: item.status,
-        version: item.version,
-        updatedAt: item.updatedAt,
-        content: item.content,
-        excerpt: buildExcerpt(item.content)
-      }));
-    artifacts.push(...fallbackArtifacts);
-  }
-
-  const prototypeLinkCandidate = pickPrototypeLinkCandidate(deliverables);
-  if (prototypeLinkCandidate && !artifacts.some((item) => item.key === "interactive_prototype")) {
-    const accessUrls = buildArtifactAccessUrls(prototypeLinkCandidate.url);
-    const filePath = resolveGeneratedFilePathFromUrl(prototypeLinkCandidate.url);
-    const linkExists = !filePath || existsSync(filePath);
-    const isDappMvp = isDappMvpPrototypeUrl(prototypeLinkCandidate.url);
-    artifacts.push({
-      key: "interactive_prototype",
-      category: isDappMvp ? "DApp MVP 交互原型（项目交付物）" : "交互页面交付物（项目链接）",
-      required: false,
-      ready: linkExists,
-      issue: linkExists
-        ? undefined
-        : "交互原型链接对应文件不存在，请重新生成或修复路径。",
-      source: "link",
-      name: isDappMvp ? "DApp MVP 交互原型" : "交互页面交付物",
-      stageType: prototypeLinkCandidate.deliverable.stageType,
-      status: prototypeLinkCandidate.deliverable.status,
-      version: prototypeLinkCandidate.deliverable.version,
-      updatedAt: prototypeLinkCandidate.deliverable.updatedAt,
-      url: accessUrls.publicUrl || accessUrls.localUrl || prototypeLinkCandidate.url,
-      localUrl: accessUrls.localUrl,
-      publicUrl: accessUrls.publicUrl,
-      filePath,
-      excerpt: formatArtifactAccessExcerpt(
-        `访问地址：${prototypeLinkCandidate.url}（来源：${prototypeLinkCandidate.deliverable.name}）`,
-        accessUrls
-      )
-    });
-  }
-
   if (officialSite?.url) {
-    const accessUrls = buildArtifactAccessUrls(officialSite.url);
     const isDesignPreview = officialSite.kind === "design_preview";
-    const isDappMvpPrototype = /\/generated\/liquidity-dapp-mvp\/index\.html/i.test(String(officialSite.url || ""));
-    const isGeneratedHtmlDeliverable = /\/generated\/.+\.html(?:[?#].*)?$/i.test(String(officialSite.url || ""));
     const linkExists = !officialSite.filePath || existsSync(officialSite.filePath);
     const sourceHint = officialSite.sourceDeliverableName ? `，来源：${officialSite.sourceDeliverableName}` : "";
     const officialSiteExcerpt = officialSite.url
-      ? `访问地址：${officialSite.url}（${isDappMvpPrototype ? "DApp MVP 交互原型" : isDesignPreview ? "设计预览快照" : isGeneratedHtmlDeliverable ? "交互页面交付物" : "交付物链接"}${sourceHint}）`
+      ? `访问地址：${officialSite.url}（${isDesignPreview ? "设计预览快照" : "交付物导航页"}${sourceHint}）`
       : officialSite.filePath
         ? `本地文件：${officialSite.filePath}`
         : "可直接打开在线演示页";
     artifacts.push({
       key: "official_site",
-      category: isDappMvpPrototype
-        ? "DApp MVP 交互原型（项目交付物）"
-        : isDesignPreview
-          ? "设计预览快照（非最终研发成果）"
-          : isGeneratedHtmlDeliverable
-            ? "交互页面交付物"
-            : "交付成果链接",
+      category: isDesignPreview ? "设计预览快照（非最终研发成果）" : "交付成果导航页（辅助查阅）",
       required: false,
-      ready: linkExists && (!isDesignPreview || isDappMvpPrototype),
+      ready: linkExists && !isDesignPreview,
       issue: !linkExists
         ? "链接文件不存在，当前地址不可作为验收依据。"
-        : isDappMvpPrototype
-          ? "该页面为项目 MVP 的高保真交互原型交付物，可直接用于走查与演示。"
         : isDesignPreview
           ? "该页面直接来源于 DESIGN 视觉预览，只能用于看稿，不能替代真实开发结果。"
-          : isGeneratedHtmlDeliverable
-            ? "该页面来自项目交付物中的真实生成链接，可用于走查与演示。"
-            : "该链接来自交付物引用，请结合阶段产出与测试结果进行验收。",
+          : "该页面仅作为成果导航页，最终验收仍需以真实研发交付和测试结果为准。",
       source: "link",
-      name: isDappMvpPrototype
-        ? "DApp MVP 交互原型"
-        : isDesignPreview
-          ? "设计预览快照"
-          : isGeneratedHtmlDeliverable
-            ? "交互页面交付物"
-            : "交付成果链接",
+      name: isDesignPreview ? "设计预览快照" : "交付成果导航页",
       stageType: "ACCEPT",
-      status: isDappMvpPrototype ? "approved" : isDesignPreview ? "submitted" : "approved",
+      status: isDesignPreview ? "submitted" : "approved",
       updatedAt: new Date().toISOString(),
-      url: accessUrls.publicUrl || accessUrls.localUrl || officialSite.url,
-      localUrl: accessUrls.localUrl,
-      publicUrl: accessUrls.publicUrl,
+      url: officialSite.url,
       filePath: officialSite.filePath,
-      excerpt: formatArtifactAccessExcerpt(officialSiteExcerpt, accessUrls)
+      excerpt: officialSiteExcerpt
     });
   }
 
@@ -3669,8 +2895,8 @@ function buildProjectFinalArtifactsReport(
     officialSite
   });
 
-  const required = requiredArtifacts.filter((item) => item.required).length;
-  const provided = requiredArtifacts
+  const required = FINAL_REQUIRED_ARTIFACTS.filter((item) => item.required).length;
+  const provided = FINAL_REQUIRED_ARTIFACTS
     .filter((item) => item.required)
     .reduce((count, item) => {
       const matched = artifacts.find((artifact) => artifact.key === item.key);
@@ -3810,9 +3036,7 @@ const ACCEPTANCE_REPORT_LOW_SIGNAL_TIMELINE_TYPES = new Set<string>([
   "project_created"
 ]);
 const ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN =
-  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|lorem ipsum|\bxxx\b/i;
-const ACCEPTANCE_REPORT_SUSPICIOUS_TODO_PATTERN =
-  /(?:^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/;
+  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
 
 type AcceptanceExecutionRecord = {
   role: string;
@@ -3847,9 +3071,6 @@ function detectSuspiciousDeliverableReasons(content: string) {
   }
   if (ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN.test(normalized)) {
     reasons.push("命中模板/占位/自动补齐特征");
-  }
-  if (ACCEPTANCE_REPORT_SUSPICIOUS_TODO_PATTERN.test(normalized)) {
-    reasons.push("命中 TODO/TBD 占位词特征");
   }
   if (!normalized.includes("## 验收检查清单")) {
     reasons.push("缺少“## 验收检查清单”章节");
@@ -4298,14 +3519,96 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
   ].join("\n");
 }
 
-configureSecurityMiddleware(app);
-app.use(requestLogger);
-app.use(validateJsonMutationBody());
+// CORS 配置
+const configuredAllowedOrigins = (process.env.ALLOWED_ORIGINS?.split(",").map(origin => origin.trim()).filter(Boolean) || []);
+const loopbackOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+const desktopOriginPatterns = [
+  /^app:\/\//i,
+  /^tauri:\/\//i,
+  /^capacitor:\/\/localhost$/i
+];
 
-app.use("/api", (_req, res, next) => {
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
+if (process.env.NODE_ENV === "production" && configuredAllowedOrigins.length === 0) {
+  throw new Error("生产环境必须设置 ALLOWED_ORIGINS 环境变量，不允许使用通配符");
+}
+
+const corsOrigin: cors.CorsOptions["origin"] = process.env.NODE_ENV === "production"
+  ? (origin, callback) => {
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    if (configuredAllowedOrigins.includes(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    if (loopbackOriginPattern.test(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    const isDesktopOrigin = desktopOriginPatterns.some((pattern) => pattern.test(origin));
+    if (isDesktopOrigin) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Not allowed by CORS: ${origin}`));
+  }
+  : true; // 开发环境允许任意源
+
+app.use(cors({
+  origin: corsOrigin,
+  credentials: true
+}));
+
+// 安全 Headers
+app.use(helmet({
+  strictTransportSecurity: {
+    maxAge: 31536000, // 1 year
+    includeSubDomains: true,
+    preload: true
+  },
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      mediaSrc: ["'self'"],
+      frameSrc: ["'none'"]
+    }
+  },
+  xFrameOptions: { action: "deny" },
+  xContentTypeOptions: true,
+  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  xDownloadOptions: false,
+  xPermittedCrossDomainPolicies: false
+}));
+app.use(express.json({ limit: "1mb" }));
+app.use((req, res, next) => {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+
+  res.locals.requestId = requestId;
+  res.setHeader("x-request-id", requestId);
+  res.on("finish", () => {
+    console.log(
+      JSON.stringify({
+        requestId,
+        method: req.method,
+        path: req.originalUrl,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - startedAt
+      })
+    );
+  });
+
   next();
 });
 
@@ -4343,7 +3646,6 @@ app.post("/api/auth/setup", asyncRoute(async (req, res) => {
 app.post("/api/auth/login", asyncRoute(async (req, res) => {
   const payload = req.body as AuthLoginInput;
   const password = String(payload?.password ?? "").trim();
-  const email = String((payload as { email?: unknown })?.email ?? "").trim();
 
   if (!password) {
     res.status(400).json({ message: "password is required" });
@@ -4351,9 +3653,7 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   }
 
   try {
-    const session = email
-      ? await loginUserByEmail(email, password)
-      : await loginAdmin(password);
+    const session = await loginAdmin(password);
     res.setHeader("Set-Cookie", createSessionCookie(session.token));
     await safeAudit(req, res, {
       actorType: "admin",
@@ -4367,68 +3667,6 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
     const message = error instanceof Error ? error.message : "登录失败";
     const statusCode = message.includes("尚未完成初始化") ? 428 : 401;
     res.status(statusCode).json({ message });
-  }
-}));
-
-app.post("/api/auth/register", asyncRoute(async (req, res) => {
-  const payload = req.body as {
-    email?: unknown;
-    name?: unknown;
-    password?: unknown;
-    role?: unknown;
-  };
-  const sessionToken = parseSessionToken(req.headers.cookie);
-
-  try {
-    const user = await registerUserByAdmin(sessionToken, {
-      email: String(payload.email ?? ""),
-      name: String(payload.name ?? ""),
-      password: String(payload.password ?? ""),
-      role: String(payload.role ?? "viewer")
-    });
-
-    await safeAudit(req, res, {
-      actorType: "admin",
-      actorLabel: "管理员",
-      action: "auth.register",
-      resourceType: "user",
-      resourceId: user.id,
-      summary: `创建用户 ${user.email}`,
-      detail: `role=${user.role}`
-    });
-
-    res.json({
-      success: true,
-      data: {
-        id: user.id,
-        email: user.email,
-        name: user.name,
-        role: user.role
-      }
-    });
-  } catch (error) {
-    const code = error instanceof Error ? error.message : "REGISTER_FAILED";
-    if (code === "AUTH_REQUIRED") {
-      res.status(401).json({ success: false, error: { code, message: "authentication required" } });
-      return;
-    }
-    if (code === "FORBIDDEN") {
-      res.status(403).json({ success: false, error: { code, message: "forbidden" } });
-      return;
-    }
-    if (code === "USER_EXISTS") {
-      res.status(409).json({ success: false, error: { code, message: "user already exists" } });
-      return;
-    }
-    if (code === "INVALID_EMAIL" || code === "INVALID_NAME") {
-      res.status(400).json({ success: false, error: { code, message: "invalid user payload" } });
-      return;
-    }
-    if (code.startsWith("密码")) {
-      res.status(400).json({ success: false, error: { code: "WEAK_PASSWORD", message: code } });
-      return;
-    }
-    res.status(400).json({ success: false, error: { code: "REGISTER_FAILED", message: String(code) } });
   }
 }));
 
@@ -4447,15 +3685,6 @@ app.post("/api/auth/logout", asyncRoute(async (req, res) => {
 }));
 
 app.get("/health", asyncRoute(async (_req, res) => {
-  res.json({
-    ok: true,
-    service: "occ-api",
-    runtime: await getRuntimeStatus(),
-    timestamp: new Date().toISOString()
-  });
-}));
-
-app.get("/api/health", asyncRoute(async (_req, res) => {
   res.json({
     ok: true,
     service: "occ-api",
@@ -4525,7 +3754,6 @@ app.use("/api", (req, res, next) => {
       req.path.startsWith("/openclaw/")
       || req.path.startsWith("/projects")
       || req.path.startsWith("/tasks")
-      || req.path.startsWith("/v1/workflows")
       || req.path.startsWith("/gitlab")
       || req.path.startsWith("/role-sets")
       || req.path.startsWith("/product-context")
@@ -4567,15 +3795,6 @@ app.use("/api", (req, res, next) => {
       return;
     }
 
-    const currentUser = await getCurrentUser(sessionToken);
-    if (!currentUser) {
-      res.status(401).json({
-        message: "authentication required"
-      });
-      return;
-    }
-    res.locals.currentUser = currentUser;
-
     next();
   })().catch(next);
 });
@@ -4583,7 +3802,6 @@ app.use("/api", (req, res, next) => {
 app.use("/api/models", createModelsRouter());
 app.use("/api/agents", createAgentsRouter());
 app.use("/api/team", createTeamRouter());
-app.use("/api/users", createUsersRouter());
 app.use("/api/role-sets", createRoleSetsRouter());
 app.use("/api/product-context", createProductContextRouter());
 app.use("/api/issues", createIssuesRouter({
@@ -4595,9 +3813,6 @@ app.use("/api/system", createSystemRouter({
   asyncRoute,
   safeAudit,
   sendEvent
-}));
-app.get("/api/observability/summary", asyncRoute(async (_req, res) => {
-  res.json(await getObservabilitySummarySnapshot());
 }));
 app.use("/api/gitlab", createGitLabRouter());
 app.use("/api/v1/knowledge", createKnowledgeV2Router());
@@ -4644,24 +3859,17 @@ app.use("/api/openclaw", createOpenClawRouter({
   safeAudit
 }));
 
+if (existsSync(webGeneratedPath)) {
+  app.use("/generated", express.static(webGeneratedPath));
+}
 if (existsSync(siteGeneratedPath)) {
   app.use("/generated", express.static(siteGeneratedPath));
-}
-
-if (existsSync(workspaceGeneratedPath)) {
-  app.use("/generated", express.static(workspaceGeneratedPath));
 }
 
 if (existsSync(webDistPath)) {
   app.use(express.static(webDistPath));
   app.get("*", (req, res, next) => {
-    if (
-      req.path.startsWith("/api")
-      || req.path.startsWith("/generated")
-      || req.path === "/health"
-      || req.path === "/ready"
-      || req.path === "/metrics"
-    ) {
+    if (req.path.startsWith("/api") || req.path === "/health" || req.path === "/ready" || req.path === "/metrics") {
       next();
       return;
     }
@@ -4694,7 +3902,6 @@ function asyncRoute(
 }
 
 async function start() {
-  installRuntimeErrorGuards();
   await ensureSeedData((await getRuntimeStatus()).mode);
   ensureLocalAgentMonitorLive();
   restartProjectAutomationTicker();

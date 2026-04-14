@@ -1,11 +1,4 @@
-/**
- * ⚠️ V1 维护模式
- * 此文件仅接受 bug 修复，不接受新功能。
- * 新功能请在 workflows-v2.ts 或 workflow-v2/ 目录下实现。
- * 详见 docs/ARCHITECTURE-EVOLUTION.md
- */
 import express from "express";
-import type { Response } from "express";
 import type {
   InterventionInput,
   ProjectMessageInput,
@@ -13,10 +6,6 @@ import type {
   StageRejectInput,
   StageSubmissionInput,
   TaskUpdateInput
-} from "@occ/shared";
-import {
-  ROLE_LABELS,
-  STAGE_LABELS
 } from "@occ/shared";
 import {
   approveProject,
@@ -37,7 +26,6 @@ import {
   getProjectTemplateGatePrecheck,
   reconcileProjectDeliverablesNow,
   rejectProjectStage,
-  runProjectStageAgent,
   resumeProject,
   submitCurrentStage,
   startProjectWarmupAfterCreate,
@@ -49,19 +37,10 @@ import {
   buildProjectIssueFirstMessage,
   ensureProjectIssueFirst
 } from "../services/project-issue-first.js";
-import {
-  confirmProjectPostCreatePrep,
-  evaluateProjectPostCreatePrepStatus,
-  runProjectPostCreatePrep,
-  saveProjectPostCreatePrepDraft
-} from "../system/post-create-prep.js";
-import { getStageRealModelGateRoles } from "../system/project-stage-execution.js";
 import { prisma } from "../db.js";
-import { getProjectRole, isPermissionAllowed, type ProjectRole } from "../security/rbac.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import {
-  publishProjectMainIssueNote,
   publishTaskIssueNote,
   syncProjectGitLabHarness,
   upsertQualityGateRepairIssue
@@ -72,252 +51,22 @@ import {
   importRelayInputs,
   listProjectInputs
 } from "../workflow-v2/project-modes.js";
-import { validateBody } from "../validation/middleware.js";
-import {
-  MutationOptionalSchema,
-  MutationPassthroughSchema,
-  ProjectAutomationUpdateSchema,
-  ProjectCleanupRequestSchema,
-  ProjectCreateSchema,
-  ProjectInterveneSchema,
-  ProjectMessageSchema,
-  ProjectParseRequestSchema,
-  ProjectPostCreatePrepConfirmSchema,
-  ProjectPostCreatePrepSchema,
-  ProjectPreviewRequestSchema,
-  ProjectRejectSchema,
-  ProjectStageSubmitSchema,
-  TaskStatusUpdateSchema
-} from "../validation/schemas.js";
 
-const PROJECT_DIRECT_CREATE_ENABLED = String(process.env.PROJECT_DIRECT_CREATE_ENABLED ?? "false").trim().toLowerCase() === "true";
+const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED !== "false";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
 const QUALITY_GATE_REPAIR_DEFAULT_LIMIT = 80;
 const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
-  INIT: "项目立项",
-  ANALYSIS: "需求分析",
-  DESIGN: "需求设计/视觉设计",
-  DEV: "代码开发",
-  ACCEPT: "测试验收"
+  INIT: "立项",
+  ANALYSIS: "分析",
+  DESIGN: "设计",
+  DEV: "开发",
+  ACCEPT: "验收"
 };
-const LIFECYCLE_AUDIT_STAGE_ORDER: Array<"INIT" | "ANALYSIS" | "DESIGN" | "DEV" | "ACCEPT"> = [
-  "INIT",
-  "ANALYSIS",
-  "DESIGN",
-  "DEV",
-  "ACCEPT"
-];
 const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
   "pnpm --filter @occ/api typecheck",
   "pnpm --filter @occ/web typecheck",
   "pnpm --filter @occ/web build"
 ];
-type LifecycleReplayJob = {
-  id: string;
-  projectId: string;
-  status: "running" | "completed";
-  startedAt: string;
-  completedAt: string | null;
-  attempted: Array<{ stageType: string; role: RoleType }>;
-  succeeded: Array<{ stageType: string; role: RoleType }>;
-  failed: Array<{ stageType: string; role: RoleType; reason: string }>;
-  latestAudit?: unknown;
-};
-const lifecycleReplayJobs = new Map<string, LifecycleReplayJob>();
-
-function sanitizeReplayReason(value: unknown) {
-  return String(value ?? "")
-    .replace(/[\u0000-\u001F\u007F]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-const PROJECT_PREP_GITLAB_BASE_URL = String(process.env.GITLAB_BASE_URL || "https://gitlab.com")
-  .trim()
-  .replace(/\/+$/, "");
-type CurrentUserLike = {
-  id: string;
-  role: string;
-  name?: string;
-  email?: string;
-};
-type ProjectPermissionSnapshot = {
-  projectRole: ProjectRole | null;
-  canApprove: boolean;
-  canDelete: boolean;
-  canEdit: boolean;
-};
-const LEGACY_DEV_AUTH_BYPASS = process.env.NODE_ENV !== "production";
-
-type PostCreatePrepDraftLike = {
-  discussion?: string;
-  analysis?: string;
-  rawRequirements?: string;
-  prd?: string;
-  debateSummary?: string;
-  discussionTrace?: string;
-};
-
-function parsePostCreatePrepDraft(body: unknown): PostCreatePrepDraftLike | undefined {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return undefined;
-  }
-  const record = body as Record<string, unknown>;
-  return {
-    discussion: typeof record.discussion === "string" ? record.discussion : undefined,
-    analysis: typeof record.analysis === "string" ? record.analysis : undefined,
-    rawRequirements: typeof record.rawRequirements === "string" ? record.rawRequirements : undefined,
-    prd: typeof record.prd === "string" ? record.prd : undefined,
-    debateSummary: typeof record.debateSummary === "string" ? record.debateSummary : undefined,
-    discussionTrace: typeof record.discussionTrace === "string" ? record.discussionTrace : undefined
-  };
-}
-
-function hasPostCreatePrepDraftValue(draft: PostCreatePrepDraftLike | undefined) {
-  if (!draft) {
-    return false;
-  }
-  return [
-    draft.discussion,
-    draft.analysis,
-    draft.rawRequirements,
-    draft.prd,
-    draft.debateSummary,
-    draft.discussionTrace
-  ].some((item) => typeof item === "string");
-}
-
-function normalizePrepTraceMetaValue(value: unknown) {
-  return String(value || "").replace(/\s+/g, " ").trim();
-}
-
-function escapeRegExpForPrepTrace(value: string) {
-  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function upsertPrepDiscussionTraceMetaLine(source: string, key: string, value: unknown) {
-  const normalizedKey = normalizePrepTraceMetaValue(key);
-  if (!normalizedKey) {
-    return String(source || "").trim();
-  }
-  const normalizedValue = normalizePrepTraceMetaValue(value);
-  const linePattern = new RegExp(`(^|\\n)-\\s*${escapeRegExpForPrepTrace(normalizedKey)}:\\s*[^\\n]*(?=\\n|$)`, "i");
-  let next = String(source || "").trim();
-  if (!normalizedValue) {
-    next = next.replace(linePattern, "").replace(/\n{3,}/g, "\n\n").trim();
-    return next;
-  }
-  const nextLine = `- ${normalizedKey}: ${normalizedValue}`;
-  if (linePattern.test(next)) {
-    return next.replace(linePattern, `$1${nextLine}`).replace(/\n{3,}/g, "\n\n").trim();
-  }
-  const roundMarker = "\n## 讨论回合记录";
-  if (next.includes(roundMarker)) {
-    return next.replace(roundMarker, `\n${nextLine}${roundMarker}`).replace(/\n{3,}/g, "\n\n").trim();
-  }
-  return `${next}\n${nextLine}`.trim();
-}
-
-function upsertPrepDiscussionTraceMeta(source: string, fields: Record<string, unknown>) {
-  return Object.entries(fields).reduce((acc, [key, value]) => {
-    return upsertPrepDiscussionTraceMetaLine(acc, key, value);
-  }, String(source || "").trim());
-}
-
-function buildPrepGitLabIssueUrl(projectPath: string, issueIid: number) {
-  const normalizedPath = normalizePrepTraceMetaValue(projectPath);
-  const normalizedIid = Number(issueIid);
-  if (!normalizedPath || !Number.isInteger(normalizedIid) || normalizedIid <= 0) {
-    return "";
-  }
-  return `${PROJECT_PREP_GITLAB_BASE_URL}/${normalizedPath}/-/issues/${normalizedIid}`;
-}
-
-function truncatePrepNoteBlock(value: unknown, maxLength = 1800) {
-  const normalized = String(value || "").trim();
-  if (!normalized) {
-    return "_未生成_";
-  }
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-  return `${normalized.slice(0, Math.max(200, maxLength)).trim()}\n\n...（内容过长，已截断）`;
-}
-
-function getCurrentUserFromLocals(res: Response): CurrentUserLike | null {
-  const raw = res.locals?.currentUser as Partial<CurrentUserLike> | undefined;
-  const id = String(raw?.id || "").trim();
-  const role = String(raw?.role || "").trim().toLowerCase();
-  if (!id || !role) {
-    return null;
-  }
-  return {
-    id,
-    role,
-    name: typeof raw?.name === "string" ? raw.name : undefined,
-    email: typeof raw?.email === "string" ? raw.email : undefined
-  };
-}
-
-function sendForbidden(res: Response, message = "当前账号没有执行该操作的权限") {
-  res.status(403).json({
-    success: false,
-    error: {
-      code: "FORBIDDEN",
-      message
-    }
-  });
-}
-
-async function buildProjectPermissions(projectId: string, user: CurrentUserLike): Promise<ProjectPermissionSnapshot> {
-  const projectRole = await getProjectRole({
-    projectId,
-    userId: user.id
-  });
-  return {
-    projectRole,
-    canApprove: isPermissionAllowed({
-      userRole: user.role,
-      projectRole,
-      permission: "approve"
-    }),
-    canDelete: isPermissionAllowed({
-      userRole: user.role,
-      projectRole,
-      permission: "delete"
-    }),
-    canEdit: isPermissionAllowed({
-      userRole: user.role,
-      projectRole,
-      permission: "edit"
-    })
-  };
-}
-
-function buildPostCreatePrepIssueNoteBody(input: {
-  projectId: string;
-  projectName: string;
-  triggeredBy: string;
-  draft: PostCreatePrepDraftLike | undefined;
-}) {
-  return [
-    "### 创建后预备阶段 · 多Agent讨论回填",
-    `- projectId: ${normalizePrepTraceMetaValue(input.projectId)}`,
-    `- projectName: ${normalizePrepTraceMetaValue(input.projectName)}`,
-    `- triggeredBy: ${normalizePrepTraceMetaValue(input.triggeredBy || "projects_route_manual_trigger")}`,
-    `- generatedAt: ${new Date().toISOString()}`,
-    "",
-    "#### 多Agent讨论结论",
-    truncatePrepNoteBlock(input.draft?.discussion),
-    "",
-    "#### 项目详情理解确认草案",
-    truncatePrepNoteBlock(input.draft?.analysis),
-    "",
-    "#### 核心输入回填摘要",
-    `- rawRequirements: ${truncatePrepNoteBlock(input.draft?.rawRequirements, 800)}`,
-    `- prd: ${truncatePrepNoteBlock(input.draft?.prd, 800)}`,
-    `- debateSummary: ${truncatePrepNoteBlock(input.draft?.debateSummary, 800)}`
-  ].join("\n");
-}
 
 function normalizeStringArrayInput(input: unknown) {
   if (!Array.isArray(input)) {
@@ -541,239 +290,6 @@ function formatTerminalCollaborationViolation(message: string) {
     ? "已检测到协作交接卡区块，但字段未填写完整"
     : "未检测到完整协作交接卡区块";
   return `最新执行未通过协作交接卡协议：${sectionState}，缺少字段 ${formattedFields || "unknown"}。请补齐 factsConfirmed / assumptions / decisions / handoff / openQuestions 后重试。`;
-}
-
-function buildExecutionProtocolFailureDiagnostics(input: {
-  rawMessage: string;
-  protocolGatePrecheck?: ExecutionProtocolPrecheckRecord;
-}): ExecutionProtocolFailureDiagnostics {
-  const rawMessage = String(input.rawMessage || "").trim();
-  const upper = rawMessage.toUpperCase();
-  const categories = new Set<ExecutionProtocolFailureCategory>();
-
-  if (
-    upper.includes("REAL_MODEL_GATE_FAILED")
-    || upper.includes("MODEL_ATTEMPT_TIMEOUT")
-    || upper.includes("REQUEST_TIMEOUT")
-    || upper.includes("ETIMEDOUT")
-    || upper.includes("ECONNRESET")
-    || upper.includes("EAI_AGAIN")
-    || upper.includes("RUNTIME")
-  ) {
-    categories.add("runtime_or_model");
-  }
-  if (upper.includes("TERMINAL_COLLAB_PROTOCOL_VIOLATION")) {
-    categories.add("collaboration");
-  }
-  if (upper.includes("STAGE_TEMPLATE_VALIDATION_FAILED")) {
-    categories.add("stage_template");
-  }
-
-  const precheck = input.protocolGatePrecheck;
-  const missingChecks: ExecutionProtocolFailureMissingCheck[] = [];
-  const blockingIssues = Array.isArray(precheck?.blockingIssues)
-    ? precheck.blockingIssues.filter((item) => String(item || "").trim().length > 0)
-    : [];
-
-  for (const check of precheck?.protocolChecks || []) {
-    if (check.passed) {
-      continue;
-    }
-    if (check.category === "collaboration") {
-      categories.add("collaboration");
-    } else if (check.category === "skill") {
-      categories.add("skill_evidence");
-    } else {
-      categories.add("content_evidence");
-    }
-    missingChecks.push({
-      source: "protocol",
-      key: check.key,
-      label: check.label,
-      detail: check.detail
-    });
-  }
-
-  for (const check of precheck?.contentChecks || []) {
-    if (check.passed) {
-      continue;
-    }
-    categories.add("content_evidence");
-    missingChecks.push({
-      source: "content",
-      key: check.key,
-      label: check.label
-    });
-  }
-
-  for (const issue of blockingIssues.slice(0, 4)) {
-    const normalizedIssue = String(issue || "").trim();
-    if (!normalizedIssue) {
-      continue;
-    }
-    if (/真实模型|model|runtime|超时|timeout|连接/i.test(normalizedIssue)) {
-      categories.add("runtime_or_model");
-    } else if (/模板|template/i.test(normalizedIssue)) {
-      categories.add("stage_template");
-    } else if (/协作|交接|collab/i.test(normalizedIssue)) {
-      categories.add("collaboration");
-    } else {
-      categories.add("content_evidence");
-    }
-    missingChecks.push({
-      source: "blocking",
-      key: `blocking-${missingChecks.length + 1}`,
-      label: "阻断项",
-      detail: normalizedIssue
-    });
-  }
-
-  const uniqueMissingChecks: ExecutionProtocolFailureMissingCheck[] = [];
-  const dedupeSet = new Set<string>();
-  for (const item of missingChecks) {
-    const dedupeKey = `${item.source}|${item.key}|${item.label}|${item.detail || ""}`;
-    if (dedupeSet.has(dedupeKey)) {
-      continue;
-    }
-    dedupeSet.add(dedupeKey);
-    uniqueMissingChecks.push(item);
-  }
-
-  const categoryOrder: ExecutionProtocolFailureCategory[] = [
-    "runtime_or_model",
-    "collaboration",
-    "skill_evidence",
-    "content_evidence",
-    "stage_template",
-    "unknown"
-  ];
-  const orderedCategories = categoryOrder.filter((category) => categories.has(category));
-
-  const primaryCategory = orderedCategories[0] || "unknown";
-  const summaryByCategory: Record<ExecutionProtocolFailureCategory, string> = {
-    runtime_or_model: "执行协议门禁未通过：模型/运行时链路存在异常，请先修复运行时配置后重试。",
-    collaboration: "执行协议门禁未通过：多 Agent 协作交接卡不完整，请补齐交接字段并重试。",
-    skill_evidence: "执行协议门禁未通过：缺少阶段要求的技能调用证据，请补齐对应技能输出。",
-    content_evidence: "执行协议门禁未通过：交付物缺少关键执行证据（代码路径/命令验证/结果）。",
-    stage_template: "执行协议门禁未通过：当前交付物模板结构不完整，请先补齐模板章节与检查项。",
-    unknown: "执行协议门禁未通过：请先根据缺失检查项补齐证据后再重试。"
-  };
-
-  return {
-    primaryCategory,
-    categories: orderedCategories.length > 0
-      ? orderedCategories
-      : (["unknown"] as ExecutionProtocolFailureCategory[]),
-    summary: summaryByCategory[primaryCategory],
-    missingChecks: uniqueMissingChecks.slice(0, 8),
-    blockingIssues
-  };
-}
-
-const EXECUTION_PROTOCOL_FALLBACK_ACTION_ORDER: ProjectRequiredAction["action"][] = [
-  "submit_stage_deliverable",
-  "reconcile_deliverables",
-  "resolve_blocked_tasks",
-  "review_pending_stage",
-  "refresh_runtime"
-];
-
-const EXECUTION_PROTOCOL_ACTION_ORDER: Record<
-  ExecutionProtocolFailureCategory,
-  ProjectRequiredAction["action"][]
-> = {
-  runtime_or_model: [
-    "refresh_runtime",
-    "submit_stage_deliverable",
-    "reconcile_deliverables",
-    "resolve_blocked_tasks",
-    "review_pending_stage"
-  ],
-  collaboration: [
-    "submit_stage_deliverable",
-    "reconcile_deliverables",
-    "resolve_blocked_tasks",
-    "review_pending_stage",
-    "refresh_runtime"
-  ],
-  skill_evidence: [
-    "submit_stage_deliverable",
-    "reconcile_deliverables",
-    "review_pending_stage",
-    "refresh_runtime",
-    "resolve_blocked_tasks"
-  ],
-  content_evidence: [
-    "submit_stage_deliverable",
-    "reconcile_deliverables",
-    "resolve_blocked_tasks",
-    "review_pending_stage",
-    "refresh_runtime"
-  ],
-  stage_template: [
-    "reconcile_deliverables",
-    "submit_stage_deliverable",
-    "review_pending_stage",
-    "resolve_blocked_tasks",
-    "refresh_runtime"
-  ],
-  unknown: EXECUTION_PROTOCOL_FALLBACK_ACTION_ORDER
-};
-
-function buildExecutionProtocolRecoveryActions(input: {
-  project: ProjectRecord;
-  requiredActions: ProjectRequiredAction[];
-  diagnostics: ExecutionProtocolFailureDiagnostics;
-}) {
-  const base = buildRealModelGateRecoveryActions({
-    project: input.project,
-    requiredActions: input.requiredActions
-  });
-  const order = EXECUTION_PROTOCOL_ACTION_ORDER[input.diagnostics.primaryCategory] || REAL_MODEL_GATE_ACTION_ORDER;
-  const rank = new Map(order.map((action, index) => [action, index]));
-
-  const withFallback = [...base.requiredActions];
-  if (input.diagnostics.primaryCategory === "runtime_or_model") {
-    if (!withFallback.some((item) => item.action === "refresh_runtime")) {
-      withFallback.unshift(createFallbackRequiredAction("refresh_runtime", input.project));
-    }
-  } else if (!withFallback.some((item) => item.action === "submit_stage_deliverable")) {
-    withFallback.unshift(createFallbackRequiredAction("submit_stage_deliverable", input.project));
-  }
-  if (!withFallback.some((item) => item.action === "review_pending_stage")) {
-    withFallback.push(createFallbackRequiredAction("review_pending_stage", input.project));
-  }
-
-  const ordered = [...withFallback]
-    .map((item, index) => ({ item, index }))
-    .sort((left, right) => {
-      const leftRank = rank.has(left.item.action) ? Number(rank.get(left.item.action)) : 99;
-      const rightRank = rank.has(right.item.action) ? Number(rank.get(right.item.action)) : 99;
-      if (leftRank !== rightRank) {
-        return leftRank - rightRank;
-      }
-      return left.index - right.index;
-    })
-    .map((entry) => entry.item);
-
-  const deduped: ProjectRequiredAction[] = [];
-  const seen = new Set<ProjectRequiredAction["action"]>();
-  for (const action of ordered) {
-    if (seen.has(action.action)) {
-      continue;
-    }
-    seen.add(action.action);
-    deduped.push(action);
-  }
-
-  return {
-    requiredActions: deduped,
-    recoveryPlan: deduped.map((action, index) => ({
-      step: index + 1,
-      action: action.action,
-      title: action.title
-    }))
-  };
 }
 
 /**
@@ -1471,35 +987,13 @@ type ProjectRequiredAction = {
     | "review_pending_stage"
     | "resolve_blocked_tasks"
     | "reconcile_deliverables"
-    | "refresh_runtime"
-    | "run_post_create_prep";
+    | "refresh_runtime";
   ctaLabel: string;
   reasonCode?: "design_ambiguity";
   prefillContent?: string;
 };
 
 type ProjectRecord = NonNullable<Awaited<ReturnType<typeof findProject>>>;
-type ExecutionProtocolPrecheckRecord = NonNullable<Awaited<ReturnType<typeof getProjectExecutionProtocolPrecheck>>>;
-type ExecutionProtocolFailureCategory =
-  | "runtime_or_model"
-  | "collaboration"
-  | "skill_evidence"
-  | "content_evidence"
-  | "stage_template"
-  | "unknown";
-type ExecutionProtocolFailureMissingCheck = {
-  source: "protocol" | "content" | "blocking";
-  key: string;
-  label: string;
-  detail?: string;
-};
-type ExecutionProtocolFailureDiagnostics = {
-  primaryCategory: ExecutionProtocolFailureCategory;
-  categories: ExecutionProtocolFailureCategory[];
-  summary: string;
-  missingChecks: ExecutionProtocolFailureMissingCheck[];
-  blockingIssues: string[];
-};
 
 type ProjectAutomationState = {
   enabled: boolean;
@@ -1749,10 +1243,9 @@ function tryRecoverStalledAdvanceJob(input: {
   hasLock: boolean;
   hasJob: boolean;
   ensureManualAdvanceJob: (projectId: string) => void;
-  projectAdvanceLocks: Set<string>;
   projectAdvanceJobs: Map<string, Promise<void>>;
 }) {
-  if (!input.hasJob && !input.hasLock) {
+  if (!input.hasJob || input.hasLock) {
     return false;
   }
 
@@ -1771,7 +1264,6 @@ function tryRecoverStalledAdvanceJob(input: {
   }
 
   input.projectAdvanceJobs.delete(input.projectId);
-  input.projectAdvanceLocks.delete(input.projectId);
   input.ensureManualAdvanceJob(input.projectId);
   markProjectAdvanceRecovery(input.projectId);
   return true;
@@ -1811,34 +1303,6 @@ function hasVisualDesignPreview(content: string) {
     || /<!doctype html/i.test(source)
     || /<html[\s>]/i.test(source)
     || /!\[[^\]]*\]\((https?:\/\/|data:image\/)/i.test(source);
-}
-
-async function resolveProjectPostCreatePrepState(project: ProjectRecord) {
-  return evaluateProjectPostCreatePrepStatus({
-    projectId: project.id,
-    description: project.description,
-    projectInputs: project.projectInputs,
-    projectType: project.projectType
-  });
-}
-
-function buildPostCreatePrepRequiredAction(input: {
-  missingItems: string[];
-}): ProjectRequiredAction {
-  const requiresConfirmOnly = input.missingItems.length > 0
-    && input.missingItems.every((item) => item === "用户确认预备内容");
-  return {
-    id: "post-create-prep-required",
-    severity: "critical",
-    title: "项目尚未完成需求分析与多Agent决策预备",
-    detail: requiresConfirmOnly
-      ? "草案已生成，但仍需人工确认通过后才能进入正式项目详情页。"
-      : (input.missingItems.length > 0
-        ? `缺失项：${input.missingItems.join("；")}。请先执行“创建后需求预备”再推进阶段。`
-        : "请先执行“创建后需求预备”再推进阶段。"),
-    action: "run_post_create_prep",
-    ctaLabel: requiresConfirmOnly ? "前往预备阶段确认" : "执行创建后需求预备"
-  };
 }
 
 function createFallbackRequiredAction(
@@ -2039,7 +1503,7 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
   } = options;
 
   const router = express.Router();
-router.post("/api/projects/parse", validateBody(ProjectParseRequestSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/parse", asyncRoute(async (req, res) => {
   if (!PROJECT_PARSE_LEGACY_ENABLED) {
     res.status(410).json({
       success: false,
@@ -2071,7 +1535,7 @@ router.post("/api/projects/parse", validateBody(ProjectParseRequestSchema), asyn
   });
 }));
 
-router.post("/api/projects/preview", validateBody(ProjectPreviewRequestSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/preview", asyncRoute(async (req, res) => {
   const description = String(req.body?.description ?? "").trim();
 
   if (!description) {
@@ -2083,58 +1547,7 @@ router.post("/api/projects/preview", validateBody(ProjectPreviewRequestSchema), 
 }));
 
 router.get("/api/projects", asyncRoute(async (_req, res) => {
-  const projects = await listProjects();
-  const currentUser = getCurrentUserFromLocals(res);
-  if (!currentUser) {
-    res.json(projects);
-    return;
-  }
-
-  const projectIds = projects.map((item) => item.id);
-  const projectRoleMap = new Map<string, ProjectRole | null>();
-  if (currentUser.role !== "admin" && projectIds.length > 0) {
-    const members = await prisma.projectMember.findMany({
-      where: {
-        userId: currentUser.id,
-        projectId: { in: projectIds }
-      },
-      select: {
-        projectId: true,
-        role: true
-      }
-    });
-    for (const member of members) {
-      const role = String(member.role || "").trim().toLowerCase();
-      if (role === "owner" || role === "editor" || role === "viewer") {
-        projectRoleMap.set(member.projectId, role);
-      }
-    }
-  }
-
-  res.json(projects.map((project) => {
-    const projectRole = currentUser.role === "admin" ? "owner" : (projectRoleMap.get(project.id) || null);
-    return {
-      ...project,
-      permissions: {
-        projectRole,
-        canApprove: isPermissionAllowed({
-          userRole: currentUser.role,
-          projectRole,
-          permission: "approve"
-        }),
-        canDelete: isPermissionAllowed({
-          userRole: currentUser.role,
-          projectRole,
-          permission: "delete"
-        }),
-        canEdit: isPermissionAllowed({
-          userRole: currentUser.role,
-          projectRole,
-          permission: "edit"
-        })
-      }
-    };
-  }));
+  res.json(await listProjects());
 }));
 
 type ProjectCleanupCandidate = {
@@ -2147,16 +1560,14 @@ type ProjectCleanupCandidate = {
   recommended: boolean;
 };
 
-const CLEANUP_TEST_NAME_PATTERN = /(复测|冒烟|测试|验证|巡检|高保真|闭环能力版|HTTP真实流转版|设计增强版|重新启用创建|创建即推进|阶段B-|验收版|命题验收|真实设计验收|阶段接力|全流程|单阶段|sandbox|tmp|\bV1\b)/i;
+const CLEANUP_TEST_NAME_PATTERN = /(复测|冒烟|测试|验证|巡检|高保真|闭环能力版|HTTP真实流转版|设计增强版|重新启用创建|创建即推进|阶段B-|验收版|\bV1\b)/i;
 
 function normalizeProjectNameForCleanup(input: string) {
   return String(input || "")
     .trim()
     .toLowerCase()
     .replace(/\s+/g, "")
-    .replace(/[()（）\[\]【】]/g, "")
-    .replace(/[-_]\d{8,}$/i, "")
-    .replace(/\d{12,}$/i, "");
+    .replace(/[()（）\[\]【】]/g, "");
 }
 
 function buildProjectCleanupCandidates(
@@ -2225,7 +1636,7 @@ router.get("/api/projects/cleanup/candidates", asyncRoute(async (_req, res) => {
   });
 }));
 
-router.post("/api/projects/cleanup", validateBody(ProjectCleanupRequestSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
   const idsInput = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]) : [];
   const mode = String(req.body?.mode || "recommended");
   const dryRun = Boolean(req.body?.dryRun);
@@ -2306,7 +1717,7 @@ router.get("/api/projects/automation", asyncRoute(async (_req, res) => {
   });
 }));
 
-router.put("/api/projects/automation", validateBody(ProjectAutomationUpdateSchema), asyncRoute(async (req, res) => {
+router.put("/api/projects/automation", asyncRoute(async (req, res) => {
   const enabled = req.body?.enabled;
   const autoApproveWhenReady = req.body?.autoApproveWhenReady;
   const intervalMsInput = Number(req.body?.intervalMs ?? projectAutomationState.intervalMs);
@@ -2349,7 +1760,7 @@ router.put("/api/projects/automation", validateBody(ProjectAutomationUpdateSchem
   });
 }));
 
-router.post("/api/projects/automation/run", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
   const wasRunning = projectAutomationState.running;
   void runProjectAutomationTick({ force: true });
 
@@ -2374,7 +1785,7 @@ router.post("/api/projects/automation/run", validateBody(MutationOptionalSchema)
   });
 }));
 
-router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects", asyncRoute(async (req, res) => {
   if (!PROJECT_DIRECT_CREATE_ENABLED) {
     res.status(409).json({
       success: false,
@@ -2416,25 +1827,6 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
     (await getRuntimeStatus()).mode
   );
   clearProjectAdvanceCancelled(project.id);
-  const currentUser = getCurrentUserFromLocals(res);
-  if (currentUser) {
-    await prisma.projectMember.upsert({
-      where: {
-        projectId_userId: {
-          projectId: project.id,
-          userId: currentUser.id
-        }
-      },
-      update: {
-        role: "owner"
-      },
-      create: {
-        projectId: project.id,
-        userId: currentUser.id,
-        role: "owner"
-      }
-    });
-  }
 
   await safeAudit(req, res, {
     actorType: "admin",
@@ -2465,7 +1857,7 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
   res.status(201).json(project);
 }));
 
-router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
 
   const hasAdvanceLock = projectAdvanceLocks.has(projectId);
@@ -2476,7 +1868,6 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
       hasLock: hasAdvanceLock,
       hasJob: hasAdvanceJob,
       ensureManualAdvanceJob,
-      projectAdvanceLocks,
       projectAdvanceJobs
     });
     const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, recovered);
@@ -2526,24 +1917,6 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
     return;
   }
 
-  const postCreatePrep = await resolveProjectPostCreatePrepState(project);
-  if (postCreatePrep.required && !postCreatePrep.completed) {
-    resetProjectAdvancePollHint(projectId);
-    const actions = [buildPostCreatePrepRequiredAction({
-      missingItems: postCreatePrep.missingItems
-    })];
-    res.status(409).json({
-      success: false,
-      error: {
-        code: "REQUIRES_USER_INTERVENTION",
-        message: formatRequiredActionsMessage(actions),
-        requiredActions: actions,
-        postCreatePrep
-      }
-    });
-    return;
-  }
-
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
   const blockedByUserIntervention = project.pendingApproval;
@@ -2580,7 +1953,6 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
         hasLock: projectAdvanceLocks.has(projectId),
         hasJob: projectAdvanceJobs.has(projectId),
         ensureManualAdvanceJob,
-        projectAdvanceLocks,
         projectAdvanceJobs
       });
       const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, recovered);
@@ -2626,24 +1998,6 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
       return;
     }
 
-    if (lastJobError.message.startsWith("REAL_MODEL_GATE_FAILED:")) {
-      resetProjectAdvancePollHint(projectId);
-      const recovery = buildRealModelGateRecoveryActions({
-        project: latestProject ?? project,
-        requiredActions: latestRequiredActions
-      });
-      res.status(422).json({
-        success: false,
-        error: {
-          code: "REAL_MODEL_GATE_FAILED",
-          message: lastJobError.message.replace("REAL_MODEL_GATE_FAILED:", "").trim(),
-          requiredActions: recovery.requiredActions,
-          recoveryPlan: recovery.recoveryPlan
-        }
-      });
-      return;
-    }
-
     if (isRecoverableAdvanceFailure(lastJobError.message)) {
       ensureManualAdvanceJob(projectId);
       const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, true);
@@ -2681,7 +2035,7 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
   });
 }));
 
-router.post("/api/projects/:id/reconcile-deliverables", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/reconcile-deliverables", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await reconcileProjectDeliverablesNow(projectId);
   if (!project) {
@@ -2742,128 +2096,7 @@ router.get("/api/projects/:id/lifecycle-quality-audit", asyncRoute(async (req, r
   res.json(audit);
 }));
 
-router.post("/api/projects/:id/lifecycle-quality-audit/replay", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id || "").trim();
-  if (!projectId) {
-    res.status(400).json({
-      success: false,
-      error: {
-        code: "VALIDATION_ERROR",
-        message: "project id is required"
-      }
-    });
-    return;
-  }
-
-  const project = await findProject(projectId);
-  if (!project) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "NOT_FOUND",
-        message: `Project not found: ${projectId}`
-      }
-    });
-    return;
-  }
-
-  const replayRoleTimeoutMs = Math.max(30_000, Number(req.body?.roleTimeoutMs ?? 120_000));
-  const jobId = `replay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const job: LifecycleReplayJob = {
-    id: jobId,
-    projectId: project.id,
-    status: "running",
-    startedAt: new Date().toISOString(),
-    completedAt: null,
-    attempted: [],
-    succeeded: [],
-    failed: []
-  };
-  lifecycleReplayJobs.set(jobId, job);
-
-  void (async () => {
-    for (const stageType of LIFECYCLE_AUDIT_STAGE_ORDER) {
-      const roles = getStageRealModelGateRoles(stageType);
-      for (const role of roles) {
-        job.attempted.push({ stageType, role });
-        try {
-          await Promise.race([
-            runProjectStageAgent({
-              projectId: project.id,
-              projectName: project.name,
-              projectDescription: project.description,
-              parsedIntent: project.parsedIntent,
-              stageType,
-              role,
-              action: "project.lifecycle_audit.replay_real_execution",
-              summary: `质量门禁回放：请以${ROLE_LABELS[role]}身份补充${STAGE_LABELS[stageType]}阶段真实执行证据。`,
-              metadata: {
-                replay: "lifecycle-quality-audit",
-                stageType,
-                role,
-                strictRealModel: true
-              }
-            }),
-            new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error(`replay_timeout_${replayRoleTimeoutMs}ms`)), replayRoleTimeoutMs);
-            })
-          ]);
-          job.succeeded.push({ stageType, role });
-        } catch (error) {
-          job.failed.push({
-            stageType,
-            role,
-            reason: sanitizeReplayReason(error instanceof Error ? error.message : String(error))
-          });
-        }
-      }
-    }
-    job.latestAudit = await getProjectLifecycleQualityAudit(project.id);
-    job.status = "completed";
-    job.completedAt = new Date().toISOString();
-  })().catch((error) => {
-    job.failed.push({
-      stageType: "INIT",
-      role: "ROLE_PM",
-      reason: sanitizeReplayReason(error instanceof Error ? error.message : String(error))
-    });
-    job.status = "completed";
-    job.completedAt = new Date().toISOString();
-  });
-
-  res.status(202).json({
-    success: true,
-    data: {
-      projectId: project.id,
-      jobId,
-      status: "running",
-      roleTimeoutMs: replayRoleTimeoutMs
-    }
-  });
-}));
-
-router.get("/api/projects/:id/lifecycle-quality-audit/replay/:jobId", asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id || "").trim();
-  const jobId = String(req.params.jobId || "").trim();
-  const job = lifecycleReplayJobs.get(jobId);
-  if (!projectId || !jobId || !job || job.projectId !== projectId) {
-    res.status(404).json({
-      success: false,
-      error: {
-        code: "NOT_FOUND",
-        message: "replay job not found"
-      }
-    });
-    return;
-  }
-
-  res.json({
-    success: true,
-    data: job
-  });
-}));
-
-router.post("/api/projects/:id/quality-gate/repair-issues", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/quality-gate/repair-issues", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id || "").trim();
   if (!projectId) {
     res.status(400).json({
@@ -2917,7 +2150,7 @@ router.post("/api/projects/:id/quality-gate/repair-issues", validateBody(Mutatio
   });
 }));
 
-router.post("/api/projects/quality-gate/repair-issues", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/quality-gate/repair-issues", asyncRoute(async (req, res) => {
   const dryRun = Boolean(req.body?.dryRun);
   const projectPath = String(req.body?.projectPath || "").trim() || undefined;
   const includeHistorical = req.body?.includeHistorical !== false;
@@ -3028,7 +2261,7 @@ router.get("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/inputs", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -3052,7 +2285,7 @@ router.post("/api/projects/:id/inputs", validateBody(MutationPassthroughSchema),
   });
 }));
 
-router.post("/api/projects/:id/relay/import", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/relay/import", asyncRoute(async (req, res) => {
   const targetProjectId = String(req.params.id);
   const targetProject = await findProject(targetProjectId);
   if (!targetProject) {
@@ -3105,33 +2338,9 @@ router.get("/api/projects/:id", asyncRoute(async (req, res) => {
 
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
-  const postCreatePrep = await resolveProjectPostCreatePrepState(project);
-  const currentUser = getCurrentUserFromLocals(res);
-  const permissions = currentUser
-    ? await buildProjectPermissions(projectId, currentUser)
-    : LEGACY_DEV_AUTH_BYPASS
-      ? {
-          projectRole: "owner",
-          canApprove: true,
-          canDelete: true,
-          canEdit: true
-        }
-      : {
-          projectRole: null,
-          canApprove: false,
-          canDelete: false,
-          canEdit: false
-        };
-  if (postCreatePrep.required && !postCreatePrep.completed) {
-    requiredActions.unshift(buildPostCreatePrepRequiredAction({
-      missingItems: postCreatePrep.missingItems
-    }));
-  }
   res.json({
     ...project,
-    permissions,
-    requiredActions,
-    postCreatePrep
+    requiredActions
   });
 }));
 
@@ -3153,227 +2362,6 @@ router.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
       projectId,
       total: executions.length,
       executions
-    }
-  });
-}));
-
-router.post("/api/projects/:id/post-create-prep", validateBody(ProjectPostCreatePrepSchema), asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  const issueFirst = await ensureProjectIssueFirst({ projectId }).catch((error) => ({
-    ok: false,
-    enforced: true,
-    code: "ISSUE_FIRST_CHECK_FAILED",
-    message: error instanceof Error ? error.message : String(error)
-  }));
-  if (!issueFirst.ok) {
-    res.status(409).json({
-      success: false,
-      error: {
-        code: "PROJECT_ISSUE_FIRST_REQUIRED",
-        message: buildProjectIssueFirstMessage(issueFirst)
-      }
-    });
-    return;
-  }
-
-  const draft = parsePostCreatePrepDraft(req.body);
-  const hasDraft = hasPostCreatePrepDraftValue(draft);
-  const triggeredBy = hasDraft
-    ? "projects_route_manual_trigger_with_draft"
-    : "projects_route_manual_trigger";
-  if (hasDraft && draft) {
-    await saveProjectPostCreatePrepDraft({
-      projectId,
-      draft,
-      triggeredBy: "projects_route_manual_trigger_draft_prefill"
-    });
-  }
-
-  let postCreatePrep = await runProjectPostCreatePrep({
-    projectId,
-    triggeredBy
-  });
-  const issueFirstData = issueFirst.ok && "data" in issueFirst ? issueFirst.data : undefined;
-  const gitLabProjectPath = normalizePrepTraceMetaValue(issueFirstData?.projectPath);
-  const gitLabIssueIid = Number(issueFirstData?.issueIid);
-  const gitlabPublishRequired = Boolean(
-    gitLabProjectPath
-    && Number.isInteger(gitLabIssueIid)
-    && gitLabIssueIid > 0
-  );
-
-  let gitlabPublishStatus = gitlabPublishRequired ? "pending" : "not_required";
-  let gitlabPublishProjectPath = gitLabProjectPath;
-  let gitlabPublishIssueIid = Number.isInteger(gitLabIssueIid) && gitLabIssueIid > 0 ? gitLabIssueIid : undefined;
-  let gitlabPublishIssueUrl = gitlabPublishIssueIid ? buildPrepGitLabIssueUrl(gitlabPublishProjectPath, gitlabPublishIssueIid) : "";
-  let gitlabPublishNoteUrl = "";
-  let gitlabPublishError = "";
-
-  if (gitlabPublishRequired && gitlabPublishIssueIid) {
-    const publishResult = await publishProjectMainIssueNote({
-      projectId,
-      projectPath: gitlabPublishProjectPath,
-      issueIid: gitlabPublishIssueIid,
-      body: buildPostCreatePrepIssueNoteBody({
-        projectId,
-        projectName: project.name,
-        triggeredBy,
-        draft: postCreatePrep.draft
-      })
-    });
-    if (publishResult.ok) {
-      gitlabPublishStatus = "published";
-      gitlabPublishProjectPath = normalizePrepTraceMetaValue(publishResult.data.projectPath || gitlabPublishProjectPath);
-      gitlabPublishIssueIid = Number(publishResult.data.issueIid || gitlabPublishIssueIid);
-      gitlabPublishIssueUrl = buildPrepGitLabIssueUrl(gitlabPublishProjectPath, gitlabPublishIssueIid);
-      gitlabPublishNoteUrl = normalizePrepTraceMetaValue(publishResult.data.noteUrl);
-      gitlabPublishError = "";
-    } else {
-      gitlabPublishStatus = "failed";
-      gitlabPublishError = normalizePrepTraceMetaValue(`${publishResult.code || "UNKNOWN"}: ${publishResult.message || "发布失败"}`);
-    }
-  }
-
-  const nextDiscussionTrace = upsertPrepDiscussionTraceMeta(
-    String(postCreatePrep.draft?.discussionTrace || ""),
-    {
-      gitlabPublishRequired: gitlabPublishRequired ? "yes" : "no",
-      gitlabPublishStatus,
-      gitlabProjectPath: gitlabPublishProjectPath || undefined,
-      gitlabIssueIid: gitlabPublishIssueIid ? String(gitlabPublishIssueIid) : undefined,
-      gitlabIssueUrl: gitlabPublishIssueUrl || undefined,
-      gitlabNoteUrl: gitlabPublishNoteUrl || undefined,
-      gitlabPublishError: gitlabPublishError || undefined
-    }
-  );
-
-  if (nextDiscussionTrace && nextDiscussionTrace !== String(postCreatePrep.draft?.discussionTrace || "").trim()) {
-    postCreatePrep = await saveProjectPostCreatePrepDraft({
-      projectId,
-      draft: {
-        discussionTrace: nextDiscussionTrace
-      },
-      triggeredBy: "projects_route_manual_trigger_gitlab_publish_status"
-    });
-  }
-  await syncProjectInputsToLatestWorkflow(projectId);
-
-  const refreshed = await findProject(projectId);
-  if (!refreshed) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  const runtime = await getRuntimeStatus();
-  const requiredActions = buildProjectRequiredActions(refreshed, runtime);
-  if (postCreatePrep.required && !postCreatePrep.completed) {
-    requiredActions.unshift(buildPostCreatePrepRequiredAction({
-      missingItems: postCreatePrep.missingItems
-    }));
-  }
-
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.post_create_prep",
-    resourceType: "project",
-    resourceId: projectId,
-    summary: `执行项目 ${projectId} 创建后需求预备`
-  });
-
-  res.json({
-    success: true,
-    data: {
-      project: refreshed,
-      postCreatePrep,
-      requiredActions
-    }
-  });
-}));
-
-router.post("/api/projects/:id/post-create-prep/draft", validateBody(ProjectPostCreatePrepSchema), asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-  const draft = parsePostCreatePrepDraft(req.body);
-  const postCreatePrep = await saveProjectPostCreatePrepDraft({
-    projectId,
-    draft,
-    triggeredBy: "projects_route_manual_draft_save"
-  });
-  await syncProjectInputsToLatestWorkflow(projectId);
-  const refreshed = await findProject(projectId);
-  if (!refreshed) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-  const runtime = await getRuntimeStatus();
-  const requiredActions = buildProjectRequiredActions(refreshed, runtime);
-  if (postCreatePrep.required && !postCreatePrep.completed) {
-    requiredActions.unshift(buildPostCreatePrepRequiredAction({
-      missingItems: postCreatePrep.missingItems
-    }));
-  }
-  res.json({
-    success: true,
-    data: {
-      project: refreshed,
-      postCreatePrep,
-      requiredActions
-    }
-  });
-}));
-
-router.post("/api/projects/:id/post-create-prep/confirm", validateBody(ProjectPostCreatePrepConfirmSchema), asyncRoute(async (req, res) => {
-  const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-  if (!project) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-  const draft = parsePostCreatePrepDraft(req.body);
-  const postCreatePrep = await confirmProjectPostCreatePrep({
-    projectId,
-    confirmedBy: typeof req.body?.confirmedBy === "string" ? req.body.confirmedBy : undefined,
-    notes: typeof req.body?.notes === "string" ? req.body.notes : undefined,
-    draft
-  });
-  await syncProjectInputsToLatestWorkflow(projectId);
-  const refreshed = await findProject(projectId);
-  if (!refreshed) {
-    res.status(404).json({ message: "Project not found" });
-    return;
-  }
-  const runtime = await getRuntimeStatus();
-  const requiredActions = buildProjectRequiredActions(refreshed, runtime);
-  if (postCreatePrep.required && !postCreatePrep.completed) {
-    requiredActions.unshift(buildPostCreatePrepRequiredAction({
-      missingItems: postCreatePrep.missingItems
-    }));
-  }
-  await safeAudit(req, res, {
-    actorType: "admin",
-    actorLabel: "管理员",
-    action: "project.post_create_prep.confirm",
-    resourceType: "project",
-    resourceId: projectId,
-    summary: `确认项目 ${projectId} 创建后需求预备`
-  });
-  res.json({
-    success: true,
-    data: {
-      project: refreshed,
-      postCreatePrep,
-      requiredActions
     }
   });
 }));
@@ -3424,7 +2412,7 @@ router.get("/api/projects/:id/acceptance-report.md", asyncRoute(async (req, res)
   res.send(markdown);
 }));
 
-router.post("/api/projects/:id/acceptance-report/archive", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
 
@@ -3501,11 +2489,13 @@ router.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
     });
   }
 
-  const report = buildProjectFinalArtifactsReport(
-    project,
-    activeJob?.officialSite,
-    await listProjectExecutions(projectId, 80)
-  );
+  const report = activeJob?.status === "completed" && activeJob.report
+    ? activeJob.report
+    : buildProjectFinalArtifactsReport(
+      project,
+      activeJob?.officialSite,
+      await listProjectExecutions(projectId, 80)
+    );
 
   res.json({
     success: true,
@@ -3513,7 +2503,7 @@ router.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/final-artifacts/generate", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/final-artifacts/generate", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -3635,23 +2625,7 @@ router.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
     return;
   }
 
-  let artifact;
-  try {
-    artifact = await generateOfficialSiteArtifact(project);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (/OFFICIAL_SITE_LINK_NOT_FOUND/i.test(message)) {
-      res.status(409).json({
-        success: false,
-        error: {
-          code: "OFFICIAL_SITE_LINK_NOT_FOUND",
-          message: "未在项目交付物中找到可访问的 HTML 原型链接，请先提交真实交付链接。"
-        }
-      });
-      return;
-    }
-    throw error;
-  }
+  const artifact = await generateOfficialSiteArtifact(project);
   const publicPath = String(artifact.publicPath || "").trim();
   const absoluteUrl = /^https?:\/\//i.test(publicPath)
     ? publicPath
@@ -3705,42 +2679,11 @@ router.get("/api/tasks", asyncRoute(async (req, res) => {
   }));
 }));
 
-const handleApproveProject = asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const currentUser = getCurrentUserFromLocals(res);
-  if (!currentUser) {
-    if (!LEGACY_DEV_AUTH_BYPASS) {
-      res.status(401).json({ message: "authentication required" });
-      return;
-    }
-  }
-  if (currentUser) {
-    const permissions = await buildProjectPermissions(projectId, currentUser);
-    if (!permissions.canApprove) {
-      sendForbidden(res, "仅项目负责人/编辑或管理员可以审批阶段");
-      return;
-    }
-  }
   const current = await findProject(projectId);
   if (!current) {
     res.status(404).json({ message: "Project not found" });
-    return;
-  }
-
-  const postCreatePrep = await resolveProjectPostCreatePrepState(current);
-  if (postCreatePrep.required && !postCreatePrep.completed) {
-    const actions = [buildPostCreatePrepRequiredAction({
-      missingItems: postCreatePrep.missingItems
-    })];
-    res.status(409).json({
-      success: false,
-      error: {
-        code: "REQUIRES_USER_INTERVENTION",
-        message: formatRequiredActionsMessage(actions),
-        requiredActions: actions,
-        postCreatePrep
-      }
-    });
     return;
   }
 
@@ -3779,26 +2722,6 @@ const handleApproveProject = asyncRoute(async (req, res) => {
           message: message.replace("REAL_MODEL_GATE_FAILED:", "").trim(),
           requiredActions: recovery.requiredActions,
           recoveryPlan: recovery.recoveryPlan
-        }
-      });
-      return;
-    }
-    if (message.startsWith("WORKFLOW_V2_GATE_BLOCKED:")) {
-      res.status(422).json({
-        success: false,
-        error: {
-          code: "WORKFLOW_V2_GATE_BLOCKED",
-          message: message.replace("WORKFLOW_V2_GATE_BLOCKED:", "").trim() || "workflow-v2 门禁未通过，禁止审批推进。"
-        }
-      });
-      return;
-    }
-    if (message.startsWith("WORKFLOW_V2_ACTIVE_WITHOUT_CURRENT_STAGE:")) {
-      res.status(409).json({
-        success: false,
-        error: {
-          code: "WORKFLOW_V2_ACTIVE_WITHOUT_CURRENT_STAGE",
-          message: message.replace("WORKFLOW_V2_ACTIVE_WITHOUT_CURRENT_STAGE:", "").trim() || "workflow-v2 正在运行但当前阶段异常，请先修复流程状态。"
         }
       });
       return;
@@ -3847,30 +2770,13 @@ const handleApproveProject = asyncRoute(async (req, res) => {
     if (message.startsWith("EXECUTION_PROTOCOL_GATE_FAILED:")) {
       const protocolGatePrecheck = await getProjectExecutionProtocolPrecheck(projectId);
       const rawProtocolMessage = message.replace("EXECUTION_PROTOCOL_GATE_FAILED:", "").trim();
-      const runtime = await getRuntimeStatus();
-      const requiredActions = buildProjectRequiredActions(current, runtime);
-      const diagnostics = buildExecutionProtocolFailureDiagnostics({
-        rawMessage: rawProtocolMessage,
-        protocolGatePrecheck: protocolGatePrecheck || undefined
-      });
-      const recovery = buildExecutionProtocolRecoveryActions({
-        project: current,
-        requiredActions,
-        diagnostics
-      });
-      const renderedMessage = formatTerminalCollaborationViolation(rawProtocolMessage)
-        || diagnostics.summary
-        || rawProtocolMessage;
       res.status(422).json({
         success: false,
         error: {
           code: "EXECUTION_PROTOCOL_GATE_FAILED",
-          message: renderedMessage,
+          message: formatTerminalCollaborationViolation(rawProtocolMessage) || rawProtocolMessage,
           rawMessage: rawProtocolMessage,
-          protocolFailure: diagnostics,
-          protocolGatePrecheck,
-          requiredActions: recovery.requiredActions,
-          recoveryPlan: recovery.recoveryPlan
+          protocolGatePrecheck
         }
       });
       return;
@@ -3899,28 +2805,10 @@ const handleApproveProject = asyncRoute(async (req, res) => {
   });
   void ensureManualAdvanceJob(project.id);
   res.json(project);
-});
+}));
 
-router.post("/api/projects/:id/approve", validateBody(MutationOptionalSchema), handleApproveProject);
-// Backward-compatible alias for clients using PUT semantics.
-router.put("/api/projects/:id/approve", validateBody(MutationOptionalSchema), handleApproveProject);
-
-router.post("/api/projects/:id/reject", validateBody(ProjectRejectSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/reject", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const currentUser = getCurrentUserFromLocals(res);
-  if (!currentUser) {
-    if (!LEGACY_DEV_AUTH_BYPASS) {
-      res.status(401).json({ message: "authentication required" });
-      return;
-    }
-  }
-  if (currentUser) {
-    const permissions = await buildProjectPermissions(projectId, currentUser);
-    if (!permissions.canApprove) {
-      sendForbidden(res, "仅项目负责人/编辑或管理员可以驳回阶段");
-      return;
-    }
-  }
   const current = await findProject(projectId);
   if (!current) {
     res.status(404).json({ message: "Project not found" });
@@ -3975,7 +2863,7 @@ router.post("/api/projects/:id/reject", validateBody(ProjectRejectSchema), async
   res.json(project);
 }));
 
-router.post("/api/projects/:id/intervene", validateBody(ProjectInterveneSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/intervene", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as InterventionInput;
   const command = String(payload?.command ?? "").trim();
@@ -4009,7 +2897,7 @@ router.post("/api/projects/:id/intervene", validateBody(ProjectInterveneSchema),
   res.json(project);
 }));
 
-router.post("/api/projects/:id/resume", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await resumeProject(projectId);
 
@@ -4035,7 +2923,7 @@ router.post("/api/projects/:id/resume", validateBody(MutationOptionalSchema), as
   res.json(project);
 }));
 
-router.post("/api/projects/:id/close", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await closeProject(projectId);
 
@@ -4063,20 +2951,6 @@ router.post("/api/projects/:id/close", validateBody(MutationOptionalSchema), asy
 
 router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const currentUser = getCurrentUserFromLocals(res);
-  if (!currentUser) {
-    if (!LEGACY_DEV_AUTH_BYPASS) {
-      res.status(401).json({ message: "authentication required" });
-      return;
-    }
-  }
-  if (currentUser) {
-    const permissions = await buildProjectPermissions(projectId, currentUser);
-    if (!permissions.canDelete) {
-      sendForbidden(res, "仅项目负责人或管理员可以删除项目");
-      return;
-    }
-  }
   markProjectAdvanceCancelled(projectId);
   const deleted = await deleteProject(projectId);
 
@@ -4102,7 +2976,7 @@ router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   res.json({ success: true, id: projectId });
 }));
 
-router.post("/api/projects/:id/stages/submit", validateBody(ProjectStageSubmitSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as StageSubmissionInput;
   const content = String(payload?.content ?? "").trim();
@@ -4185,7 +3059,7 @@ router.post("/api/projects/:id/stages/submit", validateBody(ProjectStageSubmitSc
   res.json(project);
 }));
 
-router.post("/api/projects/:id/messages", validateBody(ProjectMessageSchema), asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/messages", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as ProjectMessageInput;
   const message = String(payload?.message ?? "").trim();
@@ -4214,7 +3088,7 @@ router.post("/api/projects/:id/messages", validateBody(ProjectMessageSchema), as
   res.json(project);
 }));
 
-router.patch("/api/tasks/:taskId", validateBody(TaskStatusUpdateSchema), asyncRoute(async (req, res) => {
+router.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
   const taskId = String(req.params.taskId);
   const payload = req.body as TaskUpdateInput;
   const status = payload?.status;

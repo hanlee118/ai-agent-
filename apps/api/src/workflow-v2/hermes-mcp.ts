@@ -9,46 +9,6 @@ export type HermesStageRunResult = {
   raw: Record<string, unknown>;
 };
 
-export type HermesMcpRuntimeStatus = {
-  enabled: boolean;
-  endpoint: string;
-  stageMatchMode: string;
-  timeoutMs: number;
-  lastStageKey: string | null;
-  lastAttemptAt: string | null;
-  lastSuccessAt: string | null;
-  lastFailureAt: string | null;
-  lastFailureReason: string | null;
-  lastSkipReason: string | null;
-  totalAttempts: number;
-  totalSuccess: number;
-  totalFailures: number;
-};
-
-export type HermesMcpProbeStatus = {
-  state: "disabled" | "endpoint_missing" | "skipped" | "reachable" | "unreachable";
-  reachable: boolean | null;
-  statusCode: number | null;
-  latencyMs: number;
-  message: string;
-};
-
-const hermesRuntimeState: HermesMcpRuntimeStatus = {
-  enabled: false,
-  endpoint: "",
-  stageMatchMode: "design",
-  timeoutMs: 20_000,
-  lastStageKey: null,
-  lastAttemptAt: null,
-  lastSuccessAt: null,
-  lastFailureAt: null,
-  lastFailureReason: null,
-  lastSkipReason: null,
-  totalAttempts: 0,
-  totalSuccess: 0,
-  totalFailures: 0
-};
-
 function resolveHermesEnabledDefault() {
   if (process.env.NODE_ENV === "test") {
     return false;
@@ -103,103 +63,6 @@ function stageShouldUseHermes(stageKey: string) {
   );
 }
 
-function resolveHermesStageMatchMode() {
-  return normalizeText(process.env.WORKFLOW_V2_HERMES_STAGE_MATCH || "design").toLowerCase() || "design";
-}
-
-function resolveHermesTimeoutMs() {
-  return Math.max(1000, Number(process.env.WORKFLOW_V2_HERMES_TIMEOUT_MS ?? 20_000));
-}
-
-function trackHermesSkip(stageKey: string, reason: string) {
-  hermesRuntimeState.enabled = isHermesEnabled();
-  hermesRuntimeState.endpoint = resolveHermesEndpoint();
-  hermesRuntimeState.stageMatchMode = resolveHermesStageMatchMode();
-  hermesRuntimeState.timeoutMs = resolveHermesTimeoutMs();
-  hermesRuntimeState.lastStageKey = stageKey || null;
-  hermesRuntimeState.lastSkipReason = reason;
-}
-
-function trackHermesAttempt(stageKey: string) {
-  hermesRuntimeState.enabled = isHermesEnabled();
-  hermesRuntimeState.endpoint = resolveHermesEndpoint();
-  hermesRuntimeState.stageMatchMode = resolveHermesStageMatchMode();
-  hermesRuntimeState.timeoutMs = resolveHermesTimeoutMs();
-  hermesRuntimeState.lastStageKey = stageKey || null;
-  hermesRuntimeState.lastAttemptAt = new Date().toISOString();
-  hermesRuntimeState.lastSkipReason = null;
-  hermesRuntimeState.totalAttempts += 1;
-}
-
-function trackHermesFailure(reason: string) {
-  hermesRuntimeState.lastFailureAt = new Date().toISOString();
-  hermesRuntimeState.lastFailureReason = reason;
-  hermesRuntimeState.totalFailures += 1;
-}
-
-function trackHermesSuccess() {
-  hermesRuntimeState.lastSuccessAt = new Date().toISOString();
-  hermesRuntimeState.lastFailureReason = null;
-  hermesRuntimeState.totalSuccess += 1;
-}
-
-export function getHermesMcpRuntimeStatus(): HermesMcpRuntimeStatus {
-  return {
-    ...hermesRuntimeState,
-    enabled: isHermesEnabled(),
-    endpoint: resolveHermesEndpoint(),
-    stageMatchMode: resolveHermesStageMatchMode(),
-    timeoutMs: resolveHermesTimeoutMs()
-  };
-}
-
-export async function probeHermesMcpEndpoint() {
-  if (!isHermesEnabled()) {
-    return {
-      state: "disabled",
-      reachable: null,
-      statusCode: null,
-      latencyMs: 0,
-      message: "hermes_disabled"
-    } satisfies HermesMcpProbeStatus;
-  }
-
-  const endpoint = resolveHermesEndpoint();
-  if (!endpoint) {
-    return {
-      state: "endpoint_missing",
-      reachable: null,
-      statusCode: null,
-      latencyMs: 0,
-      message: "endpoint_missing"
-    } satisfies HermesMcpProbeStatus;
-  }
-  const endpointUrl = new URL(endpoint);
-  const healthUrl = `${endpointUrl.protocol}//${endpointUrl.host}/health`;
-  const startedAt = Date.now();
-  try {
-    const response = await fetch(healthUrl, {
-      method: "GET"
-    });
-    const latencyMs = Math.max(0, Date.now() - startedAt);
-    return {
-      state: response.ok ? "reachable" : "unreachable",
-      reachable: response.ok,
-      statusCode: response.status,
-      latencyMs,
-      message: response.ok ? "ok" : `http_${response.status}`
-    } satisfies HermesMcpProbeStatus;
-  } catch (error) {
-    return {
-      state: "unreachable",
-      reachable: false,
-      statusCode: null,
-      latencyMs: Math.max(0, Date.now() - startedAt),
-      message: error instanceof Error ? error.message : String(error)
-    } satisfies HermesMcpProbeStatus;
-  }
-}
-
 function asHermesArtifactList(value: unknown) {
   return asRecordArray(value)
     .map((item) => ({
@@ -245,22 +108,18 @@ export async function tryRunStageWithHermes(input: {
   expectedSkills?: string[];
 }): Promise<HermesStageRunResult | null> {
   if (!isHermesEnabled()) {
-    trackHermesSkip(input.stageKey, "disabled");
     return null;
   }
   if (!stageShouldUseHermes(input.stageKey)) {
-    trackHermesSkip(input.stageKey, "stage_not_matched");
     return null;
   }
 
   const endpoint = resolveHermesEndpoint();
   if (!endpoint) {
-    trackHermesSkip(input.stageKey, "endpoint_missing");
     return null;
   }
 
-  trackHermesAttempt(input.stageKey);
-  const timeoutMs = resolveHermesTimeoutMs();
+  const timeoutMs = Math.max(1000, Number(process.env.WORKFLOW_V2_HERMES_TIMEOUT_MS ?? 20_000));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -291,12 +150,10 @@ export async function tryRunStageWithHermes(input: {
       signal: controller.signal
     });
     if (!response.ok) {
-      trackHermesFailure(`http_${response.status}`);
       return null;
     }
     const json = asRecord(await response.json());
     if (!json) {
-      trackHermesFailure("invalid_json");
       return null;
     }
 
@@ -312,12 +169,11 @@ export async function tryRunStageWithHermes(input: {
       ?? ""
     );
     if (!success || (artifacts.length === 0 && !resolution && !textualOutput)) {
-      trackHermesFailure("empty_payload");
       return null;
     }
     const summary = normalizeText(input.summary) || `stage ${input.stageKey}`;
 
-    const result = {
+    return {
       body: toRunBody({
         stageKey: input.stageKey,
         summary,
@@ -336,10 +192,7 @@ export async function tryRunStageWithHermes(input: {
       })),
       raw: json
     };
-    trackHermesSuccess();
-    return result;
   } catch {
-    trackHermesFailure("request_failed");
     return null;
   } finally {
     clearTimeout(timer);

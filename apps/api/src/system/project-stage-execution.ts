@@ -81,16 +81,16 @@ export type ProjectStageExecutionStrategy = {
 
 const STAGE_COMPANION_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
   INIT: ["ROLE_ANALYST"],
-  ANALYSIS: ["ROLE_ANALYST", "ROLE_PM"],
-  DESIGN: ["ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN"],
+  ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
+  DESIGN: ["ROLE_ANALYST", "ROLE_PRODUCT"],
   DEV: ["ROLE_ANALYST", "ROLE_ARCH"],
   ACCEPT: ["ROLE_ANALYST", "ROLE_QA"]
 };
 
 const STAGE_REAL_MODEL_GATE_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
   INIT: ["ROLE_PM"],
-  ANALYSIS: ["ROLE_ANALYST", "ROLE_PM"],
-  DESIGN: ["ROLE_PRODUCT", "ROLE_DESIGN"],
+  ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
+  DESIGN: ["ROLE_DESIGN"],
   DEV: ["ROLE_DEV"],
   ACCEPT: ["ROLE_QA"]
 };
@@ -125,7 +125,8 @@ const DESIGN_STITCH_HINT_PATTERN = /(stitch|stitch\.withgoogle|figma)/i;
 
 const TERMINAL_STAGE_ROLE_SET = new Set<string>([
   "ANALYSIS:ROLE_ANALYST",
-  "ANALYSIS:ROLE_PM",
+  "ANALYSIS:ROLE_PRODUCT",
+  "DESIGN:ROLE_PRODUCT",
   "DESIGN:ROLE_DESIGN",
   "DEV:ROLE_ARCH",
   "DEV:ROLE_DEV"
@@ -291,16 +292,12 @@ export function getStageRealModelGateRoles(stageType: StageType) {
 
 function getStageRequiredSkills(stageType: StageType, role: RoleType) {
   const stitchMode = getDesignStitchMode();
-  if (role === "ROLE_DESIGN") {
+  if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
     const baseSkills = ["design-to-code", "frontend-design", "frontend-design-pro"];
     if (stitchMode === "required") {
       return [...baseSkills, "stitch"];
     }
     return baseSkills;
-  }
-
-  if (stageType === "DESIGN" && role === "ROLE_PRODUCT") {
-    return ["prd-structuring", "journey-mapping"];
   }
 
   if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
@@ -312,19 +309,11 @@ function getStageRequiredSkills(stageType: StageType, role: RoleType) {
 
 function getStageSkillProtocol(stageType: StageType, role: RoleType) {
   const stitchMode = getDesignStitchMode();
-  if (stageType === "ANALYSIS" || role === "ROLE_ANALYST") {
+  if (stageType === "ANALYSIS" || role === "ROLE_ANALYST" || role === "ROLE_PRODUCT") {
     return [
       "先基于当前项目做需求澄清、边界判断与价值取舍，再输出阶段结论",
       "必须显式区分已确认事实、推断假设与待确认项，避免把幻觉写成既定需求",
       "输出末尾必须追加结构化证据区块，说明判断依据、产出物与校验结论"
-    ];
-  }
-
-  if (stageType === "DESIGN" && role === "ROLE_PRODUCT") {
-    return [
-      "先读取需求分析文档与排期约束，再输出 PRD 和功能优先级",
-      "必须显式写清事实输入、功能边界、非目标与验收标准，禁止替代为视觉稿",
-      "handoff 必须写给设计角色，包含页面范围、关键状态和不可变更约束"
     ];
   }
 
@@ -529,7 +518,7 @@ export function buildTerminalStageExecutionMessage(input: {
 }
 
 export function getDesignStitchMode(): DesignStitchMode {
-  const raw = String(process.env.DESIGN_STITCH_MODE ?? "required").trim().toLowerCase();
+  const raw = String(process.env.DESIGN_STITCH_MODE ?? "").trim().toLowerCase();
   if (raw === "required" || raw === "strict" || raw === "hard") {
     return "required";
   }
@@ -541,7 +530,7 @@ export function getDesignStitchMode(): DesignStitchMode {
 
 export function isDesignStitchEvidenceRequired(stageType: StageType, role: RoleType) {
   const mode = getDesignStitchMode();
-  return mode === "required" && role === "ROLE_DESIGN";
+  return mode === "required" && (stageType === "DESIGN" || role === "ROLE_DESIGN");
 }
 
 export function validateDesignStitchEvidence(output: string): DesignStitchEvidenceValidation {

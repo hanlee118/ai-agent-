@@ -2327,7 +2327,7 @@ const ProjectRoom = ({
     return mapped.length > 0 ? mapped : [{ id: 'empty', name: '暂无交付物', type: '等待任务推进', size: '-' }];
   }, [deliverables, effectiveProjectTasks]);
 
-  const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+  const currentStageType = stageItems.find((stage) => stage.status === 'active')?.type || detail?.currentStage || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const workflowStageRows = workflowOverview?.stages || [];
