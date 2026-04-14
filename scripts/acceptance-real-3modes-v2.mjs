@@ -11,11 +11,19 @@ const SCENARIOS = String(process.env.SCENARIOS || 'single,full,relay')
   .split(',')
   .map((item) => item.trim().toLowerCase())
   .filter(Boolean);
+const USER_PROJECT_TOPIC = String(process.env.USER_PROJECT_TOPIC || '').trim();
+const USER_VISUAL_STYLE = String(process.env.USER_VISUAL_STYLE || '').trim();
+const USER_PROJECT_BRIEF = String(process.env.USER_PROJECT_BRIEF || '').trim();
+const EFFECTIVE_PROJECT_BRIEF = USER_PROJECT_BRIEF
+  || (USER_PROJECT_TOPIC
+    ? `${USER_PROJECT_TOPIC}${USER_VISUAL_STYLE ? `（${USER_VISUAL_STYLE}）` : ''}`
+    : '');
 const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const REPORT_DIR = path.resolve(process.cwd(), 'docs/reports');
 const REPORT_PATH = path.resolve(REPORT_DIR, 'acceptance-real-3modes-v2.json');
 
 let SESSION_TOKEN = '';
+const SUBMITTED_DELIVERABLE_KEYS = new Set();
 
 function log(...args) {
   const ts = new Date().toISOString();
@@ -35,6 +43,18 @@ function unwrap(payload) {
     return payload.data;
   }
   return payload;
+}
+
+async function submitDeliverableOnce(projectId, dedupeKey, submitter) {
+  const key = `${projectId}:${dedupeKey}`;
+  if (SUBMITTED_DELIVERABLE_KEYS.has(key)) {
+    return { ok: true, status: 208, skipped: true };
+  }
+  const res = await submitter();
+  if (res?.ok) {
+    SUBMITTED_DELIVERABLE_KEYS.add(key);
+  }
+  return res;
 }
 
 async function request(method, route, body, timeoutMs = REQUEST_TIMEOUT_MS) {
@@ -94,6 +114,17 @@ function buildProjectInputByTemplate(templateKey, description) {
   };
   const resolved = map[String(templateKey || '').trim()] || map.standard_software_development;
   return [{ name: resolved.name, type: resolved.type, content, inputSource: 'manual' }];
+}
+
+function buildTopicConstraintSection(stageLabel) {
+  if (!EFFECTIVE_PROJECT_BRIEF) return [];
+  return [
+    '',
+    '## 命题上下文',
+    `- 命题：${EFFECTIVE_PROJECT_BRIEF}`,
+    `- 当前阶段：${stageLabel}`,
+    '- 约束：所有分析、设计、实现与验收内容必须围绕此命题，不得漂移到无关业务。'
+  ];
 }
 
 async function ensureSession() {
@@ -177,6 +208,7 @@ function buildExecutionProtocolSections(stageLabel, requiredSkills = []) {
 async function submitDesignReview(projectId) {
   const content = [
     '# 设计审查卡.md',
+    ...buildTopicConstraintSection('设计审查'),
     '## 视觉方案',
     '- 以业务目标与验收口径为核心，聚焦关键路径与高价值操作。',
     '- 首屏强调价值主张、主行动按钮与当前阶段可验证证据。',
@@ -248,6 +280,7 @@ async function submitGenericDeliverable(projectId, title = '阶段交付补充.m
     title,
     content: [
       `# ${stage} 交付补充`,
+      ...buildTopicConstraintSection(`${stage}交付`),
       '',
       '## 本轮实现范围',
       '- 完成本阶段核心任务闭环：输入确认 -> 执行产出 -> 验证结论。',
@@ -317,6 +350,7 @@ async function submitGenericDeliverable(projectId, title = '阶段交付补充.m
 async function submitImplementationWordDeliverable(projectId) {
   const content = [
     '# 技术方案与选型.md',
+    ...buildTopicConstraintSection('技术方案'),
     '## 技术方案概览',
     '- 目标：在既有阶段编排基础上完成可验收的实现闭环，保证流程可推进。',
     '- 方案：采用分层路由 + 阶段状态机 + 交付门禁校验的组合实现。',
@@ -391,6 +425,7 @@ async function submitImplementationWordDeliverable(projectId) {
 async function submitRuntimeDeliveryDeliverable(projectId) {
   const content = [
     '# 运行地址与部署说明.md',
+    ...buildTopicConstraintSection('运行与部署'),
     '## 运行地址清单',
     '- 前端地址：http://127.0.0.1:5173',
     '- API 地址：http://127.0.0.1:8787',
@@ -451,6 +486,7 @@ async function submitRuntimeDeliveryDeliverable(projectId) {
 async function submitTestReportDeliverable(projectId) {
   const content = [
     '# 测试报告.md',
+    ...buildTopicConstraintSection('测试验收'),
     '## 测试范围与环境',
     '- 范围：项目创建、阶段推进、交付提交、验收审批主链路。',
     '- 环境：Web=http://127.0.0.1:5173，API=http://127.0.0.1:8787。',
@@ -509,6 +545,7 @@ async function submitTestReportDeliverable(projectId) {
 async function submitProductBackfillDeliverable(projectId) {
   const content = [
     '# 产品说明文档回填.md',
+    ...buildTopicConstraintSection('产品回填'),
     '## 新增能力摘要',
     '- 新增：按阶段模板自动提交核心交付文档。',
     '- 新增：Issue Debate 网络波动重试与失败原因可观测。',
@@ -574,6 +611,7 @@ async function submitProductBackfillDeliverable(projectId) {
 async function submitDesignVisualPreview(projectId) {
   const content = [
     '# 视觉定稿单页.preview.html.md',
+    ...buildTopicConstraintSection('视觉定稿'),
     '## 视觉方案',
     '- 视觉方向：以阶段执行证据为核心，突出可交付与可验收路径。',
     '- 场景聚焦：项目创建、阶段执行、交付审批三个高频入口优先展示。',
@@ -666,10 +704,10 @@ async function handleRequiredActions(projectId, requiredActions, logs) {
     const code = String(action?.action || '');
     logs.push({ type: 'required_action', action: code, title: String(action?.title || '') });
     if (code === 'open_design_review') {
-      const review = await submitDesignReview(projectId);
+      const review = await submitDeliverableOnce(projectId, 'design_review_card', () => submitDesignReview(projectId));
       assert(review.ok, `[required_action] submit design review failed: ${fmtErr(review)}`);
       logs.push({ type: 'submit_design_review', status: review.status });
-      const visual = await submitDesignVisualPreview(projectId);
+      const visual = await submitDeliverableOnce(projectId, 'design_visual_preview', () => submitDesignVisualPreview(projectId));
       assert(visual.ok, `[required_action] submit design visual preview failed: ${fmtErr(visual)}`);
       logs.push({ type: 'submit_design_visual_preview', status: visual.status });
       continue;
@@ -677,36 +715,36 @@ async function handleRequiredActions(projectId, requiredActions, logs) {
     if (code === 'submit_stage_deliverable') {
       const detail = await getProject(projectId);
       if (String(detail?.currentStage || '').toUpperCase() === 'DEV') {
-        const tech = await submitImplementationWordDeliverable(projectId);
+        const tech = await submitDeliverableOnce(projectId, 'dev_tech_solution', () => submitImplementationWordDeliverable(projectId));
         assert(tech.ok, `[required_action] submit implementation word failed: ${fmtErr(tech)}`);
         logs.push({ type: 'submit_implementation_word', status: tech.status });
 
-        const impl = await submitGenericDeliverable(projectId, '实现结果说明.md');
+        const impl = await submitDeliverableOnce(projectId, 'dev_impl_result', () => submitGenericDeliverable(projectId, '实现结果说明.md'));
         assert(impl.ok, `[required_action] submit implementation result failed: ${fmtErr(impl)}`);
         logs.push({ type: 'submit_implementation_result', status: impl.status });
 
-        const runtime = await submitRuntimeDeliveryDeliverable(projectId);
+        const runtime = await submitDeliverableOnce(projectId, 'dev_runtime_delivery', () => submitRuntimeDeliveryDeliverable(projectId));
         assert(runtime.ok, `[required_action] submit runtime delivery failed: ${fmtErr(runtime)}`);
         logs.push({ type: 'submit_runtime_delivery', status: runtime.status });
         continue;
       }
       if (String(detail?.currentStage || '').toUpperCase() === 'DESIGN') {
-        const designPreview = await submitDesignVisualPreview(projectId);
+        const designPreview = await submitDeliverableOnce(projectId, 'design_visual_preview', () => submitDesignVisualPreview(projectId));
         assert(designPreview.ok, `[required_action] submit design visual preview failed: ${fmtErr(designPreview)}`);
         logs.push({ type: 'submit_design_visual_preview', status: designPreview.status });
         continue;
       }
       if (String(detail?.currentStage || '').toUpperCase() === 'ACCEPT') {
-        const testReport = await submitTestReportDeliverable(projectId);
+        const testReport = await submitDeliverableOnce(projectId, 'accept_test_report', () => submitTestReportDeliverable(projectId));
         assert(testReport.ok, `[required_action] submit test report failed: ${fmtErr(testReport)}`);
         logs.push({ type: 'submit_test_report', status: testReport.status });
 
-        const backfill = await submitProductBackfillDeliverable(projectId);
+        const backfill = await submitDeliverableOnce(projectId, 'accept_product_backfill', () => submitProductBackfillDeliverable(projectId));
         assert(backfill.ok, `[required_action] submit product backfill failed: ${fmtErr(backfill)}`);
         logs.push({ type: 'submit_product_backfill', status: backfill.status });
         continue;
       }
-      const r = await submitGenericDeliverable(projectId);
+      const r = await submitDeliverableOnce(projectId, `generic_${String(detail?.currentStage || 'unknown').toLowerCase()}`, () => submitGenericDeliverable(projectId));
       assert(r.ok, `[required_action] submit generic deliverable failed: ${fmtErr(r)}`);
       logs.push({ type: 'submit_stage_deliverable', status: r.status });
       continue;
@@ -1092,28 +1130,34 @@ async function main() {
     let full = null;
 
     if (SCENARIOS.includes('single')) {
+      const singleBrief = EFFECTIVE_PROJECT_BRIEF
+        ? `请为“${EFFECTIVE_PROJECT_BRIEF}”创建单阶段视觉设计项目，需由真实模型完成多角色讨论并最终交付可验收设计产物。`
+        : '请创建单阶段视觉设计项目，需由真实模型完成多角色讨论并最终交付可验收设计产物。';
       single = await runScenario({
         label: 'single-stage-visual',
         mode: 'single',
-        name: `验收2-单阶段-视觉-${Date.now()}`,
-        description: '请创建单阶段视觉设计项目，需由真实模型完成多角色讨论并最终交付可验收设计产物。',
+        name: `命题验收-单阶段-视觉-${Date.now()}`,
+        description: singleBrief,
         workflowTemplateKey: 'visual_design',
         projectType: 'standalone',
-        projectInputs: buildProjectInputByTemplate('visual_design', '视觉设计阶段输入：PRD、页面目标、品牌风格、主要用户任务和验收口径。'),
+        projectInputs: buildProjectInputByTemplate('visual_design', singleBrief),
         expectedProjectStages: ['INIT', 'DESIGN']
       });
       report.scenarios.push(single);
     }
 
     if (SCENARIOS.includes('full')) {
+      const fullBrief = EFFECTIVE_PROJECT_BRIEF
+        ? `创建一个标准全流程项目，命题为“${EFFECTIVE_PROJECT_BRIEF}”，并完成从需求到验收的全流程交付。`
+        : '创建一个标准全流程项目并完成交付。';
       full = await runScenario({
         label: 'full-flow-standard',
         mode: 'full',
-        name: `验收2-全流程-${Date.now()}`,
-        description: '创建一个标准全流程项目并完成交付。',
+        name: `命题验收-全流程-${Date.now()}`,
+        description: fullBrief,
         workflowTemplateKey: 'standard_software_development',
         projectType: 'complete',
-        projectInputs: buildProjectInputByTemplate('standard_software_development', '全流程输入：业务目标、核心场景、范围边界、验收标准、非功能约束。'),
+        projectInputs: buildProjectInputByTemplate('standard_software_development', fullBrief),
         expectedProjectStages: ['INIT', 'ANALYSIS', 'DESIGN', 'DEV', 'ACCEPT']
       });
       report.scenarios.push(full);
