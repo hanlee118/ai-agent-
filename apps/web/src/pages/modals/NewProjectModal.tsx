@@ -1,10 +1,7 @@
 import { FileUp, Upload } from 'lucide-react';
 import type { NewProjectModalProps } from './NewProjectModal.types';
 import IndustryConfigPanel from './components/IndustryConfigPanel';
-import IssueAnalysisPanel from './components/IssueAnalysisPanel';
 import IssueInputPanel from './components/IssueInputPanel';
-import ProjectConfirmCard from './components/ProjectConfirmCard';
-import TeamAssignmentPanel from './components/TeamAssignmentPanel';
 import { useNewProjectModalController } from './hooks/useNewProjectModalController';
 import SurfaceModal from '../impl/SurfaceModal';
 
@@ -15,17 +12,12 @@ export default function NewProjectModal(props: NewProjectModalProps) {
     handleClose,
     isImporting,
     setIsImporting,
-    step,
     handleImportProjectFile,
-    parsedProject,
   } = controller;
-  const steps: Array<{ id: typeof step; label: string }> = [
-    { id: 'input', label: '需求输入' },
-    { id: 'analysis', label: '分析讨论' },
-    { id: 'team', label: '团队分配' },
-    { id: 'confirm', label: '确认创建' },
+  const steps: Array<{ id: string; label: string }> = [
+    { id: 'input', label: '创建项目' },
   ];
-  const currentIndex = steps.findIndex((item) => item.id === step);
+  const currentIndex = 0;
 
   return (
     <SurfaceModal isOpen={isOpen} onClose={handleClose} title="创建新项目">
@@ -69,24 +61,10 @@ export default function NewProjectModal(props: NewProjectModalProps) {
               </div>
             </div>
 
-            {step === 'input' && (
-              <div className="space-y-4">
-                <IndustryConfigPanel controller={controller} />
-                <IssueInputPanel controller={controller} />
-              </div>
-            )}
-
-            {step === 'analysis' && parsedProject && (
-              <IssueAnalysisPanel controller={controller} />
-            )}
-
-            {step === 'team' && parsedProject && (
-              <TeamAssignmentPanel controller={controller} />
-            )}
-
-            {step === 'confirm' && parsedProject && (
-              <ProjectConfirmCard controller={controller} />
-            )}
+            <div className="space-y-4">
+              <IndustryConfigPanel controller={controller} />
+              <IssueInputPanel controller={controller} />
+            </div>
           </>
         ) : (
           <div className="p-8 border-2 border-dashed border-border-subtle rounded-2xl bg-white/5 flex flex-col items-center justify-center space-y-4 group hover:border-primary/50 transition-all cursor-pointer">

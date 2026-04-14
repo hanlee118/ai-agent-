@@ -400,6 +400,22 @@ function fallbackDivergences(opinions: IssueDebateOpinion[]) {
   ];
 }
 
+function normalizeDebateFailureReason(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error ?? "unknown error");
+  return message.replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+function isTransientDebateFailureReason(reason: string) {
+  const normalized = String(reason || "").toLowerCase();
+  return normalized.includes("fetch failed")
+    || normalized.includes("econnreset")
+    || normalized.includes("econnrefused")
+    || normalized.includes("enotfound")
+    || normalized.includes("timeout")
+    || normalized.includes("aborted")
+    || normalized.includes("timed out");
+}
+
 function toConsensusAndDivergences(opinions: IssueDebateOpinion[]) {
   if (opinions.length === 0) {
     return { consensus: [] as string[], divergences: [] as string[] };
@@ -535,16 +551,45 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
     } as IssueDebateOpinion;
   };
 
-  const settled: PromiseSettledResult<IssueDebateOpinion>[] = [];
+  let settled: PromiseSettledResult<IssueDebateOpinion>[] = [];
   for (let index = 0; index < selectedRoles.length; index += debateConcurrency) {
     const batch = selectedRoles.slice(index, index + debateConcurrency);
     const batchSettled = await runDebateRoleBatch(batch, executeRole);
     settled.push(...batchSettled);
   }
 
-  const successfulOpinions = settled
+  let successfulOpinions = settled
     .filter((item): item is PromiseFulfilledResult<IssueDebateOpinion> => item.status === "fulfilled")
     .map((item) => item.value);
+  let failedReasons = settled
+    .filter((item): item is PromiseRejectedResult => item.status === "rejected")
+    .map((item) => normalizeDebateFailureReason(item.reason))
+    .filter(Boolean);
+  const shouldRetryAll =
+    successfulOpinions.length === 0
+    && failedReasons.length === selectedRoles.length
+    && failedReasons.every((reason) => isTransientDebateFailureReason(reason));
+  if (shouldRetryAll) {
+    console.warn(`[issue-debate] all role calls hit transient failure, retrying once in serial mode`);
+    settled = [];
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    for (const roleId of selectedRoles) {
+      const retrySettled = await runDebateRoleBatch([roleId], executeRole);
+      settled.push(...retrySettled);
+    }
+    successfulOpinions = settled
+      .filter((item): item is PromiseFulfilledResult<IssueDebateOpinion> => item.status === "fulfilled")
+      .map((item) => item.value);
+    failedReasons = settled
+      .filter((item): item is PromiseRejectedResult => item.status === "rejected")
+      .map((item) => normalizeDebateFailureReason(item.reason))
+      .filter(Boolean);
+  }
+  if (failedReasons.length > 0) {
+    console.warn(
+      `[issue-debate] role execution failed (${failedReasons.length}/${selectedRoles.length}): ${failedReasons.slice(0, 3).join(" | ")}`
+    );
+  }
   const failed = settled.length - successfulOpinions.length;
   const opinionByRole = new Map(successfulOpinions.map((item) => [item.roleId, item]));
   const opinions: IssueDebateOpinion[] = selectedRoles.map((roleId, index) => {
@@ -591,7 +636,8 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
       sufficiency.realModelCount > 0 && !hasRealModel
         ? `仅 ${sufficiency.realModelCount} 个角色完成真实模型输出，最低要求 ${sufficiency.effectiveMinRoles} 个且需包含需求分析师与至少 1 个非分析角色。`
         : "",
-      failed > 0 ? `${failed} 个角色辩论调用失败，已用可用结果继续。` : ""
+      failed > 0 ? `${failed} 个角色辩论调用失败，已用可用结果继续。` : "",
+      failedReasons.length > 0 ? `失败样本: ${failedReasons.slice(0, 2).join(" | ")}` : ""
     ]
       .filter(Boolean)
       .join(" ")

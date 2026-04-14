@@ -52,7 +52,7 @@ import {
   listProjectInputs
 } from "../workflow-v2/project-modes.js";
 
-const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED === "true";
+const PROJECT_DIRECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED !== "false";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
 const QUALITY_GATE_REPAIR_DEFAULT_LIMIT = 80;
 const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
@@ -1850,7 +1850,6 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
         error instanceof Error ? error.message : String(error)
       );
     });
-    void ensureManualAdvanceJob(project.id);
   } else {
     console.warn(`[ProjectIssueFirst] project create gated for ${project.id}: ${issueFirst.code} ${issueFirst.message}`);
   }

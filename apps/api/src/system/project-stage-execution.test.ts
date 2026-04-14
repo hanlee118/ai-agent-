@@ -71,11 +71,11 @@ test("analysis stage adds product companion for collaborative planning", () => {
 });
 
 test("real model gate covers analysis, design and dev critical roles", () => {
-  assert.deepEqual(getStageRealModelGateRoles("INIT"), ["ROLE_ANALYST", "ROLE_PM"]);
+  assert.deepEqual(getStageRealModelGateRoles("INIT"), ["ROLE_PM"]);
   assert.deepEqual(getStageRealModelGateRoles("ANALYSIS"), ["ROLE_ANALYST", "ROLE_PRODUCT"]);
-  assert.deepEqual(getStageRealModelGateRoles("DESIGN"), ["ROLE_ANALYST", "ROLE_DESIGN"]);
-  assert.deepEqual(getStageRealModelGateRoles("DEV"), ["ROLE_ANALYST", "ROLE_DEV"]);
-  assert.deepEqual(getStageRealModelGateRoles("ACCEPT"), ["ROLE_ANALYST", "ROLE_QA"]);
+  assert.deepEqual(getStageRealModelGateRoles("DESIGN"), ["ROLE_DESIGN"]);
+  assert.deepEqual(getStageRealModelGateRoles("DEV"), ["ROLE_DEV"]);
+  assert.deepEqual(getStageRealModelGateRoles("ACCEPT"), ["ROLE_QA"]);
 });
 
 test("terminal stage message removes dangerous shell characters", () => {

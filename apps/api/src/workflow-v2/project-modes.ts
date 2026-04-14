@@ -40,15 +40,30 @@ function normalizeInputContract(value: unknown): NormalizedInputContract {
   };
 }
 
+function normalizeArtifactKey(value: string) {
+  return normalizeText(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+const INPUT_FIELD_ALIASES: Record<string, string[]> = {
+  rawrequirements: ["raw_requirements", "prd_requirements", "requirements", "requirement"],
+  prd: ["prd_requirements", "design_brief", "technical_spec"],
+  mockups: ["mockup", "design_brief", "implementation_scope", "visualmockups"],
+  sourcecode: ["source_code", "qa_test_scope", "implementation_scope", "code_repo"]
+};
+
 function findMatchingArtifacts(artifacts: ProjectInputArtifact[], field: string) {
-  const normalized = normalizeText(field).toLowerCase();
+  const normalized = normalizeArtifactKey(field);
   if (!normalized) {
     return [] as ProjectInputArtifact[];
   }
+  const aliasTokens = INPUT_FIELD_ALIASES[normalized]
+    ? INPUT_FIELD_ALIASES[normalized].map((item) => normalizeArtifactKey(item))
+    : [];
+  const acceptedTokens = new Set([normalized, ...aliasTokens]);
   return artifacts.filter((item) => {
-    const name = normalizeText(item.name).toLowerCase();
-    const type = normalizeText(item.type).toLowerCase();
-    return name === normalized || type === normalized;
+    const name = normalizeArtifactKey(String(item.name ?? ""));
+    const type = normalizeArtifactKey(String(item.type ?? ""));
+    return acceptedTokens.has(name) || acceptedTokens.has(type);
   });
 }
 

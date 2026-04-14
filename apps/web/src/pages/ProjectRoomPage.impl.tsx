@@ -501,6 +501,24 @@ const workflowTemplateToCoreStage = (templateKey?: string) => {
   if (lowered.includes('dev') || lowered.includes('code') || lowered.includes('tech') || lowered.includes('arch')) return 'DEV';
   return '';
 };
+
+const workflowStatusToCoreStageStatus = (status?: string): CoreStageStatus => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'completed' || normalized === 'skipped') return 'completed';
+  if (normalized === 'running' || normalized === 'reviewing') return 'active';
+  if (normalized === 'failed') return 'blocked';
+  return 'pending';
+};
+
+const workflowStatusToProgress = (status?: string, isCurrent?: boolean): number => {
+  const normalized = String(status || '').trim().toLowerCase();
+  if (normalized === 'completed' || normalized === 'skipped') return 100;
+  if (normalized === 'reviewing') return 88;
+  if (normalized === 'running') return 68;
+  if (normalized === 'failed') return 38;
+  if (isCurrent) return 22;
+  return 0;
+};
 const isProjectNotFoundError = (error: unknown) =>
   /project not found/i.test(error instanceof Error ? error.message : String(error ?? ''));
 
@@ -1168,6 +1186,60 @@ const ProjectRoom = ({
   }, [effectiveProjectTasks]);
 
   const stageItems = useMemo(() => {
+    if (workflowOverview?.stages && workflowOverview.stages.length > 0) {
+      const byCoreStage = new Map<string, {
+        type: ProjectDetailResponse['stages'][number]['type'];
+        label: string;
+        assignee: string;
+        status: CoreStageStatus;
+        progress: number;
+        startedAt?: string;
+        endedAt?: string;
+      }>();
+
+      for (const stage of workflowOverview.stages) {
+        const coreStage = workflowTemplateToCoreStage(stage.templateKey) || 'INIT';
+        const mappedStatus = workflowStatusToCoreStageStatus(stage.status);
+        const mappedProgress = workflowStatusToProgress(stage.status, stage.isCurrent);
+        const assignee = stage.assignedAgents?.[0]
+          || stage.assignedAgentProfiles?.[0]?.agentId
+          || (coreStage === 'ANALYSIS'
+            ? 'ROLE_ANALYST'
+            : coreStage === 'DESIGN'
+              ? 'ROLE_DESIGN'
+              : coreStage === 'DEV'
+                ? 'ROLE_DEV'
+                : coreStage === 'ACCEPT'
+                  ? 'ROLE_QA'
+                  : 'ROLE_PM');
+        const nextItem = {
+          type: coreStage as ProjectDetailResponse['stages'][number]['type'],
+          label: workflowTemplateLabel(stage.templateKey),
+          assignee,
+          status: mappedStatus,
+          progress: mappedProgress,
+          startedAt: stage.startedAt || undefined,
+          endedAt: stage.completedAt || undefined,
+        };
+        const existing = byCoreStage.get(coreStage);
+        if (!existing) {
+          byCoreStage.set(coreStage, nextItem);
+          continue;
+        }
+        const existingPriority = Number(existing.status === 'active') * 100 + existing.progress;
+        const nextPriority = Number(nextItem.status === 'active') * 100 + nextItem.progress;
+        if (nextPriority >= existingPriority) {
+          byCoreStage.set(coreStage, nextItem);
+        }
+      }
+
+      const workflowDriven = Array.from(byCoreStage.values())
+        .sort((a, b) => STAGE_ORDER.indexOf(a.type) - STAGE_ORDER.indexOf(b.type));
+      if (workflowDriven.length > 0) {
+        return workflowDriven;
+      }
+    }
+
     if (Array.isArray(detail?.stages) && detail.stages.length > 0) {
       return [...detail.stages].sort((a, b) => STAGE_ORDER.indexOf(a.type) - STAGE_ORDER.indexOf(b.type));
     }
@@ -1182,7 +1254,7 @@ const ProjectRoom = ({
         endedAt: undefined,
       },
     ];
-  }, [detail?.currentStage, detail?.stages, project.phase, project.owner, project.progress]);
+  }, [detail?.currentStage, detail?.stages, project.phase, project.owner, project.progress, workflowOverview]);
 
   const rawDeliverables = useMemo(() => (Array.isArray(detail?.deliverables) ? detail.deliverables : []), [detail?.deliverables]);
 
@@ -1741,7 +1813,7 @@ const ProjectRoom = ({
     return mapped.length > 0 ? mapped : [{ id: 'empty', name: '暂无交付物', type: '等待任务推进', size: '-' }];
   }, [deliverables, effectiveProjectTasks]);
 
-  const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
+  const currentStageType = stageItems.find((stage) => stage.status === 'active')?.type || detail?.currentStage || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const workflowStageRows = workflowOverview?.stages || [];

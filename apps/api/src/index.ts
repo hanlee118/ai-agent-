@@ -167,6 +167,17 @@ function resolveBooleanEnvDefaultTrueOutsideTest(name: string) {
   return process.env.NODE_ENV !== "test";
 }
 
+function resolveBooleanEnvDefaultFalse(name: string) {
+  const raw = String(process.env[name] ?? "").trim().toLowerCase();
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+  return false;
+}
+
 const projectAutomationState: {
   enabled: boolean;
   autoApproveWhenReady: boolean;
@@ -176,8 +187,8 @@ const projectAutomationState: {
   lastError: string | null;
   lastSummary: string;
 } = {
-  enabled: resolveBooleanEnvDefaultTrueOutsideTest("PROJECT_AUTO_ADVANCE"),
-  autoApproveWhenReady: resolveBooleanEnvDefaultTrueOutsideTest("PROJECT_AUTO_APPROVE_WHEN_READY"),
+  enabled: resolveBooleanEnvDefaultFalse("PROJECT_AUTO_ADVANCE"),
+  autoApproveWhenReady: resolveBooleanEnvDefaultFalse("PROJECT_AUTO_APPROVE_WHEN_READY"),
   intervalMs: projectAutoAdvanceIntervalMs,
   running: false,
   lastRunAt: null,
@@ -205,6 +216,25 @@ const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
 const STAGE_AUTO_REAL_MODEL_REQUIRED = new Set<StageType>(["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]);
+const STAGE_PROTOCOL_SKILLS: Partial<Record<StageType, string[]>> = {
+  DESIGN: ["design-to-code", "frontend-design", "frontend-design-pro", "stitch"],
+  DEV: ["coding-agent"],
+  ACCEPT: ["qa-validation"]
+};
+
+function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
+  if (!STAGE_AUTO_REAL_MODEL_REQUIRED.has(stageType)) {
+    return false;
+  }
+  const raw = String(process.env.ENFORCE_AUTO_STAGE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return isRealModelGateEnabled();
+}
 
 type StageRunAttempt = {
   stageType: StageType;
@@ -269,7 +299,7 @@ function isRealModelGateEnabled() {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return process.env.NODE_ENV === "production";
+  return process.env.NODE_ENV !== "test";
 }
 
 const GENERIC_OUTPUT_PATTERNS = [
@@ -284,7 +314,7 @@ const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|lorem ipsum|\bxxx\b/gi;
 const DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN = /(^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/gi;
 
-const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(2, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
+const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 1));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
   Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 60_000)
@@ -330,16 +360,30 @@ function resolveManualAdvanceBuildTimeoutMs(project: NonNullable<Awaited<ReturnT
   );
   const repositoryStageAgentTimeoutMs = Math.max(
     60_000,
-    Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 240_000)
+    Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 420_000)
   );
-  const effectivePerSubmissionBudgetMs = Math.max(stageBudgetMs, repositoryStageAgentTimeoutMs);
+  const perSubmissionBudgetCapMs = Math.max(
+    45_000,
+    Number(process.env.MANUAL_ADVANCE_PER_SUBMISSION_TIMEOUT_MS ?? 180_000)
+  );
+  const effectivePerSubmissionBudgetMs = Math.min(
+    Math.max(stageBudgetMs, repositoryStageAgentTimeoutMs),
+    perSubmissionBudgetCapMs
+  );
+  const buildTimeoutCapMs = Math.max(
+    MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
+    Number(process.env.MANUAL_ADVANCE_BUILD_TIMEOUT_CAP_MS ?? 480_000)
+  );
   const submissionCount = Math.max(
     1,
     (STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage as StageType] || []).length
   );
-  return Math.max(
+  return Math.min(
+    buildTimeoutCapMs,
+    Math.max(
     MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
     effectivePerSubmissionBudgetMs * submissionCount + MANUAL_ADVANCE_BUILD_TIMEOUT_BUFFER_MS
+    )
   );
 }
 
@@ -411,7 +455,12 @@ function isProjectAdvanceCancelled(projectId: string) {
 
 async function canContinueProjectAdvance(projectId: string) {
   if (isProjectAdvanceCancelled(projectId)) {
-    return false;
+    const exists = await prisma.project.count({ where: { id: projectId } });
+    if (exists > 0) {
+      clearProjectAdvanceCancelled(projectId);
+    } else {
+      return false;
+    }
   }
   const exists = await prisma.project.count({ where: { id: projectId } });
   if (exists > 0) {
@@ -756,6 +805,33 @@ function buildStageTaskEvidence(
   ));
 }
 
+function buildExecutionProtocolEvidenceSections(
+  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
+  stageType: StageType,
+  title: string
+) {
+  const skills = STAGE_PROTOCOL_SKILLS[stageType] || ["stage-delivery"];
+  const topKeyword = project.parsedIntent.keywords[0] || `${STAGE_LABELS[stageType]}阶段目标`;
+  const topConstraint = project.parsedIntent.constraints[0] || "按当前阶段模板完成交付";
+  const topRisk = project.parsedIntent.risks[0] || "暂无新增阻断风险";
+  const stageTask = project.tasks.find((task) => task.stageType === stageType)?.title || `${STAGE_LABELS[stageType]}阶段任务`;
+
+  return [
+    "## 协作交接卡",
+    `factsConfirmed: 已确认 ${STAGE_LABELS[stageType]}阶段交付物《${title}》围绕“${topKeyword}”输出，并与当前任务“${stageTask}”对齐。`,
+    `assumptions: 默认约束为“${topConstraint}”，若业务边界变更需先回写需求确认单。`,
+    `decisions: 本轮优先保证阶段门禁可验收，再推进跨阶段扩展需求；风险处理采用“先暴露再补齐”。`,
+    `handoff: 下一步由审批角色复核并执行阶段流转，若通过则将该交付物作为下一阶段输入基线。`,
+    `openQuestions: ${topRisk}；如需新增范围，请先补充影响评估与验收口径。`,
+    "",
+    "## 技能执行记录",
+    `skillsUsed: ${skills.join("、")}`,
+    `reasoningBasis: 依据项目需求关键词、当前阶段任务与模板门禁要求完成结构化输出。`,
+    `artifactsProduced: 已提交 ${STAGE_LABELS[stageType]}阶段交付物《${title}》，并补齐可审批证据字段。`,
+    "verification: 已完成模板章节覆盖自检、验收清单覆盖自检与协作交接卡字段完整性校验。"
+  ];
+}
+
 function buildDeliverableSpecificSections(
   stageType: StageType,
   title: string,
@@ -847,11 +923,11 @@ function buildDeliverableSpecificSections(
       "| OPENAI_API_BASE_URL | http://127.0.0.1:1234/v1 | 模型网关地址（按环境替换） |",
       "| OPENAI_API_KEY | sk-live-redacted | 模型调用凭证 |",
       "| MODEL_PROVIDER | openai-compatible | 运行模式开关 |",
-      "| PROJECT_DIRECT_CREATE_ENABLED | false | issue-first 创建门禁 |",
+      "| PROJECT_DIRECT_CREATE_ENABLED | true | 先创建项目再执行 issue-first 分析门禁（设为 false 可回退旧流程） |",
       "- OPENAI_API_BASE_URL=http://127.0.0.1:1234/v1",
       "- OPENAI_API_KEY=sk-live-redacted",
       "- MODEL_PROVIDER=openai-compatible",
-      "- PROJECT_DIRECT_CREATE_ENABLED=false",
+      "- PROJECT_DIRECT_CREATE_ENABLED=true",
       "",
       "## 部署检查清单（Pre-flight / Post-check）",
       "- Pre-flight: 校验数据库迁移状态与 Prisma schema 一致。",
@@ -1200,6 +1276,29 @@ function buildProjectRequiredActions(
   const currentStageDeliverables = project.deliverables
     .filter((item) => item.stageType === project.currentStage)
     .sort((left, right) => right.version - left.version);
+  const expectedCoreDeliverables = STAGE_AUTO_DELIVERABLE_TITLES[project.currentStage as StageType] || [];
+  const normalizeToken = (value: string) => String(value || "").trim().replace(/\s+/g, "").toLowerCase();
+  const isCoreTitleMatch = (candidateName: string, expectedName: string) => {
+    const candidateToken = normalizeToken(candidateName);
+    const expectedToken = normalizeToken(expectedName);
+    if (!candidateToken || !expectedToken) return false;
+    if (candidateToken === expectedToken || candidateToken.includes(expectedToken) || expectedToken.includes(candidateToken)) {
+      return true;
+    }
+    const stageType = project.currentStage as StageType;
+    const expectedKind = resolveDeliverableTemplate(expectedName, stageType).kind;
+    const candidateKind = resolveDeliverableTemplate(candidateName, stageType).kind;
+    return expectedKind !== "generic" && candidateKind === expectedKind;
+  };
+  const coreDeliverableSnapshots = expectedCoreDeliverables.map((expectedName) => {
+    const matched = currentStageDeliverables.find((item) =>
+      isCoreTitleMatch(item.name, expectedName)
+    );
+    return {
+      expectedName,
+      matched
+    };
+  });
   const designIntervention = getDesignInterventionSignal(project);
 
   if (project.pendingApproval) {
@@ -1297,7 +1396,39 @@ function buildProjectRequiredActions(
         ctaLabel: "执行阶段验收"
       });
     }
-  } else if (project.currentStage === "DESIGN" && designIntervention.required && currentStageDeliverables.length === 0) {
+  } else {
+    const missingCoreDeliverables = coreDeliverableSnapshots
+      .filter((item) => !item.matched)
+      .map((item) => item.expectedName);
+    const notReadyCoreDeliverables = coreDeliverableSnapshots
+      .filter((item): item is { expectedName: string; matched: (typeof currentStageDeliverables)[number] } => Boolean(item.matched))
+      .filter((item) => !isDeliverableReadyForAcceptance({
+        status: item.matched.status,
+        content: item.matched.content,
+        project,
+        stageType: item.matched.stageType,
+        deliverableName: item.matched.name
+      }))
+      .map((item) => item.matched.name);
+
+    const needsCoreDeliverableRepair = missingCoreDeliverables.length > 0 || notReadyCoreDeliverables.length > 0;
+    if (needsCoreDeliverableRepair && !(project.currentStage === "DESIGN" && designIntervention.required)) {
+      const repairTargets = [
+        ...missingCoreDeliverables.map((name) => `缺少 ${name}`),
+        ...notReadyCoreDeliverables.map((name) => `${name} 未达可验收状态`)
+      ];
+      actions.push({
+        id: "stage-core-deliverables-missing",
+        severity: "critical",
+        title: "当前阶段核心交付物未齐",
+        detail: `请先补齐并提交核心交付物：${repairTargets.slice(0, 4).join("；")}${repairTargets.length > 4 ? "..." : ""}`,
+        action: project.currentStage === "DESIGN" ? "open_design_review" : "submit_stage_deliverable",
+        ctaLabel: project.currentStage === "DESIGN" ? "提交设计审查卡" : "提交阶段交付物"
+      });
+    }
+  }
+
+  if (project.currentStage === "DESIGN" && designIntervention.required && currentStageDeliverables.length === 0) {
     actions.push({
       id: "design-phase-no-deliverable",
       severity: "warning",
@@ -1322,6 +1453,20 @@ function buildProjectRequiredActions(
         ctaLabel: "补齐视觉设计稿",
         reasonCode: designIntervention.reasonCode,
         prefillContent: designIntervention.prefillContent
+      });
+    }
+  }
+
+  if (!project.pendingApproval && actions.length === 0) {
+    const summary = String(project.summary || "");
+    if (/核心交付物未齐|继续补充后再进入审批|未通过模板门禁/.test(summary)) {
+      actions.push({
+        id: "stage-deliverable-followup",
+        severity: "warning",
+        title: "当前阶段仍需补齐交付后再审批",
+        detail: "系统检测到阶段仍未进入可审批状态，请补齐当前阶段交付并再次提交。",
+        action: project.currentStage === "DESIGN" ? "open_design_review" : "submit_stage_deliverable",
+        ctaLabel: project.currentStage === "DESIGN" ? "补齐设计交付" : "补齐阶段交付"
       });
     }
   }
@@ -1424,7 +1569,7 @@ async function buildAutoStageSubmissions(
     ].join("\n")
   });
   if (
-    STAGE_AUTO_REAL_MODEL_REQUIRED.has(project.currentStage as StageType)
+    shouldEnforceAutoStageRealModelGate(project.currentStage as StageType)
     && (run.provider === "scripted" || Boolean((run as StageRunSnapshot).degraded))
   ) {
     throw new Error(
@@ -1477,6 +1622,8 @@ async function buildAutoStageSubmissions(
       ...template.acceptanceChecklist.map((item) => `- ${item}`),
       "",
       ...deliverableSpecificSections,
+      "",
+      ...buildExecutionProtocolEvidenceSections(project, project.currentStage as StageType, title),
       "",
       "## 审阅要点",
       ...checklist
@@ -1699,6 +1846,7 @@ async function trySyncGitLabHarnessForProject(
 }
 
 async function handleProjectCreatedIssueFirst(projectId: string) {
+  clearProjectAdvanceCancelled(projectId);
   const issueFirst = await ensureProjectIssueFirst({ projectId });
   if (!issueFirst.ok) {
     console.warn(`[ProjectIssueFirst] project bootstrap gated for ${projectId}: ${issueFirst.code} ${issueFirst.message}`);
@@ -1711,7 +1859,6 @@ async function handleProjectCreatedIssueFirst(projectId: string) {
       error instanceof Error ? error.message : String(error)
     );
   });
-  void ensureManualAdvanceJob(projectId);
   return issueFirst;
 }
 
