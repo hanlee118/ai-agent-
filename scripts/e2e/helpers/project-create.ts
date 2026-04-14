@@ -30,6 +30,34 @@ type ProjectCreatePayload = {
   projectType?: 'complete' | 'standalone' | 'relay';
 };
 
+async function waitIssueDebateReady(
+  apiUrl: string,
+  token: string,
+  issueId: string,
+  timeoutMs = 180_000,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const response = await apiRequest<any>(
+      apiUrl,
+      token,
+      `/api/issues/${encodeURIComponent(issueId)}/debate`,
+    );
+    const data = response?.data || response;
+    const status = String(data?.status || '').trim().toLowerCase();
+    const canProceed = Boolean(data?.analysisGate?.canProceed);
+    if (canProceed && status === 'completed') {
+      return;
+    }
+    if (status === 'failed') {
+      throw new Error(`issue debate failed: ${String(data?.error || 'unknown')}`);
+    }
+    const pollAfterMs = Number(data?.pollAfterMs ?? 2000);
+    await new Promise((resolve) => setTimeout(resolve, Math.max(800, Math.min(5000, pollAfterMs || 2000))));
+  }
+  throw new Error(`issue debate timeout after ${timeoutMs}ms for ${issueId}`);
+}
+
 function buildClarificationAnswers(questions: Array<{ id?: string; required?: boolean }> = []) {
   return questions.reduce((acc: Record<string, string>, item) => {
     if (!item?.required) {
@@ -75,7 +103,7 @@ export async function createProjectWithIssueFirstFallback(
       input: payload.description || payload.name,
       industryCode: 'saas',
       sourceType: 'text',
-      debateMode: 'off',
+      debateMode: 'model',
       workflowTemplateKey: payload.workflowTemplateKey,
     },
   });
@@ -84,6 +112,7 @@ export async function createProjectWithIssueFirstFallback(
   if (!issueId) {
     throw new Error('issue-first preview did not return issueId');
   }
+  await waitIssueDebateReady(apiUrl, token, issueId);
 
   const questions = Array.isArray(previewData?.questions) ? previewData.questions : [];
   const clarificationAnswers = buildClarificationAnswers(questions);

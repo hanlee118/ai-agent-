@@ -2105,9 +2105,13 @@ async function sendOpenClawAgentMessageInternal(
     : defaultMaxAttempts;
   const maxAttempts = Math.max(1, Math.min(4, requestedMaxAttempts));
   const resolveCommandTimeouts = () => {
-    const baselineCliTimeoutSeconds = preferLocalExecution
-      ? (isCodingExecution ? 120 : 45)
-      : (isCodingExecution ? 90 : 25);
+    const baselineCliTimeoutSeconds = isDesignAgent
+      ? (preferLocalExecution ? 180 : 120)
+      : (
+        preferLocalExecution
+          ? (isCodingExecution ? 120 : 45)
+          : (isCodingExecution ? 90 : 25)
+      );
     const configuredCliTimeoutSeconds = Number(process.env.OPENCLAW_AGENT_CLI_TIMEOUT_SECONDS ?? "");
     const cliTimeoutSeconds = Number.isFinite(configuredCliTimeoutSeconds) && configuredCliTimeoutSeconds > 0
       ? Math.round(configuredCliTimeoutSeconds)

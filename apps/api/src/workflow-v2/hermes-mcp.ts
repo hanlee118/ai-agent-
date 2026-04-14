@@ -78,6 +78,7 @@ function toRunBody(input: {
   stageKey: string;
   summary: string;
   resolution?: string;
+  textualOutput?: string;
   artifacts: Array<{ name: string; type: string; format: string; content: string }>;
 }) {
   const lines: string[] = [
@@ -87,6 +88,9 @@ function toRunBody(input: {
   ];
   if (input.resolution) {
     lines.push(`- resolution: ${input.resolution}`);
+  }
+  if (input.textualOutput) {
+    lines.push("", "## Hermes 输出", input.textualOutput);
   }
   for (const artifact of input.artifacts) {
     lines.push("", `### ${artifact.name} (${artifact.type}/${artifact.format})`, artifact.content);
@@ -155,10 +159,18 @@ export async function tryRunStageWithHermes(input: {
 
     const success = Boolean(json.success ?? true);
     const artifacts = asHermesArtifactList(json.artifacts);
-    if (!success || artifacts.length === 0) {
+    const resolution = normalizeText(json.resolution);
+    const textualOutput = normalizeText(
+      json.output
+      ?? json.answer
+      ?? json.finalAnswer
+      ?? json.content
+      ?? json.message
+      ?? ""
+    );
+    if (!success || (artifacts.length === 0 && !resolution && !textualOutput)) {
       return null;
     }
-    const resolution = normalizeText(json.resolution);
     const summary = normalizeText(input.summary) || `stage ${input.stageKey}`;
 
     return {
@@ -166,9 +178,10 @@ export async function tryRunStageWithHermes(input: {
         stageKey: input.stageKey,
         summary,
         resolution,
+        textualOutput,
         artifacts
       }),
-      thinkingSummary: resolution || `Hermes completed ${input.stageKey} with ${artifacts.length} artifacts`,
+      thinkingSummary: resolution || textualOutput || `Hermes completed ${input.stageKey} with ${artifacts.length} artifacts`,
       model: normalizeText(json.model) || "hermes-v2.1",
       provider: "hermes-mcp",
       artifacts: artifacts.map((item) => ({

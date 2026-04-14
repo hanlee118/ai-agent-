@@ -350,11 +350,11 @@ const WORKFLOW_NAME_MAP: Record<WorkflowTemplateKey, string> = {
 
 const TEMPLATE_INPUT_PRESETS: Record<WorkflowTemplateKey, TemplateInputPreset> = {
   standard_software_development: { name: 'raw_requirements', type: 'document' },
-  requirements_design: { name: 'prd_requirements', type: 'prd' },
-  visual_design: { name: 'design_brief', type: 'mockup' },
-  tech_design: { name: 'technical_spec', type: 'document' },
-  code_dev: { name: 'implementation_scope', type: 'code_repo' },
-  qa_acceptance: { name: 'qa_test_scope', type: 'document' },
+  requirements_design: { name: 'rawRequirements', type: 'prd' },
+  visual_design: { name: 'prd', type: 'prd' },
+  tech_design: { name: 'prd', type: 'prd' },
+  code_dev: { name: 'mockups', type: 'mockup' },
+  qa_acceptance: { name: 'sourceCode', type: 'code_repo' },
 };
 
 function cloneArtifacts(artifacts: Artifact[]): Artifact[] {

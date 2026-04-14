@@ -12,6 +12,7 @@ apps/api/.occ-secret
 !pnpm-lock.yaml
 *.tsbuildinfo
 *.db
+*.db.bak.*
 *.db-journal
 *.bak
 *.swp

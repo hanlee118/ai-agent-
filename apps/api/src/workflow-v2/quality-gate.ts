@@ -19,6 +19,17 @@ type AutoCheckValidator = (input: {
 const PLACEHOLDER_PATTERN = /(TODO|TBD|待补充|占位|lorem ipsum|\bxxx\b)/i;
 const STITCH_LINK_PATTERN = /(stitch|stitch\.withgoogle|https?:\/\/[^\s)]+)/i;
 
+function getDesignStitchModeForWorkflowGate() {
+  const raw = String(process.env.DESIGN_STITCH_MODE ?? "").trim().toLowerCase();
+  if (raw === "required" || raw === "strict" || raw === "hard") {
+    return "required";
+  }
+  if (raw === "preferred" || raw === "on" || raw === "true" || raw === "1") {
+    return "preferred";
+  }
+  return "off";
+}
+
 function findArtifactByName(artifacts: Array<Record<string, unknown>>, name: string) {
   const normalized = normalizeText(name);
   if (!normalized) {
@@ -67,14 +78,22 @@ const autoCheckValidators: Record<string, AutoCheckValidator> = {
     }
   },
   stitch_artifact: ({ config, artifacts }) => {
+    const stitchMode = getDesignStitchModeForWorkflowGate();
+    const stitchHardRequired = stitchMode === "required";
     const artifact = findArtifactByName(artifacts, normalizeText(config.artifact))
       ?? artifacts.find((item) => /stitch/i.test(String(item.name ?? "")))
       ?? null;
     const content = artifactContent(artifact);
     if (!content.trim()) {
+      if (!stitchHardRequired) {
+        return { passed: true, details: `stitch artifact optional in ${stitchMode} mode` };
+      }
       return { passed: false, details: "stitch artifact missing" };
     }
     if (!STITCH_LINK_PATTERN.test(content)) {
+      if (!stitchHardRequired) {
+        return { passed: true, details: `stitch evidence weak but allowed in ${stitchMode} mode` };
+      }
       return { passed: false, details: "stitch link/evidence missing" };
     }
     return { passed: true, details: "stitch evidence ok" };

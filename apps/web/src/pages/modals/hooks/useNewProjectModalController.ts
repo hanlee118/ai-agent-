@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ChangeEvent } from 'react';
 import {
   ApiRequestError,
   issuesApi,
+  projectsApi,
   productContextApi,
   roleSetsApi,
   type IssueDebateTaskStatus,
@@ -635,82 +636,148 @@ export function useNewProjectModalController({
     }
   };
 
-  const handleParseInput = async () => {
-    const input = sourceInput.trim();
-    if (!input) {
-      addToast('请先输入项目需求', 'error');
+  const resolveDirectCreateAgents = (plannedRoleIds: string[]) => {
+    const manualSelected = formData.agentIds
+      .map((id) => agents.find((agent) => agent.id === id))
+      .filter(Boolean);
+    if (manualSelected.length > 0) {
+      return {
+        assignedAgentIds: Array.from(new Set(manualSelected.map((agent) => agent!.id))),
+        agentNames: manualSelected.map((agent) => agent!.name),
+        teamRoleIds: uniqueNormalizedRoles(manualSelected.map((agent) => getAgentRoleId(agent!))),
+      };
+    }
+
+    const autoRecommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
+      allowedRoleIds,
+      mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
+      soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
+    });
+    return {
+      assignedAgentIds: Array.from(new Set(autoRecommendations.map((item) => item.agentId))),
+      agentNames: autoRecommendations.map((item) => item.name),
+      teamRoleIds: uniqueNormalizedRoles(autoRecommendations.map((item) => item.roleId)),
+    };
+  };
+
+  const handleCreateProjectNow = async (manualMode = false) => {
+    const textInput = sourceInput.trim();
+    const manualDescription = formData.description.trim();
+    const projectDescription = (manualMode ? manualDescription || textInput : textInput || manualDescription).trim();
+    if (!projectDescription) {
+      addToast('请先输入项目需求或在手动表单填写项目描述', 'error');
       return;
     }
 
-    setIsParsing(true);
+    if (projectType === 'relay' && !parentProjectId.trim()) {
+      addToast('接力模式需要填写来源项目 ID', 'error');
+      return;
+    }
+
+    const roleSeed = formData.agentIds.length > 0
+      ? formData.agentIds
+          .map((id) => agents.find((agent) => agent.id === id))
+          .filter(Boolean)
+          .map((agent) => getAgentRoleId(agent!))
+      : (recommendedRoleIds.length > 0 ? recommendedRoleIds : requiredWorkflowRoles);
+    let plannedRoleIds = applyTemplateRolePlan(roleSeed);
+    if (workflowTemplateKey !== 'none') {
+      plannedRoleIds = uniqueNormalizedRoles([...requiredWorkflowRoles, ...plannedRoleIds]);
+    }
+    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId) {
+      plannedRoleIds = uniqueNormalizedRoles([soulRoleId, ...plannedRoleIds]);
+    }
+
+    const { assignedAgentIds, agentNames, teamRoleIds } = resolveDirectCreateAgents(plannedRoleIds);
+    const effectiveTeamRoleIds = teamRoleIds.length > 0 ? teamRoleIds : plannedRoleIds;
+    const projectName = (manualMode ? formData.name.trim() : '').trim()
+      || fallbackSuggestName(projectDescription)
+      || '新项目';
+    const projectPriority = manualMode ? formData.priority : inferPriorityFromText(projectDescription);
+    const projectDomains = detectDomains(projectDescription);
+
+    const effectiveStandaloneInputContent = standaloneInputContent.trim()
+      || ((projectType === 'standalone' || projectType === 'relay') ? projectDescription : '');
+    const projectInputs: NonNullable<Parameters<typeof projectsApi.create>[0]['projectInputs']> = effectiveStandaloneInputContent
+      ? [{
+          name: standaloneInputName.trim() || 'raw_requirements',
+          type: standaloneInputType.trim() || 'document',
+          content: effectiveStandaloneInputContent,
+          inputSource: standaloneInputContent.trim()
+            ? (projectType === 'relay' ? 'imported_from_project' : 'manual')
+            : 'manual',
+        }]
+      : [];
+
+    setIsCreating(true);
     try {
-      const preview = await issuesApi.preview({
-        input,
-        industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
-        sourceType: issueSourceType,
-        workflowTemplateKey,
+      const created = await projectsApi.create({
+        name: projectName,
+        description: projectDescription,
+        requirements: projectDescription,
+        team: effectiveTeamRoleIds,
+        projectType,
+        parentProjectId: parentProjectId.trim() || undefined,
+        relaySourceStageId: relaySourceStageId.trim() || undefined,
+        projectInputs,
+        workflowTemplateKey: workflowTemplateKey.trim() || undefined,
+        autoStartWorkflow,
       });
 
-      const parsedTeamRoleIds = (preview?.recommendedRoleIds || []).map((role) => normalizeRoleId(role));
-      const constrainedTeamRoleIds = allowedRoleIds.length > 0
-        ? parsedTeamRoleIds.filter((roleId) => allowedRoleIds.some((allowed) => normalizeRoleId(allowed) === roleId))
-        : parsedTeamRoleIds;
-      const plannedRoleIds = applyTemplateRolePlan(constrainedTeamRoleIds);
-      const recommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
+      setParsedProject({
+        name: projectName,
+        description: projectDescription,
+        phase: '规划中',
+        agents: agentNames,
+        priority: projectPriority,
+        team: effectiveTeamRoleIds,
+      });
+      setDetectedDomains(projectDomains);
+      setAnalysisRecommendations(buildRoleBasedAgentRecommendations(effectiveTeamRoleIds, {
         allowedRoleIds,
         mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
         soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
-      });
-      const recommendedNames = recommendations.map((item) => item.name);
-      const recommendationRoleIds = Array.from(new Set(recommendations.map((item) => normalizeRoleId(item.roleId))));
-      const priority = inferPriorityFromText(input);
-      const domains = detectDomains(input);
-      const fullDescription = input;
+      }));
 
-      setIssuePreview(preview);
-      setDebateTaskId(preview.debateTask?.taskId ?? null);
-      setDebateTaskStatus(
-        preview.debateTask?.status
-          ?? (preview.debate ? 'completed' : null),
-      );
-      setDebatePollingError('');
-      setIsPollingDebate(Boolean(
-        preview.debateTask
-          && (preview.debateTask.status === 'queued' || preview.debateTask.status === 'running'),
-      ));
-      setEditableDraft(buildEditableDraftFromPreview(preview));
-      setIssueAnswers(applySuggestedAnswers(preview.questions || [], preview.suggestedAnswers || []));
-      setConflictAcknowledged((preview.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
-      setDiscussionAcknowledged((preview.discussion || []).length === 0);
-      setDiscussionOverride('');
-      setDetectedDomains(domains);
-      setAnalysisRecommendations(recommendations);
-      setClarification(INITIAL_CLARIFICATION);
-      setParsedProject({
-        name: preview.title || fallbackSuggestName(input) || '新项目',
-        description: fullDescription,
-        phase: '规划中',
-        agents: recommendedNames,
-        priority,
-        team: recommendationRoleIds,
-      });
-      setStep('analysis');
+      addToast(`项目已创建: ${created.name || projectName}`, 'success');
+      addToast('已切换为“先创建项目，后在项目详情执行分析与实施”流程', 'success');
 
-      if (enforceIndustryAssemblyRule && requiresSoulRole && !recommendationRoleIds.includes(normalizeRoleId(soulRoleId))) {
-        addToast(`已完成需求分析，但当前未匹配到灵魂角色 ${roleLabel(soulRoleId)}，请手动补充`, 'error');
-      } else {
-        addToast(
-          preview.analysisGate.canProceed
-            ? '已完成需求分析并生成正式讨论结论，请继续澄清确认'
-            : `已生成分析草案，但当前不可推进: ${preview.analysisGate.blockers[0] || '缺少真实讨论结果'}`,
-          preview.analysisGate.canProceed ? 'success' : 'info',
-        );
+      if (assignedAgentIds.length > 0) {
+        const stageHint = workflowTemplateKey === 'none' ? '手动初始化阶段后开始执行' : `按模板 ${workflowTemplateKey} 执行`;
+        const instruction = [
+          `【新项目创建】${created.name || projectName}`,
+          `项目ID: ${created.id}`,
+          `需求摘要: ${projectDescription}`,
+          `阶段策略: ${stageHint}`,
+          '',
+          '执行要求：',
+          '1. 进入项目详情页后先完成需求分析与补齐',
+          '2. 再根据当前阶段模板推进实施与交付',
+          '3. 持续沉淀知识到项目知识库并标注来源',
+        ].join('\n');
+        try {
+          await sendBatchAgentMessage(assignedAgentIds, instruction);
+          addToast(`已向 ${assignedAgentIds.length} 个 Agent 下发启动指令`, 'success');
+        } catch (error) {
+          addToast(`项目已创建，但 Agent 指令下发失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        }
       }
+
+      await onProjectCreated?.(created);
+      handleClose();
     } catch (error) {
-      addToast(`需求分析失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      if (error instanceof ApiRequestError && error.code === 'PROJECT_ISSUE_FIRST_REQUIRED') {
+        addToast('后端仍启用旧的 issue-first 门禁，请先切换后端配置或更新后端路由。', 'error');
+        return;
+      }
+      addToast(`创建失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
-      setIsParsing(false);
+      setIsCreating(false);
     }
+  };
+
+  const handleParseInput = async () => {
+    await handleCreateProjectNow(false);
   };
 
   const handleContinueFromAnalysis = () => {
@@ -1067,124 +1134,7 @@ export function useNewProjectModalController({
   };
 
   const handleManualSubmit = async () => {
-    if (!formData.name.trim()) {
-      addToast('请输入项目名称', 'error');
-      return;
-    }
-
-    if (!formData.description.trim()) {
-      addToast('请输入项目描述', 'error');
-      return;
-    }
-
-    const manualSelected = formData.agentIds
-      .map((id) => agents.find((agent) => agent.id === id))
-      .filter(Boolean);
-    const manualNames = manualSelected.map((agent) => agent!.name);
-    const manualRoleIds = Array.from(
-      new Set(manualSelected.map((agent) => normalizeRoleId(getAgentRoleId(agent!)))),
-    );
-
-    if (enforceIndustryAssemblyRule && requiresSoulRole && soulRoleId && !manualRoleIds.includes(normalizeRoleId(soulRoleId))) {
-      addToast(`当前行业团队必须包含灵魂角色 ${roleLabel(soulRoleId)}`, 'error');
-      return;
-    }
-
-    if (enforceIndustryAssemblyRule) {
-      const minRoles = selectedIndustryConfig?.assemblyRule.minRoles ?? 0;
-      if (minRoles > 0 && manualRoleIds.length < minRoles) {
-        addToast(`当前行业最少需要 ${minRoles} 个角色，请继续选择`, 'error');
-        return;
-      }
-    }
-    if (workflowTemplateKey !== 'none') {
-      const requiredPlannedRoles = applyTemplateRolePlan(manualRoleIds);
-      const missingTemplateRoles = requiredPlannedRoles.filter((roleId) => !manualRoleIds.includes(normalizeRoleId(roleId)));
-      if (missingTemplateRoles.length > 0) {
-        addToast(
-          `当前模板要求角色: ${missingTemplateRoles.map((roleId) => roleLabel(roleId)).join('、')}，请先补充对应 Agent`,
-          'error',
-        );
-        return;
-      }
-    }
-
-    setIsParsing(true);
-    let manualPreview: IssuePreview;
-    try {
-      manualPreview = await issuesApi.preview({
-        input: formData.description.trim(),
-        industryCode: selectedIndustryCode || selectedIndustryConfig?.roleSet.industryCode || 'saas',
-        sourceType: (issueSourceType === 'prd' ? 'prd' : 'text') as IssueSourceType,
-        workflowTemplateKey,
-      });
-    } catch (error) {
-      addToast(`手动模式需求分析失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
-      setIsParsing(false);
-      return;
-    }
-
-    setIssuePreview(manualPreview);
-    setEditableDraft(buildEditableDraftFromPreview(manualPreview));
-    setIssueAnswers(applySuggestedAnswers(manualPreview.questions || [], manualPreview.suggestedAnswers || []));
-    setConflictAcknowledged((manualPreview.conflicts || []).every((conflict) => conflict.severity !== 'critical'));
-    setConflictResolution('');
-    setDiscussionAcknowledged((manualPreview.discussion || []).length === 0);
-    setDiscussionOverride('');
-    setDebateTaskId(manualPreview.debateTask?.taskId ?? null);
-    setDebateTaskStatus(
-      manualPreview.debateTask?.status
-        ?? (manualPreview.debate ? 'completed' : null),
-    );
-    setDebatePollingError('');
-    setIsPollingDebate(Boolean(
-      manualPreview.debateTask
-        && (manualPreview.debateTask.status === 'queued' || manualPreview.debateTask.status === 'running'),
-    ));
-
-    const manualRecommendations = manualSelected.map((agent) => ({
-      agentId: agent!.id,
-      roleId: getAgentRoleId(agent!),
-      name: agent!.name,
-      role: agent!.role,
-      score: 1,
-      reason: '手动指定参与该项目',
-    }));
-    const plannedRoleIds = applyTemplateRolePlan(manualRoleIds);
-    const templateRecommendations = buildRoleBasedAgentRecommendations(plannedRoleIds, {
-      allowedRoleIds,
-      mustHaveSoulRole: enforceIndustryAssemblyRule && requiresSoulRole,
-      soulRoleId: enforceIndustryAssemblyRule ? soulRoleId : '',
-    });
-    const mergedRecommendations = templateRecommendations.length > 0
-      ? templateRecommendations
-      : manualRecommendations;
-    setAnalysisRecommendations(mergedRecommendations);
-    setDetectedDomains(detectDomains(formData.description.trim()));
-    setClarification((prev) => ({
-      ...prev,
-      confirmScope: true,
-      confirmExecution: true,
-    }));
-    setParsedProject({
-      name: formData.name.trim(),
-      description: formData.description.trim(),
-      phase: '规划中',
-      agents: mergedRecommendations.length > 0
-        ? mergedRecommendations.map((item) => item.name)
-        : (manualNames.length > 0 ? manualNames : agents.slice(0, 3).map((agent) => agent.name)),
-      priority: formData.priority,
-      team: uniqueNormalizedRoles(mergedRecommendations.map((item) => item.roleId)),
-    });
-    setDiscussionOverride('');
-    setStep('team');
-    addToast(
-      manualPreview.analysisGate.canProceed
-        ? '已生成项目草案并完成正式分析，请确认团队分配后继续'
-        : `已生成项目草案，正式讨论仍在进行：${manualPreview.analysisGate.blockers[0] || '请稍后继续'}`,
-      manualPreview.analysisGate.canProceed ? 'success' : 'info',
-    );
-    setIsParsing(false);
+    await handleCreateProjectNow(true);
   };
 
   const handleUseManualFromParsed = () => {
@@ -1426,6 +1376,7 @@ export function useNewProjectModalController({
     handleImportProjectFile,
     handleToggleManualAgent,
     handleToggleAnalysisAgent,
+    handleCreateProjectNow,
     handleParseInput,
     handleRefreshDebate,
     handleContinueFromAnalysis,

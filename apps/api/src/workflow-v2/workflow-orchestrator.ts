@@ -247,6 +247,159 @@ function dedupeStrings(values: string[]) {
   return result;
 }
 
+function resolveLegacyCurrentRoleByStageType(stageType: StageType): RoleType {
+  if (stageType === "ANALYSIS") {
+    return "ROLE_ANALYST";
+  }
+  if (stageType === "DESIGN") {
+    return "ROLE_DESIGN";
+  }
+  if (stageType === "DEV") {
+    return "ROLE_DEV";
+  }
+  if (stageType === "ACCEPT") {
+    return "ROLE_QA";
+  }
+  return "ROLE_PM";
+}
+
+const WORKFLOW_STAGE_TERMINAL_STATUS = new Set(["completed", "skipped", "failed"]);
+const WORKFLOW_STAGE_COMPLETED_STATUS = new Set(["completed", "skipped"]);
+const TASK_TERMINAL_STATUS = new Set(["done", "completed", "cancelled", "rejected"]);
+const WORKFLOW_V2_AGENT_TIMEOUT_MS = Math.max(
+  60_000,
+  Number(process.env.WORKFLOW_V2_AGENT_TIMEOUT_MS ?? 180_000)
+);
+
+async function withWorkflowAgentTimeout<T>(promise: Promise<T>, context: string, timeoutMs = WORKFLOW_V2_AGENT_TIMEOUT_MS) {
+  const effectiveTimeoutMs = Math.max(1_000, Math.round(timeoutMs));
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`WORKFLOW_V2_AGENT_TIMEOUT: ${context} exceeded ${effectiveTimeoutMs}ms`));
+    }, effectiveTimeoutMs);
+
+    promise.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }).catch((error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+async function syncLegacyProjectStateFromWorkflow(workflowId: string) {
+  console.warn(`[workflow-v2][sync] start workflow=${workflowId}`);
+  const workflow = await prisma.workflow.findUnique({
+    where: { id: workflowId },
+    include: {
+      stages: true
+    }
+  });
+  if (!workflow) {
+    console.warn(`[workflow-v2][sync] workflow not found ${workflowId}`);
+    return;
+  }
+
+  const currentStageIds = asStringArray(workflow.currentStageIds);
+  const stageById = new Map(workflow.stages.map((item) => [item.id, item]));
+  const currentStages = currentStageIds
+    .map((id) => stageById.get(id))
+    .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const primaryCurrentStage = currentStages[0];
+  const inferredCurrentStageType = primaryCurrentStage
+    ? resolveStageType(primaryCurrentStage.templateKey)
+    : "INIT";
+  const completedStageCount = workflow.stages.filter((item) => (
+    WORKFLOW_STAGE_COMPLETED_STATUS.has(normalizeText(item.status).toLowerCase())
+  )).length;
+  const totalStages = Math.max(1, workflow.stages.length);
+  const inferredProgress = workflow.status === "completed"
+    ? 100
+    : Math.max(4, Math.min(96, Math.round((completedStageCount / totalStages) * 100)));
+  console.warn(
+    `[workflow-v2][sync] workflow=${workflowId} status=${workflow.status} inferredStage=${inferredCurrentStageType} currentStageIds=${currentStageIds.join(",")}`
+  );
+
+  if (normalizeText(workflow.status).toLowerCase() === "completed") {
+    await prisma.$transaction(async (tx) => {
+      await tx.project.update({
+        where: { id: workflow.projectId },
+        data: {
+          status: "completed",
+          currentStage: "ACCEPT",
+          currentRole: "ROLE_QA",
+          pendingApproval: false,
+          progress: 100
+        }
+      });
+      await tx.stage.updateMany({
+        where: { projectId: workflow.projectId },
+        data: {
+          status: "completed",
+          progress: 100,
+          endedAt: new Date()
+        }
+      });
+      await tx.task.updateMany({
+        where: {
+          projectId: workflow.projectId,
+          status: {
+            notIn: Array.from(TASK_TERMINAL_STATUS)
+          }
+        },
+        data: {
+          status: "completed"
+        }
+      });
+    });
+    return;
+  }
+
+  const hasActiveWorkflowStage = currentStages.some((item) => (
+    !WORKFLOW_STAGE_TERMINAL_STATUS.has(normalizeText(item.status).toLowerCase())
+  ));
+  const legacyCurrentStage = hasActiveWorkflowStage ? inferredCurrentStageType : "INIT";
+  await prisma.$transaction(async (tx) => {
+    await tx.project.update({
+      where: { id: workflow.projectId },
+      data: {
+        status: "active",
+        currentStage: legacyCurrentStage,
+        currentRole: resolveLegacyCurrentRoleByStageType(legacyCurrentStage),
+        pendingApproval: false,
+        progress: inferredProgress
+      }
+    });
+
+    const legacyStages = await tx.stage.findMany({
+      where: { projectId: workflow.projectId },
+      orderBy: { sortOrder: "asc" }
+    });
+    const legacyStageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
+    const currentOrder = legacyStageOrder.indexOf(legacyCurrentStage);
+    for (const stage of legacyStages) {
+      const stageOrder = legacyStageOrder.indexOf(stage.type as StageType);
+      const isCurrent = stage.type === legacyCurrentStage;
+      const nextStatus: "pending" | "active" | "completed" =
+        isCurrent
+          ? "active"
+          : (stageOrder >= 0 && currentOrder >= 0 && stageOrder < currentOrder ? "completed" : "pending");
+      const nextProgress = nextStatus === "completed" ? 100 : (isCurrent ? Math.max(stage.progress ?? 0, 18) : 0);
+      await tx.stage.update({
+        where: { id: stage.id },
+        data: {
+          status: nextStatus,
+          progress: nextProgress,
+          startedAt: isCurrent ? (stage.startedAt ?? new Date()) : stage.startedAt,
+          endedAt: nextStatus === "completed" ? (stage.endedAt ?? new Date()) : null
+        }
+      });
+    }
+  });
+  console.warn(`[workflow-v2][sync] done workflow=${workflowId}`);
+}
+
 function toCompanionArtifactMarkdown(input: {
   stageKey: string;
   role: RoleType;
@@ -755,22 +908,28 @@ async function activateStage(stageId: string) {
     });
     const run = hermesRun ?? (
       shouldForceScriptedWorkflowAgent()
-        ? await runScriptedAgent({
-          projectName,
-          projectDescription,
-          parsedIntent,
-          stageType,
-          role,
-          summary
-        })
-        : await runStageAgent({
-          projectName,
-          projectDescription,
-          parsedIntent,
-          stageType,
-          role,
-          summary
-        })
+        ? await withWorkflowAgentTimeout(
+          runScriptedAgent({
+            projectName,
+            projectDescription,
+            parsedIntent,
+            stageType,
+            role,
+            summary
+          }),
+          `${stage.templateKey}/${role}/scripted-primary`
+        )
+        : await withWorkflowAgentTimeout(
+          runStageAgent({
+            projectName,
+            projectDescription,
+            parsedIntent,
+            stageType,
+            role,
+            summary
+          }),
+          `${stage.templateKey}/${role}/primary`
+        )
     );
     const executionSource = hermesRun ? "workflow_v2_hermes" : "workflow_v2_agent";
     const companionRoles = getStageCompanionRoles(stageType, role);
@@ -795,22 +954,28 @@ async function activateStage(stageId: string) {
         ].join("\n");
 
         const companionRun = shouldForceScriptedWorkflowAgent()
-          ? await runScriptedAgent({
-            projectName,
-            projectDescription,
-            parsedIntent,
-            stageType,
-            role: companionRole,
-            summary: companionSummary
-          })
-          : await runStageAgent({
-            projectName,
-            projectDescription,
-            parsedIntent,
-            stageType,
-            role: companionRole,
-            summary: companionSummary
-          });
+          ? await withWorkflowAgentTimeout(
+            runScriptedAgent({
+              projectName,
+              projectDescription,
+              parsedIntent,
+              stageType,
+              role: companionRole,
+              summary: companionSummary
+            }),
+            `${stage.templateKey}/${companionRole}/scripted-companion`
+          )
+          : await withWorkflowAgentTimeout(
+            runStageAgent({
+              projectName,
+              projectDescription,
+              parsedIntent,
+              stageType,
+              role: companionRole,
+              summary: companionSummary
+            }),
+            `${stage.templateKey}/${companionRole}/companion`
+          );
 
         companionArtifacts.push({
           name: `companion_review_${String(companionRole).toLowerCase()}.md`,
@@ -1072,6 +1237,7 @@ export async function startWorkflow(workflowId: string) {
       currentStageIds: stageIds
     }
   });
+  await syncLegacyProjectStateFromWorkflow(workflowId);
   const activatedStages = activationResults.filter(isActivatedStageResult);
   await Promise.all(
     activatedStages
@@ -1243,7 +1409,6 @@ export async function transitionWorkflowStage(input: {
     }
   });
 
-  const desiredStatus = nextStageIds.length > 0 ? "active" : "completed";
   const latestWorkflow = await prisma.workflow.findUnique({
     where: { id: workflow.id },
     select: {
@@ -1252,20 +1417,37 @@ export async function transitionWorkflowStage(input: {
     }
   });
   const latestStageIds = asStringArray(latestWorkflow?.currentStageIds);
-  const shouldPreserveAdvancedState = desiredStatus === "active"
-    && (
-      normalizeText(latestWorkflow?.status).toLowerCase() !== "active"
-      || (latestStageIds.length > 0 && !sameStageIdList(latestStageIds, nextStageIds))
-    );
-  if (!shouldPreserveAdvancedState) {
-    await prisma.workflow.update({
-      where: { id: workflow.id },
-      data: {
-        currentStageIds: nextStageIds,
-        status: desiredStatus
+  const candidateStageIds = dedupeStrings([
+    ...latestStageIds,
+    ...nextStageIds
+  ]);
+  const candidateStages = candidateStageIds.length > 0
+    ? await prisma.workflowStage.findMany({
+      where: {
+        id: {
+          in: candidateStageIds
+        }
+      },
+      select: {
+        id: true,
+        status: true
       }
-    });
-  }
+    })
+    : [];
+  const terminalStatus = new Set(["completed", "skipped", "failed"]);
+  const mergedCurrentStageIds = candidateStages
+    .filter((item) => !terminalStatus.has(normalizeText(item.status).toLowerCase()))
+    .map((item) => item.id);
+  const nextWorkflowStatus = mergedCurrentStageIds.length > 0 ? "active" : "completed";
+
+  await prisma.workflow.update({
+    where: { id: workflow.id },
+    data: {
+      currentStageIds: mergedCurrentStageIds,
+      status: nextWorkflowStatus
+    }
+  });
+  await syncLegacyProjectStateFromWorkflow(workflow.id);
 
   return {
     success: true,

@@ -30,8 +30,7 @@ export default function IssueInputPanel({ controller }: Props) {
     sourceInput,
     importedFileName,
     handleImportProjectFile,
-    handleParseInput,
-    isParsing,
+    handleCreateProjectNow,
     isLoadingIndustryConfig,
     showManualForm,
     setShowManualForm,
@@ -159,11 +158,11 @@ export default function IssueInputPanel({ controller }: Props) {
 
       <div className="grid grid-cols-2 gap-3">
         <button
-          onClick={() => void handleParseInput()}
-          disabled={isParsing || isLoadingIndustryConfig || !sourceInput.trim()}
+          onClick={() => void handleCreateProjectNow()}
+          disabled={isCreating || isLoadingIndustryConfig || (!sourceInput.trim() && !(showManualForm && formData.description.trim()))}
           className="py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all disabled:opacity-50"
         >
-          {isParsing ? 'AI 分析中...' : isLoadingIndustryConfig ? '加载行业配置中...' : 'AI 分析并分配 Agent'}
+          {isCreating ? '创建中...' : isLoadingIndustryConfig ? '加载行业配置中...' : '创建项目（先创建后分析）'}
         </button>
         <button
           onClick={() => setShowManualForm((prev) => !prev)}
@@ -252,10 +251,10 @@ export default function IssueInputPanel({ controller }: Props) {
 
           <button
             onClick={() => void handleManualSubmit()}
-            disabled={isCreating || isParsing}
+            disabled={isCreating}
             className="w-full py-3 bg-primary text-surface rounded-xl text-sm font-bold hover:bg-primary/90 transition-all mt-2 disabled:opacity-50"
           >
-            {isParsing ? '生成中...' : '生成确认卡'}
+            {isCreating ? '创建中...' : '立即创建项目'}
           </button>
         </div>
       )}

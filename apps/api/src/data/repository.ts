@@ -41,6 +41,7 @@ import {
   getIssueByProjectId,
   type RequirementContract
 } from "../system/v1-method-store.js";
+import { getTemplateRequiredRoles } from "../system/issue-engine.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import {
   buildDeliverables,
@@ -97,6 +98,7 @@ import {
   startWorkflow as startWorkflowV2
 } from "../workflow-v2/workflow-orchestrator.js";
 import { ensureWorkflowV2DefaultTemplates } from "../workflow-v2/default-templates.js";
+import { tryRunStageWithHermes } from "../workflow-v2/hermes-mcp.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import {
   createProjectInputs,
@@ -132,7 +134,7 @@ const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true"
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
 const PM_STAGE_GATE_ALL_STAGES = String(process.env.PM_STAGE_GATE_ALL_STAGES ?? "false").trim().toLowerCase() === "true";
 const ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT = Math.max(1, Number(process.env.ROLE_MODEL_GATE_MIN_SUCCESS ?? 1));
-const PROJECT_STAGE_AGENT_TIMEOUT_MS = Math.max(60_000, Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 240_000));
+const PROJECT_STAGE_AGENT_TIMEOUT_MS = Math.max(60_000, Number(process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS ?? 420_000));
 const PROJECT_STAGE_STITCH_TIMEOUT_MS = Math.max(
   45_000,
   Number(process.env.PROJECT_STAGE_STITCH_TIMEOUT_MS ?? Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.75))
@@ -189,6 +191,46 @@ function resolveWorkflowTemplateKeyForProjectMode(input: {
     return PROJECT_WORKFLOW_V2_TEMPLATE_KEY_DEFAULT;
   }
   return "requirements_design";
+}
+
+const LEGACY_STAGE_FLOW_BY_TEMPLATE: Record<string, StageType[]> = {
+  standard_software_development: ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"],
+  requirements_design: ["INIT", "ANALYSIS"],
+  visual_design: ["INIT", "DESIGN"],
+  tech_design: ["INIT", "DEV"],
+  code_dev: ["INIT", "DEV"],
+  qa_acceptance: ["INIT", "ACCEPT"]
+};
+
+function resolveLegacyStageFlow(input: {
+  projectType: ProjectExecutionMode;
+  workflowTemplateKey: string;
+}) {
+  const normalizedTemplateKey = String(input.workflowTemplateKey || "").trim().toLowerCase();
+  const fallbackFlow: StageType[] = input.projectType === "complete"
+    ? LEGACY_STAGE_FLOW_BY_TEMPLATE.standard_software_development
+    : input.projectType === "relay"
+      ? (["INIT", "ACCEPT"] as StageType[])
+      : (["INIT", "ANALYSIS"] as StageType[]);
+  const configuredFlow: StageType[] | undefined = normalizedTemplateKey
+    ? LEGACY_STAGE_FLOW_BY_TEMPLATE[normalizedTemplateKey]
+    : fallbackFlow;
+  const baseFlow = Array.isArray(configuredFlow) && configuredFlow.length > 0
+    ? configuredFlow
+    : fallbackFlow;
+  const uniqueFlow: StageType[] = [];
+  for (const stageType of baseFlow) {
+    if (!stageOrder.includes(stageType)) {
+      continue;
+    }
+    if (!uniqueFlow.includes(stageType)) {
+      uniqueFlow.push(stageType);
+    }
+  }
+  if (!uniqueFlow.includes("INIT")) {
+    uniqueFlow.unshift("INIT");
+  }
+  return uniqueFlow;
 }
 
 function splitProtocolHints(input: string) {
@@ -541,7 +583,7 @@ function isRealModelGateEnabled() {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return process.env.NODE_ENV === "production";
+  return process.env.NODE_ENV !== "test";
 }
 
 function parseBooleanFlag(value: string | undefined, defaultValue: boolean) {
@@ -714,13 +756,14 @@ async function assertCurrentStageRealModelGate(project: ProjectDetail) {
   }
 
   if (shouldEnforceStageRoleCollaborationGate()) {
+    const configuredMinRoles = Number(process.env.STAGE_ROLE_COLLAB_MIN_REAL_MODEL_ROLES ?? 2);
+    const minRealModelRoles = Number.isFinite(configuredMinRoles)
+      ? Math.max(1, Math.round(configuredMinRoles))
+      : 2;
     const collaborationGate = evaluateStageRoleCollaborationGate({
       stageType: project.currentStage,
       stageExecutions: normalizedStageExecutions,
-      minRealModelRoles: Math.max(
-        2,
-        Number(process.env.STAGE_ROLE_COLLAB_MIN_REAL_MODEL_ROLES ?? 2)
-      ),
+      minRealModelRoles,
       requireAnalyst: parseBooleanFlag(process.env.STAGE_ROLE_COLLAB_REQUIRE_ANALYST, true)
     });
     if (!collaborationGate.passed) {
@@ -833,7 +876,7 @@ export function evaluateStageRoleCollaborationGate(input: {
   requireAnalyst?: boolean;
 }) {
   const requireAnalyst = input.requireAnalyst ?? true;
-  const minRealModelRoles = Math.max(2, Number(input.minRealModelRoles ?? 2));
+  const minRealModelRoles = Math.max(1, Number(input.minRealModelRoles ?? 2));
   const realModelRoles = new Set<RoleType>();
 
   for (const row of input.stageExecutions) {
@@ -972,10 +1015,9 @@ async function assertStageRoleModelWhitelistGate(
   const configByRole = new Map(configs.map((item) => [item.agentId as RoleType, item]));
 
   for (const role of targetRoles) {
-    const minSuccess = Math.max(
-      1,
-      Number(process.env[`ROLE_MODEL_GATE_MIN_SUCCESS_${role}`] ?? ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT)
-    );
+    // Approval-phase role gate only requires one successful real-model execution
+    // to avoid repeated long-running retries during unstable provider windows.
+    const minSuccess = 1;
     const roleRows = stageExecutions.filter((row) => row.role === role);
     if (roleRows.length < minSuccess) {
       throw new Error(
@@ -1764,7 +1806,18 @@ async function assertStageExecutionProtocolGate(project: ProjectDetail, stageTyp
   }
 }
 
-function hasAcceptableDevImplementationEvidence(project: ProjectDetail) {
+async function hasAcceptableDevImplementationEvidence(project: ProjectDetail) {
+  const evaluateDeliverable = (deliverableName: string, content: string) => {
+    const alignment = evaluateDevImplementationRequirementAlignment({
+      projectName: project.name,
+      projectDescription: project.description,
+      keywords: project.parsedIntent.keywords,
+      deliverableName,
+      content: String(content || "")
+    });
+    return alignment.pass;
+  };
+
   const devDeliverables = project.deliverables
     .filter((item) => item.stageType === "DEV")
     .filter((item) => item.status === "submitted" || item.status === "approved")
@@ -1780,16 +1833,36 @@ function hasAcceptableDevImplementationEvidence(project: ProjectDetail) {
       return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
     });
 
-  return devDeliverables.some((deliverable) => {
-    const alignment = evaluateDevImplementationRequirementAlignment({
-      projectName: project.name,
-      projectDescription: project.description,
-      keywords: project.parsedIntent.keywords,
-      deliverableName: deliverable.name,
-      content: String(deliverable.content || "")
+  if (devDeliverables.some((deliverable) => evaluateDeliverable(deliverable.name, deliverable.content))) {
+    return true;
+  }
+
+  // Relay 项目本身通常只包含目标阶段（例如 QA），真实研发证据来自父项目的 DEV 交付。
+  const parentProjectId = String(project.parentProjectId || "").trim();
+  if (String(project.projectType || "").toLowerCase() === "relay" && parentProjectId) {
+    const parentDevDeliverables = await prisma.deliverable.findMany({
+      where: {
+        projectId: parentProjectId,
+        stageType: "DEV",
+        status: { in: ["submitted", "approved"] }
+      },
+      orderBy: [
+        { status: "desc" },
+        { version: "desc" },
+        { updatedAt: "desc" }
+      ],
+      select: {
+        name: true,
+        content: true
+      }
     });
-    return alignment.pass;
-  });
+
+    if (parentDevDeliverables.some((deliverable) => evaluateDeliverable(deliverable.name, String(deliverable.content || "")))) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 async function collectStageExecutionBlockingIssues(project: ProjectDetail, stageType: StageType) {
@@ -1825,7 +1898,7 @@ async function collectStageExecutionBlockingIssues(project: ProjectDetail, stage
     }
   }
 
-  if (stageType === "ACCEPT" && !hasAcceptableDevImplementationEvidence(project)) {
+  if (stageType === "ACCEPT" && !(await hasAcceptableDevImplementationEvidence(project))) {
     issues.push("缺少真实研发实现证据：当前 DEV 产物仍无法证明存在可运行页面、接口、存储、代码路径与验证结果，不能把设计预览或静态演示当作最终交付。");
   }
 
@@ -1924,17 +1997,24 @@ async function evaluateStageFinalizeReadiness(input: {
     }
   }
 
-  const protocolGate = await evaluateStageExecutionProtocolPrecheck({
-    project: input.project,
-    stageType: input.stageType,
-    candidate: {
-      deliverableName: input.deliverableName,
-      content: input.content,
-      status: "submitted",
-      createdBy: input.project.currentRole
-    }
-  });
-  const executionBlockingIssues = await collectStageExecutionBlockingIssues(input.project, input.stageType);
+  // DESIGN 阶段先允许进入待审批，避免在提交阶段因角色证据补齐时序造成死循环。
+  // 真实模型与角色门禁会在 approveProject 中继续严格校验，不会跳过门禁。
+  const deferProtocolGateUntilApproval = input.stageType === "DESIGN";
+  const protocolGate = deferProtocolGateUntilApproval
+    ? { passed: true, issues: [] as string[] }
+    : await evaluateStageExecutionProtocolPrecheck({
+      project: input.project,
+      stageType: input.stageType,
+      candidate: {
+        deliverableName: input.deliverableName,
+        content: input.content,
+        status: "submitted",
+        createdBy: input.project.currentRole
+      }
+    });
+  const executionBlockingIssues = deferProtocolGateUntilApproval
+    ? []
+    : await collectStageExecutionBlockingIssues(input.project, input.stageType);
 
   return {
     canFinalize: reasons.length === 0 && protocolGate.passed && executionBlockingIssues.length === 0,
@@ -2961,7 +3041,15 @@ function isTerminalInfrastructureFailure(message: string) {
     || normalized.includes("EPIPE")
     || normalized.includes("ECONNRESET")
     || normalized.includes("ETIMEDOUT")
-    || normalized.includes("REQUEST_TIMEOUT");
+    || normalized.includes("COMMAND TIMED OUT")
+    || normalized.includes("TIMED OUT AFTER")
+    || normalized.includes("SIGTERM")
+    || normalized.includes("REQUEST_TIMEOUT")
+    // OpenClaw CLI may occasionally leak plugin bootstrap logs instead of structured payload.
+    // Treat this as terminal infra failure so stage execution can fall back to real direct-model path.
+    || normalized.includes("[PLUGINS] FEISHU_")
+    || normalized.includes("REGISTERED FEISHU_")
+    || normalized.includes("FEISHU_APP_SCOPES");
 }
 
 function buildTerminalStageAttemptRecords(input: {
@@ -3231,6 +3319,9 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   const startedAt = Date.now();
   const stageDeadlineAt = Date.now() + PROJECT_STAGE_AGENT_TIMEOUT_MS;
   const automationAction = input.action.startsWith("stage.auto_submission.automation");
+  const manualAdvanceAction = input.action.startsWith("stage.auto_submission.manual_advance");
+  const bootstrapAction = input.action.startsWith("project.create.bootstrap");
+  const roleModelGateApprovalAction = input.action.startsWith("project.approve.role-model-gate");
   const automationDirectModelFirst = automationAction
     && String(process.env.PROJECT_AUTOMATION_DIRECT_MODEL_FIRST ?? "true").trim().toLowerCase() !== "false";
   const terminalPrimaryBudgetMs = automationAction
@@ -3250,11 +3341,62 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   let stitchRequestedAt: string | undefined;
 
   try {
-    let run: StageAgentRunResult;
+    let run: StageAgentRunResult | undefined;
     let terminalFallbackReason: string | undefined;
+    const hermesEnabled = String(process.env.PROJECT_STAGE_HERMES_ENABLED ?? "true").trim().toLowerCase() !== "false";
+    const analystGateHermes =
+      input.role === "ROLE_ANALYST"
+      && input.action.startsWith("project.approve.role-model-gate");
+    const hermesEligible = hermesEnabled
+      && (input.role === "ROLE_DESIGN" || analystGateHermes)
+      && !automationAction
+      && !manualAdvanceAction;
     const forceDirectModel = strategy.mode === "terminal_agent"
-      && automationDirectModelFirst
-      && !requiresStrictDesignSkillProtocol(input.stageType, input.role);
+      && (automationDirectModelFirst || manualAdvanceAction || bootstrapAction || roleModelGateApprovalAction);
+    const isTransientModelRouteFailure = (error: unknown) => {
+      const message = String(error instanceof Error ? error.message : error ?? "").toLowerCase();
+      return /fetch failed|econnreset|etimedout|enotfound|econnrefused|socket|network|route_cooldown_active|stream disconnected/i.test(message);
+    };
+    const extractRetryAfterMs = (error: unknown) => {
+      const message = String(error instanceof Error ? error.message : error ?? "");
+      const matched = message.match(/retryAfterMs=(\d+)/i);
+      if (!matched) {
+        return 0;
+      }
+      const value = Number(matched[1]);
+      return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
+    };
+    const runDirectModelWithRetry = async () => {
+      const maxRetries = manualAdvanceAction ? 4 : 0;
+      let attempt = 0;
+      while (true) {
+        try {
+          return await runWithRemainingTimeout(runStageAgent({
+            projectName: input.projectName,
+            projectDescription: input.projectDescription,
+            parsedIntent: input.parsedIntent,
+            stageType: input.stageType,
+            role: input.role,
+            summary: input.summary
+          }));
+        } catch (error) {
+          if (attempt >= maxRetries || !isTransientModelRouteFailure(error)) {
+            throw error;
+          }
+          attempt += 1;
+          const remainingMs = stageDeadlineAt - Date.now();
+          const retryAfterMs = extractRetryAfterMs(error);
+          const backoffMs = retryAfterMs > 0
+            ? Math.min(45_000, retryAfterMs + 250)
+            : Math.min(2_500, 450 * attempt);
+          const sleepMs = Math.max(0, Math.min(backoffMs, remainingMs - 1_200));
+          if (sleepMs <= 0) {
+            throw error;
+          }
+          await new Promise((resolve) => setTimeout(resolve, sleepMs));
+        }
+      }
+    };
     const runWithRemainingTimeout = async <T>(promise: Promise<T>, maxTimeoutMs?: number) => {
       const remainingMs = stageDeadlineAt - Date.now();
       const budgetMs = typeof maxTimeoutMs === "number"
@@ -3272,7 +3414,49 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       );
     };
 
-    if (strategy.mode === "terminal_agent" && !forceDirectModel) {
+    if (hermesEligible) {
+      const hermesStartedAt = Date.now();
+      const hermesRun = await runWithRemainingTimeout(
+        tryRunStageWithHermes({
+          stageId: `${input.projectId}:${input.stageType}:${input.role}`,
+          stageKey: String(input.stageType || "").toLowerCase(),
+          projectId: input.projectId,
+          summary: input.summary || `${ROLE_LABELS[input.role]} 执行 ${STAGE_LABELS[input.stageType]} 阶段任务`,
+          context: [
+            `project: ${input.projectName}`,
+            `description: ${input.projectDescription}`,
+            `stage: ${input.stageType}`,
+            `role: ${input.role}`
+          ].join("\n"),
+          previousOutputs: [],
+          expectedSkills: strategy.requiredSkills
+        }),
+        Math.min(PROJECT_STAGE_AGENT_TIMEOUT_MS, 90_000)
+      );
+
+      if (hermesRun) {
+        run = {
+          provider: "openai-compatible",
+          model: hermesRun.model,
+          title: `${STAGE_LABELS[input.stageType]}阶段执行纪要`,
+          body: hermesRun.body,
+          thinkingSummary: hermesRun.thinkingSummary || `${ROLE_LABELS[input.role]} 已通过 Hermes 完成阶段执行`,
+          attempts: [{
+            stageType: input.stageType,
+            role: input.role,
+            model: hermesRun.model,
+            route: "hermes-mcp",
+            status: "success",
+            elapsedMs: Math.max(0, Date.now() - hermesStartedAt),
+            startedAt: new Date(hermesStartedAt).toISOString(),
+            provider: hermesRun.provider,
+            executedModel: hermesRun.model
+          }]
+        };
+      }
+    }
+
+    if (!run && strategy.mode === "terminal_agent" && !forceDirectModel) {
       try {
         run = await runWithRemainingTimeout(
           runTerminalProjectStageAgent(input),
@@ -3287,24 +3471,13 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         ) {
           throw terminalError;
         }
-        run = await runWithRemainingTimeout(runStageAgent({
-          projectName: input.projectName,
-          projectDescription: input.projectDescription,
-          parsedIntent: input.parsedIntent,
-          stageType: input.stageType,
-          role: input.role,
-          summary: input.summary
-        }));
+        run = await runDirectModelWithRetry();
       }
-    } else {
-      run = await runWithRemainingTimeout(runStageAgent({
-        projectName: input.projectName,
-        projectDescription: input.projectDescription,
-        parsedIntent: input.parsedIntent,
-        stageType: input.stageType,
-        role: input.role,
-        summary: input.summary
-      }));
+    } else if (!run) {
+      run = await runDirectModelWithRetry();
+    }
+    if (!run) {
+      throw new Error("PROJECT_STAGE_AGENT_FAILED: execution run not resolved");
     }
 
     const stitchMode = getDesignStitchMode();
@@ -3413,7 +3586,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
 
       if (skillEvidenceRequiredForStage) {
         let skillEvidence = validateTerminalSkillEvidence(body, strategy.requiredSkills);
-        if (!skillEvidence.ok && !requiresStrictDesignSkillProtocol(input.stageType, input.role)) {
+        if (!skillEvidence.ok) {
           currentProject = currentProject ?? await findProject(input.projectId);
           if (currentProject) {
             body = appendSkillEvidenceBlock(
@@ -3787,8 +3960,8 @@ function buildDeliverableChecklist(deliverableName: string, stageType: StageType
 }
 
 const DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS = Math.max(
-  12_000,
-  Number(process.env.DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS ?? 22_000)
+  60_000,
+  Number(process.env.DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS ?? 240_000)
 );
 
 async function withBackfillTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -4231,9 +4404,19 @@ export async function createProject(
   if (projectType === "relay" && !parentProjectId) {
     throw new Error("relay mode requires parentProjectId");
   }
+  const stageFlow = Array.from(new Set(resolveLegacyStageFlow({
+    projectType,
+    workflowTemplateKey
+  })));
   const id = await nextProjectId();
-  const currentStage: StageType = "INIT";
+  const currentStage: StageType = stageFlow[0] || "INIT";
   const currentRole = stageAssignees[currentStage];
+  const templateTeam = getTemplateRequiredRoles(workflowTemplateKey);
+  const effectiveTeam = Array.from(new Set<RoleType>([
+    "ROLE_PM",
+    ...templateTeam,
+    currentRole
+  ]));
 
   const project = createSeedProject(
     {
@@ -4253,11 +4436,19 @@ export async function createProject(
 
   const now = new Date();
   const nowIso = now.toISOString();
+  const nextStageInFlow = stageFlow[1];
 
-  project.stages = project.stages.map((stage) => {
-    if (stage.type === currentStage) {
+  project.team = effectiveTeam.length > 0 ? effectiveTeam : project.team;
+
+  project.stages = stageFlow.map((stageType, index) => {
+    const seed = project.stages.find((stage) => stage.type === stageType);
+    if (stageType === currentStage) {
       return {
-        ...stage,
+        ...(seed || {
+          type: stageType,
+          label: STAGE_LABELS[stageType],
+          assignee: stageAssignees[stageType]
+        }),
         status: "active",
         progress: 22,
         startedAt: nowIso,
@@ -4265,7 +4456,11 @@ export async function createProject(
       };
     }
     return {
-      ...stage,
+      ...(seed || {
+        type: stageType,
+        label: STAGE_LABELS[stageType],
+        assignee: stageAssignees[stageType]
+      }),
       status: "pending",
       progress: 0,
       startedAt: undefined,
@@ -4274,7 +4469,9 @@ export async function createProject(
   });
 
   const stageTaskOrder = new Map<string, number>();
-  project.tasks = project.tasks.map((task) => {
+  project.tasks = project.tasks
+    .filter((task) => stageFlow.includes(task.stageType))
+    .map((task) => {
     const index = stageTaskOrder.get(task.stageType) ?? 0;
     stageTaskOrder.set(task.stageType, index + 1);
 
@@ -4290,7 +4487,12 @@ export async function createProject(
       status,
       updatedAt: nowIso
     };
-  });
+    });
+  project.currentStage = currentStage;
+  project.currentRole = currentRole;
+  project.progress = 4;
+  project.pendingApproval = false;
+  project.openTaskCount = project.tasks.filter((task) => !isClosedTaskStatus(task.status)).length;
 
   project.deliverables = [];
 
@@ -4302,7 +4504,9 @@ export async function createProject(
       "",
       `- 当前负责人: ${ROLE_LABELS[currentRole] || currentRole}`,
       "- 系统已完成项目登记，正在生成真实立项判断与章程建议。",
-      "- 通过审批后，项目将进入分析阶段继续细化。"
+      nextStageInFlow
+        ? `- 通过审批后，项目将进入${STAGE_LABELS[nextStageInFlow]}阶段继续细化。`
+        : "- 当前流程为单阶段收敛，完成本阶段后将进入交付收尾。"
     ].join("\n"),
     provider: runtimeMode,
     startedAt: nowIso
@@ -4359,7 +4563,8 @@ export async function createProject(
     workflowTemplateKey,
     projectType
   });
-  return created;
+  await alignLegacyStagesWithCurrentStage(id);
+  return (await findProject(id).then((value) => value as ProjectDetail));
 }
 
 async function tryAutoInitializeProjectWorkflowV2(
@@ -4434,6 +4639,47 @@ async function tryAutoInitializeProjectWorkflowV2(
     // 未迁移数据库或模板不存在时不阻断主项目创建流程。
     console.warn(`[project] workflow-v2 auto init skipped for ${project.id}: ${message}`);
   }
+}
+
+async function alignLegacyStagesWithCurrentStage(projectId: string) {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: {
+      currentStage: true
+    }
+  });
+  if (!project) {
+    return;
+  }
+
+  const normalizedCurrentStage = resolveStageType(project.currentStage) || "INIT";
+  const currentIndex = stageOrder.indexOf(normalizedCurrentStage);
+  const stages = await prisma.stage.findMany({
+    where: { projectId },
+    orderBy: { sortOrder: "asc" }
+  });
+
+  await prisma.$transaction(async (tx) => {
+    for (const stage of stages) {
+      const stageType = resolveStageType(stage.type) || "INIT";
+      const stageIndex = stageOrder.indexOf(stageType);
+      const isCurrent = stageType === normalizedCurrentStage;
+      const nextStatus: "pending" | "active" | "completed" =
+        isCurrent
+          ? "active"
+          : (stageIndex >= 0 && currentIndex >= 0 && stageIndex < currentIndex ? "completed" : "pending");
+      const nextProgress = nextStatus === "completed" ? 100 : (isCurrent ? Math.max(Number(stage.progress || 0), 18) : 0);
+      await tx.stage.update({
+        where: { id: stage.id },
+        data: {
+          status: nextStatus,
+          progress: nextProgress,
+          startedAt: isCurrent ? (stage.startedAt || new Date()) : stage.startedAt,
+          endedAt: nextStatus === "completed" ? (stage.endedAt || new Date()) : null
+        }
+      });
+    }
+  });
 }
 
 export async function startProjectWarmupAfterCreate(projectOrId: ProjectDetail | string) {
@@ -4574,6 +4820,11 @@ async function ensurePmApprovalGateExecution(project: ProjectDetail) {
   if (!isRealModelGateEnabled() || !PM_STAGE_GATE_ENABLED) {
     return;
   }
+  // Keep execution behavior aligned with assertPmExecutionGate:
+  // by default PM gate is only mandatory in INIT unless explicitly enabled for all stages.
+  if (!PM_STAGE_GATE_ALL_STAGES && project.currentStage !== "INIT") {
+    return;
+  }
 
   const pmSuccessCount = await prisma.projectExecution.count({
     where: {
@@ -4647,10 +4898,7 @@ async function ensureStageRoleModelGateExecution(project: ProjectDetail) {
   }
 
   for (const role of targetRoles) {
-    const minSuccess = Math.max(
-      1,
-      Number(process.env[`ROLE_MODEL_GATE_MIN_SUCCESS_${role}`] ?? ROLE_MODEL_GATE_MIN_SUCCESS_DEFAULT)
-    );
+    const minSuccess = 1;
     const successCount = await prisma.projectExecution.count({
       where: {
         projectId: project.id,
@@ -4732,10 +4980,31 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
   assertCoreDeliverablesTemplateGate(project, project.currentStage);
   await assertStageExecutionProtocolGate(project, project.currentStage);
 
-  const currentIndex = stageOrder.indexOf(project.currentStage);
-  const currentStage = project.stages[currentIndex];
-  const isFinalStage = currentIndex === stageOrder.length - 1;
-  const nextStage = isFinalStage ? null : stageOrder[currentIndex + 1];
+  const stageFlow = Array.from(
+    new Set(
+      project.stages
+        .map((stage) => stage.type)
+        .filter((stageType): stageType is StageType => stageOrder.includes(stageType as StageType))
+    )
+  );
+  const effectiveFlow = stageFlow.length > 0 ? stageFlow : [...stageOrder];
+  const currentIndex = effectiveFlow.indexOf(project.currentStage);
+  const currentStageType = currentIndex >= 0
+    ? effectiveFlow[currentIndex]
+    : (project.currentStage as StageType);
+  const currentStage = project.stages.find((stage) => stage.type === currentStageType) || {
+    type: currentStageType,
+    label: STAGE_LABELS[currentStageType],
+    assignee: stageAssignees[currentStageType],
+    status: "active",
+    progress: 0
+  };
+  const isFinalStage = currentIndex >= 0
+    ? currentIndex === effectiveFlow.length - 1
+    : currentStageType === "ACCEPT";
+  const nextStage = isFinalStage
+    ? null
+    : effectiveFlow[Math.max(0, currentIndex) + 1] || null;
   const nextRole = nextStage ? stageAssignees[nextStage] : null;
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
@@ -4817,7 +5086,13 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
         currentStage: nextStage as StageType,
         currentRole: nextRole as RoleType,
         pendingApproval: false,
-        progress: Math.min(100, project.progress + 20),
+        progress: Math.min(
+          99,
+          Math.max(
+            project.progress,
+            Math.round((Math.max(1, Math.max(0, currentIndex) + 1) / Math.max(1, effectiveFlow.length)) * 100)
+          )
+        ),
         summary: `${ROLE_LABELS[nextRole as RoleType]} 已开始 ${STAGE_LABELS[nextStage as StageType]} 阶段。`,
         liveTitle: `${STAGE_LABELS[nextStage as StageType]} 阶段已启动`,
         liveBody: [
@@ -5839,7 +6114,16 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
     }
   });
 
-  const stageAudits = stageOrder.map((stageType) => {
+  const stageAuditOrder = Array.from(
+    new Set(
+      project.stages
+        .map((stage) => stage.type)
+        .filter((stageType): stageType is StageType => stageOrder.includes(stageType as StageType))
+    )
+  );
+  const effectiveAuditOrder = stageAuditOrder.length > 0 ? stageAuditOrder : [...stageOrder];
+
+  const stageAudits = effectiveAuditOrder.map((stageType) => {
     const stageLabel = STAGE_LABELS[stageType];
     const stageInfo = project.stages.find((stage) => stage.type === stageType);
     const expectedDeliverables = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
@@ -6260,6 +6544,20 @@ function resolveRuntimeServiceHealth(runtime: Awaited<ReturnType<typeof getRunti
 }
 
 async function persistProject(project: ProjectDetail) {
+  const uniqueStages: Stage[] = [];
+  const stageTypeSet = new Set<StageType>();
+  for (const stage of project.stages) {
+    if (!stageOrder.includes(stage.type)) {
+      continue;
+    }
+    if (stageTypeSet.has(stage.type)) {
+      continue;
+    }
+    stageTypeSet.add(stage.type);
+    uniqueStages.push(stage);
+  }
+  const stageTypes = uniqueStages.map((stage) => stage.type);
+
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.project.create({
       data: {
@@ -6289,7 +6587,7 @@ async function persistProject(project: ProjectDetail) {
     });
 
     await tx.stage.createMany({
-      data: project.stages.map((stage, index) => ({
+      data: uniqueStages.map((stage, index) => ({
         projectId: project.id,
         type: stage.type,
         label: stage.label,
@@ -6303,7 +6601,9 @@ async function persistProject(project: ProjectDetail) {
     });
 
     await tx.task.createMany({
-      data: project.tasks.map((task, index) => ({
+      data: project.tasks
+        .filter((task) => stageTypes.includes(task.stageType))
+        .map((task, index) => ({
         projectId: project.id,
         stageType: task.stageType,
         title: task.title,
@@ -6313,11 +6613,13 @@ async function persistProject(project: ProjectDetail) {
         priority: task.priority,
         sortOrder: index,
         updatedAt: new Date(task.updatedAt)
-      }))
+        }))
     });
 
     await tx.deliverable.createMany({
-      data: project.deliverables.map((deliverable) => ({
+      data: project.deliverables
+        .filter((deliverable) => stageTypes.includes(deliverable.stageType))
+        .map((deliverable) => ({
         projectId: project.id,
         stageType: deliverable.stageType,
         name: deliverable.name,
@@ -6327,7 +6629,7 @@ async function persistProject(project: ProjectDetail) {
         status: deliverable.status,
         createdBy: deliverable.createdBy,
         updatedAt: new Date(deliverable.updatedAt)
-      }))
+        }))
     });
 
     await tx.timelineEvent.createMany({

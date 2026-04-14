@@ -36,7 +36,7 @@ const STAGE_TIMEOUT_BASELINE_MS: Record<StageType, number> = {
 };
 const ROUTE_TIMEOUT_COOLDOWN_MS = Math.max(30000, Number(process.env.MODEL_ROUTE_TIMEOUT_COOLDOWN_MS ?? 180000));
 const ROUTE_AUTH_COOLDOWN_MS = Math.max(60000, Number(process.env.MODEL_ROUTE_AUTH_COOLDOWN_MS ?? 900000));
-const ROUTE_NETWORK_COOLDOWN_MS = Math.max(30000, Number(process.env.MODEL_ROUTE_NETWORK_COOLDOWN_MS ?? 300000));
+const ROUTE_NETWORK_COOLDOWN_MS = Math.max(15000, Number(process.env.MODEL_ROUTE_NETWORK_COOLDOWN_MS ?? 60000));
 const MODEL_ROUTE_PREWARM_ENABLED = String(process.env.MODEL_ROUTE_PREWARM_ENABLED ?? "true").trim().toLowerCase() !== "false";
 const MODEL_ROUTE_PREWARM_TIMEOUT_MS = Math.max(1200, Number(process.env.MODEL_ROUTE_PREWARM_TIMEOUT_MS ?? 4500));
 const MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS = Math.max(10000, Number(process.env.MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS ?? 90000));
@@ -69,24 +69,27 @@ const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
 };
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
-  INIT: ["qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus"],
-  ANALYSIS: ["qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus", "glm-5"],
+  INIT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus"],
+  ANALYSIS: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus", "glm-5"],
   DESIGN: [
+    "openai/gpt-5.4",
+    "openai/gpt-5.3-codex",
     "qwen3-max-2026-01-23",
     "qwen3.5-plus",
     "qwen3-coder-plus",
     "kimi-k2.5",
     "minima/MiniMax-M2.7-highspeed",
-    "glm-5",
-    "openai/gpt-5.4",
-    "openai/gpt-5.3-codex"
+    "glm-5"
   ],
-  DEV: ["qwen3-coder-plus", "qwen3-coder-next", "qwen3-max-2026-01-23", "glm-5"],
-  ACCEPT: ["qwen3-max-2026-01-23", "qwen3.5-plus", "glm-5"]
+  DEV: ["openai/gpt-5.3-codex", "openai/gpt-5.4", "qwen3-coder-plus", "qwen3-coder-next", "qwen3-max-2026-01-23", "glm-5"],
+  ACCEPT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "glm-5"]
 };
 
 // Issue 讨论优先走当前网关已实测可用的模型链，避免把不可用模型写成首选。
 const ISSUE_DEBATE_MODEL_PREFERENCES = [
+  "openai/gpt-5.4",
+  "gpt-5.4",
+  "openai/gpt-5.3-codex",
   "qwen3-max-2026-01-23",
   "qwen3.5-plus",
   "qwen3-coder-plus"
@@ -95,23 +98,23 @@ const ISSUE_DEBATE_MODEL_PREFERENCES = [
 const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: string }> = {
   INIT: {
     objective: "快速理解需求与项目初始化。",
-    bestFit: "qwen3-max-2026-01-23（首选） -> qwen3.5-plus（补位） -> qwen3-coder-plus"
+    bestFit: "gpt-5.4（首选） -> gpt-5.3-codex（补位） -> qwen3-max / qwen3.5-plus（兜底）"
   },
   ANALYSIS: {
     objective: "抽取约束/风险/验收标准，形成可执行分析。",
-    bestFit: "qwen3-max-2026-01-23（首选） -> qwen3.5-plus（次选） -> glm-5 / qwen3-coder-plus（补位）"
+    bestFit: "gpt-5.4（首选） -> gpt-5.3-codex（次选） -> qwen3-max / glm-5（补位）"
   },
   DESIGN: {
     objective: "输出高质量视觉与交互策略，避免模板化设计。",
-    bestFit: "qwen3-max-2026-01-23（设计首选） -> qwen3.5-plus -> qwen3-coder-plus -> kimi/minimax/glm（扩展） -> gpt-5.x（网关可用时）"
+    bestFit: "gpt-5.4（设计首选） -> gpt-5.3-codex -> qwen3-max / qwen3.5-plus -> kimi/minimax/glm（扩展）"
   },
   DEV: {
     objective: "面向实现落地，强调代码可执行性和稳定性。",
-    bestFit: "qwen3-coder-plus（实现质量首选） -> qwen3-coder-next（编码补位） -> qwen3-max-2026-01-23"
+    bestFit: "gpt-5.3-codex（实现首选） -> gpt-5.4（补位） -> qwen3-coder-plus / qwen3-coder-next（兜底）"
   },
   ACCEPT: {
     objective: "验收复盘与质量关口确认。",
-    bestFit: "qwen3-max-2026-01-23（质量复核） -> qwen3.5-plus（总结评审） -> glm-5"
+    bestFit: "gpt-5.4（质量复核） -> gpt-5.3-codex（总结评审） -> qwen3-max / glm-5（兜底）"
   }
 };
 
@@ -171,7 +174,7 @@ function isRealModelGateEnabled() {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return process.env.NODE_ENV === "production";
+  return process.env.NODE_ENV !== "test";
 }
 
 function getModelRouteKey(model: string, route: string) {
@@ -199,7 +202,21 @@ function markModelRouteCooldown(model: string, route: string, error: unknown) {
     ttlMs = ROUTE_AUTH_COOLDOWN_MS;
   } else if (message.includes("MODEL_ATTEMPT_TIMEOUT") || message.includes("ETIMEOUT") || message.includes("TIMED OUT")) {
     ttlMs = ROUTE_TIMEOUT_COOLDOWN_MS;
-  } else if (message.includes("ENOTFOUND") || message.includes("ECONNREFUSED") || message.includes("ECONNRESET")) {
+  } else if (
+    message.includes("ENOTFOUND")
+    || message.includes("ECONNREFUSED")
+    || message.includes("ECONNRESET")
+    || message.includes("FETCH FAILED")
+    || message.includes("SOCKET")
+  ) {
+    ttlMs = ROUTE_NETWORK_COOLDOWN_MS;
+  } else if (
+    message.includes("HTTP_503")
+    || message.includes("NO AVAILABLE CHANNEL")
+    || message.includes("UNSUPPORTED MODEL")
+    || message.includes("MODEL NOT FOUND")
+  ) {
+    // Treat model/channel unavailability as route-level cooldown to avoid repeated hot-loop failures.
     ttlMs = ROUTE_NETWORK_COOLDOWN_MS;
   }
 
@@ -307,8 +324,15 @@ async function probeRouteModel(route: ExecutionRoute, model: string, timeoutMs: 
     if (message.includes("ABORT") || message.includes("TIMEOUT") || message.includes("TIMED OUT")) {
       return { reason: null, ttlMs: 0 };
     }
-    if (message.includes("ECONNRESET") || message.includes("ECONNREFUSED") || message.includes("ENOTFOUND")) {
-      return { reason: `PREWARM_NETWORK: ${normalizeErrorMessage(error)}`, ttlMs: ROUTE_NETWORK_COOLDOWN_MS };
+    if (
+      message.includes("ECONNRESET")
+      || message.includes("ECONNREFUSED")
+      || message.includes("ENOTFOUND")
+      || message.includes("FETCH FAILED")
+      || message.includes("SOCKET")
+    ) {
+      // Prewarm 只是探测，不应因为一次网络抖动直接阻断真实请求。
+      return { reason: null, ttlMs: 0 };
     }
     return { reason: null, ttlMs: 0 };
   } finally {
@@ -697,6 +721,13 @@ export async function runStageAgent(input: {
       }
     }
 
+    if (!lastError) {
+      const lastAttemptError = [...attempts].reverse().find((attempt) => String(attempt.error || "").trim())?.error;
+      if (lastAttemptError) {
+        lastError = new Error(String(lastAttemptError));
+      }
+    }
+
     // 保底降级：避免阶段推进长时间阻塞，至少保证流程可继续并可审阅。
     if (enforceRealModelGate) {
       const gateError = new Error(
@@ -955,20 +986,20 @@ async function resolveRoleModelPlan(
   // 1) 角色专属配置优先，显式 Agent 模型选择不应被阶段默认策略覆盖。
   push(managedSelectedModel);
 
-  // 2) 运行时显式模型优先，避免被阶段默认策略截断后无法尝试到真实可用模型。
-  push(runtimeModel);
-
-  // 3) Issue 真实讨论优先模型能力链（基于当前可用性策略）。
+  // 2) Issue 真实讨论优先模型能力链（基于当前可用性策略）。
   if (promptMode === "issue_debate") {
     for (const preferredModel of ISSUE_DEBATE_MODEL_PREFERENCES) {
       push(preferredModel);
     }
   }
 
-  // 4) 阶段级策略作为补位，确保没有显式角色配置时仍命中更适配的模型。
+  // 3) 阶段级策略优先，确保自动推进优先命中稳定可用的真实模型链。
   for (const preferredModel of STAGE_MODEL_PREFERENCES[stageType] || []) {
     push(preferredModel);
   }
+
+  // 4) 运行时显式模型作为补位，避免全局 runtime 配置覆盖阶段策略导致卡在不可用通道。
+  push(runtimeModel);
 
   // 5) 角色兜底模型
   push(managedFallbackModel);
@@ -1087,36 +1118,38 @@ async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput):
     || String(config.env?.OPENAI_API_BASE_URL ?? "").trim();
   const officialOpenAiBaseUrl = "https://api.openai.com/v1";
   const effectiveEnvOpenAiBaseUrl = envOpenAiBaseUrl || (envOpenAiKey ? officialOpenAiBaseUrl : "");
+  const routePriority = String(process.env.OPENAI_ROUTE_PRIORITY ?? "runtime-first").trim().toLowerCase();
 
-  const routes: ExecutionRoute[] = [
-    ...(prefersDirectOpenAI ? [{
+  const runtimeRoute: ExecutionRoute = {
+    source: "runtime-selected",
+    apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
+    apiKey: String(input.runtimeApiKey ?? "").trim()
+  };
+  const openclawRoute: ExecutionRoute = {
+    source: "openclaw-openai",
+    apiBaseUrl: String(provider?.baseUrl ?? "").trim(),
+    apiKey: String(provider?.apiKey ?? "").trim()
+      || String(config.env?.OPENAI_API_KEY ?? "").trim()
+      || String(process.env.OPENAI_API_KEY ?? "").trim()
+  };
+  const directRoutes: ExecutionRoute[] = [
+    {
       source: "env-openai",
       apiBaseUrl: effectiveEnvOpenAiBaseUrl,
       apiKey: envOpenAiKey
-    }] : []),
-    ...(prefersDirectOpenAI && effectiveEnvOpenAiBaseUrl && effectiveEnvOpenAiBaseUrl !== officialOpenAiBaseUrl ? [{
+    },
+    ...(effectiveEnvOpenAiBaseUrl && effectiveEnvOpenAiBaseUrl !== officialOpenAiBaseUrl ? [{
       source: "official-openai",
       apiBaseUrl: officialOpenAiBaseUrl,
       apiKey: envOpenAiKey
-    }] : []),
-    {
-      source: "runtime-selected",
-      apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
-      apiKey: String(input.runtimeApiKey ?? "").trim()
-    },
-    {
-      source: "env-openai",
-      apiBaseUrl: effectiveEnvOpenAiBaseUrl,
-      apiKey: envOpenAiKey
-    },
-    {
-      source: "openclaw-openai",
-      apiBaseUrl: String(provider?.baseUrl ?? "").trim(),
-      apiKey: String(provider?.apiKey ?? "").trim()
-        || String(config.env?.OPENAI_API_KEY ?? "").trim()
-        || String(process.env.OPENAI_API_KEY ?? "").trim()
-    }
+    }] : [])
   ];
+
+  const routes: ExecutionRoute[] = prefersDirectOpenAI
+    ? (routePriority === "env-first"
+      ? [...directRoutes, runtimeRoute, openclawRoute]
+      : [runtimeRoute, ...directRoutes, openclawRoute])
+    : [runtimeRoute, ...directRoutes, openclawRoute];
 
   return dedupeExecutionRoutes(routes);
 }

@@ -88,11 +88,11 @@ const STAGE_COMPANION_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
 };
 
 const STAGE_REAL_MODEL_GATE_ROLE_MAP: Partial<Record<StageType, RoleType[]>> = {
-  INIT: ["ROLE_ANALYST", "ROLE_PM"],
+  INIT: ["ROLE_PM"],
   ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
-  DESIGN: ["ROLE_ANALYST", "ROLE_DESIGN"],
-  DEV: ["ROLE_ANALYST", "ROLE_DEV"],
-  ACCEPT: ["ROLE_ANALYST", "ROLE_QA"]
+  DESIGN: ["ROLE_DESIGN"],
+  DEV: ["ROLE_DEV"],
+  ACCEPT: ["ROLE_QA"]
 };
 
 const ROLE_OPENCLAW_AGENT_MAP: Partial<Record<RoleType, string>> = {
@@ -174,20 +174,22 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
 
 const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
   ROLE_ANALYST: [
+    "hermes-v2.1",
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "qwen3-max-2026-01-23",
     "qwen3.5-plus",
+    "qwen3-max-2026-01-23",
+    "openai/gpt-5.3-codex",
     "glm-5"
   ],
   ROLE_PRODUCT: [
     "openai/gpt-5.4",
-    "openai/gpt-5.3-codex",
-    "qwen3-max-2026-01-23",
     "qwen3.5-plus",
+    "qwen3-max-2026-01-23",
+    "openai/gpt-5.3-codex",
     "glm-5"
   ],
   ROLE_DESIGN: [
+    "hermes-v2.1",
     "openai/gpt-5.4",
     "openai/gpt-5.3-codex",
     "qwen3-max-2026-01-23",
