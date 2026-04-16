@@ -46,10 +46,27 @@ type ProjectRoomTabParam = 'tasks' | 'stages' | 'deliverables' | 'timeline';
 type CoreStageStatus = 'pending' | 'active' | 'completed' | 'blocked' | 'rejected';
 type ProjectDetailResponse = ProjectDetail & {
   requiredActions?: ProjectRequiredAction[];
+  postCreatePrep?: {
+    required: boolean;
+    completed: boolean;
+    missingItems: string[];
+    draft?: {
+      discussion: string;
+      analysis: string;
+      rawRequirements: string;
+      prd: string;
+      debateSummary: string;
+      confirmed: boolean;
+      confirmedBy?: string;
+      confirmedAt?: string;
+      confirmationNotes?: string;
+    };
+  };
 };
 type CoreTaskStatus = ProjectDetailResponse['tasks'][number]['status'];
 type DeliverableStatus = ProjectDetailResponse['deliverables'][number]['status'];
 type ProjectDeliverable = ProjectDetailResponse['deliverables'][number];
+type ProjectStitchArtifact = NonNullable<ProjectDetailResponse['stitchArtifacts']>[number];
 type ProjectRoomTaskItem = ViewTask & {
   rawStatus: CoreTaskStatus;
   description: string;
@@ -87,6 +104,18 @@ type ProjectRoomLogItem = {
   message: string;
   type: 'danger' | 'accent' | 'primary';
   timestamp: number;
+};
+type ProtocolFailureCategory =
+  | 'runtime_or_model'
+  | 'collaboration'
+  | 'skill_evidence'
+  | 'content_evidence'
+  | 'stage_template'
+  | 'unknown';
+type ProtocolFailureHint = {
+  title: string;
+  categories: ProtocolFailureCategory[];
+  missingChecks: string[];
 };
 
 type ProjectRoomDesignReviewForm = {
@@ -127,6 +156,21 @@ const isDesignReviewFormBlank = (form: ProjectRoomDesignReviewForm) => {
     form.accessibilityChecklist,
     form.notes,
   ].some((item) => String(item || '').trim().length > 0);
+};
+
+const isPrototypeLikeArtifact = (artifact: FinalArtifactItem) => {
+  const text = [
+    artifact.name,
+    artifact.category,
+    artifact.url,
+    artifact.filePath,
+    artifact.excerpt,
+    artifact.stageType,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  return /(dapp|mvp|prototype|原型|交互|preview|预览|\/generated\/)/i.test(text);
 };
 
 const DESIGN_REVIEW_NOISE_TITLES = new Set([
@@ -640,6 +684,114 @@ const gitlabStatusBadge = (status?: string) => {
   return { label: 'GitLab 未同步', variant: 'default' as const };
 };
 
+const parseExecutionProtocolFailureHint = (
+  details: Record<string, unknown> | undefined,
+  fallbackMessage: string,
+): ProtocolFailureHint => {
+  const failure = details && typeof details.protocolFailure === 'object' && details.protocolFailure
+    ? (details.protocolFailure as {
+        primaryCategory?: unknown;
+        categories?: unknown;
+        summary?: unknown;
+        missingChecks?: unknown;
+      })
+    : null;
+  const precheck = details && typeof details.protocolGatePrecheck === 'object' && details.protocolGatePrecheck
+    ? (details.protocolGatePrecheck as {
+        protocolChecks?: unknown;
+        contentChecks?: unknown;
+        blockingIssues?: unknown;
+      })
+    : null;
+  const categories = Array.isArray(failure?.categories)
+    ? (failure?.categories as unknown[])
+        .map((item) => String(item || '').trim() as ProtocolFailureCategory)
+        .filter((item) => item.length > 0)
+    : [];
+  const missingChecks: string[] = [];
+
+  if (Array.isArray(failure?.missingChecks)) {
+    for (const item of failure.missingChecks as Array<Record<string, unknown>>) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+      const label = String(item.label || '').trim();
+      const detail = String(item.detail || '').trim();
+      const text = detail ? `${label}: ${detail}` : label;
+      if (text) {
+        missingChecks.push(text);
+      }
+      if (missingChecks.length >= 4) {
+        break;
+      }
+    }
+  }
+
+  if (missingChecks.length === 0 && precheck) {
+    const protocolChecks = Array.isArray(precheck.protocolChecks)
+      ? (precheck.protocolChecks as Array<Record<string, unknown>>)
+      : [];
+    for (const check of protocolChecks) {
+      const passed = Boolean(check.passed);
+      if (passed) {
+        continue;
+      }
+      const label = String(check.label || '').trim();
+      const detail = String(check.detail || '').trim();
+      const text = detail ? `${label}: ${detail}` : label;
+      if (text) {
+        missingChecks.push(text);
+      }
+      if (missingChecks.length >= 4) {
+        break;
+      }
+    }
+    if (missingChecks.length < 4) {
+      const contentChecks = Array.isArray(precheck.contentChecks)
+        ? (precheck.contentChecks as Array<Record<string, unknown>>)
+        : [];
+      for (const check of contentChecks) {
+        if (Boolean(check.passed)) {
+          continue;
+        }
+        const label = String(check.label || '').trim();
+        if (label) {
+          missingChecks.push(label);
+        }
+        if (missingChecks.length >= 4) {
+          break;
+        }
+      }
+    }
+    if (missingChecks.length < 4) {
+      const blockingIssues = Array.isArray(precheck.blockingIssues)
+        ? (precheck.blockingIssues as unknown[]).map((item) => String(item || '').trim()).filter(Boolean)
+        : [];
+      for (const issue of blockingIssues) {
+        missingChecks.push(`阻断项: ${issue}`);
+        if (missingChecks.length >= 4) {
+          break;
+        }
+      }
+    }
+  }
+
+  return {
+    title: String(failure?.summary || fallbackMessage || '当前阶段未通过执行协议门禁，请先修复阻断项'),
+    categories: categories.length > 0 ? categories : ['unknown'],
+    missingChecks,
+  };
+};
+
+const PROTOCOL_FAILURE_CATEGORY_LABELS: Record<ProtocolFailureCategory, string> = {
+  runtime_or_model: '模型/运行时',
+  collaboration: '协作交接',
+  skill_evidence: '技能证据',
+  content_evidence: '内容证据',
+  stage_template: '模板结构',
+  unknown: '待定位',
+};
+
 const ProjectRoom = ({
   projectId,
   addToast,
@@ -660,6 +812,7 @@ const ProjectRoom = ({
   const [isReviewingStage, setIsReviewingStage] = useState(false);
   const [stageReviewAction, setStageReviewAction] = useState<'approve' | 'reject' | null>(null);
   const [projectActionHint, setProjectActionHint] = useState<string | null>(null);
+  const [protocolFailureHint, setProtocolFailureHint] = useState<ProtocolFailureHint | null>(null);
   const [isSubmittingDesignReview, setIsSubmittingDesignReview] = useState(false);
   const [isDesignReviewOpen, setIsDesignReviewOpen] = useState(false);
   const [isAcceptanceReportOpen, setIsAcceptanceReportOpen] = useState(false);
@@ -668,6 +821,7 @@ const ProjectRoom = ({
   const [isArchivingAcceptanceReport, setIsArchivingAcceptanceReport] = useState(false);
   const [acceptanceReport, setAcceptanceReport] = useState<ProjectAcceptanceReport | null>(null);
   const [finalArtifacts, setFinalArtifacts] = useState<ProjectFinalArtifactsReport | null>(null);
+  const [finalArtifactsLoadError, setFinalArtifactsLoadError] = useState<string | null>(null);
   const [executionRecords, setExecutionRecords] = useState<ProjectExecutionRecord[]>([]);
   const [isLoadingFinalArtifacts, setIsLoadingFinalArtifacts] = useState(false);
   const [isTriggeringFinalArtifacts, setIsTriggeringFinalArtifacts] = useState(false);
@@ -687,10 +841,19 @@ const ProjectRoom = ({
   const [workflowCollaborationRoleFilters, setWorkflowCollaborationRoleFilters] = useState<Record<string, string>>({});
   const signoffAutoOpenKeyRef = useRef<string | null>(null);
   const projectRoomUrlStateAppliedRef = useRef<string | null>(null);
+  const completedProjectAutoTabRef = useRef<string | null>(null);
   const lastConnectedLogAtRef = useRef<number>(0);
   const projectRefreshTimerRef = useRef<number | null>(null);
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
+  const [prepDraftDiscussion, setPrepDraftDiscussion] = useState('');
+  const [prepDraftAnalysis, setPrepDraftAnalysis] = useState('');
+  const [prepDraftRawRequirements, setPrepDraftRawRequirements] = useState('');
+  const [prepDraftPrd, setPrepDraftPrd] = useState('');
+  const [prepDraftDebateSummary, setPrepDraftDebateSummary] = useState('');
+  const [prepConfirmNotes, setPrepConfirmNotes] = useState('');
+  const [isSavingPrepDraft, setIsSavingPrepDraft] = useState(false);
+  const [isConfirmingPrepDraft, setIsConfirmingPrepDraft] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskDelegationBundles, setTaskDelegationBundles] = useState<Record<string, TaskDelegationBundle>>({});
   const [isLoadingTaskDelegations, setIsLoadingTaskDelegations] = useState(false);
@@ -746,6 +909,7 @@ const ProjectRoom = ({
   useEffect(() => {
     setDesignReviewForm(createDefaultDesignReviewForm());
     setIsDesignReviewOpen(false);
+    setProtocolFailureHint(null);
     setWorkflowOverviewFilter('all');
     setExpandedWorkflowStageIds([]);
     setWorkflowCollaborationRoleFilters({});
@@ -760,6 +924,10 @@ const ProjectRoom = ({
     try {
       const next = await projectsApi.getDetail(effectiveProjectId);
       setDetail(next);
+      const nextRequiredActions = Array.isArray(next.requiredActions) ? next.requiredActions : [];
+      if (nextRequiredActions.length === 0) {
+        setProtocolFailureHint(null);
+      }
       if (missingProjectHandledRef.current === effectiveProjectId) {
         missingProjectHandledRef.current = null;
       }
@@ -897,7 +1065,27 @@ const ProjectRoom = ({
     [detail?.tasks],
   );
 
-  const effectiveProjectTasks = detailTasks;
+  const workflowScopedStageTypes = useMemo(() => {
+    const nodes = Array.isArray(workflowOverview?.nodes) ? workflowOverview.nodes : [];
+    if (nodes.length === 0) {
+      return null;
+    }
+    const scoped = new Set<string>();
+    for (const node of nodes) {
+      const stageType = workflowTemplateToCoreStage(node.templateKey);
+      if (stageType) {
+        scoped.add(stageType);
+      }
+    }
+    return scoped.size > 0 ? scoped : null;
+  }, [workflowOverview?.nodes]);
+
+  const effectiveProjectTasks = useMemo(() => {
+    if (!workflowScopedStageTypes) {
+      return detailTasks;
+    }
+    return detailTasks.filter((task) => workflowScopedStageTypes.has(String(task.stageType || '').trim().toUpperCase()));
+  }, [detailTasks, workflowScopedStageTypes]);
 
   useEffect(() => {
     if (effectiveProjectTasks.length === 0) {
@@ -1307,6 +1495,10 @@ const ProjectRoom = ({
       return toDeliverableVersion(b.version) - toDeliverableVersion(a.version);
     });
   }, [rawDeliverables]);
+  const stitchArtifacts = useMemo<ProjectStitchArtifact[]>(
+    () => (Array.isArray(detail?.stitchArtifacts) ? detail.stitchArtifacts : []),
+    [detail?.stitchArtifacts],
+  );
 
   const timelineItems = useMemo(
     () =>
@@ -1406,10 +1598,33 @@ const ProjectRoom = ({
     return mapping;
   }, [deliverables]);
 
-  const quickFinalArtifacts = useMemo(
-    () => (finalArtifacts?.artifacts || []).slice(0, 5),
-    [finalArtifacts],
-  );
+  const quickFinalArtifacts = useMemo(() => {
+    const artifacts = finalArtifacts?.artifacts || [];
+    if (artifacts.length <= 1) {
+      return artifacts;
+    }
+    const score = (artifact: FinalArtifactItem) => (
+      (artifact.required ? 20 : 0)
+      + (artifact.ready ? 10 : 0)
+      + (artifact.source === 'link' ? 4 : 0)
+      + (isPrototypeLikeArtifact(artifact) ? 8 : 0)
+    );
+    return [...artifacts].sort((a, b) => score(b) - score(a));
+  }, [finalArtifacts]);
+  const prototypeFinalArtifact = useMemo(() => {
+    const artifacts = quickFinalArtifacts;
+    const interactive = artifacts.find((item) => item.key === 'interactive_prototype');
+    if (interactive) {
+      return interactive;
+    }
+    const dappOfficial = artifacts.find(
+      (item) => item.key === 'official_site' && /\/generated\/liquidity-dapp-mvp\/[a-z0-9._-]+\.html/i.test(String(item.url || '')),
+    );
+    if (dappOfficial) {
+      return dappOfficial;
+    }
+    return artifacts.find((item) => isPrototypeLikeArtifact(item));
+  }, [quickFinalArtifacts]);
   const finalArtifactsGeneration = finalArtifacts?.generation;
   const finalArtifactsRunning = finalArtifactsGeneration?.status === 'queued' || finalArtifactsGeneration?.status === 'running';
   const finalArtifactsGenerationText = useMemo(() => {
@@ -1556,6 +1771,44 @@ const ProjectRoom = ({
     () => (Array.isArray(detail?.requiredActions) ? detail.requiredActions : []),
     [detail?.requiredActions],
   );
+  const postCreatePrep = detail?.postCreatePrep;
+  const isPostCreatePrepBlocked = Boolean(postCreatePrep?.required && !postCreatePrep?.completed);
+  const postCreatePrepRequiredAction = useMemo<ProjectRequiredAction | null>(() => {
+    const action = requiredActions.find((item) => item.action === 'run_post_create_prep');
+    if (action) {
+      return action;
+    }
+    if (!isPostCreatePrepBlocked) {
+      return null;
+    }
+    return {
+      id: 'post-create-prep-required-fallback',
+      severity: 'critical',
+      title: '项目创建后需求预备未完成',
+      detail: postCreatePrep?.missingItems?.length
+        ? `缺失项：${postCreatePrep.missingItems.join('；')}`
+        : '请先完成多Agent讨论结论与需求回填',
+      action: 'run_post_create_prep',
+      ctaLabel: '执行创建后需求预备',
+    };
+  }, [isPostCreatePrepBlocked, postCreatePrep?.missingItems, requiredActions]);
+
+  useEffect(() => {
+    const draft = postCreatePrep?.draft;
+    setPrepDraftDiscussion(String(draft?.discussion || ''));
+    setPrepDraftAnalysis(String(draft?.analysis || ''));
+    setPrepDraftRawRequirements(String(draft?.rawRequirements || ''));
+    setPrepDraftPrd(String(draft?.prd || ''));
+    setPrepDraftDebateSummary(String(draft?.debateSummary || ''));
+    setPrepConfirmNotes(String(draft?.confirmationNotes || ''));
+  }, [
+    postCreatePrep?.draft?.analysis,
+    postCreatePrep?.draft?.debateSummary,
+    postCreatePrep?.draft?.discussion,
+    postCreatePrep?.draft?.prd,
+    postCreatePrep?.draft?.rawRequirements,
+    postCreatePrep?.draft?.confirmationNotes,
+  ]);
 
   const designReviewRequiredAction = useMemo(
     () => requiredActions.find((action) => action.action === 'open_design_review') || null,
@@ -1934,11 +2187,15 @@ const ProjectRoom = ({
     const source = String(content || '');
     const fencedPattern = /(?:^|\n)```html[ \t]*\n([\s\S]*?)\n```(?:\n|$)/gi;
     let matched: RegExpExecArray | null;
+    let lastCandidate: string | null = null;
     while ((matched = fencedPattern.exec(source)) !== null) {
       const candidate = String(matched[1] || '').trim();
       if (/(<!doctype html|<html[\s>]|<body[\s>]|<main[\s>]|<section[\s>]|<div[\s>])/i.test(candidate)) {
-        return candidate;
+        lastCandidate = candidate;
       }
+    }
+    if (lastCandidate) {
+      return lastCandidate;
     }
     if (/(<!doctype html|<html[\s>])/i.test(source)) {
       return source.trim();
@@ -1957,14 +2214,164 @@ const ProjectRoom = ({
     }
     return null;
   };
-  const previewDeliverableHtml = useMemo(
+  const extractDeliverableStitchMeta = (content?: string) => {
+    const source = String(content || '');
+    if (!source) {
+      return null;
+    }
+    const lines = source.split(/\r?\n/);
+    const stitchMeta: {
+      status?: string;
+      provider?: string;
+      generatedAt?: string;
+      requestedAt?: string;
+      projectId?: string;
+      screenId?: string;
+      htmlUrl?: string;
+      imageUrl?: string;
+      prompt?: string;
+      error?: string;
+      hint?: string;
+      retryPolicy?: string;
+      executor?: string;
+    } = {};
+    const keyMap: Record<string, keyof typeof stitchMeta> = {
+      stitchstatus: 'status',
+      status: 'status',
+      状态: 'status',
+      provider: 'provider',
+      generatedat: 'generatedAt',
+      requestedat: 'requestedAt',
+      stitchprojectid: 'projectId',
+      projectid: 'projectId',
+      stitchscreenid: 'screenId',
+      screenid: 'screenId',
+      stitchhtmlurl: 'htmlUrl',
+      htmlurl: 'htmlUrl',
+      stitchimageurl: 'imageUrl',
+      imageurl: 'imageUrl',
+      stitchprompt: 'prompt',
+      prompt: 'prompt',
+      stitcherror: 'error',
+      stitchhint: 'hint',
+      stitchretrypolicy: 'retryPolicy',
+      stitchexecutor: 'executor',
+    };
+    for (const line of lines) {
+      const normalizedLine = line.trim().replace(/^[-*]\s*/, '');
+      const separatorIndex = normalizedLine.includes('：')
+        ? normalizedLine.indexOf('：')
+        : normalizedLine.indexOf(':');
+      if (separatorIndex <= 0) {
+        continue;
+      }
+      const key = normalizedLine.slice(0, separatorIndex).trim().toLowerCase();
+      const mappedKey = keyMap[key];
+      if (!mappedKey) {
+        continue;
+      }
+      const value = String(normalizedLine.slice(separatorIndex + 1) || '').trim();
+      if (!value) {
+        continue;
+      }
+      stitchMeta[mappedKey] = value;
+    }
+    if (!stitchMeta.projectId && !stitchMeta.htmlUrl && !stitchMeta.imageUrl && !stitchMeta.status) {
+      return null;
+    }
+    if (!stitchMeta.status && (stitchMeta.htmlUrl || stitchMeta.imageUrl)) {
+      stitchMeta.status = 'ready';
+    }
+    return stitchMeta;
+  };
+  const previewDeliverableStitchMeta = useMemo(
+    () => (previewDeliverable ? extractDeliverableStitchMeta(previewDeliverable.content) : null),
+    [previewDeliverable],
+  );
+  const activeStitchPreview = useMemo(() => {
+    // 视觉稿预览仅使用 DESIGN 交付物内绑定的 Stitch 元信息，避免误用其他阶段或历史项目的稿件。
+    return previewDeliverableStitchMeta || null;
+  }, [previewDeliverableStitchMeta]);
+  const previewDeliverableHtmlInline = useMemo(
     () => (previewDeliverable ? extractDeliverableHtmlPreview(previewDeliverable.content) : null),
     [previewDeliverable],
   );
-  const previewDeliverableImage = useMemo(
-    () => (previewDeliverable ? extractDeliverableImagePreview(previewDeliverable.content) : null),
-    [previewDeliverable],
+  const previewDeliverableHtmlUrl = useMemo(
+    () => {
+      if (activeStitchPreview?.htmlUrl) {
+        try {
+          const parsed = new URL(activeStitchPreview.htmlUrl, window.location.origin);
+          if (parsed.origin !== window.location.origin) {
+            return null;
+          }
+        } catch {
+          return null;
+        }
+        return activeStitchPreview.htmlUrl;
+      }
+      return null;
+    },
+    [activeStitchPreview],
   );
+  const shouldPreferRemoteVisualPreview = useMemo(() => {
+    if (!previewDeliverable || !isVisualPreviewDeliverable(previewDeliverable)) {
+      return false;
+    }
+    const stitchStatus = String(activeStitchPreview?.status || '').toLowerCase();
+    if (stitchStatus !== 'ready') {
+      return false;
+    }
+    if (!previewDeliverableHtmlUrl && !activeStitchPreview?.imageUrl) {
+      return false;
+    }
+    const remoteUpdatedAt = toDeliverableTimestamp(activeStitchPreview?.generatedAt || activeStitchPreview?.requestedAt);
+    const deliverableUpdatedAt = toDeliverableTimestamp(previewDeliverable.updatedAt);
+    if (!remoteUpdatedAt || !deliverableUpdatedAt) {
+      return true;
+    }
+    return remoteUpdatedAt >= deliverableUpdatedAt;
+  }, [activeStitchPreview, previewDeliverable, previewDeliverableHtmlUrl]);
+  const useInlineVisualPreview = useMemo(
+    () => Boolean(previewDeliverableHtmlInline) && !shouldPreferRemoteVisualPreview,
+    [previewDeliverableHtmlInline, shouldPreferRemoteVisualPreview],
+  );
+  const previewDeliverableHtml = useMemo(
+    () => (useInlineVisualPreview ? previewDeliverableHtmlInline : (previewDeliverableHtmlUrl || previewDeliverableHtmlInline)),
+    [previewDeliverableHtmlInline, previewDeliverableHtmlUrl, useInlineVisualPreview],
+  );
+  const previewDeliverableImage = useMemo(() => {
+    const parsed = previewDeliverable ? extractDeliverableImagePreview(previewDeliverable.content) : null;
+    return parsed || activeStitchPreview?.imageUrl || null;
+  }, [activeStitchPreview, previewDeliverable]);
+  const previewDeliverableStitchStatusLabel = useMemo(() => {
+    if (!activeStitchPreview?.status) {
+      return null;
+    }
+    const status = activeStitchPreview.status.toLowerCase();
+    if (status === 'ready') {
+      return 'Stitch 已就绪';
+    }
+    if (status === 'pending') {
+      return 'Stitch 生成中';
+    }
+    if (status === 'degraded') {
+      return 'Stitch 降级';
+    }
+    return `Stitch: ${activeStitchPreview.status}`;
+  }, [activeStitchPreview]);
+  const previewDeliverableStitchStatusVariant = useMemo(() => {
+    const status = String(activeStitchPreview?.status || '').toLowerCase();
+    if (status === 'ready') {
+      return 'primary' as const;
+    }
+    if (status === 'pending') {
+      return 'warning' as const;
+    }
+    if (status === 'degraded') {
+      return 'danger' as const;
+    }
+    return 'default' as const;
+  }, [activeStitchPreview]);
   const canRenderVisualPreview = Boolean(
     previewDeliverable
     && isVisualPreviewDeliverable(previewDeliverable)
@@ -2169,19 +2576,23 @@ const ProjectRoom = ({
   const loadFinalArtifacts = useCallback(async (options?: { silent?: boolean }) => {
     if (!effectiveProjectId) {
       setFinalArtifacts(null);
+      setFinalArtifactsLoadError(null);
       return;
     }
     setIsLoadingFinalArtifacts(true);
     try {
       const report = await projectsApi.getFinalArtifacts(effectiveProjectId);
       setFinalArtifacts(report);
+      setFinalArtifactsLoadError(null);
     } catch (error) {
       setFinalArtifacts(null);
       if (isProjectNotFoundError(error)) {
         return;
       }
+      const message = error instanceof Error ? error.message : '未知错误';
+      setFinalArtifactsLoadError(message);
       if (!options?.silent) {
-        addToast(`加载最终验收成果失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        addToast(`加载最终验收成果失败: ${message}`, 'error');
       }
     } finally {
       setIsLoadingFinalArtifacts(false);
@@ -2236,6 +2647,19 @@ const ProjectRoom = ({
     };
   }, [effectiveProjectId, finalArtifactsGeneration?.jobId, finalArtifactsRunning, loadFinalArtifacts]);
 
+  useEffect(() => {
+    if (!effectiveProjectId || !detail || detail.status !== 'completed') {
+      return;
+    }
+    if (completedProjectAutoTabRef.current === effectiveProjectId) {
+      return;
+    }
+    if (activeTab === '任务') {
+      setActiveTab('交付物');
+    }
+    completedProjectAutoTabRef.current = effectiveProjectId;
+  }, [activeTab, detail, effectiveProjectId]);
+
   const handleGenerateFinalArtifacts = useCallback(async (force = false) => {
     if (!effectiveProjectId) {
       return;
@@ -2243,6 +2667,7 @@ const ProjectRoom = ({
     setIsTriggeringFinalArtifacts(true);
     try {
       await projectsApi.generateFinalArtifacts(effectiveProjectId, force);
+      setFinalArtifactsLoadError(null);
       addToast('最终验收产物生成任务已启动', 'success');
       await loadFinalArtifacts({ silent: true });
     } catch (error) {
@@ -2447,9 +2872,70 @@ const ProjectRoom = ({
     return `${window.location.origin}/${url.replace(/^\.?\//, '')}`;
   };
 
+  const resolveArtifactAccessUrls = (artifact: FinalArtifactItem) => {
+    let localUrl = String(artifact.localUrl || '').trim();
+    let publicUrl = String(artifact.publicUrl || '').trim();
+    const rawUrl = String(artifact.url || '').trim();
+
+    const isLocalHost = (host: string) => host === '127.0.0.1' || host === 'localhost' || host === '0.0.0.0';
+    const normalizeGeneratedPath = (input: string) => {
+      const value = String(input || '').trim();
+      if (!value) {
+        return '';
+      }
+      if (value.startsWith('/generated/')) {
+        return value;
+      }
+      if (value.startsWith('generated/')) {
+        return `/${value}`;
+      }
+      return '';
+    };
+
+    if (rawUrl) {
+      if (/^https?:\/\//i.test(rawUrl)) {
+        try {
+          const parsed = new URL(rawUrl);
+          if (isLocalHost(parsed.hostname)) {
+            if (!localUrl) {
+              localUrl = parsed.toString();
+            }
+          } else if (!publicUrl) {
+            publicUrl = parsed.toString();
+          }
+          const generatedPath = normalizeGeneratedPath(parsed.pathname);
+          if (generatedPath) {
+            if (!localUrl) {
+              localUrl = `http://127.0.0.1:8787${generatedPath}`;
+            }
+            if (!publicUrl && !isLocalHost(window.location.hostname)) {
+              publicUrl = `${window.location.origin}${generatedPath}`;
+            }
+          }
+        } catch {
+          // ignore invalid absolute URL
+        }
+      } else {
+        const generatedPath = normalizeGeneratedPath(rawUrl);
+        if (generatedPath) {
+          if (!localUrl) {
+            localUrl = `http://127.0.0.1:8787${generatedPath}`;
+          }
+          if (!publicUrl && !isLocalHost(window.location.hostname)) {
+            publicUrl = `${window.location.origin}${generatedPath}`;
+          }
+        }
+      }
+    }
+
+    return { localUrl, publicUrl };
+  };
+
   const handleOpenFinalArtifact = (artifact: FinalArtifactItem) => {
-    if (artifact.source === 'link' && artifact.url) {
-      const resolvedUrl = resolveArtifactUrl(artifact.url);
+    const accessUrls = resolveArtifactAccessUrls(artifact);
+    const preferredArtifactUrl = accessUrls.publicUrl || accessUrls.localUrl || artifact.url;
+    if (artifact.source === 'link' && preferredArtifactUrl) {
+      const resolvedUrl = resolveArtifactUrl(preferredArtifactUrl);
       if (!resolvedUrl) {
         addToast('该成果链接无效，无法打开', 'error');
         return;
@@ -2546,7 +3032,9 @@ const ProjectRoom = ({
   };
 
   const handleCopyFinalArtifactLink = async (artifact: FinalArtifactItem) => {
-    const resolvedUrl = resolveArtifactUrl(artifact.url);
+    const accessUrls = resolveArtifactAccessUrls(artifact);
+    const preferredArtifactUrl = accessUrls.publicUrl || accessUrls.localUrl || artifact.url;
+    const resolvedUrl = resolveArtifactUrl(preferredArtifactUrl);
     if (!resolvedUrl) {
       addToast('该成果没有可复制链接', 'info');
       return;
@@ -2945,27 +3433,28 @@ const ProjectRoom = ({
     if (!(error instanceof ApiRequestError)) {
       return false;
     }
-    const formatExecutionProtocolMessage = () => {
-      const details = error.details && typeof error.details === 'object' ? error.details : {};
-      const rawMessage = typeof (details as { rawMessage?: unknown }).rawMessage === 'string'
-        ? String((details as { rawMessage?: string }).rawMessage)
-        : '';
-      if (/TERMINAL_COLLAB_PROTOCOL_VIOLATION:/i.test(rawMessage)) {
-        return error.message || '当前阶段未通过协作交接卡协议，请补齐缺失字段后再重试。';
-      }
-      return error.message || '当前阶段未通过执行协议门禁，请先修复阻断项';
-    };
+    const details = error.details && typeof error.details === 'object'
+      ? (error.details as Record<string, unknown>)
+      : undefined;
     if (error.code === 'NO_PENDING_APPROVAL') {
       addToast(error.message || '当前没有待确认事项', 'info');
       void loadProjectDetail();
       return true;
     }
-    const required = Array.isArray(error.details?.requiredActions)
-      ? (error.details.requiredActions as ProjectRequiredAction[])
+    const required = Array.isArray(details?.requiredActions)
+      ? (details.requiredActions as ProjectRequiredAction[])
       : [];
     if (error.code === 'EXECUTION_PROTOCOL_GATE_FAILED') {
+      const hint = parseExecutionProtocolFailureHint(
+        details,
+        error.message || '当前阶段未通过执行协议门禁，请先修复阻断项',
+      );
+      setProtocolFailureHint(hint);
       setActiveTab('交付物');
-      addToast(formatExecutionProtocolMessage(), 'error');
+      addToast(hint.title, 'error');
+      if (hint.missingChecks.length > 0) {
+        addToast(`缺失检查项: ${hint.missingChecks.slice(0, 3).join('；')}`, 'info');
+      }
       void loadProjectDetail();
       return true;
     }
@@ -3026,6 +3515,23 @@ const ProjectRoom = ({
         addToast('已重建交付物，请检查后继续推进', 'success');
         return;
       }
+      if (action.action === 'run_post_create_prep') {
+        if (!project.id) {
+          addToast('当前项目不可用，无法执行创建后需求预备', 'error');
+          return;
+        }
+        setProjectActionHint('正在生成多Agent讨论结论与需求回填草案，预计 15-60 秒...');
+        addToast('正在执行创建后需求预备，请稍候...', 'info');
+        const result = await projectsApi.runPostCreatePrep(project.id);
+        await refreshProjectView();
+        const completed = Boolean(result?.data?.postCreatePrep?.completed);
+        if (completed) {
+          addToast('创建后需求预备已完成，已解锁正式项目详情页', 'success');
+        } else {
+          addToast('草案已生成，请审阅并确认通过后进入正式详情页', 'info');
+        }
+        return;
+      }
       if (action.action === 'refresh_runtime') {
         openRuntimeConfigHint();
         return;
@@ -3041,6 +3547,219 @@ const ProjectRoom = ({
       setProjectActionHint(null);
     }
   };
+
+  const handleSavePostCreatePrepDraft = async () => {
+    if (!project.id) {
+      addToast('当前项目不可用，无法保存预备草案', 'error');
+      return;
+    }
+    setIsSavingPrepDraft(true);
+    try {
+      await projectsApi.savePostCreatePrepDraft(project.id, {
+        discussion: prepDraftDiscussion,
+        analysis: prepDraftAnalysis,
+        rawRequirements: prepDraftRawRequirements,
+        prd: prepDraftPrd,
+        debateSummary: prepDraftDebateSummary,
+      });
+      await refreshProjectView();
+      addToast('预备草案已保存', 'success');
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        addToast(error.message, 'error');
+      } else {
+        addToast(`保存失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      setIsSavingPrepDraft(false);
+    }
+  };
+
+  const handleConfirmPostCreatePrep = async () => {
+    if (!project.id) {
+      addToast('当前项目不可用，无法确认预备草案', 'error');
+      return;
+    }
+    setIsConfirmingPrepDraft(true);
+    try {
+      const result = await projectsApi.confirmPostCreatePrep(project.id, {
+        discussion: prepDraftDiscussion,
+        analysis: prepDraftAnalysis,
+        rawRequirements: prepDraftRawRequirements,
+        prd: prepDraftPrd,
+        debateSummary: prepDraftDebateSummary,
+        notes: prepConfirmNotes,
+      });
+      await refreshProjectView();
+      if (result?.data?.postCreatePrep?.completed) {
+        addToast('预备阶段确认通过，已进入正式项目执行页', 'success');
+      } else {
+        const missing = result?.data?.postCreatePrep?.missingItems || [];
+        addToast(missing.length > 0 ? `仍有缺失项: ${missing.join('；')}` : '预备阶段确认未通过', 'error');
+      }
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        addToast(error.message, 'error');
+      } else {
+        addToast(`确认失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      setIsConfirmingPrepDraft(false);
+    }
+  };
+
+  const canConfirmPostCreatePrep = [
+    prepDraftDiscussion,
+    prepDraftAnalysis,
+    prepDraftRawRequirements,
+    prepDraftPrd,
+    prepDraftDebateSummary,
+  ].every((item) => String(item || '').trim().length > 0);
+
+  if (isPostCreatePrepBlocked) {
+    return (
+      <div className="h-full flex flex-col">
+        <header className="px-4 sm:px-6 lg:px-8 py-4 sm:py-6 border-b border-border-subtle flex items-center justify-between gap-3 bg-surface/50 backdrop-blur-md">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-10 h-10 rounded-2xl bg-warning/15 flex items-center justify-center border border-warning/30 text-warning shrink-0">
+              <BrainCircuit size={20} />
+            </div>
+            <div className="min-w-0">
+              <h1 className="text-lg font-bold text-white truncate">{project.name}</h1>
+              <p className="text-xs text-slate-400">预备阶段 · 多Agent讨论与需求回填</p>
+            </div>
+          </div>
+          <Badge variant="warning">流程门禁中</Badge>
+        </header>
+        <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
+          <section className="max-w-4xl mx-auto rounded-2xl border border-warning/40 bg-warning/10 p-5 sm:p-6 space-y-4">
+            <div className="space-y-2">
+              <p className="text-[11px] font-bold uppercase tracking-widest text-warning/80">Pre-Stage Gate</p>
+              <h2 className="text-xl font-semibold text-white">当前项目尚未进入正式详情页</h2>
+              <p className="text-sm text-slate-300">
+                多Agent讨论与结果回填尚未完成。为避免直接进入模板化执行，系统已切换到“预备阶段专属页”。
+                完成下面缺失项后，会自动解锁正式项目详情页与阶段协作视图。
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-warning/40 bg-surface-soft/70 p-4 space-y-2">
+              <p className="text-xs text-slate-400">当前缺失项</p>
+              {(postCreatePrep?.missingItems || []).length > 0 ? (
+                <ul className="space-y-1">
+                  {(postCreatePrep?.missingItems || []).map((item) => (
+                    <li key={item} className="text-sm text-slate-200">- {item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-sm text-slate-300">- 正在同步缺失项，请执行一次预备任务后刷新。</p>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-3">
+              <p className="text-xs text-slate-400">多Agent讨论结论（可编辑）</p>
+              <textarea
+                value={prepDraftDiscussion}
+                onChange={(event) => setPrepDraftDiscussion(event.target.value)}
+                placeholder="请填写或编辑多Agent讨论结论..."
+                className="min-h-32 w-full rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-primary/60"
+              />
+            </div>
+
+            <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-3">
+              <p className="text-xs text-slate-400">项目详情理解确认草案（可编辑）</p>
+              <textarea
+                value={prepDraftAnalysis}
+                onChange={(event) => setPrepDraftAnalysis(event.target.value)}
+                placeholder="请填写或编辑项目理解与范围草案..."
+                className="min-h-32 w-full rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-primary/60"
+              />
+            </div>
+
+            <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-3">
+              <p className="text-xs text-slate-400">回填输入（可编辑）</p>
+              <div className="space-y-3">
+                <div className="space-y-1">
+                  <p className="text-[11px] text-slate-400">rawRequirements</p>
+                  <textarea
+                    value={prepDraftRawRequirements}
+                    onChange={(event) => setPrepDraftRawRequirements(event.target.value)}
+                    className="min-h-24 w-full rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-primary/60"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[11px] text-slate-400">prd</p>
+                  <textarea
+                    value={prepDraftPrd}
+                    onChange={(event) => setPrepDraftPrd(event.target.value)}
+                    className="min-h-24 w-full rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-primary/60"
+                  />
+                </div>
+                <div className="space-y-1">
+                  <p className="text-[11px] text-slate-400">debateSummary</p>
+                  <textarea
+                    value={prepDraftDebateSummary}
+                    onChange={(event) => setPrepDraftDebateSummary(event.target.value)}
+                    className="min-h-24 w-full rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-primary/60"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-2">
+              <p className="text-xs text-slate-400">确认备注（可选）</p>
+              <textarea
+                value={prepConfirmNotes}
+                onChange={(event) => setPrepConfirmNotes(event.target.value)}
+                placeholder="可填写本次确认的结论与限制说明"
+                className="min-h-20 w-full rounded-lg border border-white/10 bg-slate-950/50 px-3 py-2 text-sm text-slate-100 outline-none focus:border-primary/60"
+              />
+            </div>
+
+            <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 space-y-2">
+              <p className="text-xs text-slate-400">门禁说明</p>
+              <p className="text-sm text-slate-300">当前阶段: {currentStageLabel || '分析'} · 该门禁会强制补齐“多Agent讨论结论 + 项目详情理解确认草案 + 核心输入回填”，并要求用户确认通过后才解锁正式详情页。</p>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => postCreatePrepRequiredAction && void handleRequiredAction(postCreatePrepRequiredAction)}
+                disabled={!postCreatePrepRequiredAction || requiredActionLoadingId === postCreatePrepRequiredAction.id}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-primary/90 disabled:opacity-60"
+              >
+                {postCreatePrepRequiredAction && requiredActionLoadingId === postCreatePrepRequiredAction.id
+                  ? '处理中...'
+                  : (postCreatePrepRequiredAction?.ctaLabel || '执行创建后需求预备')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSavePostCreatePrepDraft()}
+                disabled={isSavingPrepDraft}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60"
+              >
+                {isSavingPrepDraft ? '保存中...' : '保存草案'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmPostCreatePrep()}
+                disabled={isConfirmingPrepDraft || !canConfirmPostCreatePrep}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"
+              >
+                {isConfirmingPrepDraft ? '确认中...' : '确认通过并进入正式详情'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void refreshProjectView()}
+                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10"
+              >
+                刷新状态
+              </button>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col">
@@ -3147,6 +3866,30 @@ const ProjectRoom = ({
             </div>
           </section>
 
+          {protocolFailureHint ? (
+            <section className="rounded-2xl border border-danger/40 bg-danger/10 p-4 sm:p-5 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="text-sm font-semibold text-danger">执行协议门禁阻断详情</h3>
+                <Badge variant="danger">
+                  {protocolFailureHint.categories
+                    .slice(0, 2)
+                    .map((category) => PROTOCOL_FAILURE_CATEGORY_LABELS[category] || category)
+                    .join(' / ')}
+                </Badge>
+              </div>
+              <p className="text-xs text-danger/90">{protocolFailureHint.title}</p>
+              {protocolFailureHint.missingChecks.length > 0 ? (
+                <div className="space-y-2">
+                  {protocolFailureHint.missingChecks.slice(0, 4).map((item, index) => (
+                    <p key={`${item}-${index}`} className="text-xs text-slate-200">
+                      {index + 1}. {item}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
+
           {requiredActions.length > 0 ? (
             <section className="rounded-2xl border border-warning/40 bg-warning/10 p-4 sm:p-5 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -3202,6 +3945,62 @@ const ProjectRoom = ({
               ))}
             </div>
           </div>
+
+          <section className="rounded-2xl border border-border-subtle bg-surface-soft/70 p-3 sm:p-4 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-widest">最终成果快照</h3>
+              <div className="flex items-center gap-2">
+                {isLoadingFinalArtifacts ? (
+                  <Badge variant="default">同步中</Badge>
+                ) : finalArtifacts ? (
+                  <Badge variant={finalArtifacts.readyForAcceptance ? 'primary' : 'warning'}>
+                    {finalArtifacts.readyForAcceptance
+                      ? `可验收 ${finalArtifacts.coverage.provided}/${finalArtifacts.coverage.required}`
+                      : `缺失 ${finalArtifacts.coverage.missing} 项`}
+                  </Badge>
+                ) : finalArtifactsLoadError ? (
+                  <Badge variant="danger">加载失败</Badge>
+                ) : (
+                  <Badge variant="default">暂无数据</Badge>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('交付物')}
+                  className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-200 hover:bg-white/10"
+                >
+                  查看交付物
+                </button>
+                {prototypeFinalArtifact ? (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenFinalArtifact(prototypeFinalArtifact)}
+                    className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25"
+                  >
+                    查看交互原型
+                  </button>
+                ) : null}
+              </div>
+            </div>
+            {finalArtifacts ? (
+              <div className="space-y-1.5">
+                <p className="text-xs text-slate-500">
+                  项目状态: {finalArtifacts.status} · 当前阶段: {finalArtifacts.currentStage}
+                </p>
+                {prototypeFinalArtifact ? (
+                  <p className="text-xs text-primary">
+                    原型交付物: {prototypeFinalArtifact.name}
+                  </p>
+                ) : null}
+                <p className="text-xs text-slate-400">
+                  {quickFinalArtifacts.slice(0, 3).map((artifact) => artifact.name).join('、') || '暂无关键产物'}
+                </p>
+              </div>
+            ) : finalArtifactsLoadError ? (
+              <p className="text-xs text-danger">最终成果读取失败：{finalArtifactsLoadError}</p>
+            ) : (
+              <p className="text-xs text-slate-500">正在读取最终成果摘要...</p>
+            )}
+          </section>
 
           {activeTab === '交付物' ? (
           <section className="space-y-3">
@@ -3266,10 +4065,40 @@ const ProjectRoom = ({
                       <p className="text-[11px] text-slate-500">
                         {artifact.stageType || '-'} · {artifact.status || '-'} · {artifact.updatedAt ? new Date(artifact.updatedAt).toLocaleString('zh-CN') : '-'}
                       </p>
+                      {isPrototypeLikeArtifact(artifact) ? (
+                        <p className="text-[11px] text-primary">该交付物支持交互预览</p>
+                      ) : null}
                       <p className="text-[11px] text-slate-500">
                         生成模型: {getArtifactModelLabel(artifact)}
                       </p>
                       <p className="text-[11px] text-slate-400 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
+                      {(() => {
+                        const access = resolveArtifactAccessUrls(artifact);
+                        return (
+                          <div className="text-[11px] text-slate-400 space-y-1">
+                            <p className="break-all">
+                              本地地址：
+                              {access.localUrl ? (
+                                <a className="ml-1 text-primary hover:underline" href={resolveArtifactUrl(access.localUrl)} target="_blank" rel="noreferrer">
+                                  {access.localUrl}
+                                </a>
+                              ) : (
+                                <span className="ml-1 text-slate-500">待生成</span>
+                              )}
+                            </p>
+                            <p className="break-all">
+                              外网地址：
+                              {access.publicUrl ? (
+                                <a className="ml-1 text-primary hover:underline" href={resolveArtifactUrl(access.publicUrl)} target="_blank" rel="noreferrer">
+                                  {access.publicUrl}
+                                </a>
+                              ) : (
+                                <span className="ml-1 text-slate-500">待生成</span>
+                              )}
+                            </p>
+                          </div>
+                        );
+                      })()}
                       {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
                       <div className="flex flex-wrap items-center gap-2">
                         <button
@@ -3278,8 +4107,37 @@ const ProjectRoom = ({
                           className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-200 hover:bg-white/10 flex items-center gap-1"
                         >
                           {artifact.source === 'link' ? <ExternalLink size={11} /> : <FileText size={11} />}
-                          {artifact.source === 'link' ? '打开链接' : '查看内容'}
+                          {isPrototypeLikeArtifact(artifact)
+                            ? '查看交互原型'
+                            : artifact.source === 'link'
+                              ? '打开链接'
+                              : '查看内容'}
                         </button>
+                        {(() => {
+                          const access = resolveArtifactAccessUrls(artifact);
+                          return (
+                            <>
+                              {access.localUrl ? (
+                                <button
+                                  type="button"
+                                  onClick={() => window.open(resolveArtifactUrl(access.localUrl), '_blank', 'noopener,noreferrer')}
+                                  className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                >
+                                  打开本地地址
+                                </button>
+                              ) : null}
+                              {access.publicUrl ? (
+                                <button
+                                  type="button"
+                                  onClick={() => window.open(resolveArtifactUrl(access.publicUrl), '_blank', 'noopener,noreferrer')}
+                                  className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                >
+                                  打开外网地址
+                                </button>
+                              ) : null}
+                            </>
+                          );
+                        })()}
                         {artifact.content ? (
                           <button
                             type="button"
@@ -3310,6 +4168,17 @@ const ProjectRoom = ({
                     </div>
                   ) : null}
                 </div>
+              </div>
+            ) : finalArtifactsLoadError ? (
+              <div className="rounded-xl border border-danger/40 bg-danger/10 p-4 text-xs text-danger space-y-2">
+                <p>最终验收成果加载失败：{finalArtifactsLoadError}</p>
+                <button
+                  type="button"
+                  onClick={() => void loadFinalArtifacts()}
+                  className="px-2.5 py-1 rounded-md bg-danger/15 border border-danger/40 text-[11px] text-danger hover:bg-danger/25"
+                >
+                  重新加载
+                </button>
               </div>
             ) : (
               <div className="rounded-xl border border-border-subtle bg-surface-soft p-4 text-xs text-slate-500">
@@ -4042,6 +4911,59 @@ const ProjectRoom = ({
                 交付物检查
               </h3>
               <div className="space-y-5">
+                {stitchArtifacts.length > 0 ? (
+                  <div className="bg-surface-soft border border-border-subtle rounded-2xl p-5 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-sm font-semibold text-white">Stitch 设计历史（已关联当前项目）</p>
+                      <Badge variant="accent">{stitchArtifacts.length} 条</Badge>
+                    </div>
+                    <p className="text-[11px] text-slate-500">
+                      仅展示与当前项目执行记录绑定的 Stitch 产物，避免出现“Stitch 有项目但平台无映射”的数据噪音。
+                    </p>
+                    <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                      {stitchArtifacts.map((item) => (
+                        <div key={item.executionId} className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-xs text-slate-200">
+                              {STAGE_LABELS[item.stageType] || item.stageType} · {roleLabel(item.role)}
+                            </p>
+                            <Badge variant={item.status === 'ready' ? 'primary' : item.status === 'pending' ? 'warning' : 'danger'}>
+                              {item.status}
+                            </Badge>
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            stitchProjectId: {item.projectId}{item.screenId ? ` · screenId: ${item.screenId}` : ''} · {new Date(item.updatedAt).toLocaleString('zh-CN')}
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {item.htmlUrl ? (
+                              <a
+                                href={item.htmlUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25 inline-flex items-center gap-1"
+                              >
+                                <ExternalLink size={12} />
+                                HTML
+                              </a>
+                            ) : null}
+                            {item.imageUrl ? (
+                              <a
+                                href={item.imageUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-200 hover:bg-white/10 inline-flex items-center gap-1"
+                              >
+                                <ExternalLink size={12} />
+                                图片
+                              </a>
+                            ) : null}
+                          </div>
+                          {item.error ? <p className="text-[11px] text-warning">error: {item.error}</p> : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
                 {stageItems.map((stage) => {
                   const stageDeliverables = deliverablesByStage.get(stage.type) || [];
                   const acceptanceStats = getStageDeliverableStats(stage.type);
@@ -4398,10 +5320,40 @@ const ProjectRoom = ({
                           <p className="text-[11px] text-slate-500">
                             {artifact.stageType || '-'} · {artifact.status || '-'} · {artifact.updatedAt ? new Date(artifact.updatedAt).toLocaleString('zh-CN') : '-'}
                           </p>
+                          {isPrototypeLikeArtifact(artifact) ? (
+                            <p className="text-[11px] text-primary">该交付物支持交互预览</p>
+                          ) : null}
                           <p className="text-[11px] text-slate-500">
                             生成模型: {getArtifactModelLabel(artifact)}
                           </p>
                           <p className="text-xs text-slate-300 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
+                          {(() => {
+                            const access = resolveArtifactAccessUrls(artifact);
+                            return (
+                              <div className="text-[11px] text-slate-400 space-y-1">
+                                <p className="break-all">
+                                  本地地址：
+                                  {access.localUrl ? (
+                                    <a className="ml-1 text-primary hover:underline" href={resolveArtifactUrl(access.localUrl)} target="_blank" rel="noreferrer">
+                                      {access.localUrl}
+                                    </a>
+                                  ) : (
+                                    <span className="ml-1 text-slate-500">待生成</span>
+                                  )}
+                                </p>
+                                <p className="break-all">
+                                  外网地址：
+                                  {access.publicUrl ? (
+                                    <a className="ml-1 text-primary hover:underline" href={resolveArtifactUrl(access.publicUrl)} target="_blank" rel="noreferrer">
+                                      {access.publicUrl}
+                                    </a>
+                                  ) : (
+                                    <span className="ml-1 text-slate-500">待生成</span>
+                                  )}
+                                </p>
+                              </div>
+                            );
+                          })()}
                           {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
                           <div className="flex flex-wrap items-center gap-2 pt-1">
                             <button
@@ -4410,8 +5362,37 @@ const ProjectRoom = ({
                               className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-200 hover:bg-white/10 flex items-center gap-1"
                             >
                               {artifact.source === 'link' ? <ExternalLink size={11} /> : <FileText size={11} />}
-                              {artifact.source === 'link' ? '打开链接' : '查看内容'}
+                              {isPrototypeLikeArtifact(artifact)
+                                ? '查看交互原型'
+                                : artifact.source === 'link'
+                                  ? '打开链接'
+                                  : '查看内容'}
                             </button>
+                            {(() => {
+                              const access = resolveArtifactAccessUrls(artifact);
+                              return (
+                                <>
+                                  {access.localUrl ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => window.open(resolveArtifactUrl(access.localUrl), '_blank', 'noopener,noreferrer')}
+                                      className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                    >
+                                      打开本地地址
+                                    </button>
+                                  ) : null}
+                                  {access.publicUrl ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => window.open(resolveArtifactUrl(access.publicUrl), '_blank', 'noopener,noreferrer')}
+                                      className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                    >
+                                      打开外网地址
+                                    </button>
+                                  ) : null}
+                                </>
+                              );
+                            })()}
                             {artifact.content ? (
                               <button
                                 type="button"
@@ -4797,6 +5778,9 @@ const ProjectRoom = ({
                 <Badge variant={isDeliverableReadable(previewDeliverable) ? 'accent' : 'warning'}>
                   {isDeliverableReadable(previewDeliverable) ? '正文完整' : `正文偏短 (${getDeliverableContentLength(previewDeliverable)} 字)`}
                 </Badge>
+                {previewDeliverableStitchStatusLabel ? (
+                  <Badge variant={previewDeliverableStitchStatusVariant}>{previewDeliverableStitchStatusLabel}</Badge>
+                ) : null}
                 <span className="text-xs text-slate-500">
                   阶段: {STAGE_LABELS[previewDeliverable.stageType] || previewDeliverable.stageType} ·
                   版本 v{previewDeliverable.version ?? 1} ·
@@ -4831,20 +5815,77 @@ const ProjectRoom = ({
                     该窗口仅用于确认设计稿或 HTML 产物本身是否可读、可审查。
                     如果要判断项目当前状态、审批结果或新建项目弹窗内容，请回到实时前端页面与 API 状态查看。
                   </p>
+                  <p className="mt-1 text-[11px] leading-5 text-slate-300">
+                    说明：视觉设计稿属于 DESIGN 阶段产物（设计 Agent 输出）；最终可运行原型属于 DEV/ACCEPT 阶段产物（研发 Agent 输出），两者不等价。
+                  </p>
                 </div>
+              ) : null}
+              {activeStitchPreview ? (
+                <div className="rounded-xl border border-border-subtle bg-surface-soft/30 p-3 space-y-2">
+                  <p className="text-xs text-slate-200 font-medium">Stitch 回传信息</p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-slate-300">
+                    {activeStitchPreview.projectId ? <span>projectId: {activeStitchPreview.projectId}</span> : null}
+                    {activeStitchPreview.screenId ? <span>screenId: {activeStitchPreview.screenId}</span> : null}
+                    {activeStitchPreview.provider ? <span>provider: {activeStitchPreview.provider}</span> : null}
+                    {activeStitchPreview.executor ? <span>executor: {activeStitchPreview.executor}</span> : null}
+                    {activeStitchPreview.generatedAt ? <span>generatedAt: {activeStitchPreview.generatedAt}</span> : null}
+                    {activeStitchPreview.requestedAt ? <span>requestedAt: {activeStitchPreview.requestedAt}</span> : null}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {activeStitchPreview.htmlUrl ? (
+                      <a
+                        href={activeStitchPreview.htmlUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-1.5 rounded-md bg-primary/15 border border-primary/30 text-xs text-primary hover:bg-primary/25"
+                      >
+                        打开 Stitch HTML
+                      </a>
+                    ) : null}
+                    {activeStitchPreview.imageUrl ? (
+                      <a
+                        href={activeStitchPreview.imageUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="px-3 py-1.5 rounded-md bg-white/5 border border-border-subtle text-xs text-slate-200 hover:bg-white/10"
+                      >
+                        打开 Stitch 图片
+                      </a>
+                    ) : null}
+                  </div>
+                  {activeStitchPreview.error ? (
+                    <p className="text-[11px] text-warning">stitchError: {activeStitchPreview.error}</p>
+                  ) : null}
+                  {activeStitchPreview.hint ? (
+                    <p className="text-[11px] text-slate-400">stitchHint: {activeStitchPreview.hint}</p>
+                  ) : null}
+                </div>
+              ) : null}
+              {shouldPreferRemoteVisualPreview && !previewDeliverableStitchMeta ? (
+                <p className="text-[11px] text-slate-400">
+                  检测到更新的 Stitch 设计回传，已优先展示最新可用稿，避免旧正文片段造成预览偏差。
+                </p>
               ) : null}
               {canRenderVisualPreview ? (
                 <div className="rounded-xl border border-border-subtle bg-surface-soft/40 p-3 space-y-2">
                   <p className="text-xs text-slate-300">视觉设计预览（确认后再进入开发）</p>
-                  {previewDeliverableHtml ? (
+                  {useInlineVisualPreview ? (
                     <iframe
                       title="视觉设计预览"
                       sandbox=""
-                      srcDoc={previewDeliverableHtml}
+                      srcDoc={previewDeliverableHtmlInline || undefined}
                       className="w-full h-[58vh] rounded-lg border border-border-subtle bg-white"
                     />
                   ) : null}
-                  {!previewDeliverableHtml && previewDeliverableImage ? (
+                  {!useInlineVisualPreview && previewDeliverableHtmlUrl ? (
+                    <iframe
+                      title="视觉设计预览（Stitch）"
+                      sandbox=""
+                      src={previewDeliverableHtmlUrl}
+                      className="w-full h-[58vh] rounded-lg border border-border-subtle bg-white"
+                    />
+                  ) : null}
+                  {!useInlineVisualPreview && !previewDeliverableHtmlUrl && previewDeliverableImage ? (
                     <img
                       src={previewDeliverableImage}
                       alt="视觉设计稿预览"
