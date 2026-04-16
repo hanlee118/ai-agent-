@@ -442,14 +442,6 @@ describe("Error Matrix: auth + projects", () => {
       assert.ok(inputNames.includes("rawRequirements"));
       assert.ok(inputNames.includes("prd"));
       assert.ok(inputNames.includes("debateSummary"));
-      assert.ok(inputNames.includes("prepDiscussionTrace"));
-      const prepTrace = String(
-        (Array.isArray(afterDetail.body?.projectInputs) ? afterDetail.body.projectInputs : [])
-          .find((item: { name?: string }) => String(item?.name || "") === "prepDiscussionTrace")
-          ?.content || ""
-      );
-      assert.match(prepTrace, /gitlabPublishRequired:/);
-      assert.match(prepTrace, /gitlabPublishStatus:/);
       assert.ok(
         Array.isArray(afterDetail.body?.requiredActions)
           && !afterDetail.body.requiredActions.some((item: { action?: string }) => item.action === "run_post_create_prep")
@@ -487,99 +479,6 @@ describe("Error Matrix: auth + projects", () => {
         .send({ notes: "二次确认通过" });
       assert.equal(confirmRes.status, 200);
       assert.equal(Boolean(confirmRes.body?.data?.postCreatePrep?.completed), true);
-    });
-
-    it("[200][PROJECT_POST_CREATE_PREP] 无 Issue 时也应基于用户输入生成结构化讨论与分析（非模板占位）", async () => {
-      const createRes = await request(fullApp)
-        .post("/api/projects")
-        .send({
-          name: "测试项目-跨境选品结构化预备",
-          description: "做一个跨境选品跟品机器人，监控 TikTok 与亚马逊爆品，输出排名与告警，并支持人工确认。",
-          projectType: "complete",
-          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
-        });
-      assert.equal(createRes.status, 201);
-      const projectId = String(createRes.body.id);
-
-      const runRes = await request(fullApp).post(`/api/projects/${projectId}/post-create-prep`).send({});
-      assert.equal(runRes.status, 200);
-      assert.equal(Boolean(runRes.body?.success), true);
-
-      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
-      assert.equal(detailRes.status, 200);
-      const description = String(detailRes.body?.description || "");
-      assert.match(description, /## 多Agent需求讨论结论/);
-      assert.match(description, /## 项目详情理解确认草案/);
-      assert.match(description, /### 共识/);
-      assert.match(description, /### 分歧与处理/);
-      assert.match(description, /### 角色决策建议/);
-      assert.match(description, /### 核心场景/);
-      assert.match(description, /### In Scope/);
-      assert.match(description, /### Out of Scope/);
-      assert.match(description, /### 验收标准/);
-      assert.match(description, /TikTok|亚马逊/i);
-      assert.ok(!description.includes("待补充业务目标"));
-      assert.ok(!description.includes("部分业务约束未显式给出"));
-
-      const inputMap = new Map(
-        (Array.isArray(detailRes.body?.projectInputs) ? detailRes.body.projectInputs : []).map(
-          (item: { name?: string; content?: string }) => [String(item?.name || ""), String(item?.content || "")]
-        )
-      );
-      const rawRequirements = String(inputMap.get("rawRequirements") || "");
-      const prd = String(inputMap.get("prd") || "");
-      const debateSummary = String(inputMap.get("debateSummary") || "");
-      const discussionTrace = String(inputMap.get("prepDiscussionTrace") || "");
-      assert.ok(rawRequirements.length > 20);
-      assert.ok(prd.length > 20);
-      assert.ok(debateSummary.length > 20);
-      assert.ok(discussionTrace.length > 20);
-      assert.notEqual(rawRequirements.trim(), prd.trim());
-      assert.match(rawRequirements, /TikTok|亚马逊/i);
-      assert.match(rawRequirements, /原始需求输入|用户诉求提炼/);
-      assert.match(prd, /结构化需求草案|需求确认单/);
-      assert.match(debateSummary, /共识|角色决策建议/);
-      assert.match(discussionTrace, /讨论回合记录|ROLE_/);
-    });
-
-    it("[200][PROJECT_POST_CREATE_PREP] 支持补充信息后继续讨论并刷新回填", async () => {
-      const createRes = await request(fullApp)
-        .post("/api/projects")
-        .send({
-          name: "测试项目-补充后继续讨论",
-          description: "搭建一个跨端看板，支持运营洞察与任务闭环。",
-          projectType: "complete",
-          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DEV"]
-        });
-      assert.equal(createRes.status, 201);
-      const projectId = String(createRes.body.id);
-
-      const firstRun = await request(fullApp).post(`/api/projects/${projectId}/post-create-prep`).send({});
-      assert.equal(firstRun.status, 200);
-
-      const supplementSeed = "补充说明：必须支持移动端离线草稿、审计日志与多租户隔离。";
-      const rerun = await request(fullApp)
-        .post(`/api/projects/${projectId}/post-create-prep`)
-        .send({
-          rawRequirements: supplementSeed,
-          analysis: "- 目标: 强化多端协同与可追溯性",
-          discussion: "补充上下文后继续讨论"
-        });
-      assert.equal(rerun.status, 200);
-
-      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
-      assert.equal(detailRes.status, 200);
-      const inputMap = new Map(
-        (Array.isArray(detailRes.body?.projectInputs) ? detailRes.body.projectInputs : []).map(
-          (item: { name?: string; content?: string }) => [String(item?.name || ""), String(item?.content || "")]
-        )
-      );
-      const rawRequirements = String(inputMap.get("rawRequirements") || "");
-      const prd = String(inputMap.get("prd") || "");
-      const discussionTrace = String(inputMap.get("prepDiscussionTrace") || "");
-      assert.match(rawRequirements, /离线草稿|审计日志|多租户/i);
-      assert.notEqual(rawRequirements.trim(), prd.trim());
-      assert.match(discussionTrace, /triggeredBy:\s*projects_route_manual_trigger_with_draft/i);
     });
   });
 
@@ -1121,59 +1020,6 @@ describe("Error Matrix: auth + projects", () => {
         .filter((item) => item.stageType === "DESIGN");
       assert.equal(designDeliverables.length, 1);
       assert.equal(designDeliverables[0]?.name, "设计审查卡.md");
-    });
-
-    it("[200][PROJECT_RECONCILE] should recover pending-approval stage when current stage has zero deliverables", async () => {
-      const createRes = await request(fullApp)
-        .post("/api/projects")
-        .send({
-          name: "测试项目-待验收无交付物自动恢复",
-          description: "覆盖待验收状态下当前阶段没有任何交付物时的恢复逻辑。",
-          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
-        });
-      assert.equal(createRes.status, 201);
-      const projectId = String(createRes.body.id);
-
-      await prismaClient.$transaction([
-        prismaClient.project.update({
-          where: { id: projectId },
-          data: {
-            currentStage: "DESIGN",
-            currentRole: "ROLE_DESIGN",
-            pendingApproval: true,
-            progress: 55
-          }
-        }),
-        prismaClient.stage.update({
-          where: { projectId_type: { projectId, type: "DESIGN" } },
-          data: { status: "active", progress: 55 }
-        }),
-        prismaClient.deliverable.deleteMany({
-          where: { projectId, stageType: "DESIGN" }
-        })
-      ]);
-
-      const beforeDetail = await request(fullApp).get(`/api/projects/${projectId}`);
-      assert.equal(beforeDetail.status, 200);
-      assert.ok(
-        Array.isArray(beforeDetail.body?.requiredActions)
-          && beforeDetail.body.requiredActions.some((item: { id?: string; action?: string }) =>
-            item.id === "missing-stage-deliverable" && item.action === "reconcile_deliverables"
-          )
-      );
-
-      const reconcileRes = await request(fullApp)
-        .post(`/api/projects/${projectId}/reconcile-deliverables`)
-        .send({});
-      assert.equal(reconcileRes.status, 200);
-
-      const afterDetail = await request(fullApp).get(`/api/projects/${projectId}`);
-      assert.equal(afterDetail.status, 200);
-      const designDeliverables = (afterDetail.body.deliverables as Array<{ stageType: string; name: string; content?: string }>)
-        .filter((item) => item.stageType === "DESIGN");
-      assert.ok(designDeliverables.length >= 1);
-      assert.ok(designDeliverables.some((item) => String(item.name || "").includes("设计审查卡")));
-      assert.ok(designDeliverables.some((item) => String(item.content || "").trim().length > 80));
     });
 
     it("[422][PROJECT_STAGE_SUBMIT] should reject template scaffold placeholder content", async () => {
