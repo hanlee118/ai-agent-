@@ -248,7 +248,6 @@ export type ProjectPostCreatePrep = {
     rawRequirements: string;
     prd: string;
     debateSummary: string;
-    discussionTrace: string;
     confirmed: boolean;
     confirmedBy?: string;
     confirmedAt?: string;
@@ -562,14 +561,7 @@ export const projectsApi = {
     }>(`/projects/${toProjectPathId(id)}`);
   },
 
-  async runPostCreatePrep(id: string, data?: {
-    discussion?: string;
-    analysis?: string;
-    rawRequirements?: string;
-    prd?: string;
-    debateSummary?: string;
-    discussionTrace?: string;
-  }) {
+  async runPostCreatePrep(id: string) {
     return request<{
       success: boolean;
       data: {
@@ -579,7 +571,7 @@ export const projectsApi = {
       };
     }>(`/projects/${toProjectPathId(id)}/post-create-prep`, {
       method: 'POST',
-      body: JSON.stringify(data || {}),
+      body: JSON.stringify({}),
     });
   },
 
@@ -589,7 +581,6 @@ export const projectsApi = {
     rawRequirements?: string;
     prd?: string;
     debateSummary?: string;
-    discussionTrace?: string;
   }) {
     return request<{
       success: boolean;
@@ -610,7 +601,6 @@ export const projectsApi = {
     rawRequirements?: string;
     prd?: string;
     debateSummary?: string;
-    discussionTrace?: string;
     confirmedBy?: string;
     notes?: string;
   }) {
