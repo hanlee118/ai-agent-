@@ -40,6 +40,7 @@ import {
   type IssueDiscussionItem,
   type IssueSourceType
 } from "../system/v1-method-store.js";
+import { runProjectPostCreatePrep } from "../system/post-create-prep.js";
 
 interface PreviewIssueBody {
   input?: unknown;
@@ -211,6 +212,207 @@ function normalizeStringMap(input: unknown) {
     }
     return acc;
   }, {});
+}
+
+type NormalizedIssueProjectInput = {
+  name: string;
+  type: string;
+  description?: string;
+  content?: string;
+  filePath?: string;
+  referenceDeliverableId?: string;
+  inputSource?: "manual" | "imported_from_project" | "template_generated";
+};
+
+function sanitizeLine(value: string, fallback = "待补充") {
+  const normalized = String(value || "").replace(/\s+/g, " ").trim();
+  return normalized || fallback;
+}
+
+function asNonEmptyList(items: string[], fallback: string) {
+  const cleaned = items.map((item) => sanitizeLine(item, "")).filter(Boolean);
+  return cleaned.length > 0 ? cleaned : [fallback];
+}
+
+function buildDebateConclusionSection(input: {
+  issue: Awaited<ReturnType<typeof getIssue>>;
+  clarificationAnswers: Record<string, string>;
+  objective: string;
+}) {
+  const issue = input.issue;
+  const discussion = Array.isArray(issue?.discussion) ? issue.discussion : [];
+  const debateOpinions = Array.isArray(issue?.debate?.opinions) ? issue.debate.opinions : [];
+  const consensus = asNonEmptyList(
+    Array.isArray(issue?.debate?.consensus) ? issue.debate.consensus : [],
+    "当前无结构化共识条目，需在后续阶段补充。"
+  );
+  const divergences = asNonEmptyList(
+    Array.isArray(issue?.debate?.divergences) ? issue.debate.divergences : [],
+    "当前无显式分歧项。"
+  );
+  const roleDecisionsFromDiscussion = discussion
+    .map((item) => {
+      const role = sanitizeLine(item.roleLabel || item.roleId || "未知角色");
+      const decision = sanitizeLine(item.proposal || item.concern || item.focus || "");
+      return decision ? `- ${role}: ${decision}` : "";
+    })
+    .filter(Boolean);
+  const roleDecisionsFromDebate = debateOpinions
+    .map((item) => {
+      const role = sanitizeLine(String((item as { roleLabel?: string; roleId?: string }).roleLabel
+        || (item as { roleId?: string }).roleId
+        || "未知角色"));
+      const decision = sanitizeLine(String((item as { proposal?: string; concern?: string }).proposal
+        || (item as { concern?: string }).concern
+        || ""));
+      return decision ? `- ${role}: ${decision}` : "";
+    })
+    .filter(Boolean);
+  const roleDecisions = roleDecisionsFromDiscussion.length > 0
+    ? roleDecisionsFromDiscussion
+    : roleDecisionsFromDebate;
+  const decisionAnchor = sanitizeLine(
+    input.clarificationAnswers.goal
+    || issue?.summary
+    || input.objective,
+    "围绕已确认业务目标推进 MVP。"
+  );
+
+  return [
+    "## 多Agent需求讨论结论",
+    "",
+    "### 共识",
+    ...consensus.map((item) => `- ${item}`),
+    "",
+    "### 分歧与处理",
+    ...divergences.map((item) => `- ${item}`),
+    "",
+    "### 角色决策建议",
+    ...(roleDecisions.length > 0 ? roleDecisions : ["- 当前缺少角色级决策建议，需补充后再推进执行。"]),
+    "",
+    "### 决策锚点",
+    `- ${decisionAnchor}`
+  ].join("\n");
+}
+
+function buildAnalysisDraftSection(input: {
+  issue: Awaited<ReturnType<typeof getIssue>>;
+  objective: string;
+  inScope: string[];
+  outOfScope: string[];
+  acceptanceCriteria: string[];
+}) {
+  const refinement = input.issue?.refinement;
+  const designBlueprint = input.issue?.designBlueprint;
+  const objective = sanitizeLine(input.objective, "待补充项目目标");
+  const scenarios = asNonEmptyList(
+    Array.isArray(designBlueprint?.coreScenarios) ? designBlueprint.coreScenarios : [],
+    "待补充核心场景"
+  );
+  const inScope = asNonEmptyList(input.inScope, "待补充首期范围");
+  const outOfScope = asNonEmptyList(input.outOfScope, "待补充非目标范围");
+  const acceptance = asNonEmptyList(input.acceptanceCriteria, "待补充验收标准");
+  const risks = asNonEmptyList(
+    [
+      ...(Array.isArray(refinement?.outOfScopeDraft) ? refinement.outOfScopeDraft : []),
+      ...(Array.isArray(input.issue?.debate?.divergences) ? input.issue?.debate?.divergences ?? [] : [])
+    ],
+    "暂无新增高风险，按阶段门禁继续验证。"
+  );
+
+  return [
+    "## 项目详情理解确认草案",
+    "",
+    `- 目标: ${objective}`,
+    `- 设计主题: ${sanitizeLine(designBlueprint?.designTheme || "", "待补充设计主题")}`,
+    "",
+    "### 核心场景",
+    ...scenarios.map((item) => `- ${item}`),
+    "",
+    "### In Scope",
+    ...inScope.map((item) => `- ${item}`),
+    "",
+    "### Out of Scope",
+    ...outOfScope.map((item) => `- ${item}`),
+    "",
+    "### 验收标准",
+    ...acceptance.map((item) => `- ${item}`),
+    "",
+    "### 关键风险与待确认",
+    ...risks.map((item) => `- ${item}`)
+  ].join("\n");
+}
+
+function buildSeedProjectInputsFromIssue(input: {
+  rawInput: string;
+  requirementBlock: string;
+  debateBlock: string;
+  analysisBlock: string;
+}): NormalizedIssueProjectInput[] {
+  const rawRequirementsContent = [
+    "# rawRequirements",
+    "",
+    sanitizeLine(input.rawInput, "待补充原始需求"),
+    "",
+    input.debateBlock,
+    "",
+    input.analysisBlock,
+    "",
+    input.requirementBlock
+  ].join("\n");
+  const prdContent = [
+    "# prd",
+    "",
+    input.analysisBlock,
+    "",
+    input.requirementBlock
+  ].join("\n");
+  const debateContent = [
+    "# debateSummary",
+    "",
+    input.debateBlock
+  ].join("\n");
+
+  return [
+    {
+      name: "rawRequirements",
+      type: "document",
+      description: "Issue 确认阶段自动注入的原始需求与多Agent讨论结论。",
+      content: rawRequirementsContent,
+      inputSource: "template_generated"
+    },
+    {
+      name: "prd",
+      type: "document",
+      description: "Issue 确认阶段自动生成的需求分析草案与需求确认单。",
+      content: prdContent,
+      inputSource: "template_generated"
+    },
+    {
+      name: "debateSummary",
+      type: "document",
+      description: "Issue 真实模型多角色讨论结论摘要。",
+      content: debateContent,
+      inputSource: "template_generated"
+    }
+  ];
+}
+
+function mergeProjectInputsWithSeeded(
+  userInputs: NormalizedIssueProjectInput[],
+  seededInputs: NormalizedIssueProjectInput[]
+) {
+  const merged = [...userInputs];
+  const keyed = new Set(merged.map((item) => String(item.name || "").trim().toLowerCase()).filter(Boolean));
+  for (const item of seededInputs) {
+    const key = String(item.name || "").trim().toLowerCase();
+    if (!key || keyed.has(key)) {
+      continue;
+    }
+    merged.push(item);
+    keyed.add(key);
+  }
+  return merged;
 }
 
 function buildParsedIntentFromIssue(input: {
@@ -1022,7 +1224,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const projectType = normalizeProjectType(payload.projectType);
     const parentProjectId = String(payload.parentProjectId ?? "").trim() || undefined;
     const relaySourceStageId = String(payload.relaySourceStageId ?? "").trim() || undefined;
-    const projectInputs = normalizeProjectInputs(payload.projectInputs);
+    const userProjectInputs = normalizeProjectInputs(payload.projectInputs);
     const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim();
     const workflowTemplateKey = workflowTemplateKeyRaw || undefined;
     const enforceIndustryAssemblyRule = workflowTemplateKeyRaw.toLowerCase() === "none";
@@ -1073,7 +1275,6 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       });
       return;
     }
-
     const requestedTeamRoleIds = normalizeRoleList(payload.teamRoleIds);
     const selectedRoleIds = requestedTeamRoleIds.length > 0
       ? requestedTeamRoleIds
@@ -1131,7 +1332,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
         projectType,
         parentProjectId,
         relaySourceStageId,
-        projectInputs,
+        projectInputs: userProjectInputs,
         requirementContract: confirmedContract,
         parsedIntent,
         workflowTemplateKey,
@@ -1157,6 +1358,16 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       status: "in_progress",
       validationStatus: "pending",
       requirementContract: confirmedContract
+    });
+    void runProjectPostCreatePrep({
+      projectId: project.id,
+      issue: updated,
+      triggeredBy: "issue_confirm_async"
+    }).catch((error) => {
+      console.warn(
+        `[issue] post-create prep failed for project ${project.id}:`,
+        error instanceof Error ? error.message : String(error)
+      );
     });
 
     await options.onProjectCreated?.(project.id);

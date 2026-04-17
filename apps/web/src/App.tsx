@@ -53,6 +53,9 @@ const APP_TABS = [
 
 const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
   Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
+const LEGACY_APP_TAB_REDIRECTS: Record<string, (typeof APP_TABS)[number]> = {
+  'dapp-mvp-mobile': 'projects',
+};
 const PROJECT_ROOM_URL_KEYS = [
   'project_id',
   'signoff_project_id',
@@ -321,8 +324,21 @@ export default function App() {
     const appTabParam = params.get('app_tab');
     const targetProjectId = params.get('signoff_project_id') || params.get('project_id');
     const targetAgentId = params.get('agent_id');
-    const nextTab = isAppTab(appTabParam) ? appTabParam : null;
+    const legacyRedirectTab = appTabParam ? LEGACY_APP_TAB_REDIRECTS[appTabParam] : undefined;
+    const nextTab = isAppTab(appTabParam) ? appTabParam : (legacyRedirectTab || null);
     const shouldIgnoreProjectUrlParams = Boolean(nextTab && nextTab !== 'project-room');
+
+    if (legacyRedirectTab && typeof window !== 'undefined') {
+      const nextParams = new URLSearchParams(params);
+      nextParams.set('app_tab', legacyRedirectTab);
+      if (legacyRedirectTab !== 'project-room') {
+        PROJECT_ROOM_URL_KEYS.forEach((key) => nextParams.delete(key));
+      }
+      const nextSearch = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState(window.history.state, '', nextUrl);
+      setUrlSearch(window.location.search);
+    }
 
     if (!nextTab && !targetProjectId && !targetAgentId) {
       return;

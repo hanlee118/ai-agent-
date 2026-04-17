@@ -32,6 +32,7 @@ load_env_file_preserving_existing "$ROOT_DIR/apps/api/.env"
 PORT="${PORT:-8787}"
 HOST="${HOST:-0.0.0.0}"
 export NODE_ENV="${NODE_ENV:-production}"
+export DESIGN_STITCH_MODE="${DESIGN_STITCH_MODE:-required}"
 export PORT
 export HOST
 

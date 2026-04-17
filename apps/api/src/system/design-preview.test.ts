@@ -78,4 +78,32 @@ describe("design preview alignment", () => {
     assert.equal(result.pass, true);
     assert.equal(result.issues.length, 0);
   });
+
+  it("keeps generic fan-site requirements out of cross-border mode even when constraints mention ecommerce as out-of-scope", () => {
+    const profile = resolveDesignRequirementProfile({
+      projectName: "蜡笔小新粉丝介绍网站",
+      projectDescription:
+        "打造角色介绍与作品世界观展示站点，首期不纳入登录、评论、社区互动和电商能力。",
+      keywords: ["粉丝站", "展示官网", "角色介绍", "世界观"]
+    });
+
+    assert.equal(profile.scenarioId, "generic_business_ui");
+  });
+
+  it("rejects collaboration template output when project is a fan-site", () => {
+    const result = evaluateVisualDesignRequirementAlignment({
+      projectName: "蜡笔小新粉丝介绍网站",
+      projectDescription: "围绕角色、世界观和经典剧情做沉浸式介绍站点",
+      keywords: ["蜡笔小新", "角色介绍", "世界观"],
+      content: [
+        "## 单页预览代码（HTML）",
+        "```html",
+        "<main><h1>项目协作平台视觉定稿</h1><button>立即进入执行看板</button><div>创建项目并选择阶段模板</div></main>",
+        "```"
+      ].join("\n")
+    });
+
+    assert.equal(result.pass, false);
+    assert.ok(result.issues.some((item) => item.includes("模板")));
+  });
 });

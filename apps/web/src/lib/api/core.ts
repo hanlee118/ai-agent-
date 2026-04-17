@@ -54,11 +54,29 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
       ...options,
       headers,
       credentials: resolveRequestCredentials(url, options.credentials),
+      cache: options.cache ?? 'no-store',
     };
     try {
       const response = await fetch(url, config);
-      const rawText = await response.text();
-      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      const requestMethod = String(config.method || 'GET').toUpperCase();
+      const shouldRetry304 = response.status === 304 && (requestMethod === 'GET' || requestMethod === 'HEAD');
+      let effectiveResponse = response;
+      let rawText = await response.text();
+
+      if (shouldRetry304) {
+        const retryUrl = `${url}${url.includes('?') ? '&' : '?'}__ts=${Date.now()}`;
+        const retryHeaders = new Headers(headers);
+        retryHeaders.set('Cache-Control', 'no-cache');
+        retryHeaders.set('Pragma', 'no-cache');
+        effectiveResponse = await fetch(retryUrl, {
+          ...config,
+          headers: retryHeaders,
+          cache: 'no-store',
+        });
+        rawText = await effectiveResponse.text();
+      }
+
+      const contentType = String(effectiveResponse.headers.get('content-type') || '').toLowerCase();
       let payload: unknown = null;
 
       if (rawText) {
@@ -72,7 +90,7 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
       if (isApiEnvelope<T>(payload)) {
         if (!payload.success) {
           throw new ApiRequestError(payload.error?.message || 'Request failed', {
-            status: response.status,
+            status: effectiveResponse.status,
             code: payload.error?.code,
             details: (payload.error || undefined) as Record<string, unknown> | undefined,
           });
@@ -80,7 +98,7 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
         return payload.data as T;
       }
 
-      if (!response.ok) {
+      if (!effectiveResponse.ok) {
         const payloadObject = typeof payload === 'object' && payload ? (payload as Record<string, unknown>) : undefined;
         const payloadCode = typeof payloadObject?.code === 'string'
           ? payloadObject.code
@@ -92,16 +110,16 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
             ? String((payload as { message?: string }).message || 'Request failed')
             : typeof payloadObject?.error === 'object' && payloadObject.error && 'message' in (payloadObject.error as Record<string, unknown>)
               ? String((payloadObject.error as { message?: string }).message || 'Request failed')
-              : `Request failed (${response.status})`;
+              : `Request failed (${effectiveResponse.status})`;
 
         const error = new ApiRequestError(message, {
-          status: response.status,
+          status: effectiveResponse.status,
           code: payloadCode,
           details: payloadObject,
         });
 
         if (hasNextCandidate && shouldFallbackToNextApiBase({
-          status: response.status,
+          status: effectiveResponse.status,
           contentType,
           rawText,
           message,

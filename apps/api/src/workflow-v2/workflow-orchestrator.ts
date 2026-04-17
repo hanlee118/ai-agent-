@@ -10,6 +10,7 @@ import { maybeGenerateStitchArtifacts } from "./stitch-chain.js";
 import { tryRunStageWithHermes } from "./hermes-mcp.js";
 import {
   bindProjectInputsToWorkflowEntryStages,
+  createProjectInputs,
   validateStageInputContract
 } from "./project-modes.js";
 import {
@@ -139,6 +140,78 @@ function parseFlag(value: string | undefined, defaultValue: boolean) {
     return false;
   }
   return defaultValue;
+}
+
+function normalizeProjectInputToken(value: string) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function shouldAttemptInputGateAutoRepair(input: {
+  violations?: string[];
+}) {
+  const issues = Array.isArray(input.violations) ? input.violations : [];
+  if (issues.length === 0) {
+    return true;
+  }
+  return issues.some((item) => {
+    const normalized = String(item || "").toLowerCase();
+    return normalized.includes("requires_external_input")
+      || normalized.includes("rawrequirements")
+      || normalized.includes("input_rule");
+  });
+}
+
+async function tryAutoRepairStageInputContract(input: {
+  stage: Awaited<ReturnType<typeof prisma.workflowStage.findUniqueOrThrow>> & {
+    workflow: {
+      projectId: string;
+      project: { description: string };
+    };
+  };
+  gateViolations?: string[];
+}) {
+  if (!shouldAttemptInputGateAutoRepair({ violations: input.gateViolations })) {
+    return null;
+  }
+
+  const projectId = input.stage.workflow.projectId;
+  const description = String(input.stage.workflow.project?.description ?? "").trim();
+  if (!description) {
+    return null;
+  }
+
+  const existingInputs = await prisma.projectInput.findMany({
+    where: { projectId },
+    select: { name: true }
+  });
+  const hasRawRequirements = existingInputs.some((item) => normalizeProjectInputToken(item.name) === "rawrequirements");
+  if (!hasRawRequirements) {
+    await createProjectInputs(projectId, [{
+      name: "rawRequirements",
+      type: "document",
+      description: "workflow-v2 输入门禁自愈：从项目描述自动补齐",
+      content: description,
+      inputSource: "template_generated"
+    }]);
+  }
+
+  await bindProjectInputsToWorkflowEntryStages({
+    workflowId: input.stage.workflowId,
+    projectId,
+    entryNodeIds: [input.stage.nodeId]
+  });
+
+  return prisma.workflowStage.findUnique({
+    where: { id: input.stage.id },
+    include: {
+      workflow: {
+        include: {
+          template: true,
+          project: true
+        }
+      }
+    }
+  });
 }
 
 function shouldForceScriptedWorkflowAgent() {
@@ -306,10 +379,19 @@ async function syncLegacyProjectStateFromWorkflow(workflowId: string) {
   const currentStages = currentStageIds
     .map((id) => stageById.get(id))
     .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  const latestStageByUpdate = [...workflow.stages]
+    .sort((a, b) => (
+      new Date(String(b.updatedAt || b.createdAt || 0)).getTime()
+      - new Date(String(a.updatedAt || a.createdAt || 0)).getTime()
+    ))[0];
   const primaryCurrentStage = currentStages[0];
   const inferredCurrentStageType = primaryCurrentStage
     ? resolveStageType(primaryCurrentStage.templateKey)
-    : "INIT";
+    : (
+      normalizeText(workflow.status).toLowerCase() === "completed"
+        ? "ACCEPT"
+        : (latestStageByUpdate ? resolveStageType(latestStageByUpdate.templateKey) : "INIT")
+    );
   const completedStageCount = workflow.stages.filter((item) => (
     WORKFLOW_STAGE_COMPLETED_STATUS.has(normalizeText(item.status).toLowerCase())
   )).length;
@@ -349,7 +431,7 @@ async function syncLegacyProjectStateFromWorkflow(workflowId: string) {
           }
         },
         data: {
-          status: "completed"
+          status: "done"
         }
       });
     });
@@ -359,7 +441,7 @@ async function syncLegacyProjectStateFromWorkflow(workflowId: string) {
   const hasActiveWorkflowStage = currentStages.some((item) => (
     !WORKFLOW_STAGE_TERMINAL_STATUS.has(normalizeText(item.status).toLowerCase())
   ));
-  const legacyCurrentStage = hasActiveWorkflowStage ? inferredCurrentStageType : "INIT";
+  const legacyCurrentStage = inferredCurrentStageType;
   await prisma.$transaction(async (tx) => {
     await tx.project.update({
       where: { id: workflow.projectId },
@@ -765,7 +847,7 @@ async function getWorkflowById(workflowId: string) {
 }
 
 async function activateStage(stageId: string) {
-  const stage = await prisma.workflowStage.findUnique({
+  let stage = await prisma.workflowStage.findUnique({
     where: { id: stageId },
     include: {
       workflow: {
@@ -792,14 +874,33 @@ async function activateStage(stageId: string) {
     templateInputContract: template.inputContract
   });
   if (!inputContractGate.passed) {
+    const repairedStage = await tryAutoRepairStageInputContract({
+      stage: stage as Awaited<ReturnType<typeof prisma.workflowStage.findUniqueOrThrow>> & {
+        workflow: {
+          projectId: string;
+          project: { description: string };
+        };
+      },
+      gateViolations: inputContractGate.violations
+    });
+    if (repairedStage) {
+      stage = repairedStage;
+    }
+  }
+
+  const refreshedInputContractGate = validateStageInputContract({
+    stageInputArtifacts: stage.inputArtifacts,
+    templateInputContract: template.inputContract
+  });
+  if (!refreshedInputContractGate.passed) {
     const pending = await prisma.workflowStage.update({
       where: { id: stage.id },
       data: {
         status: "pending",
         gateResults: toJson({
           passed: false,
-          violations: inputContractGate.violations ?? ["input contract validation failed"],
-          checks: inputContractGate.checks
+          violations: refreshedInputContractGate.violations ?? ["input contract validation failed"],
+          checks: refreshedInputContractGate.checks
         })
       }
     });
