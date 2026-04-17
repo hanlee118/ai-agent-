@@ -72,6 +72,8 @@ const STAGE_CONTENT_RULES: Record<StageType, Array<{ key: string; label: string;
   ],
   DEV: [
     { key: "tech_plan", label: "技术方案", patterns: [/技术方案|架构方案|接口|选型/i] },
+    { key: "code_paths", label: "代码文件路径证据", patterns: [/(?:apps?|src|packages|server|client|web|api)\/[a-z0-9_./-]+\.(?:ts|tsx|js|jsx|json|sql|prisma|yml|yaml|sh)/i] },
+    { key: "command_evidence", label: "命令验证证据", patterns: [/(?:pnpm|npm|yarn)\s+(?:dev|build|test|typecheck)|docker\s+compose|curl\s+https?:\/\/|http\s*200|exit code/i] },
     { key: "verification", label: "验证结果", patterns: [/验证结果|测试结果|联调|回归|verification/i] },
     { key: "risk_backlog", label: "风险与遗留问题", patterns: [/风险|遗留问题|待补项|openQuestions/i] },
     { key: "handoff_boundary", label: "完成边界与交接", patterns: [/已完成|未完成|handoff|回归关注点/i] }

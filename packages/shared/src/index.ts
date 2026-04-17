@@ -309,6 +309,22 @@ export interface ProjectDetail extends ProjectSummary {
   stages: Stage[];
   tasks: Task[];
   deliverables: Deliverable[];
+  stitchArtifacts?: Array<{
+    executionId: string;
+    stageType: StageType;
+    role: RoleType;
+    status: "ready" | "pending" | "degraded";
+    provider?: string;
+    projectId: string;
+    screenId?: string;
+    htmlUrl?: string;
+    imageUrl?: string;
+    prompt?: string;
+    error?: string;
+    executor?: string;
+    requestedAt?: string;
+    updatedAt: string;
+  }>;
   timeline: TimelineEvent[];
   liveSession: LiveSession;
 }

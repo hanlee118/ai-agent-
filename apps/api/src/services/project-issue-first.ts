@@ -9,7 +9,7 @@ const ISSUE_FIRST_GITLAB_PROJECT = String(
 ).trim();
 const ISSUE_FIRST_GITLAB_TOKEN = String(process.env.GITLAB_TOKEN || "").trim();
 const ISSUE_FIRST_LOCAL_ENFORCED = process.env.PROJECT_ISSUE_FIRST_LOCAL_ENFORCED !== "false";
-const DIRECT_PROJECT_CREATE_ENABLED = process.env.PROJECT_DIRECT_CREATE_ENABLED !== "false";
+const DIRECT_PROJECT_CREATE_ENABLED = String(process.env.PROJECT_DIRECT_CREATE_ENABLED ?? "false").trim().toLowerCase() === "true";
 
 function isMissingGitLabSyncBindingTableError(error: unknown) {
   if (!error || typeof error !== "object") {

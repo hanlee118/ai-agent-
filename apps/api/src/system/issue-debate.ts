@@ -413,7 +413,20 @@ function isTransientDebateFailureReason(reason: string) {
     || normalized.includes("enotfound")
     || normalized.includes("timeout")
     || normalized.includes("aborted")
-    || normalized.includes("timed out");
+    || normalized.includes("timed out")
+    || normalized.includes("route_cooldown_active");
+}
+
+function extractCooldownRetryAfterMs(reason: string) {
+  const match = String(reason || "").match(/retryAfterMs=(\d+)/i);
+  if (!match) {
+    return 0;
+  }
+  const parsed = Number(match[1]);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.floor(parsed);
 }
 
 function toConsensusAndDivergences(opinions: IssueDebateOpinion[]) {
@@ -509,30 +522,53 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
   const parsedIntent = previewRequirement(input.input);
   // 辩论任务已改为异步执行，不再需要过短超时。
   // 这里必须覆盖 runStageAgent 的内部阶段预算（通常约 90s），避免“模型仍在执行但外层提前判失败”。
-  const roleTimeoutMs = Math.max(60000, Number(process.env.ISSUE_DEBATE_ROLE_TIMEOUT_MS ?? 130000));
-  const debateConcurrency = Math.max(1, Number(process.env.ISSUE_DEBATE_CONCURRENCY ?? 2));
+  const roleTimeoutMs = Math.max(45_000, Number(process.env.ISSUE_DEBATE_ROLE_TIMEOUT_MS ?? 75_000));
+  const roleAttempts = Math.max(1, Number(process.env.ISSUE_DEBATE_ROLE_ATTEMPTS ?? 3));
+  const debateConcurrency = Math.max(1, Number(process.env.ISSUE_DEBATE_CONCURRENCY ?? 1));
   const executeRole = async (roleId: RoleType) => {
     const roleLabel = ROLE_LABELS[roleId] ?? roleId;
+    let lastError: unknown = null;
+    let run: Awaited<ReturnType<typeof runStageAgent>> | null = null;
     const startedAt = Date.now();
-    const run = await withTimeout(
-      runStageAgent({
-        projectName: input.title,
-        projectDescription: input.input,
-        parsedIntent,
-        stageType: "ANALYSIS",
-        role: roleId,
-        promptMode: "issue_debate",
-        summary: buildDebateSummaryPrompt({
-          issue: input.input,
-          summary: input.summary,
-          industryCode: input.industryCode,
-          roleId,
-          roleLabel
-        })
-      }),
-      roleTimeoutMs,
-      roleId
-    );
+    for (let attempt = 1; attempt <= roleAttempts; attempt += 1) {
+      try {
+        run = await withTimeout(
+          runStageAgent({
+            projectName: input.title,
+            projectDescription: input.input,
+            parsedIntent,
+            stageType: "ANALYSIS",
+            role: roleId,
+            promptMode: "issue_debate",
+            summary: buildDebateSummaryPrompt({
+              issue: input.input,
+              summary: input.summary,
+              industryCode: input.industryCode,
+              roleId,
+              roleLabel
+            })
+          }),
+          roleTimeoutMs,
+          roleId
+        );
+        break;
+      } catch (error) {
+        lastError = error;
+        const reason = normalizeDebateFailureReason(error);
+        const retryable = isTransientDebateFailureReason(reason);
+        if (!retryable || attempt >= roleAttempts) {
+          break;
+        }
+        const cooldownMs = extractCooldownRetryAfterMs(reason);
+        const waitMs = cooldownMs > 0
+          ? Math.max(1200, Math.min(30_000, cooldownMs + 1200))
+          : Math.min(8000, 1200 * attempt);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+      }
+    }
+    if (!run) {
+      throw (lastError instanceof Error ? lastError : new Error(String(lastError ?? `${roleId} execute failed`)));
+    }
     const fields = extractOpinionFields(run.body, run.thinkingSummary, roleId);
     return {
       id: `debate-${roleId}-${Date.now()}`,
@@ -565,14 +601,25 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
     .filter((item): item is PromiseRejectedResult => item.status === "rejected")
     .map((item) => normalizeDebateFailureReason(item.reason))
     .filter(Boolean);
+  const minRealModelRoles = Math.max(2, Number(process.env.ISSUE_DEBATE_MIN_REAL_MODEL_ROLES ?? 2));
+  const requireAnalyst = parseEnvFlag(process.env.ISSUE_DEBATE_REQUIRE_ANALYST, true);
   const shouldRetryAll =
     successfulOpinions.length === 0
     && failedReasons.length === selectedRoles.length
     && failedReasons.every((reason) => isTransientDebateFailureReason(reason));
   if (shouldRetryAll) {
+    const retryAfterMs = failedReasons
+      .map((reason) => extractCooldownRetryAfterMs(reason))
+      .filter((ms) => ms > 0);
+    const waitMs = retryAfterMs.length > 0
+      ? Math.max(1200, Math.min(45_000, Math.max(...retryAfterMs) + 1800))
+      : 1200;
     console.warn(`[issue-debate] all role calls hit transient failure, retrying once in serial mode`);
+    if (waitMs > 1200) {
+      console.warn(`[issue-debate] waiting ${waitMs}ms for transient cooldown before retry`);
+    }
     settled = [];
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
     for (const roleId of selectedRoles) {
       const retrySettled = await runDebateRoleBatch([roleId], executeRole);
       settled.push(...retrySettled);
@@ -584,6 +631,74 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
       .filter((item): item is PromiseRejectedResult => item.status === "rejected")
       .map((item) => normalizeDebateFailureReason(item.reason))
       .filter(Boolean);
+  }
+  const maxRescueRounds = Math.max(0, Number(process.env.ISSUE_DEBATE_RESCUE_ROUNDS ?? 2));
+  for (let rescueRound = 1; rescueRound <= maxRescueRounds; rescueRound += 1) {
+    const sufficiencyNow = evaluateDebateModelSufficiency({
+      selectedRoles,
+      opinions: successfulOpinions,
+      minRealModelRoles,
+      requireAnalyst
+    });
+    if (sufficiencyNow.passed) {
+      break;
+    }
+
+    const missingRoles = selectedRoles.filter(
+      (roleId) => !successfulOpinions.some((opinion) => opinion.roleId === roleId)
+    );
+    if (missingRoles.length === 0) {
+      break;
+    }
+
+    const targetRoles: RoleType[] = [];
+    if (requireAnalyst && !sufficiencyNow.analystReady && missingRoles.includes("ROLE_ANALYST")) {
+      targetRoles.push("ROLE_ANALYST");
+    }
+    if (!sufficiencyNow.nonAnalystReady) {
+      const nonAnalystRole = missingRoles.find((roleId) => roleId !== "ROLE_ANALYST");
+      if (nonAnalystRole && !targetRoles.includes(nonAnalystRole)) {
+        targetRoles.push(nonAnalystRole);
+      }
+    }
+    for (const roleId of missingRoles) {
+      if (targetRoles.length >= 2) break;
+      if (!targetRoles.includes(roleId)) {
+        targetRoles.push(roleId);
+      }
+    }
+    if (targetRoles.length === 0) {
+      break;
+    }
+
+    const retryAfterMs = failedReasons
+      .map((reason) => extractCooldownRetryAfterMs(reason))
+      .filter((ms) => ms > 0);
+    const waitMs = retryAfterMs.length > 0
+      ? Math.max(1200, Math.min(45_000, Math.max(...retryAfterMs) + 1800))
+      : 3000;
+    if (waitMs > 1200) {
+      console.warn(`[issue-debate] rescue round=${rescueRound}, waiting ${waitMs}ms before retry roles=${targetRoles.join(",")}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+
+    const rescueSettled = await runDebateRoleBatch(targetRoles, executeRole);
+    settled.push(...rescueSettled);
+    for (const item of rescueSettled) {
+      if (item.status !== "fulfilled") {
+        continue;
+      }
+      if (!successfulOpinions.some((opinion) => opinion.roleId === item.value.roleId)) {
+        successfulOpinions.push(item.value);
+      }
+    }
+    const rescueFailedReasons = rescueSettled
+      .filter((item): item is PromiseRejectedResult => item.status === "rejected")
+      .map((item) => normalizeDebateFailureReason(item.reason))
+      .filter(Boolean);
+    if (rescueFailedReasons.length > 0) {
+      failedReasons = failedReasons.concat(rescueFailedReasons).slice(-12);
+    }
   }
   if (failedReasons.length > 0) {
     console.warn(
@@ -614,8 +729,6 @@ export async function buildIssueRoleDebate(input: BuildIssueDebateInput): Promis
       rawPreview: "模型调用失败，已降级。"
     };
   });
-  const minRealModelRoles = Math.max(2, Number(process.env.ISSUE_DEBATE_MIN_REAL_MODEL_ROLES ?? 2));
-  const requireAnalyst = parseEnvFlag(process.env.ISSUE_DEBATE_REQUIRE_ANALYST, true);
   const sufficiency = evaluateDebateModelSufficiency({
     selectedRoles,
     opinions,

@@ -42,6 +42,30 @@ let app: express.Express;
 let updateIssueFn: any;
 let upsertTemplateFn: any;
 
+async function waitForPostCreatePrep(projectId: string, timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const project = await prismaClient.project.findUnique({
+      where: { id: projectId },
+      select: { description: true }
+    });
+    const inputs = await prismaClient.projectInput.findMany({
+      where: { projectId },
+      select: { name: true }
+    });
+    const inputNames = new Set(inputs.map((item: { name: string }) => String(item.name || "").toLowerCase()));
+    const description = String(project?.description || "");
+    const hasDiscussion = description.includes("## 多Agent需求讨论结论");
+    const hasAnalysisDraft = description.includes("## 项目详情理解确认草案");
+    const hasRequiredInputs = ["rawrequirements", "prd", "debatesummary"].every((name) => inputNames.has(name));
+    if (hasDiscussion && hasAnalysisDraft && hasRequiredInputs) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  return false;
+}
+
 before(async () => {
   snapshotSqliteSeedDatabase({
     seedDbPath,
@@ -237,6 +261,9 @@ test("issues confirm can pass workflow template fields and auto-link workflow-v2
   const projectId = String(confirmRes.body.data.project?.id || "");
   assert.ok(projectId);
 
+  const prepCompleted = await waitForPostCreatePrep(projectId);
+  assert.equal(prepCompleted, true, "project post-create prep should complete and seed required sections/inputs");
+
   const workflow = await prismaClient.workflow.findFirst({
     where: { projectId },
     orderBy: { createdAt: "desc" },
@@ -306,6 +333,9 @@ test("issues confirm keeps workflowTemplateKey=none and skips workflow-v2 auto-i
   assert.equal(confirmRes.body.success, true);
   const projectId = String(confirmRes.body.data.project?.id || "");
   assert.ok(projectId);
+
+  const prepCompleted = await waitForPostCreatePrep(projectId);
+  assert.equal(prepCompleted, true, "project post-create prep should also complete when workflowTemplateKey=none");
 
   const workflow = await prismaClient.workflow.findFirst({
     where: { projectId },

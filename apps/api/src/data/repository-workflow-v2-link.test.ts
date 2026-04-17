@@ -34,6 +34,7 @@ process.env.WORKFLOW_V2_STAGE_AUTO_PROCEED = "false";
 
 let prismaClient: any;
 let createProjectFn: any;
+let findProjectFn: any;
 let upsertTemplateFn: any;
 
 before(async () => {
@@ -60,6 +61,7 @@ before(async () => {
   ]);
   prismaClient = dbMod.prisma;
   createProjectFn = repoMod.createProject;
+  findProjectFn = repoMod.findProject;
   upsertTemplateFn = workflowMod.upsertWorkflowTemplate;
 
   await upsertTemplateFn({
@@ -180,6 +182,40 @@ test("createProject auto-initializes and starts workflow-v2", async () => {
   assert.equal((workflow.currentStageIds as unknown[]).length > 0, true);
 });
 
+test("complete project auto-seeds rawRequirements when projectInputs are missing", async () => {
+  const project = await createProjectFn(
+    {
+      name: "Complete Auto Input Seed Test",
+      description: "验证完整流程项目未显式传 projectInputs 时，系统会自动补齐 rawRequirements 入口输入并解除输入门禁。",
+      projectType: "complete",
+      workflowTemplateKey: "standard_software_development",
+      autoStartWorkflow: true
+    },
+    "scripted"
+  );
+
+  const inputs = await prismaClient.projectInput.findMany({
+    where: { projectId: project.id }
+  });
+  assert.equal(inputs.some((item: { name: string }) => String(item.name || "") === "rawRequirements"), true);
+
+  const workflow = await prismaClient.workflow.findFirst({
+    where: { projectId: project.id },
+    orderBy: { createdAt: "desc" },
+    include: { stages: true }
+  });
+  assert.ok(workflow);
+
+  const requirementStage = workflow.stages.find((item: { templateKey: string }) => item.templateKey === "requirements_design");
+  assert.ok(requirementStage);
+  assert.notEqual(requirementStage.status, "pending");
+
+  const inputArtifacts = Array.isArray(requirementStage.inputArtifacts)
+    ? (requirementStage.inputArtifacts as Array<Record<string, unknown>>)
+    : [];
+  assert.equal(inputArtifacts.some((item) => String(item.name || "") === "rawRequirements"), true);
+});
+
 test("createProject skips workflow-v2 auto-init when workflowTemplateKey is none", async () => {
   const project = await createProjectFn(
     {
@@ -298,4 +334,72 @@ test("relay project imports source deliverables into project inputs", async () =
     }
   });
   assert.equal(relayLinks.length > 0, true);
+});
+
+test("findProject reconciles false-completed state when workflow-v2 is still active", async () => {
+  const project = await createProjectFn(
+    {
+      name: "Workflow Legacy Reconcile Test",
+      description: "验证 workflow-v2 活跃时不会被错误标记 completed",
+      projectType: "standalone",
+      workflowTemplateKey: "requirements_design",
+      autoStartWorkflow: true
+    },
+    "scripted"
+  );
+
+  const workflow = await prismaClient.workflow.findFirst({
+    where: { projectId: project.id },
+    orderBy: { createdAt: "desc" },
+    include: { stages: true }
+  });
+  assert.ok(workflow);
+  assert.equal(workflow.status, "active");
+
+  const currentStageId = Array.isArray(workflow.currentStageIds) ? String(workflow.currentStageIds[0] || "") : "";
+  assert.equal(Boolean(currentStageId), true);
+
+  await prismaClient.workflowStage.update({
+    where: { id: currentStageId },
+    data: {
+      gateResults: {
+        passed: false,
+        violations: ["input_rule: rawRequirements missing"],
+        checks: [{ type: "input_rule", passed: false, details: "rawRequirements missing" }]
+      }
+    }
+  });
+
+  await prismaClient.project.update({
+    where: { id: project.id },
+    data: {
+      status: "completed",
+      currentStage: "ACCEPT",
+      currentRole: "ROLE_HR",
+      progress: 100,
+      pendingApproval: false
+    }
+  });
+  await prismaClient.stage.updateMany({
+    where: { projectId: project.id },
+    data: {
+      status: "completed",
+      progress: 100
+    }
+  });
+
+  const repaired = await findProjectFn(project.id);
+  assert.ok(repaired);
+  assert.equal(repaired.status, "active");
+  assert.equal(repaired.currentStage, "ANALYSIS");
+  assert.equal(repaired.currentRole, "ROLE_ANALYST");
+  assert.equal(repaired.progress < 100, true);
+
+  const persisted = await prismaClient.project.findUnique({
+    where: { id: project.id }
+  });
+  assert.ok(persisted);
+  assert.equal(persisted.status, "active");
+  assert.equal(persisted.currentStage, "ANALYSIS");
+  assert.equal(Number(persisted.progress) < 100, true);
 });
