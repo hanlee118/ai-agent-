@@ -1,6 +1,6 @@
 {
   "ok": true,
-  "startedAt": "2026-04-14T14:20:11.207Z",
+  "startedAt": "2026-04-14T21:19:28.844Z",
   "runtime": {
     "runtimeMode": "openai-compatible",
     "runtimeModel": "gpt-5.4",
@@ -8,9 +8,9 @@
   },
   "scenarios": [
     {
-      "label": "single-stage-visual",
-      "mode": "single",
-      "issueId": "8548ac8b-200c-49f9-bbc6-779c940ac8d0",
+      "label": "full-flow-standard",
+      "mode": "full",
+      "issueId": "ed567778-68eb-4967-8769-4416b1c8fa71",
       "debate": {
         "status": "completed",
         "mode": "model",
@@ -18,37 +18,43 @@
         "opinions": 3
       },
       "project": {
-        "id": "OCC-20260414-006",
+        "id": "OCC-20260414-032",
         "status": "completed",
-        "currentStage": "DESIGN",
+        "currentStage": "ACCEPT",
         "progress": 100,
         "stageTypes": [
           "INIT",
-          "DESIGN"
+          "ANALYSIS",
+          "DESIGN",
+          "DEV",
+          "ACCEPT"
         ]
       },
       "workflow": {
-        "workflowId": "cmnyplox900uny98xvn42wgun",
+        "workflowId": "cmnz4kxsc000yy9iarqxp6ryv",
         "nodeTemplateKeys": [
-          "visual_design"
+          "requirements_design",
+          "visual_design",
+          "tech_design",
+          "code_dev",
+          "qa_acceptance"
         ],
         "stages": [
           {
-            "templateKey": "visual_design",
+            "templateKey": "requirements_design",
             "status": "reviewing",
             "executionEngine": "hybrid",
             "collaboration": {
-              "roleCount": 2,
+              "roleCount": 1,
               "roles": [
-                "ROLE_DESIGN",
                 "ROLE_PRODUCT"
               ],
               "analystInvolved": false,
-              "companionEvidenceCount": 2
+              "companionEvidenceCount": 1
             },
             "assignedAgentProfiles": [
               {
-                "agentId": "jeremy",
+                "agentId": "product_director",
                 "engine": "openclaw",
                 "model": "openai/gpt-5.4"
               },
@@ -56,24 +62,70 @@
                 "agentId": "requirements_analyst",
                 "engine": "openclaw",
                 "model": "openai/gpt-5.4"
-              },
-              {
-                "agentId": "product_director",
-                "engine": "openclaw",
-                "model": "openai/gpt-5.4"
               }
             ]
+          },
+          {
+            "templateKey": "visual_design",
+            "status": "pending",
+            "executionEngine": "unknown",
+            "collaboration": {
+              "roleCount": 0,
+              "roles": [],
+              "analystInvolved": false,
+              "companionEvidenceCount": 0
+            },
+            "assignedAgentProfiles": []
+          },
+          {
+            "templateKey": "tech_design",
+            "status": "pending",
+            "executionEngine": "unknown",
+            "collaboration": {
+              "roleCount": 0,
+              "roles": [],
+              "analystInvolved": false,
+              "companionEvidenceCount": 0
+            },
+            "assignedAgentProfiles": []
+          },
+          {
+            "templateKey": "code_dev",
+            "status": "pending",
+            "executionEngine": "unknown",
+            "collaboration": {
+              "roleCount": 0,
+              "roles": [],
+              "analystInvolved": false,
+              "companionEvidenceCount": 0
+            },
+            "assignedAgentProfiles": []
+          },
+          {
+            "templateKey": "qa_acceptance",
+            "status": "pending",
+            "executionEngine": "unknown",
+            "collaboration": {
+              "roleCount": 0,
+              "roles": [],
+              "analystInvolved": false,
+              "companionEvidenceCount": 0
+            },
+            "assignedAgentProfiles": []
           }
         ]
       },
       "executions": {
-        "total": 1,
+        "total": 9,
         "scriptedCount": 0,
         "providerCounts": {
-          "openai-compatible": 1
+          "openai-compatible": 9
         },
         "modelCounts": {
-          "hermes-v2.1": 1
+          "openai/gpt-5.4": 4,
+          "qwen3.5-plus": 2,
+          "openai/gpt-5.3-codex": 1,
+          "hermes-v2.1": 2
         }
       },
       "gitlab": {
@@ -133,8 +185,792 @@
         },
         {
           "round": 2,
+          "status": "active",
+          "stage": "DEV",
+          "pendingApproval": false,
+          "progress": 60
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段核心交付物未齐"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 200
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 200
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 200
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 2720,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 3656,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 4873,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 6455,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 8512,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 11186,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "stale_state_detected",
+          "round": 8,
+          "stage": "DEV",
+          "fingerprint": "active|DEV|0|60",
+          "staleRounds": 6
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": ""
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "检测到推进状态长时间未收敛，已自动执行恢复重试，请稍后刷新。",
+              "pollAfterMs": 16570,
+              "recoveryAttempted": true
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 20000,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 422,
+          "code": "REAL_MODEL_GATE_FAILED",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "REAL_MODEL_GATE_FAILED",
+              "message": "真实模型调用失败（This operation was aborted）。",
+              "requiredActions": [
+                {
+                  "id": "real-model-gate-repair",
+                  "severity": "critical",
+                  "title": "当前阶段未通过真实模型门禁",
+                  "detail": "请修复模型通道（API Key / Base URL / 可用模型）并重新执行本阶段，再进行验收。",
+                  "action": "refresh_runtime",
+                  "ctaLabel": "修复模型通道"
+                },
+                {
+                  "id": "stage-deliverable-followup",
+                  "severity": "warning",
+                  "title": "当前阶段仍需补齐交付后再审批",
+                  "detail": "系统检测到阶段仍未进入可审批状态，请补齐当前阶段交付并再次提交。",
+                  "action": "submit_stage_deliverable",
+                  "ctaLabel": "补齐阶段交付"
+                }
+              ],
+              "recoveryPlan": [
+                {
+                  "step": 1,
+                  "action": "refresh_runtime",
+                  "title": "当前阶段未通过真实模型门禁"
+                },
+                {
+                  "step": 2,
+                  "action": "submit_stage_deliverable",
+                  "title": "当前阶段仍需补齐交付后再审批"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "refresh_runtime",
+          "title": "当前阶段未通过真实模型门禁"
+        },
+        {
+          "type": "refresh_runtime",
+          "status": 200,
+          "mode": "openai-compatible"
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "已开始推进当前阶段，正在后台生成交付物，请稍后刷新。",
+              "pollAfterMs": 2720
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 3656,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "stale_state_detected",
+          "round": 14,
+          "stage": "DEV",
+          "fingerprint": "active|DEV|0|60",
+          "staleRounds": 12
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": ""
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 4873,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 6455,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 8512,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段仍需补齐交付后再审批"
+        },
+        {
+          "type": "submit_implementation_word",
+          "status": 208
+        },
+        {
+          "type": "submit_implementation_result",
+          "status": 208
+        },
+        {
+          "type": "submit_runtime_delivery",
+          "status": 208
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "该项目正在推进中，请稍后刷新。",
+              "pollAfterMs": 11186,
+              "recoveryAttempted": false
+            }
+          }
+        },
+        {
+          "round": 19,
+          "status": "active",
+          "stage": "DEV",
+          "pendingApproval": true,
+          "progress": 60
+        },
+        {
+          "type": "required_action",
+          "action": "review_pending_stage",
+          "title": "当前阶段已具备验收条件"
+        },
+        {
+          "type": "approve_from_required",
+          "status": 200
+        },
+        {
+          "type": "approve_failed",
+          "status": 409,
+          "code": "NO_PENDING_APPROVAL",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "NO_PENDING_APPROVAL",
+              "message": "当前流程需要你先补足以下事项：\n1. 当前阶段核心交付物未齐（提交阶段交付物）",
+              "requiredActions": [
+                {
+                  "id": "stage-core-deliverables-missing",
+                  "severity": "critical",
+                  "title": "当前阶段核心交付物未齐",
+                  "detail": "请先补齐并提交核心交付物：缺少 测试报告.md；缺少 产品说明文档回填.md",
+                  "action": "submit_stage_deliverable",
+                  "ctaLabel": "提交阶段交付物"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "round": 20,
+          "status": "active",
+          "stage": "ACCEPT",
+          "pendingApproval": false,
+          "progress": 80
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段核心交付物未齐"
+        },
+        {
+          "type": "submit_test_report",
+          "status": 200
+        },
+        {
+          "type": "submit_product_backfill",
+          "status": 200
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "PROJECT_ADVANCE_IN_PROGRESS",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "PROJECT_ADVANCE_IN_PROGRESS",
+              "message": "检测到推进状态长时间未收敛，已自动执行恢复重试，请稍后刷新。",
+              "pollAfterMs": 16570,
+              "recoveryAttempted": true
+            }
+          }
+        },
+        {
+          "round": 21,
+          "status": "active",
+          "stage": "ACCEPT",
+          "pendingApproval": true,
+          "progress": 80
+        },
+        {
+          "round": 22,
           "status": "completed",
-          "stage": "DESIGN",
+          "stage": "ACCEPT",
+          "pendingApproval": false,
+          "progress": 100
+        }
+      ]
+    },
+    {
+      "label": "relay-qa",
+      "mode": "relay",
+      "issueId": "1d149ec3-7ddd-45b1-8dcb-05819b9e2391",
+      "debate": {
+        "status": "completed",
+        "mode": "model",
+        "canProceed": true,
+        "opinions": 3
+      },
+      "project": {
+        "id": "OCC-20260414-033",
+        "status": "completed",
+        "currentStage": "ACCEPT",
+        "progress": 100,
+        "stageTypes": [
+          "ACCEPT"
+        ]
+      },
+      "workflow": {
+        "workflowId": "cmnz4sc6p0051y9iaq3llc1ki",
+        "nodeTemplateKeys": [
+          "qa_acceptance"
+        ],
+        "stages": [
+          {
+            "templateKey": "qa_acceptance",
+            "status": "pending",
+            "executionEngine": "unknown",
+            "collaboration": {
+              "roleCount": 0,
+              "roles": [],
+              "analystInvolved": false,
+              "companionEvidenceCount": 0
+            },
+            "assignedAgentProfiles": []
+          }
+        ]
+      },
+      "executions": {
+        "total": 5,
+        "scriptedCount": 0,
+        "providerCounts": {
+          "openai-compatible": 5
+        },
+        "modelCounts": {
+          "qwen3.5-plus": 2,
+          "openai/gpt-5.3-codex": 2,
+          "openai/gpt-5.4": 1
+        }
+      },
+      "gitlab": {
+        "bindingCount": 1
+      },
+      "logs": [
+        {
+          "round": 1,
+          "status": "active",
+          "stage": "ACCEPT",
+          "pendingApproval": false,
+          "progress": 4
+        },
+        {
+          "type": "required_action",
+          "action": "submit_stage_deliverable",
+          "title": "当前阶段核心交付物未齐"
+        },
+        {
+          "type": "submit_test_report",
+          "status": 200
+        },
+        {
+          "type": "submit_product_backfill",
+          "status": 200
+        },
+        {
+          "type": "advance_failed",
+          "status": 409,
+          "code": "REQUIRES_USER_INTERVENTION",
+          "body": {
+            "success": false,
+            "error": {
+              "code": "REQUIRES_USER_INTERVENTION",
+              "message": "当前流程需要你先补足以下事项：\n1. 缺少真实研发结果，当前不能进入最终验收（补齐研发实现证据）",
+              "requiredActions": [
+                {
+                  "id": "accept-missing-runtime-evidence",
+                  "severity": "critical",
+                  "title": "缺少真实研发结果，当前不能进入最终验收",
+                  "detail": "当前 DEV 产物还不足以证明存在真实页面、接口、存储、代码路径与联调验证。请先补齐研发实现证据，不能把设计预览或静态演示当作最终交付。",
+                  "action": "reconcile_deliverables",
+                  "ctaLabel": "补齐研发实现证据"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "type": "required_action",
+          "action": "reconcile_deliverables",
+          "title": "缺少真实研发结果，当前不能进入最终验收"
+        },
+        {
+          "type": "reconcile_deliverables",
+          "status": 200
+        },
+        {
+          "round": 2,
+          "status": "active",
+          "stage": "ACCEPT",
+          "pendingApproval": true,
+          "progress": 4
+        },
+        {
+          "type": "required_action",
+          "action": "reconcile_deliverables",
+          "title": "缺少真实研发结果，当前不能进入最终验收"
+        },
+        {
+          "type": "reconcile_deliverables",
+          "status": 500
+        },
+        {
+          "round": 3,
+          "status": "completed",
+          "stage": "ACCEPT",
           "pendingApproval": false,
           "progress": 100
         }
@@ -143,7 +979,14 @@
   ],
   "assertions": [
     {
-      "scenario": "single-stage-visual",
+      "scenario": "full-flow-standard",
+      "projectCompleted": true,
+      "issueDebateModel": true,
+      "gitlabSynced": true,
+      "noScriptedExecution": true
+    },
+    {
+      "scenario": "relay-qa",
       "projectCompleted": true,
       "issueDebateModel": true,
       "gitlabSynced": true,
@@ -156,5 +999,5 @@
     }
   ],
   "errors": [],
-  "finishedAt": "2026-04-14T14:24:46.224Z"
+  "finishedAt": "2026-04-14T21:30:02.183Z"
 }

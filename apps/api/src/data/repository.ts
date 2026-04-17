@@ -36,12 +36,9 @@ import {
   type StageAgentRunResult,
   type StageModelAttemptTrace
 } from "../agents/runtime.js";
-import { runScriptedAgent } from "../agents/providers/scripted-provider.js";
 import {
-  clearIssueProjectBinding,
   finalizeRequirementBackfill,
   getIssueByProjectId,
-  listIssues,
   type RequirementContract
 } from "../system/v1-method-store.js";
 import { getTemplateRequiredRoles } from "../system/issue-engine.js";
@@ -101,7 +98,7 @@ import {
   transitionWorkflowStage
 } from "../workflow-v2/workflow-orchestrator.js";
 import { ensureWorkflowV2DefaultTemplates } from "../workflow-v2/default-templates.js";
-import { getHermesMcpRuntimeStatus, tryRunStageWithHermes } from "../workflow-v2/hermes-mcp.js";
+import { tryRunStageWithHermes } from "../workflow-v2/hermes-mcp.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import {
   createProjectInputs,
@@ -172,18 +169,6 @@ const STITCH_DEGRADED_RETRY_COOLDOWN_MS = Math.max(
 );
 const STITCH_MIN_SIGNAL_LENGTH = Math.max(8, Number(process.env.STITCH_MIN_SIGNAL_LENGTH ?? 10));
 const STITCH_PLACEHOLDER_PATTERN = /待补充|占位|todo|tbd|lorem ipsum|\bxxx\b|^\s*(?:n\/a|none|null|无|暂无)\s*$/i;
-
-function shouldStartWorkflowV2Synchronously() {
-  const fallback = process.env.NODE_ENV === "test" ? "true" : "false";
-  return String(process.env.PROJECT_WORKFLOW_V2_AUTO_START_SYNC ?? fallback).trim().toLowerCase() === "true";
-}
-
-function triggerWorkflowV2StartInBackground(workflowId: string, projectId: string) {
-  void startWorkflowV2(workflowId).catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[project] workflow-v2 async start failed for ${projectId} (${workflowId}): ${message}`);
-  });
-}
 
 function shouldAttachStitchForExecution(stageType: StageType, role: RoleType) {
   return stageType === "DESIGN" && role === "ROLE_DESIGN";
@@ -758,22 +743,6 @@ function isRealModelGateEnabled() {
   return process.env.NODE_ENV !== "test";
 }
 
-const STAGE_AUTO_REAL_MODEL_REQUIRED = new Set<StageType>(["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]);
-
-function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
-  if (!STAGE_AUTO_REAL_MODEL_REQUIRED.has(stageType)) {
-    return false;
-  }
-  const raw = String(process.env.ENFORCE_AUTO_STAGE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
-  if (raw === "true" || raw === "1" || raw === "on") {
-    return true;
-  }
-  if (raw === "false" || raw === "0" || raw === "off") {
-    return false;
-  }
-  return false;
-}
-
 function parseBooleanFlag(value: string | undefined, defaultValue: boolean) {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (!normalized) {
@@ -904,13 +873,6 @@ async function assertRealModelRuntimeReadyForGate() {
 }
 
 async function assertCurrentStageRealModelGate(project: ProjectDetail) {
-  if (!shouldEnforceAutoStageRealModelGate(project.currentStage)) {
-    return;
-  }
-  if (!isRealModelGateEnabled()) {
-    return;
-  }
-
   const stageExecutions = await prisma.projectExecution.findMany({
     where: {
       projectId: project.id,
@@ -2122,36 +2084,39 @@ async function evaluateDevExecutionHardGate(projectId: string) {
     }
   });
 
-  const hasDevExecutionRows = rows.length > 0;
+  if (rows.length === 0) {
+    return {
+      ok: false,
+      detail: "未发现 DEV/ROLE_DEV 成功执行记录。"
+    };
+  }
 
   let workspaceEvidenceSeen = false;
   let codeEvidenceSeen = false;
   let verificationEvidenceSeen = false;
 
-  if (hasDevExecutionRows) {
-    for (const row of rows) {
-      const workspaceEvidence = extractDevWorkspaceEvidenceFromMetadata(row.metadata);
-      if (workspaceEvidence) {
-        workspaceEvidenceSeen = true;
-        const codeFiles = workspaceEvidence.evidenceFiles
-          .filter((item) => DEV_WORKSPACE_CODE_FILE_PATTERN.test(item))
-          .filter((item) => !DEV_WORKSPACE_IGNORED_FILE_PATTERN.test(item));
-        if (codeFiles.length >= 2) {
-          codeEvidenceSeen = true;
-        }
+  for (const row of rows) {
+    const workspaceEvidence = extractDevWorkspaceEvidenceFromMetadata(row.metadata);
+    if (workspaceEvidence) {
+      workspaceEvidenceSeen = true;
+      const codeFiles = workspaceEvidence.evidenceFiles
+        .filter((item) => DEV_WORKSPACE_CODE_FILE_PATTERN.test(item))
+        .filter((item) => !DEV_WORKSPACE_IGNORED_FILE_PATTERN.test(item));
+      if (codeFiles.length >= 2) {
+        codeEvidenceSeen = true;
       }
+    }
 
-      const verificationSource = extractDevVerificationEvidenceText(row.metadata, String(row.outputPreview || ""));
-      if (DEV_VERIFICATION_SIGNAL_PATTERN.test(verificationSource)) {
-        verificationEvidenceSeen = true;
-      }
+    const verificationSource = extractDevVerificationEvidenceText(row.metadata, String(row.outputPreview || ""));
+    if (DEV_VERIFICATION_SIGNAL_PATTERN.test(verificationSource)) {
+      verificationEvidenceSeen = true;
+    }
 
-      if (workspaceEvidenceSeen && codeEvidenceSeen && verificationEvidenceSeen) {
-        return {
-          ok: true,
-          detail: "已命中工作区代码证据与验证命令证据。"
-        };
-      }
+    if (workspaceEvidenceSeen && codeEvidenceSeen && verificationEvidenceSeen) {
+      return {
+        ok: true,
+        detail: "已命中工作区代码证据与验证命令证据。"
+      };
     }
   }
 
@@ -3007,17 +2972,11 @@ async function reconcileProjectStateWithWorkflowIfNeeded(projectId: string) {
   }
 
   const inferred = inferLegacyStateFromWorkflow(workflow);
-  const preservePendingApproval =
-    Boolean(project.pendingApproval)
-    && inferred.status === "active"
-    && project.status === "active"
-    && inferred.currentStage === project.currentStage;
-  const nextPendingApproval = Boolean(inferred.pendingApproval || preservePendingApproval);
   const hasMismatch = project.status !== inferred.status
     || project.currentStage !== inferred.currentStage
     || project.currentRole !== inferred.currentRole
     || Number(project.progress) !== Number(inferred.progress)
-    || Boolean(project.pendingApproval) !== nextPendingApproval;
+    || Boolean(project.pendingApproval) !== Boolean(inferred.pendingApproval);
   if (!hasMismatch) {
     return;
   }
@@ -3032,7 +2991,7 @@ async function reconcileProjectStateWithWorkflowIfNeeded(projectId: string) {
         currentStage: inferred.currentStage,
         currentRole: inferred.currentRole,
         progress: inferred.progress,
-        pendingApproval: nextPendingApproval,
+        pendingApproval: inferred.pendingApproval,
         ...(project.status === "completed" && inferred.status === "active"
           ? {
               summary: `workflow-v2 当前停留在 ${STAGE_LABELS[inferred.currentStage]} 阶段，尚未通过门禁，项目未完成。`
@@ -3073,378 +3032,31 @@ async function reconcileProjectStateWithWorkflowIfNeeded(projectId: string) {
   });
 }
 
-function normalizeArtifactNameToken(value: unknown) {
-  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
-}
-
-function collectWorkflowTemplateRequiredArtifacts(template: {
-  acceptanceCriteria: Prisma.JsonValue;
-  outputSchema: Prisma.JsonValue;
-  outputContract: Prisma.JsonValue;
-} | null | undefined) {
-  const required: string[] = [];
-  const seen = new Set<string>();
-  const pushName = (value: unknown) => {
-    const raw = String(value ?? "").trim();
-    if (!raw) {
-      return;
-    }
-    const token = normalizeArtifactNameToken(raw);
-    if (!token || seen.has(token)) {
-      return;
-    }
-    seen.add(token);
-    required.push(raw);
-  };
-
-  const acceptanceCriteria = Array.isArray(template?.acceptanceCriteria)
-    ? (template?.acceptanceCriteria as Array<unknown>)
-    : [];
-  for (const criterion of acceptanceCriteria) {
-    const criterionRecord = asRecord(criterion);
-    if (!criterionRecord) {
-      continue;
-    }
-    if (String(criterionRecord.type || "").trim().toLowerCase() !== "artifact_exists") {
-      continue;
-    }
-    const config = asRecord(criterionRecord.config);
-    pushName(config?.artifact);
-  }
-
-  const outputSchema = asRecord(template?.outputSchema);
-  if (outputSchema && Array.isArray(outputSchema.required)) {
-    for (const field of outputSchema.required) {
-      pushName(field);
-    }
-  }
-
-  const outputContract = asRecord(template?.outputContract);
-  if (outputContract && Array.isArray(outputContract.deliverables)) {
-    for (const deliverable of outputContract.deliverables) {
-      pushName(deliverable);
-    }
-  }
-
-  return required;
-}
-
-function collectWorkflowTemplateManualApprovalRoles(template: {
-  acceptanceCriteria: Prisma.JsonValue;
-} | null | undefined) {
-  const roles: string[] = [];
-  const seen = new Set<string>();
-  const acceptanceCriteria = Array.isArray(template?.acceptanceCriteria)
-    ? (template?.acceptanceCriteria as Array<unknown>)
-    : [];
-  for (const criterion of acceptanceCriteria) {
-    const criterionRecord = asRecord(criterion);
-    if (!criterionRecord) {
-      continue;
-    }
-    if (String(criterionRecord.type || "").trim().toLowerCase() !== "manual_approval") {
-      continue;
-    }
-    const config = asRecord(criterionRecord.config);
-    const role = String(config?.role || "").trim().toLowerCase();
-    if (!role || seen.has(role)) {
-      continue;
-    }
-    seen.add(role);
-    roles.push(role);
-  }
-  return roles;
-}
-
-function selectLegacyDeliverableContentForArtifact(input: {
-  requiredArtifact: string;
-  stageType: StageType;
-  deliverables: Array<{ name: string; content: string }>;
-}) {
-  const requiredToken = normalizeArtifactNameToken(input.requiredArtifact);
-  if (!requiredToken) {
-    return "";
-  }
-  if (input.deliverables.length === 0) {
-    return "";
-  }
-
-  const direct = input.deliverables.find((item) => normalizeArtifactNameToken(item.name) === requiredToken);
-  if (direct && String(direct.content || "").trim()) {
-    return String(direct.content || "").trim();
-  }
-
-  const stageMatched = input.deliverables.find((item) =>
-    isSameCoreDeliverable(item.name, input.requiredArtifact, input.stageType)
-  );
-  if (stageMatched && String(stageMatched.content || "").trim()) {
-    return String(stageMatched.content || "").trim();
-  }
-
-  if (requiredToken === "sourcecode") {
-    const merged = input.deliverables
-      .slice(0, 3)
-      .map((item) => {
-        const content = String(item.content || "").trim();
-        if (!content) {
-          return "";
-        }
-        return `## ${item.name}\n${content}`;
-      })
-      .filter(Boolean)
-      .join("\n\n");
-    if (merged.trim()) {
-      return merged.trim();
-    }
-  }
-
-  const nonEmpty = input.deliverables.find((item) => String(item.content || "").trim().length >= MIN_DELIVERABLE_CONTENT_LENGTH)
-    || input.deliverables.find((item) => String(item.content || "").trim().length > 0);
-  return nonEmpty ? String(nonEmpty.content || "").trim() : "";
-}
-
-async function hydrateWorkflowStageArtifactsFromLegacyDeliverables(input: {
-  projectId: string;
-  stageIds: string[];
-  stageById: Map<
-    string,
-    {
-      id: string;
-      templateKey: string;
-      outputArtifacts: Prisma.JsonValue;
-      template: {
-        acceptanceCriteria: Prisma.JsonValue;
-        outputSchema: Prisma.JsonValue;
-        outputContract: Prisma.JsonValue;
-      } | null;
-    }
-  >;
-}) {
-  if (input.stageIds.length === 0) {
-    return;
-  }
-
-  const deliverables = await prisma.deliverable.findMany({
+async function tryApproveProjectViaWorkflowV2(projectId: string) {
+  const workflow = await prisma.workflow.findFirst({
     where: {
-      projectId: input.projectId,
-      status: {
-        in: ["submitted", "approved"]
-      }
+      projectId,
+      status: "active"
     },
-    orderBy: [
-      { updatedAt: "desc" },
-      { version: "desc" }
-    ],
+    orderBy: { createdAt: "desc" },
     select: {
-      stageType: true,
-      name: true,
-      content: true
+      id: true,
+      currentStageIds: true,
+      stages: {
+        select: {
+          id: true,
+          templateKey: true,
+          status: true
+        }
+      }
     }
   });
-
-  const byStage = new Map<StageType, Array<{ name: string; content: string }>>();
-  for (const item of deliverables) {
-    const stageType = resolveStageType(item.stageType);
-    if (!stageType) {
-      continue;
-    }
-    const existing = byStage.get(stageType) ?? [];
-    existing.push({
-      name: String(item.name || "").trim(),
-      content: String(item.content || "")
-    });
-    byStage.set(stageType, existing);
-  }
-
-  for (const stageId of input.stageIds) {
-    const stage = input.stageById.get(stageId);
-    if (!stage) {
-      continue;
-    }
-    const legacyStage = resolveLegacyStageTypeFromWorkflowTemplateKey(String(stage.templateKey || ""));
-    if (!legacyStage || legacyStage === "INIT") {
-      continue;
-    }
-    const stageDeliverables = byStage.get(legacyStage) ?? [];
-    if (stageDeliverables.length === 0) {
-      continue;
-    }
-    const requiredArtifacts = collectWorkflowTemplateRequiredArtifacts(stage.template);
-    if (requiredArtifacts.length === 0) {
-      continue;
-    }
-    const outputArtifacts = Array.isArray(stage.outputArtifacts)
-      ? (stage.outputArtifacts as Array<Record<string, unknown>>)
-      : [];
-    let changed = false;
-    for (const artifactName of requiredArtifacts) {
-      const artifactToken = normalizeArtifactNameToken(artifactName);
-      if (!artifactToken) {
-        continue;
-      }
-      const exists = outputArtifacts.some((artifact) => {
-        const record = asRecord(artifact);
-        if (!record) {
-          return false;
-        }
-        return normalizeArtifactNameToken(record.name) === artifactToken
-          && String(record.content || "").trim().length > 0;
-      });
-      if (exists) {
-        continue;
-      }
-      const fallbackContent = selectLegacyDeliverableContentForArtifact({
-        requiredArtifact: artifactName,
-        stageType: legacyStage,
-        deliverables: stageDeliverables
-      });
-      if (!fallbackContent) {
-        continue;
-      }
-      outputArtifacts.push({
-        name: artifactName,
-        type: "markdown",
-        content: fallbackContent,
-        metadata: {
-          source: "legacy_deliverable_bridge",
-          projectId: input.projectId,
-          stageType: legacyStage,
-          bridgedAt: new Date().toISOString()
-        }
-      });
-      changed = true;
-    }
-
-    if (!changed) {
-      continue;
-    }
-
-    await prisma.workflowStage.update({
-      where: { id: stage.id },
-      data: {
-        outputArtifacts: outputArtifacts as unknown as Prisma.InputJsonValue
-      }
-    });
-  }
-}
-
-async function hydrateWorkflowStageManualApprovalsForLegacyApprove(input: {
-  stageIds: string[];
-  stageById: Map<
-    string,
-    {
-      id: string;
-      gateResults: Prisma.JsonValue;
-      template: {
-        acceptanceCriteria: Prisma.JsonValue;
-      } | null;
-    }
-  >;
-}) {
-  if (input.stageIds.length === 0) {
-    return;
-  }
-
-  for (const stageId of input.stageIds) {
-    const stage = input.stageById.get(stageId);
-    if (!stage) {
-      continue;
-    }
-    const manualRoles = collectWorkflowTemplateManualApprovalRoles(stage.template);
-    if (manualRoles.length === 0) {
-      continue;
-    }
-
-    const gateResults = asRecord(stage.gateResults) ?? {};
-    const manualApprovals = asRecord(gateResults.manualApprovals) ?? {};
-    let changed = false;
-    for (const role of manualRoles) {
-      if (manualApprovals[role] === true) {
-        continue;
-      }
-      manualApprovals[role] = true;
-      changed = true;
-    }
-    if (!changed) {
-      continue;
-    }
-
-    await prisma.workflowStage.update({
-      where: { id: stage.id },
-      data: {
-        gateResults: {
-          ...gateResults,
-          manualApprovals,
-          legacyApprovalBy: "ROLE_PM",
-          legacyApprovalAt: new Date().toISOString()
-        } as unknown as Prisma.InputJsonValue
-      }
-    });
-  }
-}
-
-async function tryApproveProjectViaWorkflowV2(projectId: string) {
-  const [workflow, projectRecord] = await Promise.all([
-    prisma.workflow.findFirst({
-      where: {
-        projectId,
-        status: "active"
-      },
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        currentStageIds: true,
-        stages: {
-          select: {
-            id: true,
-            templateKey: true,
-            status: true,
-            outputArtifacts: true,
-            gateResults: true
-          }
-        }
-      }
-    }),
-    prisma.project.findUnique({
-      where: { id: projectId },
-      select: { currentStage: true }
-    })
-  ]);
   if (!workflow) {
     return false;
   }
 
-  const workflowTemplateKeys = Array.from(new Set(
-    workflow.stages
-      .map((stage) => String(stage.templateKey || "").trim())
-      .filter(Boolean)
-  ));
-  const workflowTemplates = workflowTemplateKeys.length > 0
-    ? await prisma.workflowTemplate.findMany({
-      where: {
-        key: {
-          in: workflowTemplateKeys
-        }
-      },
-      select: {
-        key: true,
-        acceptanceCriteria: true,
-        outputSchema: true,
-        outputContract: true
-      }
-    })
-    : [];
-  const workflowTemplateByKey = new Map(
-    workflowTemplates.map((template) => [String(template.key || "").trim(), template])
-  );
-  const stageById = new Map(workflow.stages.map((stage) => [
-    stage.id,
-    {
-      ...stage,
-      template: workflowTemplateByKey.get(String(stage.templateKey || "").trim()) ?? null
-    }
-  ]));
-  let activeCurrentStageIds = readStringArray(workflow.currentStageIds).filter((stageId) => {
+  const stageById = new Map(workflow.stages.map((stage) => [stage.id, stage]));
+  const activeCurrentStageIds = readStringArray(workflow.currentStageIds).filter((stageId) => {
     const stage = stageById.get(stageId);
     if (!stage) {
       return false;
@@ -3452,101 +3064,8 @@ async function tryApproveProjectViaWorkflowV2(projectId: string) {
     const status = String(stage.status || "").trim().toLowerCase();
     return !["completed", "skipped", "failed"].includes(status);
   });
-  const normalizeStageIdsByLegacyFrontier = (stageIds: string[]) => {
-    const withOrder = stageIds.map((stageId) => {
-      const stage = stageById.get(stageId);
-      const stageType = resolveLegacyStageTypeFromWorkflowTemplateKey(String(stage?.templateKey || ""));
-      return {
-        stageId,
-        order: stageOrder.indexOf(stageType)
-      };
-    }).filter((item) => item.order >= 0);
-    if (withOrder.length === 0) {
-      return stageIds;
-    }
-    const minOrder = withOrder.reduce((min, item) => Math.min(min, item.order), withOrder[0]!.order);
-    return withOrder
-      .filter((item) => item.order === minOrder)
-      .map((item) => item.stageId);
-  };
-  const normalizedCurrentStageIds = normalizeStageIdsByLegacyFrontier(activeCurrentStageIds);
-  if (
-    normalizedCurrentStageIds.length > 0
-    && (
-      normalizedCurrentStageIds.length !== activeCurrentStageIds.length
-      || normalizedCurrentStageIds.some((stageId, index) => stageId !== activeCurrentStageIds[index])
-    )
-  ) {
-    await prisma.workflow.update({
-      where: { id: workflow.id },
-      data: {
-        currentStageIds: normalizedCurrentStageIds as unknown as Prisma.InputJsonValue
-      }
-    });
-    activeCurrentStageIds = normalizedCurrentStageIds;
-  }
   if (activeCurrentStageIds.length === 0) {
-    const statusPriority = (status: string) => {
-      const normalized = String(status || "").trim().toLowerCase();
-      if (normalized === "reviewing") return 4;
-      if (normalized === "running") return 3;
-      if (normalized === "active") return 2;
-      if (normalized === "pending") return 1;
-      return 0;
-    };
-    const recoverableStageIds = workflow.stages
-      .filter((stage) => {
-        const status = String(stage.status || "").trim().toLowerCase();
-        return !["completed", "skipped", "failed"].includes(status);
-      })
-      .sort((left, right) => {
-        const priorityDelta = statusPriority(right.status) - statusPriority(left.status);
-        if (priorityDelta !== 0) {
-          return priorityDelta;
-        }
-        const leftOrder = stageOrder.indexOf(resolveLegacyStageTypeFromWorkflowTemplateKey(left.templateKey));
-        const rightOrder = stageOrder.indexOf(resolveLegacyStageTypeFromWorkflowTemplateKey(right.templateKey));
-        if (leftOrder !== rightOrder) {
-          return leftOrder - rightOrder;
-        }
-        return String(left.id).localeCompare(String(right.id));
-      })
-      .map((stage) => stage.id);
-    const frontierStageIds = normalizeStageIdsByLegacyFrontier(recoverableStageIds);
-    const selectedStageIds = frontierStageIds.length > 0 ? frontierStageIds : recoverableStageIds;
-    if (selectedStageIds.length === 0) {
-      throw new Error("WORKFLOW_V2_ACTIVE_WITHOUT_CURRENT_STAGE: workflow-v2 正在运行但缺少可推进阶段。");
-    }
-    await prisma.workflow.update({
-      where: { id: workflow.id },
-      data: {
-        currentStageIds: selectedStageIds as unknown as Prisma.InputJsonValue
-      }
-    });
-    activeCurrentStageIds.push(...selectedStageIds);
-  }
-
-  await hydrateWorkflowStageArtifactsFromLegacyDeliverables({
-    projectId,
-    stageIds: activeCurrentStageIds,
-    stageById
-  });
-  await hydrateWorkflowStageManualApprovalsForLegacyApprove({
-    stageIds: activeCurrentStageIds,
-    stageById
-  });
-
-  if (projectRecord) {
-    const currentLegacyStage = resolveStageType(String(projectRecord.currentStage || "")) || "INIT";
-    const currentLegacyOrder = stageOrder.indexOf(currentLegacyStage);
-    const frontierStageId = activeCurrentStageIds[0];
-    const frontierWorkflowStage = frontierStageId ? stageById.get(frontierStageId) : undefined;
-    const frontierLegacyStage = resolveLegacyStageTypeFromWorkflowTemplateKey(String(frontierWorkflowStage?.templateKey || ""));
-    const frontierLegacyOrder = stageOrder.indexOf(frontierLegacyStage);
-    if (frontierLegacyOrder >= 0 && currentLegacyOrder >= 0 && frontierLegacyOrder > currentLegacyOrder) {
-      await reconcileProjectStateWithWorkflowIfNeeded(projectId);
-      return true;
-    }
+    throw new Error("WORKFLOW_V2_ACTIVE_WITHOUT_CURRENT_STAGE: workflow-v2 正在运行但缺少可推进阶段。");
   }
 
   const blockedMessages: string[] = [];
@@ -4464,33 +3983,16 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
 
 export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   const startedAt = Date.now();
+  const stageDeadlineAt = Date.now() + PROJECT_STAGE_AGENT_TIMEOUT_MS;
   const automationAction = input.action.startsWith("stage.auto_submission.automation");
   const manualAdvanceAction = input.action.startsWith("stage.auto_submission.manual_advance");
   const bootstrapAction = input.action.startsWith("project.create.bootstrap");
-  const approvalWarmupAction = input.action.startsWith("project.approve.next-stage");
   const roleModelGateApprovalAction = input.action.startsWith("project.approve.role-model-gate");
-  const autoSubmissionAction = automationAction || manualAdvanceAction || bootstrapAction;
-  const relaxedGateAction = autoSubmissionAction || approvalWarmupAction || roleModelGateApprovalAction;
-  const configuredAutoSubmissionBudgetMs = Number(
-    process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS_AUTO_SUBMISSION ?? 90_000
-  );
-  const stageExecutionBudgetMs = relaxedGateAction
-    ? Math.max(
-      45_000,
-      Math.min(
-        PROJECT_STAGE_AGENT_TIMEOUT_MS,
-        Number.isFinite(configuredAutoSubmissionBudgetMs)
-          ? Math.round(configuredAutoSubmissionBudgetMs)
-          : 90_000
-      )
-    )
-    : PROJECT_STAGE_AGENT_TIMEOUT_MS;
-  const stageDeadlineAt = startedAt + stageExecutionBudgetMs;
   const automationDirectModelFirst = automationAction
     && String(process.env.PROJECT_AUTOMATION_DIRECT_MODEL_FIRST ?? "true").trim().toLowerCase() !== "false";
   const terminalPrimaryBudgetMs = automationAction
-    ? Math.max(12_000, Math.round(stageExecutionBudgetMs * 0.15))
-    : Math.max(30_000, Math.round(stageExecutionBudgetMs * 0.6));
+    ? Math.max(12_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.15))
+    : Math.max(30_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.6));
   const runtime = await getRuntimeStatus();
   const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
   let pendingStitchArtifact: StitchDesignPendingArtifact | undefined;
@@ -4507,26 +4009,14 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   try {
     let run: StageAgentRunResult | undefined;
     let terminalFallbackReason: string | undefined;
-    const hermesAttemptTraces: StageModelAttemptTrace[] = [];
-    let hermesFallbackReason: string | undefined;
     const hermesEnabled = String(process.env.PROJECT_STAGE_HERMES_ENABLED ?? "true").trim().toLowerCase() !== "false";
-    const hermesRequired = parseBooleanFlag(process.env.PROJECT_STAGE_HERMES_REQUIRED, false);
-    const hermesAutomationEnabled = String(process.env.PROJECT_STAGE_HERMES_ON_AUTOMATION ?? "true")
-      .trim()
-      .toLowerCase() !== "false";
-    const hermesManualAdvanceEnabled = String(process.env.PROJECT_STAGE_HERMES_ON_MANUAL_ADVANCE ?? "true")
-      .trim()
-      .toLowerCase() !== "false";
     const analystGateHermes =
       input.role === "ROLE_ANALYST"
       && input.action.startsWith("project.approve.role-model-gate");
-    const roleEligibleForHermes = input.role === "ROLE_DESIGN"
-      || input.role === "ROLE_ANALYST"
-      || analystGateHermes;
     const hermesEligible = hermesEnabled
-      && roleEligibleForHermes
-      && (hermesManualAdvanceEnabled || !manualAdvanceAction)
-      && (hermesAutomationEnabled || !automationAction);
+      && (input.role === "ROLE_DESIGN" || analystGateHermes)
+      && !automationAction
+      && !manualAdvanceAction;
     const forceDirectModel = strategy.mode === "terminal_agent"
       && (automationDirectModelFirst || manualAdvanceAction || bootstrapAction || roleModelGateApprovalAction);
     const isTransientModelRouteFailure = (error: unknown) => {
@@ -4543,20 +4033,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
     };
     const runDirectModelWithRetry = async () => {
-      const configuredManualAdvanceRetries = Number(
-        process.env.PROJECT_STAGE_DIRECT_MODEL_RETRIES_MANUAL_ADVANCE ?? 1
-      );
-      const maxRetries = manualAdvanceAction
-        ? (Number.isFinite(configuredManualAdvanceRetries) ? Math.max(0, Math.round(configuredManualAdvanceRetries)) : 1)
-        : 0;
-      const configuredCooldownCap = Number(
-        process.env.PROJECT_STAGE_ROUTE_COOLDOWN_BACKOFF_CAP_MS ?? 8_000
-      );
-      const routeCooldownBackoffCapMs = Number.isFinite(configuredCooldownCap)
-        ? Math.max(1_200, Math.round(configuredCooldownCap))
-        : 8_000;
-      const allowAutoScriptedFallback = relaxedGateAction
-        && !shouldEnforceAutoStageRealModelGate(input.stageType);
+      const maxRetries = manualAdvanceAction ? 4 : 0;
       let attempt = 0;
       while (true) {
         try {
@@ -4570,37 +4047,14 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
           }));
         } catch (error) {
           if (attempt >= maxRetries || !isTransientModelRouteFailure(error)) {
-            if (allowAutoScriptedFallback) {
-              const degraded = await runScriptedAgent({
-                ...input,
-                summary: `${input.summary ?? "当前阶段改为降级执行"}；真实模型暂不可用，自动切换 scripted 输出。`
-              });
-              const fallbackMessage = error instanceof Error ? error.message : String(error ?? "unknown error");
-              const attemptRecords = Array.isArray((error as { attempts?: unknown })?.attempts)
-                ? ((error as { attempts: StageModelAttemptTrace[] }).attempts)
-                : [];
-              return {
-                ...degraded,
-                title: `${degraded.title}（降级）`,
-                body: [
-                  "## 降级说明",
-                  `- 原因: 真实模型暂不可用（${fallbackMessage}）`,
-                  "- 当前阶段未强制真实模型门禁，已自动降级保证流程持续推进。",
-                  "",
-                  degraded.body
-                ].join("\n"),
-                attempts: attemptRecords,
-                degraded: shouldEnforceAutoStageRealModelGate(input.stageType)
-              };
-            }
             throw error;
           }
           attempt += 1;
           const remainingMs = stageDeadlineAt - Date.now();
           const retryAfterMs = extractRetryAfterMs(error);
           const backoffMs = retryAfterMs > 0
-            ? Math.min(routeCooldownBackoffCapMs, retryAfterMs + 250)
-            : Math.min(manualAdvanceAction ? 1_800 : 2_500, 450 * attempt);
+            ? Math.min(45_000, retryAfterMs + 250)
+            : Math.min(2_500, 450 * attempt);
           const sleepMs = Math.max(0, Math.min(backoffMs, remainingMs - 1_200));
           if (sleepMs <= 0) {
             throw error;
@@ -4616,7 +4070,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         : remainingMs;
       if (budgetMs <= 0) {
         throw new Error(
-          `PROJECT_STAGE_AGENT_TIMEOUT: ${input.stageType}/${input.role} 执行超过 ${stageExecutionBudgetMs}ms，已终止本轮自动推进。`
+          `PROJECT_STAGE_AGENT_TIMEOUT: ${input.stageType}/${input.role} 执行超过 ${PROJECT_STAGE_AGENT_TIMEOUT_MS}ms，已终止本轮自动推进。`
         );
       }
       return await withProjectStageAgentTimeout(
@@ -4647,56 +4101,24 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       );
 
       if (hermesRun) {
-        const hermesTaggedModel = String(hermesRun.model || "hermes-v2.1").toLowerCase().includes("hermes")
-          ? String(hermesRun.model || "hermes-v2.1")
-          : `hermes/${String(hermesRun.model || "v2.1")}`;
         run = {
           provider: "openai-compatible",
-          model: hermesTaggedModel,
+          model: hermesRun.model,
           title: `${STAGE_LABELS[input.stageType]}阶段执行纪要`,
           body: hermesRun.body,
           thinkingSummary: hermesRun.thinkingSummary || `${ROLE_LABELS[input.role]} 已通过 Hermes 完成阶段执行`,
           attempts: [{
             stageType: input.stageType,
             role: input.role,
-            model: hermesTaggedModel,
+            model: hermesRun.model,
             route: "hermes-mcp",
             status: "success",
             elapsedMs: Math.max(0, Date.now() - hermesStartedAt),
             startedAt: new Date(hermesStartedAt).toISOString(),
             provider: hermesRun.provider,
-            executedModel: hermesTaggedModel
+            executedModel: hermesRun.model
           }]
         };
-      } else {
-        const hermesStatus = getHermesMcpRuntimeStatus();
-        const reason = String(
-          hermesStatus.lastFailureReason
-          || hermesStatus.lastSkipReason
-          || "hermes_unavailable"
-        ).trim();
-        const hermesAttemptStatus: "failed" | "skipped" = hermesStatus.lastFailureReason ? "failed" : "skipped";
-        hermesFallbackReason = `Hermes unavailable: ${reason}`;
-        hermesAttemptTraces.push({
-          stageType: input.stageType,
-          role: input.role,
-          model: "hermes-v2.1",
-          route: "hermes-mcp",
-          status: hermesAttemptStatus,
-          elapsedMs: Math.max(0, Date.now() - hermesStartedAt),
-          startedAt: new Date(hermesStartedAt).toISOString(),
-          provider: "hermes-mcp",
-          executedModel: "hermes-v2.1",
-          error: reason
-        });
-
-        if (hermesRequired && hermesStatus.lastSkipReason !== "stage_not_matched") {
-          const strictError = new Error(`HERMES_REQUIRED_BUT_UNAVAILABLE: ${reason}`) as Error & {
-            attempts?: StageModelAttemptTrace[];
-          };
-          strictError.attempts = [...hermesAttemptTraces];
-          throw strictError;
-        }
       }
     }
 
@@ -4722,11 +4144,6 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
     }
     if (!run) {
       throw new Error("PROJECT_STAGE_AGENT_FAILED: execution run not resolved");
-    }
-    if (hermesFallbackReason) {
-      terminalFallbackReason = terminalFallbackReason
-        ? `${terminalFallbackReason}; ${hermesFallbackReason}`
-        : hermesFallbackReason;
     }
 
     const stitchMode = getDesignStitchMode();
@@ -4985,21 +4402,19 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       }
     }
 
-    const runAttemptsRaw = Array.isArray((run as { attempts?: unknown }).attempts)
+    const runAttempts = Array.isArray((run as { attempts?: unknown }).attempts)
       ? ((run as { attempts: StageModelAttemptTrace[] }).attempts)
       : [];
-    const runAttempts = [...hermesAttemptTraces, ...runAttemptsRaw];
 
     if (isRealModelGateEnabled()) {
       const executionProtocol = await getExecutionProtocolSettings();
       const provider = String(run.provider || "").trim().toLowerCase();
       const degraded = Boolean((run as { degraded?: boolean }).degraded);
-      const allowAutoStageScriptedWrite =
-        provider === "scripted"
-        && relaxedGateAction
-        && !shouldEnforceAutoStageRealModelGate(input.stageType);
-      const blockDegradedWrite = executionProtocol.blockDegradedWrites && degraded && !allowAutoStageScriptedWrite;
-      if ((!allowAutoStageScriptedWrite && provider === "scripted") || blockDegradedWrite) {
+      const allowInitBootstrapWrite =
+        input.stageType === "INIT"
+        && strategy.mode === "direct_model"
+        && provider === "scripted";
+      if ((!allowInitBootstrapWrite && provider === "scripted") || (executionProtocol.blockDegradedWrites && degraded)) {
         const gateError = new Error("REAL_MODEL_GATE_FAILED: 当前阶段输出触发 scripted/degraded 降级，不允许写入为成功结果。") as Error & {
           attempts?: StageModelAttemptTrace[];
         };
@@ -5319,28 +4734,11 @@ const DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS = Math.max(
 
 async function withBackfillTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const taskResult = task.then(
-    (value) => ({ type: "task" as const, ok: true as const, value }),
-    (error) => ({ type: "task" as const, ok: false as const, error })
-  );
-  const timeout = new Promise<{ type: "timeout" }>((resolve) => {
-    timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs);
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`BACKFILL_TIMEOUT: ${label} exceeded ${timeoutMs}ms`)), timeoutMs);
   });
   try {
-    const winner = await Promise.race([taskResult, timeout] as const);
-    if (winner.type === "timeout") {
-      void taskResult.then((late) => {
-        if (!late.ok) {
-          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
-          console.warn(`[repository.withBackfillTimeout] late rejection after timeout ignored: ${lateMessage}`);
-        }
-      });
-      throw new Error(`BACKFILL_TIMEOUT: ${label} exceeded ${timeoutMs}ms`);
-    }
-    if (!winner.ok) {
-      throw winner.error;
-    }
-    return winner.value;
+    return await Promise.race([task, timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -5559,14 +4957,8 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       // 不允许为未来阶段提前生成占位交付物，避免流程错位。
       continue;
     }
-    const isCurrentActiveStage = project.status === "active" && stage.type === project.currentStage;
-    const existingCurrentStageDeliverables = project.deliverables.filter((item) => item.stageType === stage.type);
-    const shouldAllowCurrentStageRecovery = isCurrentActiveStage
-      && project.pendingApproval
-      && existingCurrentStageDeliverables.length === 0;
-    if (isCurrentActiveStage && !shouldAllowCurrentStageRecovery) {
-      // 当前进行中的阶段默认禁止自动补齐核心交付物，避免模板稿冒充真实产物。
-      // 例外：若系统处于“待验收但没有任何交付物”的异常状态，允许一次恢复性补齐。
+    if (project.status === "active" && stage.type === project.currentStage) {
+      // 当前进行中的阶段禁止自动补齐核心交付物，避免模板稿冒充真实产物。
       continue;
     }
     const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
@@ -5574,7 +4966,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       continue;
     }
 
-    const existingStageDeliverables = existingCurrentStageDeliverables;
+    const existingStageDeliverables = project.deliverables.filter((item) => item.stageType === stage.type);
     const existingNames = new Set(existingStageDeliverables.map((item) => normalizeDeliverableName(item.name)));
     const scheduledNames = new Set(
       creates
@@ -6021,18 +5413,13 @@ async function tryAutoInitializeProjectWorkflowV2(
     return;
   }
   const autoStart = input.autoStartWorkflow ?? PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT;
-  const startSynchronously = autoStart && shouldStartWorkflowV2Synchronously();
   const createAndMaybeStart = async () => {
     const workflow = await createWorkflowV2FromTemplate({
       projectId: project.id,
       templateKey
     });
     if (autoStart) {
-      if (startSynchronously) {
-        await startWorkflowV2(workflow.id);
-      } else {
-        triggerWorkflowV2StartInBackground(workflow.id, project.id);
-      }
+      await startWorkflowV2(workflow.id);
     }
     return workflow;
   };
@@ -6047,9 +5434,7 @@ async function tryAutoInitializeProjectWorkflowV2(
         type: "system",
         title: "V2 工作流已联动初始化",
         content: autoStart
-          ? (startSynchronously
-              ? `已基于模板 ${templateKey} 自动创建并启动 workflow-v2（${workflow.id}）。`
-              : `已基于模板 ${templateKey} 自动创建 workflow-v2（${workflow.id}），并在后台异步启动。`)
+          ? `已基于模板 ${templateKey} 自动创建并启动 workflow-v2（${workflow.id}）。`
           : `已基于模板 ${templateKey} 自动创建 workflow-v2（${workflow.id}），等待手动启动。`,
         priority: "normal"
       }
@@ -6069,9 +5454,7 @@ async function tryAutoInitializeProjectWorkflowV2(
             type: "system",
             title: "V2 工作流模板已自动修复",
             content: autoStart
-              ? (startSynchronously
-                  ? `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并启动 workflow-v2（${recoveredWorkflow.id}）。`
-                  : `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}），并后台异步启动 workflow-v2（${recoveredWorkflow.id}）。`)
+              ? `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并启动 workflow-v2（${recoveredWorkflow.id}）。`
               : `检测到模板缺失，已自动补种模板（${seeded.keys.join(", ")}）并创建 workflow-v2（${recoveredWorkflow.id}）。`,
             priority: "normal"
           }
@@ -6997,7 +6380,6 @@ export async function deleteProject(id: string): Promise<boolean> {
   }
 
   await prisma.project.delete({ where: { id } });
-  await clearIssueProjectBinding(id);
   return true;
 }
 
@@ -8754,44 +8136,13 @@ function readSkills(value: Prisma.JsonValue): AgentProfile["skills"] {
 
 async function nextProjectId() {
   const today = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-  const dayPrefix = `OCC-${today}-`;
-  const [todayProjects, todayProjectInputs, issues] = await Promise.all([
-    prisma.project.findMany({
-      where: { id: { startsWith: dayPrefix } },
-      select: { id: true }
-    }),
-    prisma.projectInput.findMany({
-      where: { projectId: { startsWith: dayPrefix } },
-      select: { projectId: true },
-      distinct: ["projectId"]
-    }),
-    listIssues()
-  ]);
+  const lastProject = await prisma.project.findFirst({
+    where: { id: { startsWith: `OCC-${today}-` } },
+    orderBy: { id: "desc" }
+  });
 
-  const reservedSequence = new Set<number>();
-  const readSequence = (id: string | undefined) => {
-    const normalized = String(id ?? "");
-    if (!normalized.startsWith(dayPrefix)) {
-      return;
-    }
-
-    const suffix = normalized.slice(dayPrefix.length).trim();
-    if (!/^\d+$/.test(suffix)) {
-      return;
-    }
-    reservedSequence.add(Number(suffix));
-  };
-
-  todayProjects.forEach((project) => readSequence(project.id));
-  todayProjectInputs.forEach((item) => readSequence(item.projectId));
-  issues.forEach((issue) => readSequence(issue.createdProjectId));
-
-  let nextSequence = reservedSequence.size > 0 ? Math.max(...reservedSequence) + 1 : 1;
-  while (reservedSequence.has(nextSequence)) {
-    nextSequence += 1;
-  }
-
-  return `${dayPrefix}${String(nextSequence).padStart(3, "0")}`;
+  const lastSequence = lastProject ? Number(lastProject.id.split("-").at(-1)) : 0;
+  return `OCC-${today}-${String(lastSequence + 1).padStart(3, "0")}`;
 }
 
 async function backfillProjectTasks() {

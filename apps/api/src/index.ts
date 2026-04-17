@@ -4,7 +4,7 @@ import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { prisma } from "./db.js";
@@ -153,7 +153,6 @@ const webDistPath = fileURLToPath(new URL("../../web/dist", import.meta.url));
 const siteGeneratedPath = fileURLToPath(new URL("../../../site/generated", import.meta.url));
 const workspaceGeneratedPath = fileURLToPath(new URL("../../../generated", import.meta.url));
 const cloudflaredTunnelLogPath = fileURLToPath(new URL("../../../.runtime/cloudflared-tunnel.log", import.meta.url));
-const runtimeDirectoryPath = fileURLToPath(new URL("../../../.runtime", import.meta.url));
 const projectAutoAdvanceIntervalMs = Math.max(5000, Number(process.env.PROJECT_AUTO_ADVANCE_INTERVAL_MS ?? 12000));
 const GITLAB_HARNESS_SYNC_STAGES = new Set<StageType>(["DEV", "ACCEPT"]);
 
@@ -222,55 +221,6 @@ const STAGE_PROTOCOL_SKILLS: Partial<Record<StageType, string[]>> = {
   DEV: ["coding-agent"],
   ACCEPT: ["qa-validation"]
 };
-const NON_FATAL_RUNTIME_ERROR_PATTERNS = [
-  /resource has been exhausted/i,
-  /check quota/i,
-  /rate limit/i,
-  /stitch/i,
-  /this operation was aborted/i,
-  /aborted due to timeout/i
-];
-let runtimeErrorGuardsInstalled = false;
-
-function normalizeRuntimeErrorMessage(reason: unknown) {
-  if (reason instanceof Error) {
-    return String(reason.message || "").trim();
-  }
-  return String(reason ?? "").trim();
-}
-
-function isKnownNonFatalRuntimeError(reason: unknown) {
-  const message = normalizeRuntimeErrorMessage(reason);
-  if (!message) {
-    return false;
-  }
-  return NON_FATAL_RUNTIME_ERROR_PATTERNS.some((pattern) => pattern.test(message));
-}
-
-function installRuntimeErrorGuards() {
-  if (runtimeErrorGuardsInstalled) {
-    return;
-  }
-  runtimeErrorGuardsInstalled = true;
-
-  process.on("unhandledRejection", (reason) => {
-    const message = normalizeRuntimeErrorMessage(reason);
-    if (isKnownNonFatalRuntimeError(reason)) {
-      console.warn(`[runtime.guard] non-fatal unhandledRejection ignored: ${message}`);
-      return;
-    }
-    console.error("[runtime.guard] unhandledRejection:", reason);
-  });
-
-  process.on("uncaughtException", (error) => {
-    const message = normalizeRuntimeErrorMessage(error);
-    if (isKnownNonFatalRuntimeError(error)) {
-      console.warn(`[runtime.guard] non-fatal uncaughtException ignored: ${message}`);
-      return;
-    }
-    console.error("[runtime.guard] uncaughtException:", error);
-  });
-}
 
 function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
   if (!STAGE_AUTO_REAL_MODEL_REQUIRED.has(stageType)) {
@@ -283,7 +233,7 @@ function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return false;
+  return isRealModelGateEnabled();
 }
 
 type StageRunAttempt = {
@@ -371,7 +321,7 @@ const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|lorem ipsum|\bxxx\b/gi;
 const DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN = /(^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/gi;
 
-const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
+const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 1));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
   Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 60_000)
@@ -391,29 +341,11 @@ function sleep(ms: number) {
 
 async function withTimeout<T>(task: Promise<T>, timeoutMs: number, message: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const taskResult = task.then(
-    (value) => ({ type: "task" as const, ok: true as const, value }),
-    (error) => ({ type: "task" as const, ok: false as const, error })
-  );
-  const timeout = new Promise<{ type: "timeout" }>((resolve) => {
-    timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs);
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
   });
   try {
-    const winner = await Promise.race([taskResult, timeout] as const);
-    if (winner.type === "timeout") {
-      // 超时后继续吸收任务晚到错误，防止未处理拒绝导致进程退出。
-      void taskResult.then((late) => {
-        if (!late.ok) {
-          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
-          console.warn(`[withTimeout] late rejection after timeout ignored: ${lateMessage}`);
-        }
-      });
-      throw new Error(message);
-    }
-    if (!winner.ok) {
-      throw winner.error;
-    }
-    return winner.value;
+    return await Promise.race([task, timeout]);
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -620,16 +552,6 @@ async function executeManualAdvanceCycle(projectId: string) {
           if (!(await canContinueProjectAdvance(projectId))) {
             return;
           }
-          const latestBeforeSubmit = await findProject(projectId);
-          if (
-            !latestBeforeSubmit
-            || latestBeforeSubmit.status !== "active"
-            || latestBeforeSubmit.pendingApproval
-            || latestBeforeSubmit.currentStage !== current.currentStage
-            || latestBeforeSubmit.currentRole !== current.currentRole
-          ) {
-            return;
-          }
           await withTimeout(
             submitStageSubmissionBundle(projectId, submissions),
             MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS,
@@ -771,7 +693,7 @@ function buildDesignRequiredSections(
     "- 交付文案需与当前业务关键词保持一致，避免泛化模板语义。",
     "",
     "## 视觉预览来源约束",
-    "- 禁止自动注入泛化模板 HTML 作为最终视觉定稿。",
+    "- 禁止自动注入占位模板 HTML 作为最终视觉定稿。",
     "- 视觉定稿需来自真实设计执行结果（Stitch 可访问链接 / 图片链接 / 人工确认可渲染 HTML）。",
     "- 若仅有文字说明而缺少可渲染预览，应保持待完善并继续迭代。"
   ].join("\n");
@@ -848,115 +770,6 @@ function sanitizeModelDeliverableBody(content: string) {
   normalized = normalized.replace(DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN, "$1已补全");
 
   return normalized.replace(/\n{3,}/g, "\n\n").trim();
-}
-
-function hasMarkdownTable(content: string) {
-  const lines = String(content || "")
-    .split("\n")
-    .map((line) => line.trim());
-  for (let index = 0; index < lines.length - 1; index += 1) {
-    const current = lines[index];
-    const next = lines[index + 1];
-    if (
-      /\|/.test(current)
-      && /^\|?\s*[-:]{3,}\s*(\|\s*[-:]{3,}\s*)+\|?$/.test(next)
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function buildAutoSubmissionMatrixSection(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>,
-  stageType: StageType,
-  title: string
-) {
-  const tasks = project.tasks
-    .filter((task) => task.stageType === stageType)
-    .slice(0, 3)
-    .map((task) => task.title);
-  const keywords = project.parsedIntent.keywords.slice(0, 3);
-
-  return [
-    "## 交付追踪矩阵（需求-任务-验收）",
-    "| 需求关键词 | 对应任务 | 验收口径 |",
-    "| --- | --- | --- |",
-    `| ${keywords[0] || project.name} | ${tasks[0] || `${STAGE_LABELS[stageType]}阶段核心任务`} | 交付章节完整且模板门禁通过 |`,
-    `| ${keywords[1] || "范围边界稳定"} | ${tasks[1] || "阶段关键任务收敛"} | 核心证据可追溯到阶段任务与需求输入 |`,
-    `| ${keywords[2] || title} | ${tasks[2] || "审批输入材料齐备"} | 可进入阶段审批并形成下一阶段输入 |`
-  ].join("\n");
-}
-
-function buildVisualMockupFallbackPreview(
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
-) {
-  const heroTitle = project.parsedIntent.keywords[0] || project.name;
-  const heroSubtitle = project.parsedIntent.summary || project.description || "围绕当前项目目标构建的视觉定稿预览";
-
-  return [
-    "## 单页预览代码（HTML）",
-    "```html",
-    "<!doctype html>",
-    "<html lang=\"zh-CN\">",
-    "<head>",
-    "  <meta charset=\"UTF-8\" />",
-    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\" />",
-    `  <title>${heroTitle} · 视觉定稿</title>`,
-    "  <style>",
-    "    :root { --bg:#f7f2e8; --ink:#1a1a1a; --accent:#e44c2a; --panel:#fff9ef; --line:#2f241f22; }",
-    "    * { box-sizing:border-box; }",
-    "    body { margin:0; font-family:'Hiragino Mincho ProN','Yu Mincho',serif; background:radial-gradient(circle at 10% 10%, #fff8dc, #efe2c8); color:var(--ink); }",
-    "    main { max-width:960px; margin:0 auto; padding:48px 20px 72px; }",
-    "    .hero { background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:24px; box-shadow:0 20px 40px #00000014; }",
-    "    h1 { margin:0 0 8px; font-size:40px; line-height:1.08; letter-spacing:.02em; }",
-    "    p { margin:0; line-height:1.8; }",
-    "    .grid { margin-top:18px; display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }",
-    "    .card { border:1px solid var(--line); border-radius:14px; background:#fff; padding:14px; }",
-    "    .cta { display:inline-flex; margin-top:18px; padding:10px 16px; border-radius:999px; background:var(--accent); color:#fff; text-decoration:none; font-weight:700; }",
-    "    @media (max-width:780px) { h1 { font-size:30px; } .grid { grid-template-columns:1fr; } }",
-    "  </style>",
-    "</head>",
-    "<body>",
-    "  <main>",
-    "    <section class=\"hero\">",
-    `      <h1>${heroTitle}</h1>`,
-    `      <p>${heroSubtitle}</p>`,
-    "      <div class=\"grid\">",
-    "        <article class=\"card\">默认态：信息完整展示，主 CTA 可见。</article>",
-    "        <article class=\"card\">悬停态：主卡片抬升并突出高亮边框。</article>",
-    "        <article class=\"card\">异常态：展示告警提示与补救入口。</article>",
-    "      </div>",
-    "      <a class=\"cta\" href=\"#\">立即进入核心流程</a>",
-    "    </section>",
-    "  </main>",
-    "</body>",
-    "</html>",
-    "```"
-  ].join("\n");
-}
-
-function ensureAutoSubmissionTemplateReadiness(input: {
-  content: string;
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
-  stageType: StageType;
-  title: string;
-  templateKind: ReturnType<typeof resolveDeliverableTemplate>["kind"];
-}) {
-  let normalized = String(input.content || "").trim();
-  if (!normalized) {
-    return normalized;
-  }
-
-  if (!hasMarkdownTable(normalized)) {
-    normalized = `${normalized}\n\n${buildAutoSubmissionMatrixSection(input.project, input.stageType, input.title)}`;
-  }
-
-  if (input.stageType === "DESIGN" && input.templateKind === "visual_mockup" && !hasVisualDesignPreview(normalized)) {
-    normalized = `${normalized}\n\n${buildVisualMockupFallbackPreview(input.project)}`;
-  }
-
-  return normalized;
 }
 
 function countHits(source: string, items: string[]) {
@@ -1151,18 +964,18 @@ function buildDeliverableSpecificSections(
     .slice(0, 4)
     .map((task) => task.title);
 
-    const analysisRequirementEvidenceSections = [
-      "",
-      "## 事实依据与来源（Source of Truth）",
-      "| 来源 | 类型 | 当前结论 |",
-      "| --- | --- | --- |",
-      `| 原始需求 | 用户输入 | ${project.name} |`,
-      `| 项目描述 | 需求摘要 | ${project.parsedIntent.summary || project.description.slice(0, 60)} |`,
-      `| 阶段任务 | ANALYSIS | ${analysisTasks.join("、") || "暂无阶段任务"} |`,
-      "",
-      "## 需求追踪矩阵（目标-功能-验收）",
-      "| 目标 | 对应功能/任务 | 验收方式 |",
-      "| --- | --- | --- |",
+  const analysisRequirementEvidenceSections = [
+    "",
+    "## 事实依据与来源（Source of Truth）",
+    "| 来源 | 类型 | 当前结论 |",
+    "| --- | --- | --- |",
+    `| 原始需求 | 用户输入 | ${project.name} |`,
+    `| 项目描述 | 需求摘要 | ${project.parsedIntent.summary || project.description.slice(0, 60)} |`,
+    `| 阶段任务 | ANALYSIS | ${analysisTasks.join("、") || "待补充任务"} |`,
+    "",
+    "## 需求追踪矩阵（目标-功能-验收）",
+    "| 目标 | 对应功能/任务 | 验收方式 |",
+    "| --- | --- | --- |",
     `| ${project.parsedIntent.keywords[0] || "明确 MVP 目标"} | ${analysisTasks[0] || "提炼目标与边界"} | 评审通过后进入下一阶段 |`,
     `| ${project.parsedIntent.keywords[1] || "收敛需求范围"} | ${analysisTasks[1] || "输出项目排期"} | 需求、排期、风险可回溯 |`,
     `| ${project.parsedIntent.keywords[2] || "建立审批基线"} | ${analysisTasks[2] || "形成审批版分析稿"} | 存在清晰验收与待确认项 |`,
@@ -1249,8 +1062,7 @@ function evaluateAutoSubmissionQuality(input: {
   const issues: string[] = [];
   const diagnostics: string[] = [];
   let score = 100;
-  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true"
-    || shouldEnforceAutoStageRealModelGate(input.stageType);
+  const strictRealModel = process.env.STRICT_REAL_MODEL_OUTPUT === "true" || isRealModelGateEnabled();
   const allowInitScriptedBootstrap =
     input.stageType === "INIT"
     && input.run.provider === "scripted"
@@ -1496,9 +1308,9 @@ function buildProjectRequiredActions(
         id: "missing-stage-deliverable",
         severity: "critical",
         title: "当前阶段缺少交付物，无法验收",
-        detail: `检测到 ${STAGE_LABELS[project.currentStage] || project.currentStage} 阶段处于待验收但无交付物，建议先一键重建交付物后再验收。`,
-        action: "reconcile_deliverables",
-        ctaLabel: "一键重建阶段交付物"
+        detail: `请先提交 ${STAGE_LABELS[project.currentStage] || project.currentStage} 阶段交付物，再执行审批。`,
+        action: "submit_stage_deliverable",
+        ctaLabel: "前往提交交付物"
       });
     }
 
@@ -1669,7 +1481,7 @@ function buildProjectRequiredActions(
     }
   }
 
-  if (!project.pendingApproval && actions.length === 0 && currentStageDeliverables.length === 0) {
+  if (!project.pendingApproval && actions.length === 0) {
     const summary = String(project.summary || "");
     if (/核心交付物未齐|继续补充后再进入审批|未通过模板门禁/.test(summary)) {
       actions.push({
@@ -1848,13 +1660,6 @@ async function buildAutoStageSubmissions(
     if (project.currentStage === "DEV") {
       content = `${content}\n\n${await buildDevGateEvidenceAppendix(project)}`;
     }
-    content = ensureAutoSubmissionTemplateReadiness({
-      content,
-      project,
-      stageType: project.currentStage as StageType,
-      title,
-      templateKind: template.kind
-    });
 
     const quality = evaluateAutoSubmissionQuality({
       project,
@@ -2182,16 +1987,6 @@ async function runProjectAutomationTick(options?: { force?: boolean }) {
               const built = await buildAutoStageSubmissions(project, {
                 action: "stage.auto_submission.automation"
               });
-              const latestBeforeSubmit = await findProject(project.id);
-              if (
-                !latestBeforeSubmit
-                || latestBeforeSubmit.status !== "active"
-                || latestBeforeSubmit.pendingApproval
-                || latestBeforeSubmit.currentStage !== project.currentStage
-                || latestBeforeSubmit.currentRole !== project.currentRole
-              ) {
-                return built;
-              }
               await submitStageSubmissionBundle(project.id, built);
               return built;
             })();
@@ -2798,61 +2593,6 @@ function extractGeneratedHtmlUrlsFromContent(content: string) {
   return Array.from(new Set(matches.map((item) => normalizeExtractedUrl(item)).filter(Boolean)));
 }
 
-function pickRuntimeDeliveryAccessUrl(content: string) {
-  const urls = extractGeneratedHtmlUrlsFromContent(content);
-  if (urls.length === 0) {
-    return undefined;
-  }
-
-  const scored = urls.map((url) => {
-    let score = 0;
-    if (isGeneratedHtmlUrl(url)) {
-      score += 120;
-    }
-
-    if (/^https?:\/\//i.test(url)) {
-      try {
-        const parsed = new URL(url);
-        const host = parsed.hostname.toLowerCase();
-        const pathName = parsed.pathname.toLowerCase();
-        const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
-        const isLocalHost = host === "127.0.0.1" || host === "localhost" || host === "0.0.0.0";
-        if (isLocalHost) {
-          if (port === "5173") {
-            score += 90;
-          } else if (port === "4173") {
-            score += 70;
-          } else if (port === "3000") {
-            score += 60;
-          } else if (port === "8080") {
-            score += 35;
-          } else if (port === "8787") {
-            score += 5;
-          } else {
-            score += 20;
-          }
-        }
-
-        if (pathName === "/" || pathName.endsWith(".html")) {
-          score += 20;
-        }
-        if (pathName.startsWith("/generated/")) {
-          score += 30;
-        }
-        if (pathName.startsWith("/api/") || pathName === "/ready" || pathName === "/health") {
-          score -= 60;
-        }
-      } catch {
-        // ignore malformed absolute URL and keep base score
-      }
-    }
-
-    return { url, score };
-  });
-
-  return scored.sort((left, right) => right.score - left.score)[0]?.url;
-}
-
 function isDappMvpPrototypeUrl(url: string) {
   const normalized = String(url || "").toLowerCase();
   return /\/generated\/liquidity-dapp-mvp\/[a-z0-9._-]+\.html/.test(normalized)
@@ -2971,42 +2711,6 @@ function resolveFinalArtifactPublicBaseUrl() {
     }
   }
 
-  if (existsSync(runtimeDirectoryPath)) {
-    try {
-      const logFiles = readdirSync(runtimeDirectoryPath)
-        .filter((name) => /cloudflared|tunnel/i.test(name) && /\.log$/i.test(name))
-        .map((name) => path.join(runtimeDirectoryPath, name));
-      const candidates: Array<{ url: string; mtimeMs: number }> = [];
-      for (const filePath of logFiles) {
-        try {
-          const stat = statSync(filePath);
-          if (!stat.isFile()) {
-            continue;
-          }
-          const logText = readFileSync(filePath, "utf8");
-          const matches = [...logText.matchAll(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/gi)].map((item) =>
-            String(item[0] || "").replace(/\/+$/, "")
-          );
-          if (matches.length === 0) {
-            continue;
-          }
-          candidates.push({
-            url: matches[matches.length - 1],
-            mtimeMs: stat.mtimeMs || 0
-          });
-        } catch {
-          // ignore unreadable runtime log files and continue
-        }
-      }
-      if (candidates.length > 0) {
-        candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
-        return candidates[0].url;
-      }
-    } catch {
-      // ignore runtime directory scan failures
-    }
-  }
-
   return undefined;
 }
 
@@ -3022,10 +2726,6 @@ function buildArtifactAccessUrls(inputUrl?: string) {
       const parsed = new URL(raw);
       if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "0.0.0.0") {
         result.localUrl = parsed.toString();
-        if (!result.publicUrl && publicBase) {
-          const pathSuffix = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
-          result.publicUrl = `${publicBase}${pathSuffix.startsWith("/") ? pathSuffix : `/${pathSuffix}`}`;
-        }
       } else {
         result.publicUrl = parsed.toString();
       }
@@ -3347,44 +3047,6 @@ function pickBestDeliverable(
   })[0];
 }
 
-function pickRuntimeDeliveryDeliverable(
-  deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"],
-  project: NonNullable<Awaited<ReturnType<typeof findProject>>>
-) {
-  const devDeliverables = deliverables.filter((item) => item.stageType === "DEV");
-  return pickBestDeliverable(devDeliverables, [/运行地址|部署说明|联调说明|运行说明/i], project)
-    || pickBestDeliverable(devDeliverables, [/实现结果|技术方案|运行地址|运行说明|部署说明|联调说明/i], project)
-    || pickBestDeliverable(deliverables, [/实现结果|技术方案|运行地址|运行说明|部署说明|联调说明/i], project);
-}
-
-function pickRuntimeDeliveryAccessUrlFromDeliverables(
-  deliverables: NonNullable<Awaited<ReturnType<typeof findProject>>>["deliverables"]
-) {
-  const devDeliverables = deliverables
-    .filter((item) => item.stageType === "DEV")
-    .sort((left, right) => new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime());
-
-  const priorities = [
-    /运行地址|部署说明|联调说明|运行说明/i,
-    /实现结果|技术方案/i,
-    /.*/
-  ];
-
-  for (const pattern of priorities) {
-    for (const item of devDeliverables) {
-      if (!pattern.test(String(item.name || ""))) {
-        continue;
-      }
-      const picked = pickRuntimeDeliveryAccessUrl(String(item.content || ""));
-      if (picked) {
-        return picked;
-      }
-    }
-  }
-
-  return undefined;
-}
-
 function buildFinalArtifactsBlockingIssues(input: {
   project: NonNullable<Awaited<ReturnType<typeof findProject>>>;
   executions: Awaited<ReturnType<typeof listProjectExecutions>>;
@@ -3470,9 +3132,7 @@ function buildProjectFinalArtifactsReport(
   const missingRequired: string[] = [];
 
   for (const target of requiredArtifacts) {
-    const matched = target.key === "runtime_delivery"
-      ? pickRuntimeDeliveryDeliverable(deliverables, project)
-      : pickBestDeliverable(deliverables, target.patterns, project);
+    const matched = pickBestDeliverable(deliverables, target.patterns, project);
     if (!matched) {
       if (target.required) {
         missingRequired.push(target.category);
@@ -3491,14 +3151,6 @@ function buildProjectFinalArtifactsReport(
       missingRequired.push(target.category);
     }
 
-    const runtimeAccessSource = target.key === "runtime_delivery"
-      ? pickRuntimeDeliveryAccessUrl(String(matched.content || "")) || pickRuntimeDeliveryAccessUrlFromDeliverables(deliverables)
-      : undefined;
-    const runtimeAccessUrls: { localUrl?: string; publicUrl?: string } = target.key === "runtime_delivery"
-      ? buildArtifactAccessUrls(runtimeAccessSource)
-      : {};
-    const runtimeFilePath = runtimeAccessSource ? resolveGeneratedFilePathFromUrl(runtimeAccessSource) : undefined;
-
     artifacts.push({
       key: target.key,
       category: target.category,
@@ -3513,13 +3165,7 @@ function buildProjectFinalArtifactsReport(
       version: matched.version,
       updatedAt: matched.updatedAt,
       content: matched.content,
-      url: runtimeAccessUrls.publicUrl || runtimeAccessUrls.localUrl || runtimeAccessSource,
-      localUrl: runtimeAccessUrls.localUrl,
-      publicUrl: runtimeAccessUrls.publicUrl,
-      filePath: runtimeFilePath,
-      excerpt: target.key === "runtime_delivery"
-        ? formatArtifactAccessExcerpt(buildExcerpt(matched.content), runtimeAccessUrls)
-        : buildExcerpt(matched.content)
+      excerpt: buildExcerpt(matched.content)
     });
   }
 
@@ -4530,7 +4176,6 @@ app.use("/api", (req, res, next) => {
       req.path.startsWith("/openclaw/")
       || req.path.startsWith("/projects")
       || req.path.startsWith("/tasks")
-      || req.path.startsWith("/v1/workflows")
       || req.path.startsWith("/gitlab")
       || req.path.startsWith("/role-sets")
       || req.path.startsWith("/product-context")
@@ -4686,7 +4331,6 @@ function asyncRoute(
 }
 
 async function start() {
-  installRuntimeErrorGuards();
   await ensureSeedData((await getRuntimeStatus()).mode);
   ensureLocalAgentMonitorLive();
   restartProjectAutomationTicker();
