@@ -1,6 +1,19 @@
+import type { RoleType } from "@occ/shared";
 import { prisma } from "../db.js";
 import {
+  buildClarificationQuestions,
+  buildContextAlignment,
+  buildDesignBlueprint,
+  buildExpectedArtifacts,
+  buildIssueDiscussion,
+  buildRequirementContract,
+  buildRequirementRefinement,
+  buildSuggestedAnswers,
+  inferIssueSummary
+} from "./issue-engine.js";
+import {
   getIssueByProjectId,
+  getProductContext,
   type IssueRecord
 } from "./v1-method-store.js";
 
@@ -8,6 +21,16 @@ const DISCUSSION_SECTION_TITLE = "## 多Agent需求讨论结论";
 const ANALYSIS_SECTION_TITLE = "## 项目详情理解确认草案";
 const PREP_CONFIRM_SECTION_TITLE = "## 预备阶段用户确认";
 const REQUIRED_INPUT_NAMES = ["rawRequirements", "prd", "debateSummary"] as const;
+const PREP_DISCUSSION_ROLE_IDS: RoleType[] = [
+  "ROLE_PM",
+  "ROLE_ANALYST",
+  "ROLE_PRODUCT",
+  "ROLE_DESIGN",
+  "ROLE_ARCH",
+  "ROLE_DEV",
+  "ROLE_QA"
+];
+const PREP_SOUL_ROLE_ID: RoleType = "ROLE_ANALYST";
 
 type ProjectInputLike = {
   id?: string;
@@ -23,6 +46,18 @@ type ProjectPostCreatePrepSource = {
   projectType: string;
   issue: IssueRecord | null;
 };
+
+type PrepIssueLike = Pick<
+IssueRecord,
+| "rawInput"
+| "summary"
+| "requirementContract"
+| "discussion"
+| "discussionDraft"
+| "debate"
+| "refinement"
+| "designBlueprint"
+>;
 
 export type ProjectPostCreatePrepStatus = {
   required: boolean;
@@ -165,8 +200,35 @@ function shouldRequirePostCreatePrep(input: {
   return normalizeProjectType(input.projectType) === "complete";
 }
 
+function removeMarkdownSection(body: string, sectionTitle: string) {
+  const source = String(body || "");
+  if (!source.trim()) {
+    return "";
+  }
+  const pattern = new RegExp(`${escapeRegExp(sectionTitle)}\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)`, "i");
+  return source.replace(pattern, "").trim();
+}
+
+function stripMarkdownDecorators(source: string) {
+  return String(source || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripPrepGeneratedSections(source: string) {
+  let next = String(source || "");
+  next = removeMarkdownSection(next, DISCUSSION_SECTION_TITLE);
+  next = removeMarkdownSection(next, ANALYSIS_SECTION_TITLE);
+  next = removeMarkdownSection(next, PREP_CONFIRM_SECTION_TITLE);
+  return stripMarkdownDecorators(next);
+}
+
 function extractStructuredLines(description: string, fallback: string) {
-  const raw = String(description || "").replace(/\r/g, "\n");
+  const raw = stripMarkdownDecorators(description).replace(/\r/g, "\n");
   const chunks = raw
     .split(/\n+/)
     .flatMap((line) => line.split(/[。！？!?；;]+/))
@@ -175,94 +237,194 @@ function extractStructuredLines(description: string, fallback: string) {
   return dedupeLines(chunks.slice(0, 8), fallback);
 }
 
-function buildFallbackRequirementContractBlock(projectDescription: string) {
-  const lines = extractStructuredLines(projectDescription, "待补充业务目标");
-  const objective = lines[0] || "待补充业务目标";
-  const inScope = lines.slice(0, 3);
-  return [
-    "需求确认单:",
-    `- 目标: ${objective}`,
-    `- In Scope: ${inScope.join("；") || "待补充首期范围"}`,
-    "- Out of Scope: 非首期扩展场景、复杂运营后台、跨域系统重构。",
-    "- 验收: 主链路可运行；核心页面可交互；关键限制与风险有明确结论。",
-    "- 产出: 需求分析文档、项目排期方案、设计输入、研发实现与验收报告。"
-  ].join("\n");
+function inferRawInputFromProject(input: {
+  projectDescription: string;
+  projectInputs: ProjectInputLike[];
+}) {
+  const rawRequirements = stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "rawRequirements"));
+  const description = stripPrepGeneratedSections(input.projectDescription);
+  const prd = stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "prd"));
+  const debateSummary = stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "debateSummary"));
+  const candidates = [rawRequirements, description, prd, debateSummary]
+    .map((item) => sanitizeLine(item, ""))
+    .filter(Boolean);
+  return candidates[0] || "待补充原始需求";
 }
 
-function buildFallbackDebateConclusionSection(projectDescription: string) {
-  const lines = extractStructuredLines(projectDescription, "待补充需求上下文");
+function buildFallbackDebate(input: {
+  rawInput: string;
+  summary: string;
+  discussion: NonNullable<PrepIssueLike["discussion"]>;
+}): NonNullable<PrepIssueLike["debate"]> {
+  const lines = extractStructuredLines(input.rawInput, "待补充需求上下文");
+  const consensusFromDiscussion = (input.discussion || [])
+    .map((item) => sanitizeLine(item.proposal || "", ""))
+    .filter(Boolean);
+  const divergencesFromDiscussion = (input.discussion || [])
+    .map((item) => sanitizeLine(item.concern || "", ""))
+    .filter(Boolean);
   const consensus = dedupeLines([
-    `围绕“${lines[0] || "当前项目目标"}”收敛 MVP，先保证主链路闭环。`,
-    "先完成需求边界、交互主链路和验收标准，再推进设计与研发实施。"
+    ...consensusFromDiscussion,
+    `围绕“${lines[0] || input.summary || "当前项目目标"}”收敛 MVP，先保证主链路闭环。`
   ], "当前无结构化共识条目，需在后续阶段补充。");
   const divergences = dedupeLines([
-    "范围可能过宽，需在分析阶段明确非目标范围并冻结首期边界。",
-    "部分业务约束未显式给出，需在项目详情确认草案中补齐假设与风险。"
+    ...divergencesFromDiscussion,
+    "若边界未冻结，后续设计与研发会出现返工风险。"
   ], "当前无显式分歧项。");
-  const roleDecisions = [
-    "- 需求分析师: 先把目标、范围、约束、风险结构化，形成可执行分析稿。",
-    "- 产品经理: 在分析稿基础上明确优先级、验收标准与阶段排期。",
-    "- 项目经理: 以门禁驱动推进，未补齐讨论与回填前禁止进入正式执行页。"
-  ];
-  return [
-    DISCUSSION_SECTION_TITLE,
-    "",
-    "### 共识",
-    ...consensus.map((item) => `- ${item}`),
-    "",
-    "### 分歧与处理",
-    ...divergences.map((item) => `- ${item}`),
-    "",
-    "### 角色决策建议",
-    ...roleDecisions,
-    "",
-    "### 决策锚点",
-    `- ${lines[0] || "围绕已确认业务目标推进 MVP。"}`
-  ].join("\n");
+  const opinions = (input.discussion || []).map((item, index) => ({
+    id: item.id || `prep-opinion-${index + 1}`,
+    roleId: item.roleId,
+    roleLabel: item.roleLabel,
+    focus: item.focus,
+    concern: item.concern,
+    proposal: item.proposal,
+    provider: "issue_engine",
+    model: "heuristic",
+    elapsedMs: 0,
+    mode: "fallback" as const,
+    rawPreview: `${item.focus}\n${item.concern}\n${item.proposal}`
+  }));
+  return {
+    mode: "fallback",
+    generatedAt: new Date().toISOString(),
+    consensus,
+    divergences,
+    opinions,
+    note: "当前结论来自创建后预备阶段结构化推导。若存在已确认 Issue，将优先采用其正式讨论结果。"
+  };
 }
 
-function buildFallbackAnalysisDraftSection(projectDescription: string) {
-  const lines = extractStructuredLines(projectDescription, "待补充核心场景");
-  const inScope = dedupeLines(lines.slice(0, 3), "待补充首期范围");
-  const outOfScope = dedupeLines([
-    "非首期复杂扩展功能",
-    "与主链路无直接关联的外围能力",
-    "超出当前资源窗口的大规模重构"
-  ], "待补充非目标范围");
-  const acceptance = dedupeLines([
-    "关键用户链路可端到端执行",
-    "阶段交付物可追溯到需求与决策结论",
-    "风险与待确认项可被后续阶段持续跟踪"
-  ], "待补充验收标准");
-  const risks = dedupeLines([
-    "输入需求可能存在歧义，需在分析阶段继续澄清。",
-    "若缺少角色级决策证据，后续阶段容易回退。"
-  ], "暂无新增高风险，按阶段门禁继续验证。");
-
-  return [
-    ANALYSIS_SECTION_TITLE,
-    "",
-    `- 目标: ${lines[0] || "待补充项目目标"}`,
-    "- 设计主题: 以可执行、可验收、可交接为优先",
-    "",
-    "### 核心场景",
-    ...dedupeLines(lines.slice(0, 4), "待补充核心场景").map((item) => `- ${item}`),
-    "",
-    "### In Scope",
-    ...inScope.map((item) => `- ${item}`),
-    "",
-    "### Out of Scope",
-    ...outOfScope.map((item) => `- ${item}`),
-    "",
-    "### 验收标准",
-    ...acceptance.map((item) => `- ${item}`),
-    "",
-    "### 关键风险与待确认",
-    ...risks.map((item) => `- ${item}`)
-  ].join("\n");
+function hasMeaningfulRequirementContract(contract: PrepIssueLike["requirementContract"]) {
+  if (!contract) {
+    return false;
+  }
+  return Boolean(
+    sanitizeLine(contract.objective || "", "")
+    || (Array.isArray(contract.inScope) && contract.inScope.some((item) => sanitizeLine(item, "")))
+    || (Array.isArray(contract.acceptanceCriteria) && contract.acceptanceCriteria.some((item) => sanitizeLine(item, "")))
+  );
 }
 
-function buildRequirementContractBlock(issue: IssueRecord) {
+function hasMeaningfulRefinement(refinement: PrepIssueLike["refinement"]) {
+  if (!refinement) {
+    return false;
+  }
+  return Boolean(
+    sanitizeLine(refinement.problemStatement || "", "")
+    || sanitizeLine(refinement.expectedOutcome || "", "")
+    || (Array.isArray(refinement.inScopeDraft) && refinement.inScopeDraft.some((item) => sanitizeLine(item, "")))
+  );
+}
+
+function hasMeaningfulDesignBlueprint(designBlueprint: PrepIssueLike["designBlueprint"]) {
+  if (!designBlueprint) {
+    return false;
+  }
+  return Boolean(
+    sanitizeLine(designBlueprint.designTheme || "", "")
+    || sanitizeLine(designBlueprint.valueNarrative || "", "")
+    || (Array.isArray(designBlueprint.coreScenarios) && designBlueprint.coreScenarios.some((item) => sanitizeLine(item, "")))
+  );
+}
+
+async function buildSynthesizedPrepIssueLike(rawInput: string): Promise<PrepIssueLike> {
+  const normalizedRawInput = sanitizeLine(rawInput, "待补充原始需求");
+  const summary = sanitizeLine(inferIssueSummary(normalizedRawInput), normalizedRawInput.slice(0, 80));
+  const productContext = await getProductContext();
+  const refinement = buildRequirementRefinement(normalizedRawInput);
+  const discussion = buildIssueDiscussion(
+    normalizedRawInput,
+    PREP_DISCUSSION_ROLE_IDS,
+    PREP_SOUL_ROLE_ID,
+    { includeSoulRole: true }
+  );
+  const alignment = buildContextAlignment(normalizedRawInput, productContext);
+  const designBlueprint = buildDesignBlueprint({
+    rawInput: normalizedRawInput,
+    refinement,
+    alignment
+  });
+  const questions = buildClarificationQuestions(normalizedRawInput);
+  const suggestedAnswers = buildSuggestedAnswers({
+    rawInput: normalizedRawInput,
+    questions,
+    refinement,
+    alignment,
+    discussion
+  });
+  const requirementContract = buildRequirementContract({
+    suggestedAnswers,
+    refinement,
+    designBlueprint,
+    expectedArtifacts: buildExpectedArtifacts("standard_software_development")
+  });
+
+  return {
+    rawInput: normalizedRawInput,
+    summary,
+    refinement,
+    designBlueprint,
+    requirementContract,
+    discussion,
+    discussionDraft: discussion,
+    debate: buildFallbackDebate({
+      rawInput: normalizedRawInput,
+      summary,
+      discussion
+    })
+  };
+}
+
+async function resolvePrepIssueLike(input: {
+  issue: IssueRecord | null;
+  projectDescription: string;
+  projectInputs: ProjectInputLike[];
+}) {
+  const inferredRawInput = inferRawInputFromProject({
+    projectDescription: input.projectDescription,
+    projectInputs: input.projectInputs
+  });
+  const synthesized = await buildSynthesizedPrepIssueLike(inferredRawInput);
+  if (!input.issue) {
+    return synthesized;
+  }
+
+  const discussion = Array.isArray(input.issue.discussion) && input.issue.discussion.length > 0
+    ? input.issue.discussion
+    : (Array.isArray(input.issue.discussionDraft) && input.issue.discussionDraft.length > 0
+      ? input.issue.discussionDraft
+      : synthesized.discussion);
+  const hasIssueDebate = Boolean(
+    input.issue.debate
+    && (
+      input.issue.debate.consensus.length > 0
+      || input.issue.debate.divergences.length > 0
+      || input.issue.debate.opinions.length > 0
+    )
+  );
+
+  return {
+    ...synthesized,
+    rawInput: sanitizeLine(input.issue.rawInput || inferredRawInput, inferredRawInput),
+    summary: sanitizeLine(input.issue.summary || synthesized.summary, synthesized.summary),
+    requirementContract: hasMeaningfulRequirementContract(input.issue.requirementContract)
+      ? input.issue.requirementContract
+      : synthesized.requirementContract,
+    refinement: hasMeaningfulRefinement(input.issue.refinement)
+      ? input.issue.refinement
+      : synthesized.refinement,
+    designBlueprint: hasMeaningfulDesignBlueprint(input.issue.designBlueprint)
+      ? input.issue.designBlueprint
+      : synthesized.designBlueprint,
+    discussion,
+    discussionDraft: Array.isArray(input.issue.discussionDraft) && input.issue.discussionDraft.length > 0
+      ? input.issue.discussionDraft
+      : discussion,
+    debate: hasIssueDebate ? input.issue.debate : synthesized.debate
+  } satisfies PrepIssueLike;
+}
+
+function buildRequirementContractBlock(issue: PrepIssueLike) {
   const contract = issue.requirementContract;
   return [
     "需求确认单:",
@@ -274,7 +436,7 @@ function buildRequirementContractBlock(issue: IssueRecord) {
   ].join("\n");
 }
 
-function buildDebateConclusionSection(issue: IssueRecord) {
+function buildDebateConclusionSection(issue: PrepIssueLike) {
   const discussion = Array.isArray(issue.discussion) ? issue.discussion : [];
   const opinions = Array.isArray(issue.debate?.opinions) ? issue.debate.opinions : [];
   const consensus = dedupeLines(issue.debate?.consensus || [], "当前无结构化共识条目，需在后续阶段补充。");
@@ -306,7 +468,7 @@ function buildDebateConclusionSection(issue: IssueRecord) {
   ].join("\n");
 }
 
-function buildAnalysisDraftSection(issue: IssueRecord) {
+function buildAnalysisDraftSection(issue: PrepIssueLike) {
   const refinement = issue.refinement;
   const designBlueprint = issue.designBlueprint;
   const objective = sanitizeLine(issue.requirementContract?.objective || issue.summary || issue.rawInput, "待补充项目目标");
@@ -339,7 +501,7 @@ function buildAnalysisDraftSection(issue: IssueRecord) {
   ].join("\n");
 }
 
-function buildSeededInputs(issue: IssueRecord, blocks: {
+function buildSeededInputs(issue: PrepIssueLike, blocks: {
   debate: string;
   analysis: string;
   requirement: string;
@@ -481,10 +643,16 @@ export async function runProjectPostCreatePrep(input: {
   issue?: IssueRecord | null;
   triggeredBy?: string;
 }) {
-  const project = await prisma.project.findUnique({
-    where: { id: input.projectId },
-    select: { id: true, description: true, projectType: true }
-  });
+  const [project, projectInputs] = await Promise.all([
+    prisma.project.findUnique({
+      where: { id: input.projectId },
+      select: { id: true, description: true, projectType: true }
+    }),
+    prisma.projectInput.findMany({
+      where: { projectId: input.projectId },
+      select: { id: true, name: true, content: true, description: true, inputSource: true }
+    })
+  ]);
   if (!project) {
     throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
   }
@@ -506,32 +674,22 @@ export async function runProjectPostCreatePrep(input: {
     } satisfies ProjectPostCreatePrepStatus;
   }
 
-  const requirementBlock = source.issue && source.issue.status === "confirmed"
-    ? buildRequirementContractBlock(source.issue)
-    : buildFallbackRequirementContractBlock(source.projectDescription);
-  const debateBlock = source.issue && source.issue.status === "confirmed"
-    ? buildDebateConclusionSection(source.issue)
-    : buildFallbackDebateConclusionSection(source.projectDescription);
-  const analysisBlock = source.issue && source.issue.status === "confirmed"
-    ? buildAnalysisDraftSection(source.issue)
-    : buildFallbackAnalysisDraftSection(source.projectDescription);
+  const prepIssueLike = await resolvePrepIssueLike({
+    issue: source.issue,
+    projectDescription: source.projectDescription,
+    projectInputs
+  });
+  const requirementBlock = buildRequirementContractBlock(prepIssueLike);
+  const debateBlock = buildDebateConclusionSection(prepIssueLike);
+  const analysisBlock = buildAnalysisDraftSection(prepIssueLike);
   let nextDescription = ensureSection(String(project.description || ""), debateBlock, DISCUSSION_SECTION_TITLE);
   nextDescription = ensureSection(nextDescription, analysisBlock, ANALYSIS_SECTION_TITLE);
 
-  const seededInputs = source.issue && source.issue.status === "confirmed"
-    ? buildSeededInputs(source.issue, {
-      debate: debateBlock,
-      analysis: analysisBlock,
-      requirement: requirementBlock
-    })
-    : buildSeededInputsFromRawInput({
-      rawInput: source.projectDescription,
-      blocks: {
-        debate: debateBlock,
-        analysis: analysisBlock,
-        requirement: requirementBlock
-      }
-    });
+  const seededInputs = buildSeededInputs(prepIssueLike, {
+    debate: debateBlock,
+    analysis: analysisBlock,
+    requirement: requirementBlock
+  });
 
   const now = new Date();
   await prisma.$transaction(async (tx) => {
