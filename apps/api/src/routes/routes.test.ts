@@ -442,6 +442,7 @@ describe("Error Matrix: auth + projects", () => {
       assert.ok(inputNames.includes("rawRequirements"));
       assert.ok(inputNames.includes("prd"));
       assert.ok(inputNames.includes("debateSummary"));
+      assert.ok(inputNames.includes("prepDiscussionTrace"));
       assert.ok(
         Array.isArray(afterDetail.body?.requiredActions)
           && !afterDetail.body.requiredActions.some((item: { action?: string }) => item.action === "run_post_create_prep")
@@ -521,11 +522,14 @@ describe("Error Matrix: auth + projects", () => {
       const rawRequirements = String(inputMap.get("rawRequirements") || "");
       const prd = String(inputMap.get("prd") || "");
       const debateSummary = String(inputMap.get("debateSummary") || "");
+      const discussionTrace = String(inputMap.get("prepDiscussionTrace") || "");
       assert.ok(rawRequirements.length > 20);
       assert.ok(prd.length > 20);
       assert.ok(debateSummary.length > 20);
+      assert.ok(discussionTrace.length > 20);
       assert.match(rawRequirements, /TikTok|亚马逊/i);
       assert.match(debateSummary, /共识|角色决策建议/);
+      assert.match(discussionTrace, /讨论回合记录|ROLE_/);
     });
   });
 
