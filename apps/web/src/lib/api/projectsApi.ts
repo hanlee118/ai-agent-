@@ -248,6 +248,7 @@ export type ProjectPostCreatePrep = {
     rawRequirements: string;
     prd: string;
     debateSummary: string;
+    discussionTrace: string;
     confirmed: boolean;
     confirmedBy?: string;
     confirmedAt?: string;
@@ -581,6 +582,7 @@ export const projectsApi = {
     rawRequirements?: string;
     prd?: string;
     debateSummary?: string;
+    discussionTrace?: string;
   }) {
     return request<{
       success: boolean;
@@ -601,6 +603,7 @@ export const projectsApi = {
     rawRequirements?: string;
     prd?: string;
     debateSummary?: string;
+    discussionTrace?: string;
     confirmedBy?: string;
     notes?: string;
   }) {

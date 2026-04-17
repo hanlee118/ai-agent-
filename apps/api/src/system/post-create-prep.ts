@@ -1,5 +1,6 @@
 import type { RoleType } from "@occ/shared";
 import { prisma } from "../db.js";
+import { getRuntimeStatus } from "../agents/runtime.js";
 import {
   buildClarificationQuestions,
   buildContextAlignment,
@@ -9,8 +10,12 @@ import {
   buildRequirementContract,
   buildRequirementRefinement,
   buildSuggestedAnswers,
-  inferIssueSummary
+  detectIndustry,
+  inferIssueTitle,
+  inferIssueSummary,
+  synthesizeIssueArtifactsFromDebate
 } from "./issue-engine.js";
+import { buildIssueRoleDebate } from "./issue-debate.js";
 import {
   getIssueByProjectId,
   getProductContext,
@@ -21,6 +26,7 @@ const DISCUSSION_SECTION_TITLE = "## 多Agent需求讨论结论";
 const ANALYSIS_SECTION_TITLE = "## 项目详情理解确认草案";
 const PREP_CONFIRM_SECTION_TITLE = "## 预备阶段用户确认";
 const REQUIRED_INPUT_NAMES = ["rawRequirements", "prd", "debateSummary"] as const;
+const PREP_DISCUSSION_TRACE_INPUT_NAME = "prepDiscussionTrace";
 const PREP_DISCUSSION_ROLE_IDS: RoleType[] = [
   "ROLE_PM",
   "ROLE_ANALYST",
@@ -38,6 +44,7 @@ type ProjectInputLike = {
   content?: string | null;
   description?: string | null;
   inputSource?: string | null;
+  updatedAt?: Date | string | null;
 };
 
 type ProjectPostCreatePrepSource = {
@@ -69,6 +76,7 @@ export type ProjectPostCreatePrepStatus = {
     rawRequirements: string;
     prd: string;
     debateSummary: string;
+    discussionTrace: string;
     confirmed: boolean;
     confirmedBy?: string;
     confirmedAt?: string;
@@ -159,9 +167,49 @@ function buildPrepConfirmationSection(input: {
   ].join("\n");
 }
 
-function getInputContentByName(projectInputs: ProjectInputLike[], inputName: string) {
+function getInputSourcePriority(source: string | null | undefined) {
+  const normalized = String(source || "").trim().toLowerCase();
+  if (normalized === "manual") {
+    return 3;
+  }
+  if (normalized === "imported_from_project") {
+    return 2;
+  }
+  if (normalized === "template_generated") {
+    return 1;
+  }
+  return 0;
+}
+
+function toTimestamp(value: Date | string | null | undefined) {
+  if (value instanceof Date) {
+    return value.getTime();
+  }
+  const parsed = Date.parse(String(value || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function pickBestProjectInputByName(projectInputs: ProjectInputLike[], inputName: string) {
   const key = normalizeKey(inputName);
-  const target = projectInputs.find((item) => normalizeKey(item.name) === key);
+  const candidates = projectInputs.filter((item) => normalizeKey(item.name) === key);
+  if (candidates.length <= 0) {
+    return undefined;
+  }
+  return [...candidates].sort((left, right) => {
+    const sourceDelta = getInputSourcePriority(right.inputSource) - getInputSourcePriority(left.inputSource);
+    if (sourceDelta !== 0) {
+      return sourceDelta;
+    }
+    const contentDelta = Number(Boolean(String(right.content || "").trim())) - Number(Boolean(String(left.content || "").trim()));
+    if (contentDelta !== 0) {
+      return contentDelta;
+    }
+    return toTimestamp(right.updatedAt) - toTimestamp(left.updatedAt);
+  })[0];
+}
+
+function getInputContentByName(projectInputs: ProjectInputLike[], inputName: string) {
+  const target = pickBestProjectInputByName(projectInputs, inputName);
   return String(target?.content || "").trim();
 }
 
@@ -178,6 +226,7 @@ function buildPrepDraftSnapshot(input: {
     rawRequirements: getInputContentByName(input.projectInputs, "rawRequirements"),
     prd: getInputContentByName(input.projectInputs, "prd"),
     debateSummary: getInputContentByName(input.projectInputs, "debateSummary"),
+    discussionTrace: getInputContentByName(input.projectInputs, PREP_DISCUSSION_TRACE_INPUT_NAME),
     ...confirmation
   };
 }
@@ -227,6 +276,13 @@ function stripPrepGeneratedSections(source: string) {
   return stripMarkdownDecorators(next);
 }
 
+function normalizeRawInputSeed(source: string) {
+  return String(source || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/^\s*((rawrequirements|prd|debatesummary|prepdiscussiontrace)\s*[:：]?\s*)+/i, "")
+    .trim();
+}
+
 function extractStructuredLines(description: string, fallback: string) {
   const raw = stripMarkdownDecorators(description).replace(/\r/g, "\n");
   const chunks = raw
@@ -241,14 +297,59 @@ function inferRawInputFromProject(input: {
   projectDescription: string;
   projectInputs: ProjectInputLike[];
 }) {
-  const rawRequirements = stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "rawRequirements"));
-  const description = stripPrepGeneratedSections(input.projectDescription);
-  const prd = stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "prd"));
-  const debateSummary = stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "debateSummary"));
+  const rawRequirements = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "rawRequirements")));
+  const description = normalizeRawInputSeed(stripPrepGeneratedSections(input.projectDescription));
+  const prd = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "prd")));
+  const debateSummary = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "debateSummary")));
   const candidates = [rawRequirements, description, prd, debateSummary]
     .map((item) => sanitizeLine(item, ""))
     .filter(Boolean);
   return candidates[0] || "待补充原始需求";
+}
+
+function normalizeIntentSeed(source: string) {
+  return String(source || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^\p{L}\p{N}\p{Script=Han}]+/gu, "")
+    .trim();
+}
+
+function intentBigrams(source: string) {
+  const normalized = normalizeIntentSeed(source);
+  if (normalized.length <= 1) {
+    return normalized ? [normalized] : [];
+  }
+  const grams: string[] = [];
+  for (let index = 0; index < normalized.length - 1; index += 1) {
+    grams.push(normalized.slice(index, index + 2));
+  }
+  return Array.from(new Set(grams));
+}
+
+function isLikelySameIntent(left: string, right: string) {
+  const a = normalizeIntentSeed(left);
+  const b = normalizeIntentSeed(right);
+  if (!a || !b) {
+    return false;
+  }
+  if (Math.min(a.length, b.length) >= 16 && (a.includes(b) || b.includes(a))) {
+    return true;
+  }
+  const aGrams = intentBigrams(a);
+  const bGrams = intentBigrams(b);
+  if (aGrams.length <= 0 || bGrams.length <= 0) {
+    return false;
+  }
+  const bSet = new Set(bGrams);
+  let intersection = 0;
+  for (const gram of aGrams) {
+    if (bSet.has(gram)) {
+      intersection += 1;
+    }
+  }
+  const union = new Set([...aGrams, ...bGrams]).size;
+  return union > 0 ? (intersection / union) >= 0.35 : false;
 }
 
 function buildFallbackDebate(input: {
@@ -294,6 +395,41 @@ function buildFallbackDebate(input: {
   };
 }
 
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`PREP_DISCUSSION_TIMEOUT:${label}:${timeoutMs}ms`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function toDiscussionFromDebate(
+  debate: PrepIssueLike["debate"] | null | undefined,
+  fallback: NonNullable<PrepIssueLike["discussion"]>
+) {
+  if (!debate || !Array.isArray(debate.opinions) || debate.opinions.length <= 0) {
+    return fallback;
+  }
+  return debate.opinions.map((item, index) => ({
+    id: sanitizeLine(item.id || `prep-debate-opinion-${index + 1}`, `prep-debate-opinion-${index + 1}`),
+    roleId: item.roleId as RoleType,
+    roleLabel: sanitizeLine(item.roleLabel || item.roleId || "未知角色", "未知角色"),
+    focus: sanitizeLine(item.focus || "", "待补充"),
+    concern: sanitizeLine(item.concern || "", "待补充"),
+    proposal: sanitizeLine(item.proposal || "", "待补充")
+  }));
+}
+
 function hasMeaningfulRequirementContract(contract: PrepIssueLike["requirementContract"]) {
   if (!contract) {
     return false;
@@ -331,8 +467,9 @@ async function buildSynthesizedPrepIssueLike(rawInput: string): Promise<PrepIssu
   const normalizedRawInput = sanitizeLine(rawInput, "待补充原始需求");
   const summary = sanitizeLine(inferIssueSummary(normalizedRawInput), normalizedRawInput.slice(0, 80));
   const productContext = await getProductContext();
+  const industryCode = sanitizeLine(detectIndustry(normalizedRawInput), "") || "saas";
   const refinement = buildRequirementRefinement(normalizedRawInput);
-  const discussion = buildIssueDiscussion(
+  const fallbackDiscussion = buildIssueDiscussion(
     normalizedRawInput,
     PREP_DISCUSSION_ROLE_IDS,
     PREP_SOUL_ROLE_ID,
@@ -350,7 +487,8 @@ async function buildSynthesizedPrepIssueLike(rawInput: string): Promise<PrepIssu
     questions,
     refinement,
     alignment,
-    discussion
+    industryCode,
+    discussion: fallbackDiscussion
   });
   const requirementContract = buildRequirementContract({
     suggestedAnswers,
@@ -358,20 +496,87 @@ async function buildSynthesizedPrepIssueLike(rawInput: string): Promise<PrepIssu
     designBlueprint,
     expectedArtifacts: buildExpectedArtifacts("standard_software_development")
   });
+  const fallbackDebate = buildFallbackDebate({
+    rawInput: normalizedRawInput,
+    summary,
+    discussion: fallbackDiscussion
+  });
+
+  let debate = fallbackDebate;
+  let discussion: NonNullable<PrepIssueLike["discussion"]> = fallbackDiscussion;
+  let synthesizedSummary = summary;
+  let synthesizedRefinement = refinement;
+  let synthesizedDesignBlueprint = designBlueprint;
+  let synthesizedRequirementContract = requirementContract;
+  const runtime = await getRuntimeStatus();
+  const shouldRunModelDebate = String(runtime.mode || "").trim().toLowerCase() !== "scripted"
+    && String(process.env.NODE_ENV || "").trim().toLowerCase() !== "test";
+  const debateTimeoutMs = Math.max(8_000, Number(process.env.PREP_DISCUSSION_DEBATE_TIMEOUT_MS ?? 95_000));
+
+  if (shouldRunModelDebate) {
+    try {
+      const debateResult = await withTimeout(
+        buildIssueRoleDebate({
+          input: normalizedRawInput,
+          title: inferIssueTitle(normalizedRawInput),
+          summary,
+          recommendedRoleIds: PREP_DISCUSSION_ROLE_IDS,
+          soulRoleId: PREP_SOUL_ROLE_ID,
+          industryCode
+        }),
+        debateTimeoutMs,
+        "pre_stage_model_debate"
+      );
+      debate = debateResult;
+      discussion = toDiscussionFromDebate(debateResult, fallbackDiscussion);
+      if (debateResult.mode === "model") {
+        const synthesized = synthesizeIssueArtifactsFromDebate({
+          rawInput: normalizedRawInput,
+          productContext,
+          industryCode,
+          questions,
+          expectedArtifacts: buildExpectedArtifacts("standard_software_development"),
+          draft: {
+            summary,
+            refinement,
+            contextAlignment: alignment,
+            designBlueprint,
+            suggestedAnswers,
+            requirementContract
+          },
+          debate: debateResult
+        });
+        synthesizedSummary = sanitizeLine(synthesized.summary || summary, summary);
+        synthesizedRefinement = synthesized.refinement || refinement;
+        synthesizedDesignBlueprint = synthesized.designBlueprint || designBlueprint;
+        synthesizedRequirementContract = synthesized.requirementContract || requirementContract;
+      }
+    } catch (error) {
+      const reason = sanitizeLine(error instanceof Error ? error.message : String(error || "unknown_error"), "");
+      debate = {
+        ...fallbackDebate,
+        note: reason
+          ? `${fallbackDebate.note || ""} 模型讨论调用失败，已自动降级。原因: ${reason}`.trim()
+          : fallbackDebate.note
+      };
+      discussion = fallbackDiscussion;
+    }
+  } else {
+    debate = {
+      ...fallbackDebate,
+      note: `${fallbackDebate.note || ""} 当前运行模式为 ${sanitizeLine(String(runtime.mode || "unknown"), "unknown")}，未触发真实模型讨论。`.trim()
+    };
+  }
 
   return {
     rawInput: normalizedRawInput,
-    summary,
-    refinement,
-    designBlueprint,
-    requirementContract,
+    summary: synthesizedSummary,
+    refinement: synthesizedRefinement,
+    designBlueprint: synthesizedDesignBlueprint,
+    requirementContract: synthesizedRequirementContract,
     discussion,
-    discussionDraft: discussion,
-    debate: buildFallbackDebate({
-      rawInput: normalizedRawInput,
-      summary,
-      discussion
-    })
+    discussionDraft: fallbackDiscussion,
+    debate
   };
 }
 
@@ -389,38 +594,61 @@ async function resolvePrepIssueLike(input: {
     return synthesized;
   }
 
-  const discussion = Array.isArray(input.issue.discussion) && input.issue.discussion.length > 0
-    ? input.issue.discussion
-    : (Array.isArray(input.issue.discussionDraft) && input.issue.discussionDraft.length > 0
-      ? input.issue.discussionDraft
-      : synthesized.discussion);
+  const issueConfirmed = String(input.issue.status || "").trim().toLowerCase() === "confirmed";
   const hasIssueDebate = Boolean(
-    input.issue.debate
+    issueConfirmed
+    && input.issue.debate
     && (
       input.issue.debate.consensus.length > 0
       || input.issue.debate.divergences.length > 0
       || input.issue.debate.opinions.length > 0
     )
   );
+  const hasIssueModelDebate = Boolean(
+    hasIssueDebate
+    && String(input.issue.debate?.mode || "").trim().toLowerCase() === "model"
+  );
+  const normalizedIssueRawInput = normalizeRawInputSeed(
+    stripPrepGeneratedSections(String(input.issue.rawInput || ""))
+  );
+  const issueVsCurrentAligned = isLikelySameIntent(
+    normalizedIssueRawInput || String(input.issue.summary || ""),
+    inferredRawInput
+  );
+  const shouldReuseIssueArtifacts = issueConfirmed && hasIssueModelDebate && issueVsCurrentAligned;
+  const synthesizedDiscussion = (Array.isArray(synthesized.discussion) ? synthesized.discussion : []) as NonNullable<PrepIssueLike["discussion"]>;
+  const issueDiscussionFallback: NonNullable<PrepIssueLike["discussion"]> = Array.isArray(input.issue.discussion) && input.issue.discussion.length > 0
+    ? input.issue.discussion
+    : (Array.isArray(input.issue.discussionDraft) && input.issue.discussionDraft.length > 0
+      ? input.issue.discussionDraft
+      : synthesizedDiscussion);
+  const effectiveDebate = shouldReuseIssueArtifacts ? input.issue.debate : synthesized.debate;
+  const discussion = shouldReuseIssueArtifacts
+    ? toDiscussionFromDebate(effectiveDebate, issueDiscussionFallback)
+    : synthesizedDiscussion;
+  const effectiveIssueRawInput = sanitizeLine(normalizedIssueRawInput || inferredRawInput, inferredRawInput);
+  const hasIssueDebateDiscussionDraft = shouldReuseIssueArtifacts && Array.isArray(input.issue.discussionDraft) && input.issue.discussionDraft.length > 0;
 
   return {
     ...synthesized,
-    rawInput: sanitizeLine(input.issue.rawInput || inferredRawInput, inferredRawInput),
-    summary: sanitizeLine(input.issue.summary || synthesized.summary, synthesized.summary),
-    requirementContract: hasMeaningfulRequirementContract(input.issue.requirementContract)
+    rawInput: shouldReuseIssueArtifacts ? effectiveIssueRawInput : synthesized.rawInput,
+    summary: shouldReuseIssueArtifacts
+      ? sanitizeLine(input.issue.summary || synthesized.summary, synthesized.summary)
+      : synthesized.summary,
+    requirementContract: shouldReuseIssueArtifacts && hasMeaningfulRequirementContract(input.issue.requirementContract)
       ? input.issue.requirementContract
       : synthesized.requirementContract,
-    refinement: hasMeaningfulRefinement(input.issue.refinement)
+    refinement: shouldReuseIssueArtifacts && hasMeaningfulRefinement(input.issue.refinement)
       ? input.issue.refinement
       : synthesized.refinement,
-    designBlueprint: hasMeaningfulDesignBlueprint(input.issue.designBlueprint)
+    designBlueprint: shouldReuseIssueArtifacts && hasMeaningfulDesignBlueprint(input.issue.designBlueprint)
       ? input.issue.designBlueprint
       : synthesized.designBlueprint,
     discussion,
-    discussionDraft: Array.isArray(input.issue.discussionDraft) && input.issue.discussionDraft.length > 0
+    discussionDraft: hasIssueDebateDiscussionDraft
       ? input.issue.discussionDraft
       : discussion,
-    debate: hasIssueDebate ? input.issue.debate : synthesized.debate
+    debate: effectiveDebate
   } satisfies PrepIssueLike;
 }
 
@@ -447,9 +675,10 @@ function buildDebateConclusionSection(issue: PrepIssueLike) {
   const roleDecisionsFromOpinions = opinions
     .map((item) => `- ${sanitizeLine(item.roleLabel || item.roleId || "未知角色")}: ${sanitizeLine(item.proposal || item.concern || "", "待补充")}`)
     .filter(Boolean);
-  const roleDecisions = roleDecisionsFromDiscussion.length > 0
-    ? roleDecisionsFromDiscussion
-    : roleDecisionsFromOpinions;
+  const preferOpinionDecisions = String(issue.debate?.mode || "").trim().toLowerCase() === "model";
+  const roleDecisions = preferOpinionDecisions
+    ? (roleDecisionsFromOpinions.length > 0 ? roleDecisionsFromOpinions : roleDecisionsFromDiscussion)
+    : (roleDecisionsFromDiscussion.length > 0 ? roleDecisionsFromDiscussion : roleDecisionsFromOpinions);
 
   return [
     DISCUSSION_SECTION_TITLE,
@@ -501,10 +730,69 @@ function buildAnalysisDraftSection(issue: PrepIssueLike) {
   ].join("\n");
 }
 
+function buildDiscussionTraceInput(input: {
+  issue: PrepIssueLike;
+  triggeredBy?: string;
+  generatedAt?: Date;
+}) {
+  const generatedAt = (input.generatedAt || new Date()).toISOString();
+  const triggeredBy = sanitizeLine(input.triggeredBy || "projects_route_manual_trigger", "projects_route_manual_trigger");
+  const discussion = Array.isArray(input.issue.discussion) ? input.issue.discussion : [];
+  const opinions = Array.isArray(input.issue.debate?.opinions) ? input.issue.debate.opinions : [];
+  const opinionByRole = new Map<string, typeof opinions[number]>();
+  for (const opinion of opinions) {
+    const key = String(opinion.roleId || "").trim();
+    if (!key || opinionByRole.has(key)) {
+      continue;
+    }
+    opinionByRole.set(key, opinion);
+  }
+
+  const discussionBlocks = discussion.map((item, index) => {
+    const roleId = sanitizeLine(item.roleId || "ROLE_ANALYST", "ROLE_ANALYST");
+    const roleLabel = sanitizeLine(item.roleLabel || roleId, roleId);
+    const opinion = opinionByRole.get(roleId);
+    const mode = sanitizeLine(String((opinion as { mode?: string } | undefined)?.mode || "fallback"), "fallback");
+    const model = sanitizeLine(String((opinion as { model?: string } | undefined)?.model || "heuristic"), "heuristic");
+    const provider = sanitizeLine(String((opinion as { provider?: string } | undefined)?.provider || "issue_engine"), "issue_engine");
+    const elapsedMsRaw = Number((opinion as { elapsedMs?: number } | undefined)?.elapsedMs);
+    const elapsedMs = Number.isFinite(elapsedMsRaw) ? `${Math.max(0, Math.round(elapsedMsRaw))}` : "0";
+    return [
+      `### ${index + 1}. ${roleLabel} (${roleId})`,
+      `- 关注: ${sanitizeLine(item.focus || "", "待补充")}`,
+      `- 风险: ${sanitizeLine(item.concern || "", "待补充")}`,
+      `- 建议: ${sanitizeLine(item.proposal || "", "待补充")}`,
+      `- 模式: ${mode}`,
+      `- 模型: ${model}`,
+      `- Provider: ${provider}`,
+      `- 耗时(ms): ${elapsedMs}`
+    ].join("\n");
+  });
+
+  return [
+    `# ${PREP_DISCUSSION_TRACE_INPUT_NAME}`,
+    "",
+    `- generatedAt: ${generatedAt}`,
+    `- triggeredBy: ${triggeredBy}`,
+    "- phase: pre_stage_multi_agent_debate",
+    `- debateMode: ${sanitizeLine(String(input.issue.debate?.mode || "fallback"), "fallback")}`,
+    `- debateNote: ${sanitizeLine(String(input.issue.debate?.note || "无"), "无")}`,
+    "- backfillTargets: rawRequirements, prd, debateSummary",
+    `- sourceRawInput: ${sanitizeLine(input.issue.rawInput || "", "待补充原始需求")}`,
+    `- sourceObjective: ${sanitizeLine(input.issue.requirementContract?.objective || input.issue.summary || "", "待补充目标")}`,
+    "",
+    "## 讨论回合记录",
+    ...(discussionBlocks.length > 0
+      ? discussionBlocks
+      : ["### 1. 系统 (ROLE_ANALYST)\n- 关注: 待补充\n- 风险: 待补充\n- 建议: 待补充\n- 模式: fallback\n- 模型: heuristic\n- Provider: issue_engine\n- 耗时(ms): 0"]),
+  ].join("\n");
+}
+
 function buildSeededInputs(issue: PrepIssueLike, blocks: {
   debate: string;
   analysis: string;
   requirement: string;
+  trace: string;
 }) {
   return buildSeededInputsFromRawInput({
     rawInput: sanitizeLine(issue.rawInput, "待补充原始需求"),
@@ -518,6 +806,7 @@ function buildSeededInputsFromRawInput(input: {
     debate: string;
     analysis: string;
     requirement: string;
+    trace: string;
   };
 }) {
   const rawRequirementsContent = [
@@ -543,6 +832,7 @@ function buildSeededInputsFromRawInput(input: {
     "",
     input.blocks.debate
   ].join("\n");
+  const discussionTraceContent = String(input.blocks.trace || "").trim();
   return [
     {
       name: "rawRequirements",
@@ -561,19 +851,14 @@ function buildSeededInputsFromRawInput(input: {
       type: "document",
       description: "项目创建后自动生成：多Agent讨论结论摘要",
       content: debateSummaryContent
+    },
+    {
+      name: PREP_DISCUSSION_TRACE_INPUT_NAME,
+      type: "document",
+      description: "项目创建后自动生成：多Agent讨论回合日志（用于预备阶段展示与审阅）",
+      content: discussionTraceContent
     }
   ] as const;
-}
-
-function ensureSection(description: string, sectionContent: string, sectionTitle: string) {
-  const source = String(description || "").trim();
-  if (source.includes(sectionTitle)) {
-    return source;
-  }
-  if (!source) {
-    return sectionContent;
-  }
-  return `${source}\n\n${sectionContent}`;
 }
 
 export async function evaluateProjectPostCreatePrepStatus(input: {
@@ -682,13 +967,27 @@ export async function runProjectPostCreatePrep(input: {
   const requirementBlock = buildRequirementContractBlock(prepIssueLike);
   const debateBlock = buildDebateConclusionSection(prepIssueLike);
   const analysisBlock = buildAnalysisDraftSection(prepIssueLike);
-  let nextDescription = ensureSection(String(project.description || ""), debateBlock, DISCUSSION_SECTION_TITLE);
-  nextDescription = ensureSection(nextDescription, analysisBlock, ANALYSIS_SECTION_TITLE);
+  const discussionTraceBlock = buildDiscussionTraceInput({
+    issue: prepIssueLike,
+    triggeredBy: input.triggeredBy,
+    generatedAt: new Date()
+  });
+  let nextDescription = upsertMarkdownSection(
+    String(project.description || ""),
+    DISCUSSION_SECTION_TITLE,
+    extractMarkdownSection(debateBlock, DISCUSSION_SECTION_TITLE)
+  );
+  nextDescription = upsertMarkdownSection(
+    nextDescription,
+    ANALYSIS_SECTION_TITLE,
+    extractMarkdownSection(analysisBlock, ANALYSIS_SECTION_TITLE)
+  );
 
   const seededInputs = buildSeededInputs(prepIssueLike, {
     debate: debateBlock,
     analysis: analysisBlock,
-    requirement: requirementBlock
+    requirement: requirementBlock,
+    trace: discussionTraceBlock
   });
 
   const now = new Date();
@@ -771,6 +1070,7 @@ export async function saveProjectPostCreatePrepDraft(input: {
     rawRequirements?: string;
     prd?: string;
     debateSummary?: string;
+    discussionTrace?: string;
   };
   triggeredBy?: string;
 }) {
@@ -799,7 +1099,8 @@ export async function saveProjectPostCreatePrepDraft(input: {
   const hasRawRequirements = typeof draftInput.rawRequirements === "string";
   const hasPrd = typeof draftInput.prd === "string";
   const hasDebateSummary = typeof draftInput.debateSummary === "string";
-  if (!hasDiscussion && !hasAnalysis && !hasRawRequirements && !hasPrd && !hasDebateSummary) {
+  const hasDiscussionTrace = typeof draftInput.discussionTrace === "string";
+  if (!hasDiscussion && !hasAnalysis && !hasRawRequirements && !hasPrd && !hasDebateSummary && !hasDiscussionTrace) {
     return evaluateProjectPostCreatePrepStatus({
       projectId: project.id,
       description: project.description,
@@ -841,7 +1142,10 @@ export async function saveProjectPostCreatePrepDraft(input: {
       });
     }
 
-    const upsertInputContent = async (name: "rawRequirements" | "prd" | "debateSummary", content: string | undefined) => {
+    const upsertInputContent = async (
+      name: "rawRequirements" | "prd" | "debateSummary" | typeof PREP_DISCUSSION_TRACE_INPUT_NAME,
+      content: string | undefined
+    ) => {
       if (typeof content !== "string") {
         return;
       }
@@ -879,6 +1183,7 @@ export async function saveProjectPostCreatePrepDraft(input: {
     await upsertInputContent("rawRequirements", draftInput.rawRequirements);
     await upsertInputContent("prd", draftInput.prd);
     await upsertInputContent("debateSummary", draftInput.debateSummary);
+    await upsertInputContent(PREP_DISCUSSION_TRACE_INPUT_NAME, draftInput.discussionTrace);
   });
 
   return evaluateProjectPostCreatePrepStatus({
@@ -898,6 +1203,7 @@ export async function confirmProjectPostCreatePrep(input: {
     rawRequirements?: string;
     prd?: string;
     debateSummary?: string;
+    discussionTrace?: string;
   };
 }) {
   if (input.draft) {

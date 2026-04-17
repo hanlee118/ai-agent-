@@ -56,6 +56,7 @@ type ProjectDetailResponse = ProjectDetail & {
       rawRequirements: string;
       prd: string;
       debateSummary: string;
+      discussionTrace: string;
       confirmed: boolean;
       confirmedBy?: string;
       confirmedAt?: string;
@@ -155,9 +156,41 @@ type PrepRequirementContractView = {
   artifacts: string[];
 };
 
+type PrepDiscussionTraceItem = {
+  roleId: string;
+  roleLabel: string;
+  focus: string;
+  concern: string;
+  proposal: string;
+  mode: string;
+  model: string;
+  provider: string;
+  elapsedMs: string;
+};
+
+type PrepDiscussionTraceView = {
+  generatedAt: string;
+  triggeredBy: string;
+  debateMode: string;
+  debateNote: string;
+  backfillTargets: string;
+  sourceRawInput: string;
+  sourceObjective: string;
+  items: PrepDiscussionTraceItem[];
+};
+
 const DEFAULT_REVIEWER = '视觉设计总监';
 const DEFAULT_UX_ITEMS = ['主路径优先', '关键反馈及时', '降低认知负担'];
 const DEFAULT_A11Y_ITEMS = ['文本对比度达标', '键盘可达', '语义结构完整'];
+const PREP_DISCUSSION_AGENT_ORDER = [
+  'ROLE_ANALYST',
+  'ROLE_PRODUCT',
+  'ROLE_DESIGN',
+  'ROLE_ARCH',
+  'ROLE_DEV',
+  'ROLE_QA',
+  'ROLE_PM',
+];
 
 const createDefaultDesignReviewForm = (): ProjectRoomDesignReviewForm => ({
   visualDirection: '',
@@ -307,6 +340,62 @@ const parsePrepDiscussionView = (source: string): PrepDiscussionView => {
     divergences,
     roleDecisions,
     anchor: anchorRaw[0] || '',
+  };
+};
+
+const parsePrepDiscussionTraceView = (source: string): PrepDiscussionTraceView => {
+  const text = String(source || '').replace(/\r\n/g, '\n').trim();
+  if (!text) {
+    return {
+      generatedAt: '',
+      triggeredBy: '',
+      debateMode: '',
+      debateNote: '',
+      backfillTargets: '',
+      sourceRawInput: '',
+      sourceObjective: '',
+      items: [],
+    };
+  }
+  const generatedAt = sanitizePrefillText(text.match(/(?:^|\n)-\s*generatedAt:\s*([^\n]+)/i)?.[1] || '');
+  const triggeredBy = sanitizePrefillText(text.match(/(?:^|\n)-\s*triggeredBy:\s*([^\n]+)/i)?.[1] || '');
+  const debateMode = sanitizePrefillText(text.match(/(?:^|\n)-\s*debateMode:\s*([^\n]+)/i)?.[1] || '');
+  const debateNote = sanitizePrefillText(text.match(/(?:^|\n)-\s*debateNote:\s*([^\n]+)/i)?.[1] || '');
+  const backfillTargets = sanitizePrefillText(text.match(/(?:^|\n)-\s*backfillTargets:\s*([^\n]+)/i)?.[1] || '');
+  const sourceRawInput = sanitizePrefillText(text.match(/(?:^|\n)-\s*sourceRawInput:\s*([^\n]+)/i)?.[1] || '');
+  const sourceObjective = sanitizePrefillText(text.match(/(?:^|\n)-\s*sourceObjective:\s*([^\n]+)/i)?.[1] || '');
+
+  const items: PrepDiscussionTraceItem[] = [];
+  const blockPattern = /###\s*([^\n]+)\n([\s\S]*?)(?=\n###\s+|$)/g;
+  let matched: RegExpExecArray | null = blockPattern.exec(text);
+  while (matched) {
+    const header = String(matched[1] || '').trim();
+    const body = String(matched[2] || '').trim();
+    const roleId = sanitizePrefillText(header.match(/\(([^)]+)\)/)?.[1] || '');
+    const roleLabelRaw = sanitizePrefillText(header.replace(/\([^)]*\)/g, '').replace(/^\d+\.\s*/, '').trim());
+    items.push({
+      roleId,
+      roleLabel: roleLabelRaw || roleLabel(roleId || 'ROLE_ANALYST'),
+      focus: sanitizePrefillText(body.match(/(?:^|\n)-\s*关注[:：]\s*([^\n]+)/i)?.[1] || ''),
+      concern: sanitizePrefillText(body.match(/(?:^|\n)-\s*(?:风险|疑虑)[:：]\s*([^\n]+)/i)?.[1] || ''),
+      proposal: sanitizePrefillText(body.match(/(?:^|\n)-\s*建议[:：]\s*([^\n]+)/i)?.[1] || ''),
+      mode: sanitizePrefillText(body.match(/(?:^|\n)-\s*模式[:：]\s*([^\n]+)/i)?.[1] || ''),
+      model: sanitizePrefillText(body.match(/(?:^|\n)-\s*模型[:：]\s*([^\n]+)/i)?.[1] || ''),
+      provider: sanitizePrefillText(body.match(/(?:^|\n)-\s*Provider[:：]\s*([^\n]+)/i)?.[1] || ''),
+      elapsedMs: sanitizePrefillText(body.match(/(?:^|\n)-\s*耗时\(ms\)[:：]\s*([^\n]+)/i)?.[1] || ''),
+    });
+    matched = blockPattern.exec(text);
+  }
+
+  return {
+    generatedAt,
+    triggeredBy,
+    debateMode,
+    debateNote,
+    backfillTargets,
+    sourceRawInput,
+    sourceObjective,
+    items,
   };
 };
 
@@ -951,9 +1040,13 @@ const ProjectRoom = ({
   const [prepDraftRawRequirements, setPrepDraftRawRequirements] = useState('');
   const [prepDraftPrd, setPrepDraftPrd] = useState('');
   const [prepDraftDebateSummary, setPrepDraftDebateSummary] = useState('');
+  const [prepDraftDiscussionTrace, setPrepDraftDiscussionTrace] = useState('');
   const [prepConfirmNotes, setPrepConfirmNotes] = useState('');
   const [isSavingPrepDraft, setIsSavingPrepDraft] = useState(false);
   const [isConfirmingPrepDraft, setIsConfirmingPrepDraft] = useState(false);
+  const [isRunningPrepDebate, setIsRunningPrepDebate] = useState(false);
+  const [prepDebateProgressStep, setPrepDebateProgressStep] = useState(-1);
+  const prepDebateProgressTimerRef = useRef<number | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [taskDelegationBundles, setTaskDelegationBundles] = useState<Record<string, TaskDelegationBundle>>({});
   const [isLoadingTaskDelegations, setIsLoadingTaskDelegations] = useState(false);
@@ -978,6 +1071,17 @@ const ProjectRoom = ({
   const addToastRef = useRef(addToast);
   const onProjectMissingRef = useRef(onProjectMissing);
   const lastDetailErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
+
+  const stopPrepDebateProgressTicker = useCallback(() => {
+    if (prepDebateProgressTimerRef.current && typeof window !== 'undefined') {
+      window.clearInterval(prepDebateProgressTimerRef.current);
+    }
+    prepDebateProgressTimerRef.current = null;
+  }, []);
+
+  useEffect(() => () => {
+    stopPrepDebateProgressTicker();
+  }, [stopPrepDebateProgressTicker]);
   const lastWorkflowErrorRef = useRef<{ projectId: string; message: string; at: number } | null>(null);
 
   useEffect(() => {
@@ -1900,11 +2004,13 @@ const ProjectRoom = ({
     setPrepDraftRawRequirements(String(draft?.rawRequirements || ''));
     setPrepDraftPrd(String(draft?.prd || ''));
     setPrepDraftDebateSummary(String(draft?.debateSummary || ''));
+    setPrepDraftDiscussionTrace(String(draft?.discussionTrace || ''));
     setPrepConfirmNotes(String(draft?.confirmationNotes || ''));
   }, [
     postCreatePrep?.draft?.analysis,
     postCreatePrep?.draft?.debateSummary,
     postCreatePrep?.draft?.discussion,
+    postCreatePrep?.draft?.discussionTrace,
     postCreatePrep?.draft?.prd,
     postCreatePrep?.draft?.rawRequirements,
     postCreatePrep?.draft?.confirmationNotes,
@@ -3576,6 +3682,57 @@ const ProjectRoom = ({
     addToast('请前往设置页补全模型运行时配置（API Base URL / API Key / Model）', 'info');
   };
 
+  const executePostCreatePrepRun = useCallback(async (source: 'required_action' | 'manual_button' = 'manual_button') => {
+    if (!project.id) {
+      addToast('当前项目不可用，无法执行创建后需求预备', 'error');
+      return;
+    }
+    setIsRunningPrepDebate(true);
+    setPrepDebateProgressStep(0);
+    stopPrepDebateProgressTicker();
+    if (typeof window !== 'undefined') {
+      prepDebateProgressTimerRef.current = window.setInterval(() => {
+        setPrepDebateProgressStep((previous) => {
+          if (previous >= PREP_DISCUSSION_AGENT_ORDER.length - 1) {
+            return previous;
+          }
+          return previous + 1;
+        });
+      }, 1200);
+    }
+    setProjectActionHint('正在触发多Agent讨论并回填前期材料，预计 15-60 秒...');
+    addToast(
+      source === 'manual_button'
+        ? '已触发多Agent讨论，正在生成讨论日志与需求草案...'
+        : '正在执行创建后需求预备，请稍候...',
+      'info',
+    );
+    try {
+      const result = await projectsApi.runPostCreatePrep(project.id);
+      setPrepDebateProgressStep(PREP_DISCUSSION_AGENT_ORDER.length - 1);
+      await refreshProjectView();
+      const completed = Boolean(result?.data?.postCreatePrep?.completed);
+      if (completed) {
+        addToast('创建后需求预备已完成，已解锁正式项目详情页', 'success');
+      } else {
+        addToast('多Agent讨论结果已回填，请审阅并确认通过后进入正式详情页', 'success');
+      }
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        addToast(error.message, 'error');
+        if (error.code === 'PROJECT_ISSUE_FIRST_REQUIRED') {
+          addToast('请先确认项目已完成 Issue First（含 GitLab 主 Issue 绑定）后再触发多Agent讨论。', 'info');
+        }
+      } else {
+        addToast(`执行失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      }
+    } finally {
+      stopPrepDebateProgressTicker();
+      setIsRunningPrepDebate(false);
+      setProjectActionHint(null);
+    }
+  }, [addToast, project.id, refreshProjectView, stopPrepDebateProgressTicker]);
+
   const handleRequiredAction = async (action: ProjectRequiredAction) => {
     setRequiredActionLoadingId(action.id);
     try {
@@ -3616,20 +3773,7 @@ const ProjectRoom = ({
         return;
       }
       if (action.action === 'run_post_create_prep') {
-        if (!project.id) {
-          addToast('当前项目不可用，无法执行创建后需求预备', 'error');
-          return;
-        }
-        setProjectActionHint('正在生成多Agent讨论结论与需求回填草案，预计 15-60 秒...');
-        addToast('正在执行创建后需求预备，请稍候...', 'info');
-        const result = await projectsApi.runPostCreatePrep(project.id);
-        await refreshProjectView();
-        const completed = Boolean(result?.data?.postCreatePrep?.completed);
-        if (completed) {
-          addToast('创建后需求预备已完成，已解锁正式项目详情页', 'success');
-        } else {
-          addToast('草案已生成，请审阅并确认通过后进入正式详情页', 'info');
-        }
+        await executePostCreatePrepRun('required_action');
         return;
       }
       if (action.action === 'refresh_runtime') {
@@ -3644,7 +3788,9 @@ const ProjectRoom = ({
       }
     } finally {
       setRequiredActionLoadingId(null);
-      setProjectActionHint(null);
+      if (!isRunningPrepDebate) {
+        setProjectActionHint(null);
+      }
     }
   };
 
@@ -3661,6 +3807,7 @@ const ProjectRoom = ({
         rawRequirements: prepDraftRawRequirements,
         prd: prepDraftPrd,
         debateSummary: prepDraftDebateSummary,
+        discussionTrace: prepDraftDiscussionTrace,
       });
       await refreshProjectView();
       addToast('预备草案已保存', 'success');
@@ -3688,6 +3835,7 @@ const ProjectRoom = ({
         rawRequirements: prepDraftRawRequirements,
         prd: prepDraftPrd,
         debateSummary: prepDraftDebateSummary,
+        discussionTrace: prepDraftDiscussionTrace,
         notes: prepConfirmNotes,
       });
       await refreshProjectView();
@@ -3719,6 +3867,14 @@ const ProjectRoom = ({
     () => parsePrepDiscussionView(prepDraftDiscussion),
     [prepDraftDiscussion],
   );
+  const prepDiscussionTraceView = useMemo(
+    () => parsePrepDiscussionTraceView(prepDraftDiscussionTrace),
+    [prepDraftDiscussionTrace],
+  );
+  const prepDiscussionTraceByRole = useMemo(
+    () => new Map(prepDiscussionTraceView.items.map((item) => [String(item.roleId || '').trim(), item])),
+    [prepDiscussionTraceView.items],
+  );
   const prepAnalysisView = useMemo(
     () => parsePrepAnalysisView(prepDraftAnalysis),
     [prepDraftAnalysis],
@@ -3727,6 +3883,39 @@ const ProjectRoom = ({
     () => parsePrepRequirementContractView([prepDraftPrd, prepDraftRawRequirements].join('\n\n')),
     [prepDraftPrd, prepDraftRawRequirements],
   );
+  const prepDiscussionMode = prepDiscussionTraceView.debateMode.toLowerCase();
+  const prepDiscussionSourceVariant: 'primary' | 'warning' | 'accent' = prepDiscussionMode === 'model'
+    ? 'primary'
+    : (prepDiscussionTraceView.items.length > 0 ? 'accent' : 'warning');
+  const prepDiscussionSourceLabel = prepDiscussionMode === 'model'
+    ? '模型正式结论'
+    : (prepDiscussionTraceView.items.length > 0 ? '降级/规则结果' : '待触发');
+  const prepDiscussionReady = String(prepDraftDiscussion || '').trim().length > 0
+    && prepDiscussionTraceView.items.length > 0;
+  const prepAnalysisReady = String(prepDraftAnalysis || '').trim().length > 0;
+  const prepBackfillReady = [
+    prepDraftRawRequirements,
+    prepDraftPrd,
+    prepDraftDebateSummary,
+  ].every((item) => String(item || '').trim().length > 0);
+  const prepConfirmed = Boolean(postCreatePrep?.draft?.confirmed);
+  const prepStepCards = [
+    { id: 'discussion', label: '多Agent讨论', done: prepDiscussionReady },
+    { id: 'analysis', label: '需求理解草案', done: prepAnalysisReady },
+    { id: 'backfill', label: '核心输入回填', done: prepBackfillReady },
+    { id: 'confirm', label: '用户确认放行', done: prepConfirmed },
+  ];
+  const prepCompletedCount = prepStepCards.filter((step) => step.done).length;
+  const prepProgressPercent = Math.round((prepCompletedCount / Math.max(1, prepStepCards.length)) * 100);
+  const hasPrepDraftChanges = [
+    ['discussion', prepDraftDiscussion, postCreatePrep?.draft?.discussion],
+    ['analysis', prepDraftAnalysis, postCreatePrep?.draft?.analysis],
+    ['rawRequirements', prepDraftRawRequirements, postCreatePrep?.draft?.rawRequirements],
+    ['prd', prepDraftPrd, postCreatePrep?.draft?.prd],
+    ['debateSummary', prepDraftDebateSummary, postCreatePrep?.draft?.debateSummary],
+    ['discussionTrace', prepDraftDiscussionTrace, postCreatePrep?.draft?.discussionTrace],
+    ['confirmationNotes', prepConfirmNotes, postCreatePrep?.draft?.confirmationNotes],
+  ].some(([, localValue, remoteValue]) => String(localValue || '').trim() !== String(remoteValue || '').trim());
 
   if (isPostCreatePrepBlocked) {
     return (
@@ -3744,107 +3933,254 @@ const ProjectRoom = ({
           <Badge variant="warning">流程门禁中</Badge>
         </header>
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
-          <section className="max-w-5xl mx-auto space-y-4">
-            <div className="space-y-5 p-5 bg-surface-soft border border-primary/20 rounded-2xl">
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 text-primary">
-                  <Zap size={14} />
-                  <span className="text-[10px] font-bold uppercase tracking-widest">需求分析与多Agent决策预备</span>
-                </div>
-                <Badge variant="warning">阻断中</Badge>
-              </div>
-
-              <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 space-y-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="warning">Pre-Stage Gate</Badge>
-                  <Badge variant={canConfirmPostCreatePrep ? 'primary' : 'warning'}>
-                    {canConfirmPostCreatePrep ? '可确认' : '待补齐'}
-                  </Badge>
-                </div>
-                <p className="text-xs leading-6 text-slate-300">
-                  页面结构已按“创建项目分析阶段”同构：需求理解摘要、需求细化草案、需求确认单、多角色讨论、回填输入与确认门禁。
-                </p>
-                {(postCreatePrep?.missingItems || []).length > 0 ? (
+          <section className="max-w-6xl mx-auto space-y-4">
+            <div className="relative overflow-hidden rounded-3xl border border-primary/25 bg-gradient-to-br from-primary/10 via-surface-soft to-surface-soft p-5 sm:p-6">
+              <div className="absolute -top-10 -right-10 h-40 w-40 rounded-full bg-primary/15 blur-3xl" />
+              <div className="relative space-y-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
                   <div className="space-y-1">
-                    {(postCreatePrep?.missingItems || []).map((item) => (
-                      <p key={item} className="text-[11px] text-warning">未完成 · {item}</p>
-                    ))}
+                    <div className="flex items-center gap-2 text-primary">
+                      <Zap size={14} />
+                      <span className="text-[10px] font-bold uppercase tracking-widest">需求分析与多Agent决策预备</span>
+                    </div>
+                    <p className="text-sm text-slate-200">
+                      先完成讨论与回填，再放行进入正式项目执行页。
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      门禁说明: 必须完成“多Agent讨论结论 + 项目详情理解确认草案 + 核心输入回填 + 用户确认”。
+                    </p>
                   </div>
-                ) : (
-                  <p className="text-[11px] text-slate-400">缺失项同步中，建议先执行一次“创建后需求预备”。</p>
-                )}
-              </div>
-
-              <div className="space-y-3">
-                <p className="text-xs text-slate-400">Issue 理解摘要</p>
-                <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-1">
-                  <p className="text-sm font-semibold text-white">
-                    {prepRequirementContractView.objective || prepAnalysisView.objective || project.name}
-                  </p>
-                  <p className="text-[11px] text-slate-400">
-                    当前阶段: {currentStageLabel || '分析'} · 未通过预备确认前，系统不会进入正式阶段详情页。
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                <p className="text-xs text-slate-400">基于输入的多角色讨论结论</p>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
-                    <p className="text-[11px] text-slate-300">共识</p>
-                    {(prepDiscussionView.consensus.length > 0 ? prepDiscussionView.consensus : ['待补充共识']).map((item, index) => (
-                      <p key={`consensus-${index}`} className="text-[11px] text-slate-400 leading-relaxed">- {item}</p>
-                    ))}
-                  </div>
-                  <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
-                    <p className="text-[11px] text-slate-300">分歧与处理</p>
-                    {(prepDiscussionView.divergences.length > 0 ? prepDiscussionView.divergences : ['待补充分歧项']).map((item, index) => (
-                      <p key={`divergence-${index}`} className="text-[11px] text-warning leading-relaxed">- {item}</p>
-                    ))}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant="warning">阻断中</Badge>
+                    <Badge variant={prepProgressPercent >= 100 ? 'primary' : 'accent'}>
+                      进度 {prepCompletedCount}/{prepStepCards.length} · {prepProgressPercent}%
+                    </Badge>
+                    {hasPrepDraftChanges ? <Badge variant="warning">有未保存改动</Badge> : null}
+                    <Badge variant={canConfirmPostCreatePrep ? 'primary' : 'warning'}>
+                      {canConfirmPostCreatePrep ? '可确认放行' : '待补齐'}
+                    </Badge>
                   </div>
                 </div>
-                <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
-                  <p className="text-[11px] text-slate-300">角色决策建议</p>
-                  {(prepDiscussionView.roleDecisions.length > 0 ? prepDiscussionView.roleDecisions : ['待补充角色建议']).map((item, index) => (
-                    <p key={`role-${index}`} className="text-[11px] text-slate-400 leading-relaxed">- {item}</p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+                  {prepStepCards.map((step, index) => (
+                    <div
+                      key={step.id}
+                      className={cn(
+                        'rounded-2xl border px-4 py-3 space-y-1',
+                        step.done ? 'border-emerald-300/40 bg-emerald-500/10' : 'border-border-subtle bg-white/5',
+                      )}
+                    >
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Step {index + 1}</p>
+                      <p className="text-xs font-semibold text-slate-100">{step.label}</p>
+                      <p className={cn('text-[11px]', step.done ? 'text-emerald-300' : 'text-slate-500')}>
+                        {step.done ? '已完成' : '待完成'}
+                      </p>
+                    </div>
                   ))}
-                  {prepDiscussionView.anchor ? (
-                    <p className="text-[11px] text-primary">决策锚点: {prepDiscussionView.anchor}</p>
-                  ) : null}
                 </div>
-                <textarea
-                  value={prepDraftDiscussion}
-                  onChange={(event) => setPrepDraftDiscussion(event.target.value)}
-                  placeholder="请填写或编辑多Agent讨论结论..."
-                  className="min-h-36 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
-                />
-              </div>
 
-              <div className="space-y-3">
-                <p className="text-xs text-slate-400">需求细化草案（项目详情理解确认）</p>
-                <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
-                  <p className="text-[11px] text-slate-300">目标: {prepAnalysisView.objective || '待补充'}</p>
-                  <p className="text-[11px] text-slate-300">设计主题: {prepAnalysisView.designTheme || '待补充'}</p>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div className="space-y-1">
+                <div className="rounded-2xl border border-border-subtle bg-white/5 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (typeof window !== 'undefined') {
+                          document.getElementById('prep-discussion-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                      }}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+                    >
+                      跳转: 多Agent讨论
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (typeof window !== 'undefined') {
+                          document.getElementById('prep-analysis-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                      }}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+                    >
+                      跳转: 需求草案
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (typeof window !== 'undefined') {
+                          document.getElementById('prep-backfill-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                      }}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+                    >
+                      跳转: 输入回填
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (typeof window !== 'undefined') {
+                          document.getElementById('prep-confirm-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        }
+                      }}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
+                    >
+                      跳转: 用户确认
+                    </button>
+                  </div>
+                </div>
+
+                <div id="prep-discussion-section" className="grid grid-cols-1 xl:grid-cols-[1.2fr_0.8fr] gap-4">
+                  <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs text-slate-300">1. 基于输入的多角色讨论结论</p>
+                      <div className="flex items-center gap-2">
+                        <Badge variant={prepDiscussionSourceVariant}>{prepDiscussionSourceLabel}</Badge>
+                        <button
+                          type="button"
+                          onClick={() => void executePostCreatePrepRun('manual_button')}
+                          disabled={isRunningPrepDebate || (postCreatePrepRequiredAction ? requiredActionLoadingId === postCreatePrepRequiredAction.id : false)}
+                          className="inline-flex min-h-8 items-center justify-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-[11px] font-semibold text-primary hover:bg-primary/20 disabled:opacity-60"
+                        >
+                          {isRunningPrepDebate ? '讨论中...' : '进行讨论'}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-border-subtle bg-surface-muted/70 p-3">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-slate-400">
+                        <p>最近触发: {prepDiscussionTraceView.generatedAt || '未触发'}</p>
+                        <p>触发来源: {prepDiscussionTraceView.triggeredBy || '未记录'}</p>
+                        <p>讨论模式: {prepDiscussionTraceView.debateMode || '未记录'}</p>
+                        <p className="md:col-span-2">源需求: {prepDiscussionTraceView.sourceRawInput || '未记录'}</p>
+                        <p className="md:col-span-2">目标锚点: {prepDiscussionTraceView.sourceObjective || '未记录'}</p>
+                        <p className="md:col-span-2">讨论备注: {prepDiscussionTraceView.debateNote || '无'}</p>
+                        <p className="md:col-span-2">回填目标: {prepDiscussionTraceView.backfillTargets || 'rawRequirements, prd, debateSummary'}</p>
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
+                      {PREP_DISCUSSION_AGENT_ORDER.map((roleId, index) => {
+                        const trace = prepDiscussionTraceByRole.get(roleId);
+                        const isCurrentRunning = isRunningPrepDebate && !trace && index === prepDebateProgressStep;
+                        const isScheduled = isRunningPrepDebate && !trace && index < prepDebateProgressStep;
+                        const statusLabel = trace
+                          ? '已回填'
+                          : (isCurrentRunning ? '讨论中' : (isScheduled ? '已调度' : '待执行'));
+                        return (
+                          <div key={roleId} className="rounded-lg border border-border-subtle bg-surface-muted/70 px-3 py-2 space-y-1">
+                            <p className="text-[11px] font-semibold text-slate-200">{roleLabel(roleId)}</p>
+                            <p className={cn(
+                              'text-[10px]',
+                              trace ? 'text-emerald-300' : (isCurrentRunning ? 'text-primary' : (isScheduled ? 'text-accent' : 'text-slate-500')),
+                            )}
+                            >
+                              {statusLabel}
+                            </p>
+                            {trace?.proposal ? (
+                              <p className="text-[10px] text-slate-400 line-clamp-2">建议: {trace.proposal}</p>
+                            ) : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                        <p className="text-[11px] text-slate-300">共识</p>
+                        {(prepDiscussionView.consensus.length > 0 ? prepDiscussionView.consensus : ['待补充共识']).map((item, index) => (
+                          <p key={`consensus-${index}`} className="text-[11px] text-slate-400 leading-relaxed">- {item}</p>
+                        ))}
+                      </div>
+                      <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                        <p className="text-[11px] text-slate-300">分歧与处理</p>
+                        {(prepDiscussionView.divergences.length > 0 ? prepDiscussionView.divergences : ['待补充分歧项']).map((item, index) => (
+                          <p key={`divergence-${index}`} className="text-[11px] text-warning leading-relaxed">- {item}</p>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                      <p className="text-[11px] text-slate-300">角色决策建议</p>
+                      {(prepDiscussionView.roleDecisions.length > 0 ? prepDiscussionView.roleDecisions : ['待补充角色建议']).map((item, index) => (
+                        <p key={`role-${index}`} className="text-[11px] text-slate-400 leading-relaxed">- {item}</p>
+                      ))}
+                      {prepDiscussionView.anchor ? (
+                        <p className="text-[11px] text-primary">决策锚点: {prepDiscussionView.anchor}</p>
+                      ) : null}
+                    </div>
+                    <textarea
+                      value={prepDraftDiscussion}
+                      onChange={(event) => setPrepDraftDiscussion(event.target.value)}
+                      placeholder="请填写或编辑多Agent讨论结论..."
+                      className="min-h-32 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                    />
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-xs text-slate-300">2. 项目详情理解确认草案</p>
+                        <Badge variant="accent">预备草案</Badge>
+                      </div>
+                      <p className="text-sm font-semibold text-white">
+                        {prepRequirementContractView.objective || prepAnalysisView.objective || project.name}
+                      </p>
+                      <p className="text-[11px] text-slate-400">
+                        当前阶段: {currentStageLabel || '分析'} · 未通过预备确认前，系统不会进入正式阶段详情页。
+                      </p>
+                      <p className="text-[11px] text-slate-300">设计主题: {prepAnalysisView.designTheme || '待补充'}</p>
+                      <p className="text-[11px] text-slate-400">验收: {(prepRequirementContractView.acceptance || []).join('；') || '待补充'}</p>
+                    </div>
+
+                    <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-2">
+                      <p className="text-xs text-slate-300">当前缺失项</p>
+                      {(postCreatePrep?.missingItems || []).length > 0 ? (
+                        (postCreatePrep?.missingItems || []).map((item) => (
+                          <p key={item} className="text-[11px] text-warning">未完成 · {item}</p>
+                        ))
+                      ) : (
+                        <p className="text-[11px] text-slate-400">缺失项同步中，建议先执行一次“进行讨论”。</p>
+                      )}
+                    </div>
+
+                    <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-2">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-xs text-slate-300">多Agent讨论过程日志</p>
+                        <Badge variant={prepDiscussionSourceVariant}>{prepDiscussionTraceView.debateMode || 'fallback'}</Badge>
+                      </div>
+                      {prepDiscussionTraceView.items.length > 0 ? (
+                        <div className="space-y-2">
+                          {prepDiscussionTraceView.items.map((item, index) => (
+                            <div key={`${item.roleId}-${index}`} className="rounded-xl border border-border-subtle bg-surface-muted/70 p-2 space-y-1">
+                              <p className="text-[11px] font-semibold text-slate-200">{item.roleLabel}</p>
+                              <p className="text-[10px] text-slate-400">关注: {item.focus || '待补充'}</p>
+                              <p className="text-[10px] text-warning">风险: {item.concern || '待补充'}</p>
+                              <p className="text-[10px] text-slate-300">建议: {item.proposal || '待补充'}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-[11px] text-slate-500">暂无讨论日志，点击“进行讨论”后将生成。</p>
+                      )}
+                      <details className="rounded-xl border border-border-subtle bg-surface-muted/50 p-2">
+                        <summary className="cursor-pointer text-[11px] text-slate-300">查看/编辑讨论日志原文</summary>
+                        <textarea
+                          value={prepDraftDiscussionTrace}
+                          onChange={(event) => setPrepDraftDiscussionTrace(event.target.value)}
+                          placeholder="多Agent讨论过程日志将自动写入，可手动编辑..."
+                          className="mt-2 min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                        />
+                      </details>
+                    </div>
+                  </div>
+                </div>
+
+                <div id="prep-analysis-section" className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-3">
+                    <p className="text-xs text-slate-300">3. 需求细化草案（可编辑）</p>
+                    <div className="rounded-xl border border-border-subtle bg-surface-muted/60 p-3 space-y-2">
                       <p className="text-[11px] text-slate-400">核心场景</p>
                       {(prepAnalysisView.scenarios.length > 0 ? prepAnalysisView.scenarios : ['待补充']).map((item, index) => (
                         <p key={`scenario-${index}`} className="text-[11px] text-slate-300">- {item}</p>
                       ))}
                     </div>
-                    <div className="space-y-1">
-                      <p className="text-[11px] text-slate-400">验收标准</p>
-                      {(prepAnalysisView.acceptance.length > 0 ? prepAnalysisView.acceptance : ['待补充']).map((item, index) => (
-                        <p key={`accept-${index}`} className="text-[11px] text-slate-300">- {item}</p>
-                      ))}
-                    </div>
-                    <div className="space-y-1">
-                      <p className="text-[11px] text-slate-400">In Scope</p>
-                      {(prepAnalysisView.inScope.length > 0 ? prepAnalysisView.inScope : ['待补充']).map((item, index) => (
-                        <p key={`inscope-${index}`} className="text-[11px] text-slate-300">- {item}</p>
-                      ))}
-                    </div>
-                    <div className="space-y-1">
+                    <div className="rounded-xl border border-border-subtle bg-surface-muted/60 p-3 space-y-2">
                       <p className="text-[11px] text-slate-400">Out of Scope / 风险</p>
                       {[...prepAnalysisView.outOfScope, ...prepAnalysisView.risks].length > 0
                         ? [...prepAnalysisView.outOfScope, ...prepAnalysisView.risks].map((item, index) => (
@@ -3852,102 +4188,98 @@ const ProjectRoom = ({
                         ))
                         : <p className="text-[11px] text-slate-400">- 待补充</p>}
                     </div>
+                    <textarea
+                      value={prepDraftAnalysis}
+                      onChange={(event) => setPrepDraftAnalysis(event.target.value)}
+                      placeholder="请填写或编辑项目理解与范围草案..."
+                      className="min-h-36 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                    />
+                  </div>
+
+                  <div id="prep-backfill-section" className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-3">
+                    <p className="text-xs text-slate-300">4. 核心输入回填（可编辑）</p>
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-slate-400">rawRequirements</p>
+                      <textarea
+                        value={prepDraftRawRequirements}
+                        onChange={(event) => setPrepDraftRawRequirements(event.target.value)}
+                        className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-slate-400">prd</p>
+                      <textarea
+                        value={prepDraftPrd}
+                        onChange={(event) => setPrepDraftPrd(event.target.value)}
+                        className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-slate-400">debateSummary</p>
+                      <textarea
+                        value={prepDraftDebateSummary}
+                        onChange={(event) => setPrepDraftDebateSummary(event.target.value)}
+                        className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                      />
+                    </div>
                   </div>
                 </div>
-                <textarea
-                  value={prepDraftAnalysis}
-                  onChange={(event) => setPrepDraftAnalysis(event.target.value)}
-                  placeholder="请填写或编辑项目理解与范围草案..."
-                  className="min-h-36 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
-                />
-              </div>
 
-              <div className="space-y-3">
-                <p className="text-xs text-slate-400">需求确认单草案（从回填输入解析）</p>
-                <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-1">
-                  <p className="text-[11px] text-slate-300">目标: {prepRequirementContractView.objective || '待补充'}</p>
-                  <p className="text-[11px] text-slate-400">In Scope: {(prepRequirementContractView.inScope || []).join('；') || '待补充'}</p>
-                  <p className="text-[11px] text-slate-400">Out of Scope: {(prepRequirementContractView.outOfScope || []).join('；') || '待补充'}</p>
-                  <p className="text-[11px] text-slate-400">验收: {(prepRequirementContractView.acceptance || []).join('；') || '待补充'}</p>
-                  <p className="text-[11px] text-slate-400">产出: {(prepRequirementContractView.artifacts || []).join('、') || '待补充'}</p>
+                <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-3">
+                  <p className="text-xs text-slate-300">需求确认单草案（从回填输入解析）</p>
+                  <div className="rounded-xl border border-border-subtle bg-surface-muted/60 p-3 space-y-1">
+                    <p className="text-[11px] text-slate-300">目标: {prepRequirementContractView.objective || '待补充'}</p>
+                    <p className="text-[11px] text-slate-400">In Scope: {(prepRequirementContractView.inScope || []).join('；') || '待补充'}</p>
+                    <p className="text-[11px] text-slate-400">Out of Scope: {(prepRequirementContractView.outOfScope || []).join('；') || '待补充'}</p>
+                    <p className="text-[11px] text-slate-400">验收: {(prepRequirementContractView.acceptance || []).join('；') || '待补充'}</p>
+                    <p className="text-[11px] text-slate-400">产出: {(prepRequirementContractView.artifacts || []).join('、') || '待补充'}</p>
+                  </div>
                 </div>
-              </div>
 
-              <div className="rounded-xl border border-border-subtle bg-white/5 p-4 space-y-3">
-                <p className="text-xs text-slate-400">回填输入（可编辑）</p>
-                <div className="space-y-2">
-                  <p className="text-[11px] text-slate-400">rawRequirements</p>
+                <div id="prep-confirm-section" className="rounded-2xl border border-primary/25 bg-primary/8 p-4 space-y-3">
+                  <p className="text-xs text-slate-300">5. 用户确认与放行</p>
+                  {postCreatePrep?.draft?.confirmed ? (
+                    <div className="rounded-xl border border-emerald-300/40 bg-emerald-500/10 p-3">
+                      <p className="text-[11px] text-emerald-200">
+                        已确认: {postCreatePrep.draft.confirmedBy || '项目负责人'} · {postCreatePrep.draft.confirmedAt || '时间未记录'}
+                      </p>
+                    </div>
+                  ) : null}
+                  {hasPrepDraftChanges ? (
+                    <p className="text-[11px] text-warning">你有未保存改动，建议先“保存草案”再确认放行。</p>
+                  ) : null}
                   <textarea
-                    value={prepDraftRawRequirements}
-                    onChange={(event) => setPrepDraftRawRequirements(event.target.value)}
-                    className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                    value={prepConfirmNotes}
+                    onChange={(event) => setPrepConfirmNotes(event.target.value)}
+                    placeholder="可填写本次确认的结论与限制说明"
+                    className="min-h-20 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
                   />
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleSavePostCreatePrepDraft()}
+                      disabled={isSavingPrepDraft}
+                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60"
+                    >
+                      {isSavingPrepDraft ? '保存中...' : '保存草案'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleConfirmPostCreatePrep()}
+                      disabled={isConfirmingPrepDraft || !canConfirmPostCreatePrep}
+                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"
+                    >
+                      {isConfirmingPrepDraft ? '确认中...' : '确认通过并进入正式详情'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void refreshProjectView()}
+                      className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10"
+                    >
+                      刷新状态
+                    </button>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] text-slate-400">prd</p>
-                  <textarea
-                    value={prepDraftPrd}
-                    onChange={(event) => setPrepDraftPrd(event.target.value)}
-                    className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <p className="text-[11px] text-slate-400">debateSummary</p>
-                  <textarea
-                    value={prepDraftDebateSummary}
-                    onChange={(event) => setPrepDraftDebateSummary(event.target.value)}
-                    className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
-                  />
-                </div>
-              </div>
-
-              <div className="rounded-xl border border-border-subtle bg-white/5 p-4 space-y-2">
-                <p className="text-xs text-slate-400">确认备注（可选）</p>
-                <textarea
-                  value={prepConfirmNotes}
-                  onChange={(event) => setPrepConfirmNotes(event.target.value)}
-                  placeholder="可填写本次确认的结论与限制说明"
-                  className="min-h-20 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
-                />
-                <p className="text-[11px] text-slate-400">
-                  门禁说明: 必须完成“多Agent讨论结论 + 项目详情理解确认草案 + 核心输入回填 + 用户确认”才解锁正式页面。
-                </p>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => postCreatePrepRequiredAction && void handleRequiredAction(postCreatePrepRequiredAction)}
-                  disabled={!postCreatePrepRequiredAction || requiredActionLoadingId === postCreatePrepRequiredAction.id}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-primary px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-primary/90 disabled:opacity-60"
-                >
-                  {postCreatePrepRequiredAction && requiredActionLoadingId === postCreatePrepRequiredAction.id
-                    ? '处理中...'
-                    : (postCreatePrepRequiredAction?.ctaLabel || '执行创建后需求预备')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleSavePostCreatePrepDraft()}
-                  disabled={isSavingPrepDraft}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60"
-                >
-                  {isSavingPrepDraft ? '保存中...' : '保存草案'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void handleConfirmPostCreatePrep()}
-                  disabled={isConfirmingPrepDraft || !canConfirmPostCreatePrep}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"
-                >
-                  {isConfirmingPrepDraft ? '确认中...' : '确认通过并进入正式详情'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void refreshProjectView()}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-white/5 px-4 py-2 text-xs font-semibold text-slate-200 hover:bg-white/10"
-                >
-                  刷新状态
-                </button>
               </div>
             </div>
           </section>
