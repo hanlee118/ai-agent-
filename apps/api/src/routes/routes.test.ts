@@ -480,6 +480,53 @@ describe("Error Matrix: auth + projects", () => {
       assert.equal(confirmRes.status, 200);
       assert.equal(Boolean(confirmRes.body?.data?.postCreatePrep?.completed), true);
     });
+
+    it("[200][PROJECT_POST_CREATE_PREP] 无 Issue 时也应基于用户输入生成结构化讨论与分析（非模板占位）", async () => {
+      const createRes = await request(fullApp)
+        .post("/api/projects")
+        .send({
+          name: "测试项目-跨境选品结构化预备",
+          description: "做一个跨境选品跟品机器人，监控 TikTok 与亚马逊爆品，输出排名与告警，并支持人工确认。",
+          projectType: "complete",
+          team: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_DEV", "ROLE_QA"]
+        });
+      assert.equal(createRes.status, 201);
+      const projectId = String(createRes.body.id);
+
+      const runRes = await request(fullApp).post(`/api/projects/${projectId}/post-create-prep`).send({});
+      assert.equal(runRes.status, 200);
+      assert.equal(Boolean(runRes.body?.success), true);
+
+      const detailRes = await request(fullApp).get(`/api/projects/${projectId}`);
+      assert.equal(detailRes.status, 200);
+      const description = String(detailRes.body?.description || "");
+      assert.match(description, /## 多Agent需求讨论结论/);
+      assert.match(description, /## 项目详情理解确认草案/);
+      assert.match(description, /### 共识/);
+      assert.match(description, /### 分歧与处理/);
+      assert.match(description, /### 角色决策建议/);
+      assert.match(description, /### 核心场景/);
+      assert.match(description, /### In Scope/);
+      assert.match(description, /### Out of Scope/);
+      assert.match(description, /### 验收标准/);
+      assert.match(description, /TikTok|亚马逊/i);
+      assert.ok(!description.includes("待补充业务目标"));
+      assert.ok(!description.includes("部分业务约束未显式给出"));
+
+      const inputMap = new Map(
+        (Array.isArray(detailRes.body?.projectInputs) ? detailRes.body.projectInputs : []).map(
+          (item: { name?: string; content?: string }) => [String(item?.name || ""), String(item?.content || "")]
+        )
+      );
+      const rawRequirements = String(inputMap.get("rawRequirements") || "");
+      const prd = String(inputMap.get("prd") || "");
+      const debateSummary = String(inputMap.get("debateSummary") || "");
+      assert.ok(rawRequirements.length > 20);
+      assert.ok(prd.length > 20);
+      assert.ok(debateSummary.length > 20);
+      assert.match(rawRequirements, /TikTok|亚马逊/i);
+      assert.match(debateSummary, /共识|角色决策建议/);
+    });
   });
 
   describe("400/404/409 PROJECT_ACTIONS", () => {
