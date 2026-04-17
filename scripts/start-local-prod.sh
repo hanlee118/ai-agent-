@@ -32,9 +32,7 @@ load_env_file_preserving_existing "$ROOT_DIR/apps/api/.env"
 PORT="${PORT:-8787}"
 HOST="${HOST:-0.0.0.0}"
 export NODE_ENV="${NODE_ENV:-production}"
-export DESIGN_STITCH_MODE="${DESIGN_STITCH_MODE:-preferred}"
-export WORKFLOW_V2_HERMES_ENDPOINT="${WORKFLOW_V2_HERMES_ENDPOINT:-http://127.0.0.1:3001}"
-export WORKFLOW_V2_HERMES_STAGE_MATCH="${WORKFLOW_V2_HERMES_STAGE_MATCH:-all}"
+export DESIGN_STITCH_MODE="${DESIGN_STITCH_MODE:-required}"
 export PORT
 export HOST
 

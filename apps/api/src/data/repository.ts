@@ -42,7 +42,6 @@ import {
   type RequirementContract
 } from "../system/v1-method-store.js";
 import { getTemplateRequiredRoles } from "../system/issue-engine.js";
-import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import {
   buildDeliverables,
   buildStageLiveSession,
@@ -95,14 +94,16 @@ import {
 } from "../openclaw/workspace.js";
 import {
   createWorkflowFromTemplate as createWorkflowV2FromTemplate,
-  startWorkflow as startWorkflowV2
+  startWorkflow as startWorkflowV2,
+  transitionWorkflowStage
 } from "../workflow-v2/workflow-orchestrator.js";
 import { ensureWorkflowV2DefaultTemplates } from "../workflow-v2/default-templates.js";
 import { tryRunStageWithHermes } from "../workflow-v2/hermes-mcp.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import {
   createProjectInputs,
-  importRelayInputs
+  importRelayInputs,
+  type ProjectInputCreatePayload
 } from "../workflow-v2/project-modes.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
@@ -158,6 +159,68 @@ const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
   /模板章节骨架（自动补齐）|模板章节骨架（请按模板补全）|请结合(?:本阶段)?(?:\s*任务证据(?:与|和)?\s*(?:Agent\s*(?:输出正文|正文))?|(?:\s*Agent\s*(?:输出正文|正文))?\s*与任务证据)(?:补全|完善)本节|请结合(?:\s*Agent\s*输出正文)?与任务证据(?:补全|完善)本节/i;
 const STITCH_OUTPUT_SECTION_TITLE = "## Stitch 设计产物";
 const pendingStitchRecoveryJobs = new Map<string, Promise<void>>();
+const STITCH_PENDING_REUSE_TTL_MS = Math.max(
+  60_000,
+  Number(process.env.STITCH_PENDING_REUSE_TTL_MS ?? 12 * 60 * 60 * 1000)
+);
+const STITCH_DEGRADED_RETRY_COOLDOWN_MS = Math.max(
+  30_000,
+  Number(process.env.STITCH_DEGRADED_RETRY_COOLDOWN_MS ?? 15 * 60 * 1000)
+);
+const STITCH_MIN_SIGNAL_LENGTH = Math.max(8, Number(process.env.STITCH_MIN_SIGNAL_LENGTH ?? 10));
+const STITCH_PLACEHOLDER_PATTERN = /待补充|占位|todo|tbd|lorem ipsum|\bxxx\b|^\s*(?:n\/a|none|null|无|暂无)\s*$/i;
+
+function shouldAttachStitchForExecution(stageType: StageType, role: RoleType) {
+  return stageType === "DESIGN" && role === "ROLE_DESIGN";
+}
+
+function normalizeStitchSignalText(input: unknown) {
+  return String(input ?? "").replace(/\s+/g, " ").trim();
+}
+
+function hasMeaningfulStitchSignal(input: unknown) {
+  const value = normalizeStitchSignalText(input);
+  if (!value) {
+    return false;
+  }
+  if (value.length < STITCH_MIN_SIGNAL_LENGTH) {
+    return false;
+  }
+  if (STITCH_PLACEHOLDER_PATTERN.test(value)) {
+    return false;
+  }
+  return true;
+}
+
+function validateStitchInputForExecution(input: {
+  summary?: string;
+  projectDescription: string;
+  parsedIntent: ParsedIntent;
+}) {
+  const summary = normalizeStitchSignalText(input.summary);
+  const description = normalizeStitchSignalText(input.projectDescription);
+  const signals = [
+    summary,
+    description,
+    ...input.parsedIntent.keywords,
+    ...input.parsedIntent.constraints,
+    ...input.parsedIntent.risks
+  ].map((item) => normalizeStitchSignalText(item)).filter(Boolean);
+  const meaningfulSignals = signals.filter((item) => hasMeaningfulStitchSignal(item));
+  if (meaningfulSignals.length > 0) {
+    return { ok: true as const, reason: "" };
+  }
+
+  const reason = [
+    !hasMeaningfulStitchSignal(summary) ? "summary_invalid" : "",
+    !hasMeaningfulStitchSignal(description) ? "description_invalid" : "",
+    meaningfulSignals.length === 0 ? "intent_signals_missing" : ""
+  ].filter(Boolean).join(",");
+  return {
+    ok: false as const,
+    reason: reason || "missing_effective_prompt_input"
+  };
+}
 const PROJECT_WORKFLOW_V2_AUTO_INIT_ENABLED =
   String(process.env.PROJECT_WORKFLOW_V2_AUTO_INIT ?? "true").trim().toLowerCase() !== "false";
 const PROJECT_WORKFLOW_V2_AUTO_START_DEFAULT =
@@ -193,13 +256,107 @@ function resolveWorkflowTemplateKeyForProjectMode(input: {
   return "requirements_design";
 }
 
+function normalizeProjectInputNameToken(value: string) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+const TEMPLATE_DEFAULT_INPUT_FIELDS: Record<string, string> = {
+  standard_software_development: "rawRequirements",
+  requirements_design: "rawRequirements",
+  visual_design: "prd",
+  tech_design: "prd",
+  code_dev: "techSpec",
+  qa_acceptance: "sourceCode"
+};
+
+function buildTemplateFallbackProjectInputs(input: {
+  workflowTemplateKey: string;
+  projectDescription: string;
+  projectType: ProjectExecutionMode;
+}) {
+  const content = String(input.projectDescription || "").trim();
+  if (!content) {
+    return [] as ProjectInputCreatePayload[];
+  }
+
+  const normalizedTemplateKey = String(input.workflowTemplateKey || "").trim().toLowerCase();
+  const fallbackField = TEMPLATE_DEFAULT_INPUT_FIELDS[normalizedTemplateKey];
+  if (!fallbackField) {
+    return [] as ProjectInputCreatePayload[];
+  }
+
+  const shouldAutoSeed =
+    input.projectType === "complete"
+    || input.projectType === "standalone";
+  if (!shouldAutoSeed) {
+    return [] as ProjectInputCreatePayload[];
+  }
+
+  return [{
+    name: fallbackField,
+    type: "document",
+    description: "项目创建时自动从项目描述生成的入口输入",
+    content,
+    inputSource: "template_generated" as const
+  }];
+}
+
+function mergeProjectInputPayloads(
+  explicitInputs: Array<{
+    name: string;
+    type: string;
+    description?: string;
+    content?: string;
+    filePath?: string;
+    referenceDeliverableId?: string;
+    inputSource?: "manual" | "imported_from_project" | "template_generated";
+  }> | undefined,
+  fallbackInputs: ProjectInputCreatePayload[]
+) {
+  const result: ProjectInputCreatePayload[] = [];
+  const seen = new Set<string>();
+  const pushIfValid = (item: ProjectInputCreatePayload) => {
+    const name = String(item.name || "").trim();
+    if (!name) {
+      return;
+    }
+    const key = normalizeProjectInputNameToken(name);
+    if (!key || seen.has(key)) {
+      return;
+    }
+    seen.add(key);
+    result.push({
+      ...item,
+      name,
+      type: String(item.type || "").trim() || "document"
+    });
+  };
+
+  for (const item of Array.isArray(explicitInputs) ? explicitInputs : []) {
+    pushIfValid({
+      name: item.name,
+      type: item.type,
+      description: item.description,
+      content: item.content,
+      filePath: item.filePath,
+      referenceDeliverableId: item.referenceDeliverableId,
+      inputSource: item.inputSource
+    });
+  }
+  for (const item of fallbackInputs) {
+    pushIfValid(item);
+  }
+  return result;
+}
+
 const LEGACY_STAGE_FLOW_BY_TEMPLATE: Record<string, StageType[]> = {
   standard_software_development: ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"],
-  requirements_design: ["INIT", "ANALYSIS"],
-  visual_design: ["INIT", "DESIGN"],
-  tech_design: ["INIT", "DEV"],
-  code_dev: ["INIT", "DEV"],
-  qa_acceptance: ["INIT", "ACCEPT"]
+  // 单阶段模板不再强制注入 INIT，避免 issue-first 后再次出现“伪立项”阶段。
+  requirements_design: ["ANALYSIS"],
+  visual_design: ["DESIGN"],
+  tech_design: ["DEV"],
+  code_dev: ["DEV"],
+  qa_acceptance: ["ACCEPT"]
 };
 
 function resolveLegacyStageFlow(input: {
@@ -210,8 +367,8 @@ function resolveLegacyStageFlow(input: {
   const fallbackFlow: StageType[] = input.projectType === "complete"
     ? LEGACY_STAGE_FLOW_BY_TEMPLATE.standard_software_development
     : input.projectType === "relay"
-      ? (["INIT", "ACCEPT"] as StageType[])
-      : (["INIT", "ANALYSIS"] as StageType[]);
+      ? (["ACCEPT"] as StageType[])
+      : (["ANALYSIS"] as StageType[]);
   const configuredFlow: StageType[] | undefined = normalizedTemplateKey
     ? LEGACY_STAGE_FLOW_BY_TEMPLATE[normalizedTemplateKey]
     : fallbackFlow;
@@ -227,7 +384,7 @@ function resolveLegacyStageFlow(input: {
       uniqueFlow.push(stageType);
     }
   }
-  if (!uniqueFlow.includes("INIT")) {
+  if (input.projectType === "complete" && !uniqueFlow.includes("INIT")) {
     uniqueFlow.unshift("INIT");
   }
   return uniqueFlow;
@@ -1865,6 +2022,169 @@ async function hasAcceptableDevImplementationEvidence(project: ProjectDetail) {
   return false;
 }
 
+const DEV_WORKSPACE_CODE_FILE_PATTERN = /(?:^|\/)(?:app|apps|src|packages|server|client|web|api)\/.+\.(?:ts|tsx|js|jsx|sql|prisma|yml|yaml|sh|json)$/i;
+const DEV_WORKSPACE_CODE_FILE_EXTRACT_PATTERN = /(?:app|apps|src|packages|server|client|web|api)\/[a-z0-9_./-]+\.(?:ts|tsx|js|jsx|sql|prisma|yml|yaml|sh|json)/gi;
+const DEV_WORKSPACE_IGNORED_FILE_PATTERN = /(?:^|\/)(?:readme|license|changelog|test-report|sprint|requirements)\.md$/i;
+const DEV_VERIFICATION_SIGNAL_PATTERN = /(?:pnpm|npm|yarn)\s+(?:dev|build|test|typecheck)|docker\s+compose|curl\s+https?:\/\/|http\s*200|exit code|通过|失败/i;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function readStringList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as string[];
+  }
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function extractDevWorkspaceEvidenceFromMetadata(metadata: unknown) {
+  const root = asRecord(metadata);
+  const workspace = asRecord(root?.terminalWorkspaceEvidence);
+  if (!workspace) {
+    return null;
+  }
+  const workspacePath = String(workspace.workspacePath || "").trim();
+  const relativePath = String(workspace.relativePath || "").trim();
+  const evidenceFiles = readStringList(workspace.evidenceFiles);
+  if (!workspacePath) {
+    return null;
+  }
+  return {
+    workspacePath,
+    relativePath,
+    evidenceFiles
+  };
+}
+
+function extractDevVerificationEvidenceText(metadata: unknown, outputPreview: string) {
+  const root = asRecord(metadata);
+  const skill = asRecord(root?.terminalSkillEvidence);
+  const verification = String(skill?.verification || "").trim();
+  const reasoningBasis = String(skill?.reasoningBasis || "").trim();
+  return [String(outputPreview || "").trim(), verification, reasoningBasis].filter(Boolean).join("\n");
+}
+
+async function evaluateDevExecutionHardGate(projectId: string) {
+  const rows = await prisma.projectExecution.findMany({
+    where: {
+      projectId,
+      stageType: "DEV",
+      role: "ROLE_DEV",
+      status: "success"
+    },
+    orderBy: { createdAt: "desc" },
+    take: 16,
+    select: {
+      metadata: true,
+      outputPreview: true
+    }
+  });
+
+  if (rows.length === 0) {
+    return {
+      ok: false,
+      detail: "未发现 DEV/ROLE_DEV 成功执行记录。"
+    };
+  }
+
+  let workspaceEvidenceSeen = false;
+  let codeEvidenceSeen = false;
+  let verificationEvidenceSeen = false;
+
+  for (const row of rows) {
+    const workspaceEvidence = extractDevWorkspaceEvidenceFromMetadata(row.metadata);
+    if (workspaceEvidence) {
+      workspaceEvidenceSeen = true;
+      const codeFiles = workspaceEvidence.evidenceFiles
+        .filter((item) => DEV_WORKSPACE_CODE_FILE_PATTERN.test(item))
+        .filter((item) => !DEV_WORKSPACE_IGNORED_FILE_PATTERN.test(item));
+      if (codeFiles.length >= 2) {
+        codeEvidenceSeen = true;
+      }
+    }
+
+    const verificationSource = extractDevVerificationEvidenceText(row.metadata, String(row.outputPreview || ""));
+    if (DEV_VERIFICATION_SIGNAL_PATTERN.test(verificationSource)) {
+      verificationEvidenceSeen = true;
+    }
+
+    if (workspaceEvidenceSeen && codeEvidenceSeen && verificationEvidenceSeen) {
+      return {
+        ok: true,
+        detail: "已命中工作区代码证据与验证命令证据。"
+      };
+    }
+  }
+
+  // Fallback: some terminal-agent providers may omit structured workspace metadata.
+  // In that case, reuse DEV deliverable正文 as secondary evidence source.
+  const deliverables = await prisma.deliverable.findMany({
+    where: {
+      projectId,
+      stageType: "DEV",
+      status: { in: ["submitted", "approved"] }
+    },
+    orderBy: [{ version: "desc" }, { updatedAt: "desc" }],
+    take: 8,
+    select: {
+      content: true
+    }
+  });
+
+  if (deliverables.length > 0) {
+    const fallbackSource = [
+      ...deliverables.map((item) => String(item.content || "")),
+      ...rows.map((item) => String(item.outputPreview || ""))
+    ].join("\n");
+    const fallbackWorkspaceSignal = /(workspace|工作区|项目工作区|repo|仓库根目录|\/users\/|\/home\/)/i.test(fallbackSource);
+    const fallbackVerificationSignal = DEV_VERIFICATION_SIGNAL_PATTERN.test(fallbackSource);
+    const fallbackCodeFiles = Array.from(
+      new Set(
+        Array.from(fallbackSource.matchAll(DEV_WORKSPACE_CODE_FILE_EXTRACT_PATTERN))
+          .map((match) => String(match[0] || "").trim())
+          .filter(Boolean)
+          .filter((item) => !DEV_WORKSPACE_IGNORED_FILE_PATTERN.test(item))
+      )
+    );
+
+    if (fallbackWorkspaceSignal) {
+      workspaceEvidenceSeen = true;
+    }
+    if (fallbackCodeFiles.length >= 2) {
+      codeEvidenceSeen = true;
+    }
+    if (fallbackVerificationSignal) {
+      verificationEvidenceSeen = true;
+    }
+
+    if (workspaceEvidenceSeen && codeEvidenceSeen && verificationEvidenceSeen) {
+      return {
+        ok: true,
+        detail: "已通过交付正文补充命中工作区、代码路径与验证命令证据。"
+      };
+    }
+  }
+
+  const missing: string[] = [];
+  if (!workspaceEvidenceSeen) {
+    missing.push("缺少 terminalWorkspaceEvidence（项目工作区证据）");
+  }
+  if (!codeEvidenceSeen) {
+    missing.push("缺少代码文件证据（至少 2 个 app/src/apps 路径文件）");
+  }
+  if (!verificationEvidenceSeen) {
+    missing.push("缺少验证命令证据（build/test/typecheck/curl 等）");
+  }
+  return {
+    ok: false,
+    detail: missing.join("；")
+  };
+}
+
 async function collectStageExecutionBlockingIssues(project: ProjectDetail, stageType: StageType) {
   const extraRoles: RoleType[] = stageType === "ACCEPT" ? ["ROLE_QA"] : [];
   const rolesToCheck = Array.from(new Set<RoleType>([
@@ -1888,18 +2208,27 @@ async function collectStageExecutionBlockingIssues(project: ProjectDetail, stage
 
   const issues: string[] = [];
   for (const role of rolesToCheck) {
-    const latest = latestRows.find((row) => row.role === role);
+    const roleRows = latestRows.filter((row) => row.role === role);
+    const latest = roleRows[0];
     if (!latest) {
       continue;
     }
-    if (latest.status === "failed") {
+    const hasSuccessfulExecution = roleRows.some((row) => row.status === "success");
+    if (latest.status === "failed" && !hasSuccessfulExecution) {
       const label = ROLE_LABELS[role] || role;
-      issues.push(`最新${label}执行失败，需先修复后再推进（${String(latest.errorMessage || "未返回具体错误").trim()}）`);
+      issues.push(`最新${label}执行失败且尚无成功记录，需先修复后再推进（${String(latest.errorMessage || "未返回具体错误").trim()}）`);
     }
   }
 
   if (stageType === "ACCEPT" && !(await hasAcceptableDevImplementationEvidence(project))) {
     issues.push("缺少真实研发实现证据：当前 DEV 产物仍无法证明存在可运行页面、接口、存储、代码路径与验证结果，不能把设计预览或静态演示当作最终交付。");
+  }
+
+  if (stageType === "DEV" || stageType === "ACCEPT") {
+    const devHardGate = await evaluateDevExecutionHardGate(project.id);
+    if (!devHardGate.ok) {
+      issues.push(`DEV 实施硬门禁未通过：${devHardGate.detail}`);
+    }
   }
 
   return issues;
@@ -2322,58 +2651,10 @@ async function syncRequirementBackfillOnProjectCompleted(project: ProjectDetail)
     requirementContract: contract
   });
 
-  try {
-    const artifact = await generateOfficialSiteArtifact(project);
-    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      const legacyEntries = await tx.deliverable.findMany({
-        where: {
-          projectId: project.id,
-          name: "官网演示页.html"
-        },
-        orderBy: { version: "desc" }
-      });
-
-      for (const legacy of legacyEntries) {
-        await tx.deliverable.update({
-          where: { id: legacy.id },
-          data: {
-            name: artifact.kind === "design_preview" ? "设计预览快照.html" : "交付成果导航页.html",
-            stageType: artifact.kind === "design_preview" ? "DESIGN" : "ACCEPT",
-            createdBy: artifact.kind === "design_preview" ? "ROLE_DESIGN" : "ROLE_DEV",
-            content: [
-              artifact.kind === "design_preview" ? "# 设计预览快照" : "# 交付成果导航页",
-              "",
-              artifact.kind === "design_preview"
-                ? "该页面仅用于回看 DESIGN 阶段视觉预览，不得作为最终研发交付。"
-                : "该页面仅用于辅助查阅交付物，不得替代真实研发结果、运行入口和测试结论。",
-              artifact.sourceDeliverableName
-                ? `渲染来源: ${artifact.sourceDeliverableName}`
-                : "渲染来源: 交付物汇总渲染",
-              `访问地址: ${artifact.publicPath}`,
-              `本地文件: ${artifact.filePaths[0]}`
-            ].join("\n"),
-            updatedAt: new Date()
-          }
-        });
-      }
-
-      await tx.timelineEvent.create({
-        data: {
-          projectId: project.id,
-          timestamp: new Date(),
-          agentId: artifact.kind === "design_preview" ? "ROLE_DESIGN" : "ROLE_DEV",
-          type: "system",
-          title: artifact.kind === "design_preview" ? "设计预览快照已生成" : "交付成果导航页已生成",
-          content: artifact.kind === "design_preview"
-            ? `已生成设计预览快照，路径：${artifact.publicPath}。该链接仅用于看稿，不得作为最终研发交付。`
-            : `已生成交付成果导航页，路径：${artifact.publicPath}。该链接仅用于辅助查阅，不替代真实研发结果。`,
-          priority: "normal"
-        }
-      });
-    });
-  } catch {
-    // 生成官网产物失败时不阻断主流程，避免影响项目收敛与回填。
-  }
+  // NOTE:
+  // Do not auto-generate static official-site snapshots during completion backfill.
+  // Snapshot generation stays as an explicit/manual action to avoid stale auto artifacts
+  // shadowing manually curated pages.
 }
 
 function formatRequirementContract(contract: RequirementContract) {
@@ -2578,6 +2859,243 @@ export async function reconcileProjectDeliverablesNow(id: string): Promise<Proje
   return findProject(id);
 }
 
+type WorkflowLegacyStateSnapshot = {
+  status: ProjectStatus;
+  currentStage: StageType;
+  currentRole: RoleType;
+  progress: number;
+  pendingApproval: boolean;
+};
+
+function resolveLegacyStageTypeFromWorkflowTemplateKey(templateKey: string): StageType {
+  const normalizedTemplateKey = String(templateKey || "").trim().toLowerCase();
+  const flow = normalizedTemplateKey
+    ? LEGACY_STAGE_FLOW_BY_TEMPLATE[normalizedTemplateKey]
+    : undefined;
+  if (Array.isArray(flow) && flow.length > 0) {
+    return flow[Math.max(0, flow.length - 1)] as StageType;
+  }
+  return "INIT";
+}
+
+function inferLegacyStateFromWorkflow(workflow: {
+  status: string;
+  currentStageIds: Prisma.JsonValue;
+  stages: Array<{
+    id: string;
+    templateKey: string;
+    status: string;
+    createdAt: Date;
+    updatedAt: Date;
+  }>;
+}): WorkflowLegacyStateSnapshot {
+  const workflowStatus = String(workflow.status || "").trim().toLowerCase();
+  const stageById = new Map(workflow.stages.map((stage) => [stage.id, stage]));
+  const currentStageIds = readStringArray(workflow.currentStageIds);
+  const currentStages = currentStageIds
+    .map((id) => stageById.get(id))
+    .filter((stage): stage is NonNullable<typeof stage> => Boolean(stage));
+  const latestStageByUpdate = [...workflow.stages].sort((left, right) => (
+    new Date(right.updatedAt || right.createdAt || 0).getTime()
+    - new Date(left.updatedAt || left.createdAt || 0).getTime()
+  ))[0];
+  const inferredCurrentStage = workflowStatus === "completed"
+    ? "ACCEPT"
+    : (
+      currentStages[0]
+        ? resolveLegacyStageTypeFromWorkflowTemplateKey(currentStages[0].templateKey)
+        : latestStageByUpdate
+          ? resolveLegacyStageTypeFromWorkflowTemplateKey(latestStageByUpdate.templateKey)
+          : "INIT"
+    );
+  const completedStageCount = workflow.stages.filter((stage) => {
+    const status = String(stage.status || "").trim().toLowerCase();
+    return status === "completed" || status === "skipped";
+  }).length;
+  const totalStages = Math.max(1, workflow.stages.length);
+  const progress = workflowStatus === "completed"
+    ? 100
+    : Math.max(4, Math.min(96, Math.round((completedStageCount / totalStages) * 100)));
+  const pendingApproval = workflowStatus !== "completed"
+    && currentStages.some((stage) => String(stage.status || "").trim().toLowerCase() === "reviewing");
+  const currentRole = stageAssignees[inferredCurrentStage] || "ROLE_PM";
+
+  return {
+    status: workflowStatus === "completed" ? "completed" : "active",
+    currentStage: inferredCurrentStage,
+    currentRole,
+    progress,
+    pendingApproval
+  };
+}
+
+async function reconcileProjectStateWithWorkflowIfNeeded(projectId: string) {
+  const [project, workflow] = await Promise.all([
+    prisma.project.findUnique({
+      where: { id: projectId },
+      select: {
+        id: true,
+        status: true,
+        currentStage: true,
+        currentRole: true,
+        progress: true,
+        pendingApproval: true
+      }
+    }),
+    prisma.workflow.findFirst({
+      where: {
+        projectId,
+        status: {
+          in: ["active", "completed"]
+        }
+      },
+      orderBy: { createdAt: "desc" },
+      select: {
+        id: true,
+        status: true,
+        currentStageIds: true,
+        stages: {
+          select: {
+            id: true,
+            templateKey: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true
+          }
+        }
+      }
+    })
+  ]);
+
+  if (!project || !workflow) {
+    return;
+  }
+
+  const inferred = inferLegacyStateFromWorkflow(workflow);
+  const hasMismatch = project.status !== inferred.status
+    || project.currentStage !== inferred.currentStage
+    || project.currentRole !== inferred.currentRole
+    || Number(project.progress) !== Number(inferred.progress)
+    || Boolean(project.pendingApproval) !== Boolean(inferred.pendingApproval);
+  if (!hasMismatch) {
+    return;
+  }
+
+  const now = new Date();
+  const inferredStageOrder = stageOrder.indexOf(inferred.currentStage);
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.project.update({
+      where: { id: projectId },
+      data: {
+        status: inferred.status,
+        currentStage: inferred.currentStage,
+        currentRole: inferred.currentRole,
+        progress: inferred.progress,
+        pendingApproval: inferred.pendingApproval,
+        ...(project.status === "completed" && inferred.status === "active"
+          ? {
+              summary: `workflow-v2 当前停留在 ${STAGE_LABELS[inferred.currentStage]} 阶段，尚未通过门禁，项目未完成。`
+            }
+          : {})
+      }
+    });
+
+    const legacyStages = await tx.stage.findMany({
+      where: { projectId },
+      orderBy: { sortOrder: "asc" }
+    });
+    for (const stage of legacyStages) {
+      const stageType = resolveStageType(stage.type) || "INIT";
+      const stageTypeOrder = stageOrder.indexOf(stageType);
+      const isCurrent = stageType === inferred.currentStage;
+      const nextStatus: "pending" | "active" | "completed" = inferred.status === "completed"
+        ? "completed"
+        : isCurrent
+          ? "active"
+          : (
+            stageTypeOrder >= 0
+            && inferredStageOrder >= 0
+            && stageTypeOrder < inferredStageOrder
+              ? "completed"
+              : "pending"
+          );
+      await tx.stage.update({
+        where: { id: stage.id },
+        data: {
+          status: nextStatus,
+          progress: nextStatus === "completed" ? 100 : (isCurrent ? Math.max(stage.progress ?? 0, 18) : 0),
+          startedAt: isCurrent ? (stage.startedAt ?? now) : stage.startedAt,
+          endedAt: nextStatus === "completed" ? (stage.endedAt ?? now) : null
+        }
+      });
+    }
+  });
+}
+
+async function tryApproveProjectViaWorkflowV2(projectId: string) {
+  const workflow = await prisma.workflow.findFirst({
+    where: {
+      projectId,
+      status: "active"
+    },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      currentStageIds: true,
+      stages: {
+        select: {
+          id: true,
+          templateKey: true,
+          status: true
+        }
+      }
+    }
+  });
+  if (!workflow) {
+    return false;
+  }
+
+  const stageById = new Map(workflow.stages.map((stage) => [stage.id, stage]));
+  const activeCurrentStageIds = readStringArray(workflow.currentStageIds).filter((stageId) => {
+    const stage = stageById.get(stageId);
+    if (!stage) {
+      return false;
+    }
+    const status = String(stage.status || "").trim().toLowerCase();
+    return !["completed", "skipped", "failed"].includes(status);
+  });
+  if (activeCurrentStageIds.length === 0) {
+    throw new Error("WORKFLOW_V2_ACTIVE_WITHOUT_CURRENT_STAGE: workflow-v2 正在运行但缺少可推进阶段。");
+  }
+
+  const blockedMessages: string[] = [];
+  for (const stageId of activeCurrentStageIds) {
+    const stage = stageById.get(stageId);
+    const result = await transitionWorkflowStage({
+      workflowId: workflow.id,
+      stageId,
+      action: "proceed",
+      triggeredBy: "ROLE_PM",
+      reason: "legacy project approve route delegated to workflow-v2 gate"
+    });
+    if (result.success) {
+      continue;
+    }
+    const violations = Array.isArray(result.violations)
+      ? result.violations.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const stageLabel = String(stage?.templateKey || stageId).trim();
+    blockedMessages.push(`${stageLabel}: ${violations.join("；") || "未通过门禁校验"}`);
+  }
+
+  if (blockedMessages.length > 0) {
+    throw new Error(`WORKFLOW_V2_GATE_BLOCKED: ${blockedMessages.join(" | ")}`);
+  }
+
+  await reconcileProjectStateWithWorkflowIfNeeded(projectId);
+  return true;
+}
+
 async function loadProjectRecord(id: string) {
   return prisma.project.findUnique({
     where: { id },
@@ -2625,6 +3143,10 @@ async function loadProjectRecord(id: string) {
           }
         },
         orderBy: { createdAt: "asc" }
+      },
+      executions: {
+        orderBy: { updatedAt: "desc" },
+        take: 240
       },
       timeline: { orderBy: { timestamp: "desc" } }
     }
@@ -2831,6 +3353,143 @@ function buildPendingStitchRecoveryJobKey(input: {
   stitchProjectId: string;
 }) {
   return `${input.projectId}:${input.stageType}:${input.role}:${input.stitchProjectId}`;
+}
+
+type ReusableStitchExecutionState =
+  | {
+      status: "ready";
+      provider: string;
+      projectId: string;
+      screenId: string;
+      htmlUrl?: string;
+      imageUrl?: string;
+      prompt: string;
+      executor: "direct";
+      requestedAt: string;
+      error?: string;
+    }
+  | {
+      status: "pending";
+      provider: string;
+      projectId: string;
+      prompt: string;
+      executor: "direct";
+      requestedAt: string;
+      error?: string;
+    }
+  | {
+      status: "degraded";
+      provider: string;
+      projectId: string;
+      prompt: string;
+      executor: "direct";
+      requestedAt: string;
+      error?: string;
+    };
+
+function toJsonObject(input: Prisma.JsonValue | undefined | null): Record<string, unknown> | null {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return null;
+  }
+  return input as Record<string, unknown>;
+}
+
+function toOptionalString(input: unknown) {
+  const value = String(input ?? "").trim();
+  return value || undefined;
+}
+
+function toStitchExecutor(input: unknown): "direct" {
+  const value = String(input ?? "").trim().toLowerCase();
+  return value === "direct" ? "direct" : "direct";
+}
+
+async function loadReusableStitchExecutionState(input: {
+  projectId: string;
+  stageType: StageType;
+  role: RoleType;
+}): Promise<ReusableStitchExecutionState | null> {
+  const rows = await prisma.projectExecution.findMany({
+    where: {
+      projectId: input.projectId,
+      stageType: input.stageType,
+      role: input.role
+    },
+    orderBy: { createdAt: "desc" },
+    take: 24,
+    select: {
+      createdAt: true,
+      metadata: true
+    }
+  });
+
+  const now = Date.now();
+  for (const row of rows) {
+    const metadata = toJsonObject(row.metadata);
+    if (!metadata) {
+      continue;
+    }
+    const projectId = toOptionalString(metadata.stitchProjectId);
+    if (!projectId) {
+      continue;
+    }
+
+    const statusRaw = String(metadata.stitchStatus ?? "").trim().toLowerCase();
+    const provider = toOptionalString(metadata.provider) || "google-stitch-mcp";
+    const prompt = toOptionalString(metadata.stitchPrompt) || "";
+    const requestedAt = toOptionalString(metadata.stitchRequestedAt) || row.createdAt.toISOString();
+    const requestedTs = Date.parse(requestedAt);
+    const ageMs = Number.isFinite(requestedTs) ? now - requestedTs : now - row.createdAt.getTime();
+    const executor = toStitchExecutor(metadata.stitchExecutor);
+    const error = toOptionalString(metadata.stitchError);
+
+    if (statusRaw === "ready") {
+      const htmlUrl = toOptionalString(metadata.stitchHtmlUrl);
+      const imageUrl = toOptionalString(metadata.stitchImageUrl);
+      const screenId = toOptionalString(metadata.stitchScreenId) || "unknown";
+      if (!htmlUrl && !imageUrl) {
+        continue;
+      }
+      return {
+        status: "ready",
+        provider,
+        projectId,
+        screenId,
+        htmlUrl,
+        imageUrl,
+        prompt,
+        executor,
+        requestedAt,
+        error
+      };
+    }
+
+    if (statusRaw === "pending" && ageMs <= STITCH_PENDING_REUSE_TTL_MS) {
+      return {
+        status: "pending",
+        provider,
+        projectId,
+        prompt,
+        executor,
+        requestedAt,
+        error
+      };
+    }
+
+    if (statusRaw === "degraded" && ageMs <= STITCH_DEGRADED_RETRY_COOLDOWN_MS) {
+      return {
+        status: "degraded",
+        provider,
+        projectId,
+        prompt,
+        executor,
+        requestedAt,
+        error
+      };
+    }
+  }
+
+  return null;
 }
 
 async function reconcilePendingStitchArtifactInBackground(input: {
@@ -3294,6 +3953,13 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
       thinkingSummary: String(result.summary ?? "").trim() || `${ROLE_LABELS[input.role]} 已完成终端执行`,
       skillEvidence: skillEvidence.parsedEvidence,
       collaborationEvidence: collaborationEvidence.parsedEvidence,
+      workspaceEvidence: workspaceContext
+        ? {
+            workspacePath: workspaceContext.workspacePath,
+            relativePath: workspaceContext.relativePath,
+            evidenceFiles: workspaceContext.evidenceFiles.slice(0, 80)
+          }
+        : null,
       attempts
     };
   } catch (error) {
@@ -3481,9 +4147,25 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
     }
 
     const stitchMode = getDesignStitchMode();
-    const shouldUseStitch = (input.stageType === "DESIGN" || input.role === "ROLE_DESIGN") && stitchMode !== "off";
+    const shouldUseStitch = stitchMode !== "off" && shouldAttachStitchForExecution(input.stageType, input.role);
     if (shouldUseStitch) {
-      if (isStitchTransportCooldownActive()) {
+      const stitchInputValidation = validateStitchInputForExecution({
+        summary: input.summary,
+        projectDescription: input.projectDescription,
+        parsedIntent: input.parsedIntent
+      });
+
+      if (!stitchInputValidation.ok) {
+        stitchStatus = "degraded";
+        stitchErrorMessage = `STITCH_INPUT_INVALID: ${stitchInputValidation.reason}`;
+        if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
+          throw new Error(`DESIGN_STITCH_INPUT_INVALID: ${stitchInputValidation.reason}`);
+        }
+        run = {
+          ...run,
+          body: appendStitchFailureNote(String(run.body || ""), stitchErrorMessage)
+        };
+      } else if (isStitchTransportCooldownActive()) {
         stitchStatus = "degraded";
         stitchErrorMessage = "STITCH_TRANSPORT_COOLDOWN_ACTIVE: temporary skip to avoid repeated transport noise";
         run = {
@@ -3491,26 +4173,147 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
           body: appendStitchFailureNote(String(run.body || ""), stitchErrorMessage)
         };
       } else {
-      try {
-        if (stitchMode === "preferred") {
-          const stitchResult = await runWithRemainingTimeout(
-            startStitchDesignGeneration({
-              projectId: input.projectId,
-              projectName: input.projectName,
-              projectDescription: input.projectDescription,
-              parsedIntent: input.parsedIntent,
-              stageType: input.stageType,
-              role: input.role,
-              summary: input.summary
-            }, {
-              requestTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS,
-              recoveryTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS
-            }),
-            Math.min(PROJECT_STAGE_STITCH_TIMEOUT_MS, PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS)
-          );
+        try {
+          const fallbackPrompt = String(input.summary || `${input.projectName} ${STAGE_LABELS[input.stageType]}`).trim();
+          const reusableStitchState = await loadReusableStitchExecutionState({
+            projectId: input.projectId,
+            stageType: input.stageType,
+            role: input.role
+          });
 
-          if (stitchResult.status === "ready") {
-            const stitchArtifact = stitchResult.artifact;
+          if (reusableStitchState?.status === "ready") {
+            stitchStatus = "ready";
+            stitchProjectId = reusableStitchState.projectId;
+            stitchScreenId = reusableStitchState.screenId;
+            stitchHtmlUrl = reusableStitchState.htmlUrl || undefined;
+            stitchImageUrl = reusableStitchState.imageUrl || undefined;
+            stitchPrompt = reusableStitchState.prompt || fallbackPrompt;
+            stitchExecutor = reusableStitchState.executor;
+            stitchRequestedAt = reusableStitchState.requestedAt;
+            run = {
+              ...run,
+              body: appendStitchArtifactBlock(String(run.body || ""), {
+                provider: reusableStitchState.provider,
+                generatedAt: new Date().toISOString(),
+                projectId: reusableStitchState.projectId,
+                screenId: reusableStitchState.screenId,
+                htmlUrl: reusableStitchState.htmlUrl || "",
+                imageUrl: reusableStitchState.imageUrl || "",
+                prompt: stitchPrompt
+              })
+            };
+          } else if (reusableStitchState?.status === "pending") {
+            const pendingPrompt = reusableStitchState.prompt || fallbackPrompt;
+            const recoveredArtifact = await runWithRemainingTimeout(
+              recoverStitchDesignArtifact({
+                stitchProjectId: reusableStitchState.projectId,
+                prompt: pendingPrompt,
+                executor: reusableStitchState.executor,
+                requestTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS,
+                timeoutMs: PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS
+              }),
+              Math.min(PROJECT_STAGE_STITCH_TIMEOUT_MS, PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS)
+            );
+
+            if (recoveredArtifact) {
+              stitchStatus = "ready";
+              stitchProjectId = recoveredArtifact.projectId;
+              stitchScreenId = recoveredArtifact.screenId;
+              stitchHtmlUrl = recoveredArtifact.htmlUrl || undefined;
+              stitchImageUrl = recoveredArtifact.imageUrl || undefined;
+              stitchPrompt = recoveredArtifact.prompt;
+              stitchExecutor = recoveredArtifact.executor;
+              run = {
+                ...run,
+                body: appendStitchArtifactBlock(String(run.body || ""), recoveredArtifact)
+              };
+            } else {
+              const nextPendingArtifact: StitchDesignPendingArtifact = {
+                provider: reusableStitchState.provider as "google-stitch-mcp",
+                requestedAt: reusableStitchState.requestedAt,
+                projectId: reusableStitchState.projectId,
+                prompt: pendingPrompt,
+                executor: reusableStitchState.executor,
+                status: "pending"
+              };
+              pendingStitchArtifact = nextPendingArtifact;
+              stitchStatus = "pending";
+              stitchProjectId = nextPendingArtifact.projectId;
+              stitchPrompt = nextPendingArtifact.prompt;
+              stitchExecutor = nextPendingArtifact.executor;
+              stitchRequestedAt = nextPendingArtifact.requestedAt;
+              run = {
+                ...run,
+                body: appendStitchPendingNote(String(run.body || ""), nextPendingArtifact)
+              };
+            }
+          } else if (reusableStitchState?.status === "degraded") {
+            stitchStatus = "degraded";
+            stitchProjectId = reusableStitchState.projectId;
+            stitchPrompt = reusableStitchState.prompt || fallbackPrompt;
+            stitchExecutor = reusableStitchState.executor;
+            stitchRequestedAt = reusableStitchState.requestedAt;
+            stitchErrorMessage = reusableStitchState.error
+              || "STITCH_RECENT_DEGRADED: skip immediate retry to avoid wasting Stitch quota";
+            run = {
+              ...run,
+              body: appendStitchFailureNote(String(run.body || ""), stitchErrorMessage)
+            };
+          } else if (stitchMode === "preferred") {
+            const stitchResult = await runWithRemainingTimeout(
+              startStitchDesignGeneration({
+                projectId: input.projectId,
+                projectName: input.projectName,
+                projectDescription: input.projectDescription,
+                parsedIntent: input.parsedIntent,
+                stageType: input.stageType,
+                role: input.role,
+                summary: input.summary
+              }, {
+                requestTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_REQUEST_TIMEOUT_MS,
+                recoveryTimeoutMs: PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS
+              }),
+              Math.min(PROJECT_STAGE_STITCH_TIMEOUT_MS, PROJECT_STAGE_STITCH_ASYNC_INITIAL_WAIT_MS)
+            );
+
+            if (stitchResult.status === "ready") {
+              const stitchArtifact = stitchResult.artifact;
+              stitchStatus = "ready";
+              stitchProjectId = stitchArtifact.projectId;
+              stitchScreenId = stitchArtifact.screenId;
+              stitchHtmlUrl = stitchArtifact.htmlUrl || undefined;
+              stitchImageUrl = stitchArtifact.imageUrl || undefined;
+              stitchPrompt = stitchArtifact.prompt;
+              stitchExecutor = stitchArtifact.executor;
+              run = {
+                ...run,
+                body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
+              };
+            } else {
+              pendingStitchArtifact = stitchResult.pending;
+              stitchStatus = "pending";
+              stitchProjectId = stitchResult.pending.projectId;
+              stitchPrompt = stitchResult.pending.prompt;
+              stitchExecutor = stitchResult.pending.executor;
+              stitchRequestedAt = stitchResult.pending.requestedAt;
+              run = {
+                ...run,
+                body: appendStitchPendingNote(String(run.body || ""), stitchResult.pending)
+              };
+            }
+          } else {
+            const stitchArtifact = await runWithRemainingTimeout(
+              generateStitchDesignArtifact({
+                projectId: input.projectId,
+                projectName: input.projectName,
+                projectDescription: input.projectDescription,
+                parsedIntent: input.parsedIntent,
+                stageType: input.stageType,
+                role: input.role,
+                summary: input.summary
+              }),
+              PROJECT_STAGE_STITCH_TIMEOUT_MS
+            );
             stitchStatus = "ready";
             stitchProjectId = stitchArtifact.projectId;
             stitchScreenId = stitchArtifact.screenId;
@@ -3522,57 +4325,21 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
               ...run,
               body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
             };
-          } else {
-            pendingStitchArtifact = stitchResult.pending;
-            stitchStatus = "pending";
-            stitchProjectId = stitchResult.pending.projectId;
-            stitchPrompt = stitchResult.pending.prompt;
-            stitchExecutor = stitchResult.pending.executor;
-            stitchRequestedAt = stitchResult.pending.requestedAt;
-            run = {
-              ...run,
-              body: appendStitchPendingNote(String(run.body || ""), stitchResult.pending)
-            };
           }
-        } else {
-          const stitchArtifact = await runWithRemainingTimeout(
-            generateStitchDesignArtifact({
-              projectId: input.projectId,
-              projectName: input.projectName,
-              projectDescription: input.projectDescription,
-              parsedIntent: input.parsedIntent,
-              stageType: input.stageType,
-              role: input.role,
-              summary: input.summary
-            }),
-            PROJECT_STAGE_STITCH_TIMEOUT_MS
-          );
-          stitchStatus = "ready";
-          stitchProjectId = stitchArtifact.projectId;
-          stitchScreenId = stitchArtifact.screenId;
-          stitchHtmlUrl = stitchArtifact.htmlUrl || undefined;
-          stitchImageUrl = stitchArtifact.imageUrl || undefined;
-          stitchPrompt = stitchArtifact.prompt;
-          stitchExecutor = stitchArtifact.executor;
+        } catch (stitchError) {
+          const stitchMessage = isStitchTransportCooldownError(stitchError)
+            ? "STITCH_TRANSPORT_COOLDOWN_ACTIVE: temporary skip to avoid repeated transport noise"
+            : stitchError instanceof Error ? stitchError.message : String(stitchError);
+          stitchStatus = "degraded";
+          stitchErrorMessage = stitchMessage;
+          if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
+            throw new Error(`DESIGN_STITCH_RUNTIME_FAILED: ${stitchMessage}`);
+          }
           run = {
             ...run,
-            body: appendStitchArtifactBlock(String(run.body || ""), stitchArtifact)
+            body: appendStitchFailureNote(String(run.body || ""), stitchMessage)
           };
         }
-      } catch (stitchError) {
-        const stitchMessage = isStitchTransportCooldownError(stitchError)
-          ? "STITCH_TRANSPORT_COOLDOWN_ACTIVE: temporary skip to avoid repeated transport noise"
-          : stitchError instanceof Error ? stitchError.message : String(stitchError);
-        stitchStatus = "degraded";
-        stitchErrorMessage = stitchMessage;
-        if (isDesignStitchEvidenceRequired(input.stageType, input.role)) {
-          throw new Error(`DESIGN_STITCH_RUNTIME_FAILED: ${stitchMessage}`);
-        }
-        run = {
-          ...run,
-          body: appendStitchFailureNote(String(run.body || ""), stitchMessage)
-        };
-      }
       }
     }
 
@@ -3679,6 +4446,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         skillProtocol: strategy.skillProtocol,
         terminalSkillEvidence: (run as { skillEvidence?: Prisma.InputJsonValue | null }).skillEvidence ?? undefined,
         terminalCollaborationEvidence: (run as { collaborationEvidence?: Prisma.InputJsonValue | null }).collaborationEvidence ?? undefined,
+        terminalWorkspaceEvidence: (run as { workspaceEvidence?: Prisma.InputJsonValue | null }).workspaceEvidence ?? undefined,
         terminalFallbackReason,
         stitchStatus,
         stitchProjectId,
@@ -4296,8 +5064,56 @@ export async function listProjects(): Promise<ProjectSummary[]> {
     },
     orderBy: { updatedAt: "desc" }
   });
+  const workflowOverrides = new Map<string, WorkflowLegacyStateSnapshot>();
+  const projectIds = projects.map((project) => project.id);
+  if (projectIds.length > 0) {
+    const workflows = await prisma.workflow.findMany({
+      where: {
+        projectId: { in: projectIds },
+        status: "active"
+      },
+      orderBy: [{ createdAt: "desc" }],
+      select: {
+        id: true,
+        projectId: true,
+        status: true,
+        currentStageIds: true,
+        stages: {
+          select: {
+            id: true,
+            templateKey: true,
+            status: true,
+            createdAt: true,
+            updatedAt: true
+          }
+        }
+      }
+    });
+    for (const workflow of workflows) {
+      if (workflowOverrides.has(workflow.projectId)) {
+        continue;
+      }
+      workflowOverrides.set(workflow.projectId, inferLegacyStateFromWorkflow(workflow));
+    }
+  }
 
-  return projects.map(toProjectSummary);
+  return projects.map((project) => {
+    const override = workflowOverrides.get(project.id);
+    if (!override) {
+      return toProjectSummary(project);
+    }
+    return toProjectSummary({
+      ...project,
+      status: override.status,
+      currentStage: override.currentStage,
+      currentRole: override.currentRole,
+      progress: override.progress,
+      pendingApproval: override.pendingApproval,
+      summary: project.status === "completed" && override.status === "active"
+        ? `workflow-v2 当前停留在 ${STAGE_LABELS[override.currentStage]} 阶段，尚未通过门禁，项目未完成。`
+        : project.summary
+    });
+  });
 }
 
 export async function listAgents(): Promise<AgentProfile[]> {
@@ -4337,6 +5153,7 @@ export async function findAgent(roleId: RoleType): Promise<AgentProfile | undefi
 }
 
 export async function findProject(id: string): Promise<ProjectDetail | undefined> {
+  await reconcileProjectStateWithWorkflowIfNeeded(id);
   const project = await loadProjectRecord(id);
   return project ? toProjectDetail(project) : undefined;
 }
@@ -4401,6 +5218,12 @@ export async function createProject(
     workflowTemplateKey: input.workflowTemplateKey,
     projectType
   });
+  const fallbackProjectInputs = buildTemplateFallbackProjectInputs({
+    workflowTemplateKey,
+    projectDescription: input.description,
+    projectType
+  });
+  const mergedProjectInputs = mergeProjectInputPayloads(input.projectInputs, fallbackProjectInputs);
   if (projectType === "relay" && !parentProjectId) {
     throw new Error("relay mode requires parentProjectId");
   }
@@ -4429,7 +5252,9 @@ export async function createProject(
       pendingApproval: false,
       currentRole,
       updatedAt: new Date().toISOString(),
-      summary: "项目经理已开始立项，你可以直接进入观测室查看实时输出。"
+      summary: currentStage === "INIT"
+        ? "项目经理已开始立项，你可以直接进入观测室查看实时输出。"
+        : `${STAGE_LABELS[currentStage]}阶段已启动，你可以直接进入观测室查看实时输出。`
     },
     runtimeMode
   );
@@ -4503,7 +5328,9 @@ export async function createProject(
       `## ${STAGE_LABELS[currentStage]}阶段准备中`,
       "",
       `- 当前负责人: ${ROLE_LABELS[currentRole] || currentRole}`,
-      "- 系统已完成项目登记，正在生成真实立项判断与章程建议。",
+      currentStage === "INIT"
+        ? "- 系统已完成项目登记，正在生成真实立项判断与章程建议。"
+        : `- 系统已完成项目登记，正在生成${STAGE_LABELS[currentStage]}阶段执行建议与交付草案。`,
       nextStageInFlow
         ? `- 通过审批后，项目将进入${STAGE_LABELS[nextStageInFlow]}阶段继续细化。`
         : "- 当前流程为单阶段收敛，完成本阶段后将进入交付收尾。"
@@ -4536,7 +5363,9 @@ export async function createProject(
       agentId: currentRole,
       type: "thinking",
       title: "Agent 已接管阶段",
-      content: "立项阶段已启动，正在后台预热模型并生成项目章程与治理建议。",
+      content: currentStage === "INIT"
+        ? "立项阶段已启动，正在后台预热模型并生成项目章程与治理建议。"
+        : `${STAGE_LABELS[currentStage]}阶段已启动，正在后台预热模型并生成交付草案。`,
       priority: "normal"
     }
   ];
@@ -4554,8 +5383,8 @@ export async function createProject(
       relayType: "full"
     });
   }
-  if (Array.isArray(input.projectInputs) && input.projectInputs.length > 0) {
-    await createProjectInputs(project.id, input.projectInputs);
+  if (mergedProjectInputs.length > 0) {
+    await createProjectInputs(project.id, mergedProjectInputs);
   }
   const created = await findProject(id).then((value) => value as ProjectDetail);
   await tryAutoInitializeProjectWorkflowV2(created, {
@@ -4936,6 +5765,11 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     return project;
   }
 
+  const handledByWorkflow = await tryApproveProjectViaWorkflowV2(id);
+  if (handledByWorkflow) {
+    return findProject(id);
+  }
+
   const designIntervention = getDesignInterventionSignal(project);
   if (project.currentStage === "DESIGN" && designIntervention.required) {
     const designReviewDeliverables = project.deliverables
@@ -5045,6 +5879,30 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     });
 
     if (isFinalStage) {
+      await tx.stage.updateMany({
+        where: {
+          projectId: id,
+          status: {
+            not: "completed"
+          }
+        },
+        data: {
+          status: "completed",
+          progress: 100,
+          endedAt: new Date()
+        }
+      });
+      await tx.task.updateMany({
+        where: {
+          projectId: id,
+          status: {
+            notIn: ["done", "completed", "cancelled", "rejected"]
+          }
+        },
+        data: {
+          status: "done"
+        }
+      });
       await tx.project.update({
         where: { id },
         data: {
@@ -6678,6 +7536,134 @@ function toProjectSummary(project: {
   };
 }
 
+function extractStitchValueFromText(input: string, key: string) {
+  const matched = String(input || "").match(new RegExp(`(?:^|\\n)\\s*(?:[-*]\\s*)?${key}\\s*[：:]\\s*([^\\n]+)`, "i"));
+  return matched ? toOptionalString(matched[1]) : undefined;
+}
+
+function buildProjectStitchArtifacts(input: {
+  executions: Array<{
+    id: string;
+    stageType: string;
+    role: string;
+    status: string;
+    provider: string | null;
+    outputPreview: string | null;
+    errorMessage: string | null;
+    metadata: Prisma.JsonValue;
+    updatedAt: Date;
+  }>;
+  deliverables: Array<{
+    id: string;
+    stageType: string;
+    createdBy: string;
+    content: string;
+    updatedAt: Date;
+  }>;
+}): NonNullable<ProjectDetail["stitchArtifacts"]> {
+  const { executions, deliverables } = input;
+  const picked = new Map<string, NonNullable<ProjectDetail["stitchArtifacts"]>[number]>();
+  for (const execution of executions) {
+    const metadata = toJsonObject(execution.metadata);
+    const stitchedProjectId = toOptionalString(metadata?.stitchProjectId)
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "stitchProjectId"))
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "projectId"));
+    if (!stitchedProjectId) {
+      continue;
+    }
+
+    const statusRaw = String(
+      metadata?.stitchStatus
+      ?? extractStitchValueFromText(String(execution.outputPreview || ""), "stitchStatus")
+      ?? extractStitchValueFromText(String(execution.outputPreview || ""), "状态")
+      ?? ""
+    ).trim().toLowerCase();
+    const status: "ready" | "pending" | "degraded" = statusRaw === "ready"
+      ? "ready"
+      : statusRaw === "pending"
+        ? "pending"
+        : "degraded";
+    const screenId = toOptionalString(metadata?.stitchScreenId)
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "stitchScreenId"))
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "screenId"));
+    const htmlUrl = toOptionalString(metadata?.stitchHtmlUrl)
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "stitchHtmlUrl"))
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "htmlUrl"));
+    const imageUrl = toOptionalString(metadata?.stitchImageUrl)
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "stitchImageUrl"))
+      || toOptionalString(extractStitchValueFromText(String(execution.outputPreview || ""), "imageUrl"));
+    const prompt = toOptionalString(metadata?.stitchPrompt);
+    const error = toOptionalString(metadata?.stitchError) || toOptionalString(execution.errorMessage);
+    const provider = toOptionalString(metadata?.provider) || toOptionalString(execution.provider);
+    const executor = toOptionalString(metadata?.stitchExecutor);
+    const requestedAt = toOptionalString(metadata?.stitchRequestedAt);
+    const dedupeKey = `${stitchedProjectId}:${screenId || "screen-na"}:${execution.stageType}:${execution.role}`;
+    if (picked.has(dedupeKey)) {
+      continue;
+    }
+    picked.set(dedupeKey, {
+      executionId: execution.id,
+      stageType: execution.stageType as StageType,
+      role: execution.role as RoleType,
+      status,
+      provider: provider || undefined,
+      projectId: stitchedProjectId,
+      screenId: screenId || undefined,
+      htmlUrl: htmlUrl || undefined,
+      imageUrl: imageUrl || undefined,
+      prompt: prompt || undefined,
+      error: error || undefined,
+      executor: executor || undefined,
+      requestedAt: requestedAt || undefined,
+      updatedAt: execution.updatedAt.toISOString()
+    });
+  }
+
+  for (const deliverable of deliverables) {
+    const projectId = toOptionalString(extractStitchValueFromText(deliverable.content, "stitchProjectId"))
+      || toOptionalString(extractStitchValueFromText(deliverable.content, "projectId"));
+    if (!projectId) {
+      continue;
+    }
+    const screenId = toOptionalString(extractStitchValueFromText(deliverable.content, "stitchScreenId"))
+      || toOptionalString(extractStitchValueFromText(deliverable.content, "screenId"));
+    const htmlUrl = toOptionalString(extractStitchValueFromText(deliverable.content, "stitchHtmlUrl"))
+      || toOptionalString(extractStitchValueFromText(deliverable.content, "htmlUrl"));
+    const imageUrl = toOptionalString(extractStitchValueFromText(deliverable.content, "stitchImageUrl"))
+      || toOptionalString(extractStitchValueFromText(deliverable.content, "imageUrl"));
+    const prompt = toOptionalString(extractStitchValueFromText(deliverable.content, "stitchPrompt"))
+      || toOptionalString(extractStitchValueFromText(deliverable.content, "prompt"));
+    const statusRaw = String(
+      extractStitchValueFromText(deliverable.content, "stitchStatus")
+      || extractStitchValueFromText(deliverable.content, "状态")
+      || (htmlUrl || imageUrl ? "ready" : "pending")
+    ).trim().toLowerCase();
+    const status: "ready" | "pending" | "degraded" = statusRaw === "ready"
+      ? "ready"
+      : statusRaw === "pending"
+        ? "pending"
+        : "degraded";
+    const dedupeKey = `${projectId}:${screenId || "screen-na"}:${deliverable.stageType}:${deliverable.createdBy}`;
+    if (picked.has(dedupeKey)) {
+      continue;
+    }
+    picked.set(dedupeKey, {
+      executionId: `deliverable-${deliverable.id}`,
+      stageType: deliverable.stageType as StageType,
+      role: deliverable.createdBy as RoleType,
+      status,
+      provider: "google-stitch-mcp",
+      projectId,
+      screenId: screenId || undefined,
+      htmlUrl: htmlUrl || undefined,
+      imageUrl: imageUrl || undefined,
+      prompt: prompt || undefined,
+      updatedAt: deliverable.updatedAt.toISOString()
+    });
+  }
+  return [...picked.values()];
+}
+
 function toProjectDetail(project: {
   id: string;
   name: string;
@@ -6798,6 +7784,17 @@ function toProjectDetail(project: {
     content: string;
     priority: string;
   }>;
+  executions: Array<{
+    id: string;
+    stageType: string;
+    role: string;
+    status: string;
+    provider: string | null;
+    outputPreview: string | null;
+    errorMessage: string | null;
+    metadata: Prisma.JsonValue;
+    updatedAt: Date;
+  }>;
 }): ProjectDetail {
   const latestDeliverables = selectLatestDeliverablesByCoreName(project.deliverables);
 
@@ -6871,6 +7868,10 @@ function toProjectDetail(project: {
         createdBy: deliverable.createdBy as RoleType,
         updatedAt: deliverable.updatedAt.toISOString()
       };
+    }),
+    stitchArtifacts: buildProjectStitchArtifacts({
+      executions: project.executions,
+      deliverables: project.deliverables
     }),
     timeline,
     liveSession: {

@@ -111,22 +111,12 @@ export async function request<T>(endpoint: string, options: RequestInit = {}): P
             : typeof payloadObject?.error === 'object' && payloadObject.error && 'message' in (payloadObject.error as Record<string, unknown>)
               ? String((payloadObject.error as { message?: string }).message || 'Request failed')
               : `Request failed (${effectiveResponse.status})`;
-        const normalizedMessage = effectiveResponse.status === 403
-          ? '权限不足，无法执行此操作'
-          : message;
 
         const error = new ApiRequestError(message, {
           status: effectiveResponse.status,
           code: payloadCode,
           details: payloadObject,
         });
-        if (effectiveResponse.status === 403) {
-          throw new ApiRequestError(normalizedMessage, {
-            status: effectiveResponse.status,
-            code: payloadCode || 'FORBIDDEN',
-            details: payloadObject,
-          });
-        }
 
         if (hasNextCandidate && shouldFallbackToNextApiBase({
           status: effectiveResponse.status,
