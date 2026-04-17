@@ -2712,6 +2712,23 @@ router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) =>
     return;
   }
 
+  const issueFirst = await ensureProjectIssueFirst({ projectId }).catch((error) => ({
+    ok: false,
+    enforced: true,
+    code: "ISSUE_FIRST_CHECK_FAILED",
+    message: error instanceof Error ? error.message : String(error)
+  }));
+  if (!issueFirst.ok) {
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "PROJECT_ISSUE_FIRST_REQUIRED",
+        message: buildProjectIssueFirstMessage(issueFirst)
+      }
+    });
+    return;
+  }
+
   const postCreatePrep = await runProjectPostCreatePrep({
     projectId,
     triggeredBy: "projects_route_manual_trigger"
@@ -2762,7 +2779,8 @@ router.post("/api/projects/:id/post-create-prep/draft", asyncRoute(async (req, r
       analysis: typeof req.body?.analysis === "string" ? req.body.analysis : undefined,
       rawRequirements: typeof req.body?.rawRequirements === "string" ? req.body.rawRequirements : undefined,
       prd: typeof req.body?.prd === "string" ? req.body.prd : undefined,
-      debateSummary: typeof req.body?.debateSummary === "string" ? req.body.debateSummary : undefined
+      debateSummary: typeof req.body?.debateSummary === "string" ? req.body.debateSummary : undefined,
+      discussionTrace: typeof req.body?.discussionTrace === "string" ? req.body.discussionTrace : undefined
     }
     : undefined;
   const postCreatePrep = await saveProjectPostCreatePrepDraft({
@@ -2805,7 +2823,8 @@ router.post("/api/projects/:id/post-create-prep/confirm", asyncRoute(async (req,
       analysis: typeof req.body?.analysis === "string" ? req.body.analysis : undefined,
       rawRequirements: typeof req.body?.rawRequirements === "string" ? req.body.rawRequirements : undefined,
       prd: typeof req.body?.prd === "string" ? req.body.prd : undefined,
-      debateSummary: typeof req.body?.debateSummary === "string" ? req.body.debateSummary : undefined
+      debateSummary: typeof req.body?.debateSummary === "string" ? req.body.debateSummary : undefined,
+      discussionTrace: typeof req.body?.discussionTrace === "string" ? req.body.discussionTrace : undefined
     }
     : undefined;
   const postCreatePrep = await confirmProjectPostCreatePrep({
