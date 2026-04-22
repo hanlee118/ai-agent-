@@ -222,7 +222,20 @@ export async function bindProjectInputsToWorkflowEntryStages(input: {
     const existing = Array.isArray(stage.inputArtifacts)
       ? (stage.inputArtifacts as Array<Record<string, unknown>>)
       : [];
-    const merged = [...existing, ...artifacts];
+    const latestProjectInputIds = new Set(
+      artifacts
+        .map((item) => asRecord(item.metadata)?.projectInputId)
+        .map((id) => normalizeText(id))
+        .filter(Boolean)
+    );
+    const preserved = existing.filter((item) => {
+      const projectInputId = normalizeText(asRecord(item.metadata)?.projectInputId);
+      if (!projectInputId) {
+        return true;
+      }
+      return !latestProjectInputIds.has(projectInputId);
+    });
+    const merged = [...preserved, ...artifacts];
     await prisma.workflowStage.update({
       where: { id: stage.id },
       data: {

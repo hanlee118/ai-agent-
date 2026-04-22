@@ -2892,6 +2892,7 @@ router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) =>
       triggeredBy: "projects_route_manual_trigger_gitlab_publish_status"
     });
   }
+  await syncProjectInputsToLatestWorkflow(projectId);
 
   const refreshed = await findProject(projectId);
   if (!refreshed) {
@@ -2948,6 +2949,7 @@ router.post("/api/projects/:id/post-create-prep/draft", asyncRoute(async (req, r
     draft,
     triggeredBy: "projects_route_manual_draft_save"
   });
+  await syncProjectInputsToLatestWorkflow(projectId);
   const refreshed = await findProject(projectId);
   if (!refreshed) {
     res.status(404).json({ message: "Project not found" });
@@ -2993,6 +2995,7 @@ router.post("/api/projects/:id/post-create-prep/confirm", asyncRoute(async (req,
     notes: typeof req.body?.notes === "string" ? req.body.notes : undefined,
     draft
   });
+  await syncProjectInputsToLatestWorkflow(projectId);
   const refreshed = await findProject(projectId);
   if (!refreshed) {
     res.status(404).json({ message: "Project not found" });
