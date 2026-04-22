@@ -4176,6 +4176,7 @@ app.use("/api", (req, res, next) => {
       req.path.startsWith("/openclaw/")
       || req.path.startsWith("/projects")
       || req.path.startsWith("/tasks")
+      || req.path.startsWith("/v1/workflows")
       || req.path.startsWith("/gitlab")
       || req.path.startsWith("/role-sets")
       || req.path.startsWith("/product-context")
