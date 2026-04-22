@@ -176,6 +176,13 @@ type PrepDiscussionTraceView = {
   backfillTargets: string;
   sourceRawInput: string;
   sourceObjective: string;
+  gitlabPublishRequired: string;
+  gitlabPublishStatus: string;
+  gitlabProjectPath: string;
+  gitlabIssueIid: string;
+  gitlabIssueUrl: string;
+  gitlabNoteUrl: string;
+  gitlabPublishError: string;
   items: PrepDiscussionTraceItem[];
 };
 
@@ -354,6 +361,13 @@ const parsePrepDiscussionTraceView = (source: string): PrepDiscussionTraceView =
       backfillTargets: '',
       sourceRawInput: '',
       sourceObjective: '',
+      gitlabPublishRequired: '',
+      gitlabPublishStatus: '',
+      gitlabProjectPath: '',
+      gitlabIssueIid: '',
+      gitlabIssueUrl: '',
+      gitlabNoteUrl: '',
+      gitlabPublishError: '',
       items: [],
     };
   }
@@ -364,6 +378,13 @@ const parsePrepDiscussionTraceView = (source: string): PrepDiscussionTraceView =
   const backfillTargets = sanitizePrefillText(text.match(/(?:^|\n)-\s*backfillTargets:\s*([^\n]+)/i)?.[1] || '');
   const sourceRawInput = sanitizePrefillText(text.match(/(?:^|\n)-\s*sourceRawInput:\s*([^\n]+)/i)?.[1] || '');
   const sourceObjective = sanitizePrefillText(text.match(/(?:^|\n)-\s*sourceObjective:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabPublishRequired = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabPublishRequired:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabPublishStatus = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabPublishStatus:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabProjectPath = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabProjectPath:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabIssueIid = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabIssueIid:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabIssueUrl = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabIssueUrl:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabNoteUrl = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabNoteUrl:\s*([^\n]+)/i)?.[1] || '');
+  const gitlabPublishError = sanitizePrefillText(text.match(/(?:^|\n)-\s*gitlabPublishError:\s*([^\n]+)/i)?.[1] || '');
 
   const items: PrepDiscussionTraceItem[] = [];
   const blockPattern = /###\s*([^\n]+)\n([\s\S]*?)(?=\n###\s+|$)/g;
@@ -395,6 +416,13 @@ const parsePrepDiscussionTraceView = (source: string): PrepDiscussionTraceView =
     backfillTargets,
     sourceRawInput,
     sourceObjective,
+    gitlabPublishRequired,
+    gitlabPublishStatus,
+    gitlabProjectPath,
+    gitlabIssueIid,
+    gitlabIssueUrl,
+    gitlabNoteUrl,
+    gitlabPublishError,
     items,
   };
 };
@@ -3890,8 +3918,30 @@ const ProjectRoom = ({
   const prepDiscussionSourceLabel = prepDiscussionMode === 'model'
     ? '模型正式结论'
     : (prepDiscussionTraceView.items.length > 0 ? '降级/规则结果' : '待触发');
+  const prepGitlabPublishRequiredFlag = prepDiscussionTraceView.gitlabPublishRequired.toLowerCase();
+  const prepGitlabPublishStatus = prepDiscussionTraceView.gitlabPublishStatus.toLowerCase();
+  const prepGitlabBindingDetected = Boolean(
+    prepDiscussionTraceView.gitlabProjectPath
+    || prepDiscussionTraceView.gitlabIssueIid
+    || prepDiscussionTraceView.gitlabIssueUrl,
+  );
+  const prepGitlabPublishRequired = prepGitlabPublishRequiredFlag === 'yes' || prepGitlabBindingDetected;
+  const prepGitlabPublishReady = prepGitlabPublishRequired
+    ? prepGitlabPublishStatus === 'published'
+    : prepGitlabPublishStatus !== 'failed';
+  const prepGitlabStatusVariant: 'primary' | 'warning' | 'accent' = prepGitlabPublishStatus === 'published'
+    ? 'primary'
+    : (prepGitlabPublishStatus === 'failed'
+      ? 'warning'
+      : 'accent');
+  const prepGitlabStatusLabel = prepGitlabPublishStatus === 'published'
+    ? 'GitLab 已留痕'
+    : (prepGitlabPublishStatus === 'failed'
+      ? 'GitLab 留痕失败'
+      : (prepGitlabPublishRequired ? '待写入 GitLab' : '无需 GitLab 留痕'));
   const prepDiscussionReady = String(prepDraftDiscussion || '').trim().length > 0
-    && prepDiscussionTraceView.items.length > 0;
+    && prepDiscussionTraceView.items.length > 0
+    && prepGitlabPublishReady;
   const prepAnalysisReady = String(prepDraftAnalysis || '').trim().length > 0;
   const prepBackfillReady = [
     prepDraftRawRequirements,
@@ -4035,6 +4085,7 @@ const ProjectRoom = ({
                       <p className="text-xs text-slate-300">1. 基于输入的多角色讨论结论</p>
                       <div className="flex items-center gap-2">
                         <Badge variant={prepDiscussionSourceVariant}>{prepDiscussionSourceLabel}</Badge>
+                        <Badge variant={prepGitlabStatusVariant}>{prepGitlabStatusLabel}</Badge>
                         <button
                           type="button"
                           onClick={() => void executePostCreatePrepRun('manual_button')}
@@ -4054,6 +4105,41 @@ const ProjectRoom = ({
                         <p className="md:col-span-2">目标锚点: {prepDiscussionTraceView.sourceObjective || '未记录'}</p>
                         <p className="md:col-span-2">讨论备注: {prepDiscussionTraceView.debateNote || '无'}</p>
                         <p className="md:col-span-2">回填目标: {prepDiscussionTraceView.backfillTargets || 'rawRequirements, prd, debateSummary'}</p>
+                        <p>GitLab 留痕要求: {prepGitlabPublishRequired ? '需要' : '不需要'}</p>
+                        <p>GitLab 留痕状态: {prepDiscussionTraceView.gitlabPublishStatus || '未记录'}</p>
+                        <p className="md:col-span-2">GitLab 项目: {prepDiscussionTraceView.gitlabProjectPath || '未记录'}</p>
+                        <p className="md:col-span-2">Issue IID: {prepDiscussionTraceView.gitlabIssueIid || '未记录'}</p>
+                        {prepDiscussionTraceView.gitlabIssueUrl ? (
+                          <p className="md:col-span-2">
+                            Issue 地址:
+                            {' '}
+                            <a
+                              href={prepDiscussionTraceView.gitlabIssueUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-primary hover:underline"
+                            >
+                              打开 Issue
+                            </a>
+                          </p>
+                        ) : null}
+                        {prepDiscussionTraceView.gitlabNoteUrl ? (
+                          <p className="md:col-span-2">
+                            Discussion Note:
+                            {' '}
+                            <a
+                              href={prepDiscussionTraceView.gitlabNoteUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-primary hover:underline"
+                            >
+                              打开讨论留痕
+                            </a>
+                          </p>
+                        ) : null}
+                        {prepDiscussionTraceView.gitlabPublishError ? (
+                          <p className="md:col-span-2 text-warning">GitLab 留痕错误: {prepDiscussionTraceView.gitlabPublishError}</p>
+                        ) : null}
                       </div>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
@@ -4142,7 +4228,10 @@ const ProjectRoom = ({
                     <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-2">
                       <div className="flex items-center justify-between gap-3">
                         <p className="text-xs text-slate-300">多Agent讨论过程日志</p>
-                        <Badge variant={prepDiscussionSourceVariant}>{prepDiscussionTraceView.debateMode || 'fallback'}</Badge>
+                        <div className="flex items-center gap-2">
+                          <Badge variant={prepDiscussionSourceVariant}>{prepDiscussionTraceView.debateMode || 'fallback'}</Badge>
+                          <Badge variant={prepGitlabStatusVariant}>{prepGitlabStatusLabel}</Badge>
+                        </div>
                       </div>
                       {prepDiscussionTraceView.items.length > 0 ? (
                         <div className="space-y-2">

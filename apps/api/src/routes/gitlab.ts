@@ -985,6 +985,75 @@ export async function ensureProjectMainIssueSync(input: {
   return ensureProjectMainIssue(input);
 }
 
+export async function publishProjectMainIssueNote(input: {
+  projectId: string;
+  body: string;
+  projectPath?: string;
+  issueIid?: number;
+}) {
+  const body = parseOptionalString(input.body);
+  if (!body) {
+    return {
+      ok: false,
+      code: "VALIDATION_ERROR",
+      message: "body is required"
+    } as const;
+  }
+
+  if (!GITLAB_TOKEN) {
+    return {
+      ok: false,
+      code: "SERVICE_UNAVAILABLE",
+      message: "GITLAB_TOKEN 未配置，无法发布项目主 Issue 讨论"
+    } as const;
+  }
+
+  let targetProjectPath = parseOptionalString(input.projectPath);
+  let targetIssueIid = Number(input.issueIid);
+
+  if (!targetProjectPath || !Number.isInteger(targetIssueIid) || targetIssueIid <= 0) {
+    const ensured = await ensureProjectMainIssue({
+      projectId: input.projectId,
+      projectPath: targetProjectPath || undefined
+    });
+    if (!ensured.ok) {
+      return ensured;
+    }
+    targetProjectPath = ensured.data.projectPath;
+    targetIssueIid = ensured.data.issueIid;
+  }
+
+  const response = await requestGitLab(
+    `/projects/${encodeURIComponent(targetProjectPath)}/issues/${encodeURIComponent(String(targetIssueIid))}/notes`,
+    {
+      method: "POST",
+      body: JSON.stringify({ body })
+    }
+  );
+  if (!response.ok) {
+    return {
+      ok: false,
+      code: resolveGitLabErrorCode(response.status),
+      message: response.errorText
+    } as const;
+  }
+
+  const noteId = Number((response.payload as { id?: unknown } | null)?.id);
+  const noteUrl = Number.isFinite(noteId) && noteId > 0
+    ? `${GITLAB_BASE_URL}/${targetProjectPath}/-/issues/${targetIssueIid}#note_${Math.round(noteId)}`
+    : `${GITLAB_BASE_URL}/${targetProjectPath}/-/issues/${targetIssueIid}`;
+
+  return {
+    ok: true,
+    data: {
+      projectId: input.projectId,
+      projectPath: targetProjectPath,
+      issueIid: targetIssueIid,
+      noteUrl
+    }
+  } as const;
+}
+
 export async function syncProjectGitLabHarness(input: {
   projectId: string;
   stageType?: StageType | string;

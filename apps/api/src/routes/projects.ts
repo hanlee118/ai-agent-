@@ -47,6 +47,7 @@ import { prisma } from "../db.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import {
+  publishProjectMainIssueNote,
   publishTaskIssueNote,
   syncProjectGitLabHarness,
   upsertQualityGateRepairIssue
@@ -73,6 +74,101 @@ const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
   "pnpm --filter @occ/web typecheck",
   "pnpm --filter @occ/web build"
 ];
+const PROJECT_PREP_GITLAB_BASE_URL = String(process.env.GITLAB_BASE_URL || "https://gitlab.com")
+  .trim()
+  .replace(/\/+$/, "");
+
+type PostCreatePrepDraftLike = {
+  discussion?: string;
+  analysis?: string;
+  rawRequirements?: string;
+  prd?: string;
+  debateSummary?: string;
+  discussionTrace?: string;
+};
+
+function normalizePrepTraceMetaValue(value: unknown) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function escapeRegExpForPrepTrace(value: string) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function upsertPrepDiscussionTraceMetaLine(source: string, key: string, value: unknown) {
+  const normalizedKey = normalizePrepTraceMetaValue(key);
+  if (!normalizedKey) {
+    return String(source || "").trim();
+  }
+  const normalizedValue = normalizePrepTraceMetaValue(value);
+  const linePattern = new RegExp(`(^|\\n)-\\s*${escapeRegExpForPrepTrace(normalizedKey)}:\\s*[^\\n]*(?=\\n|$)`, "i");
+  let next = String(source || "").trim();
+  if (!normalizedValue) {
+    next = next.replace(linePattern, "").replace(/\n{3,}/g, "\n\n").trim();
+    return next;
+  }
+  const nextLine = `- ${normalizedKey}: ${normalizedValue}`;
+  if (linePattern.test(next)) {
+    return next.replace(linePattern, `$1${nextLine}`).replace(/\n{3,}/g, "\n\n").trim();
+  }
+  const roundMarker = "\n## 讨论回合记录";
+  if (next.includes(roundMarker)) {
+    return next.replace(roundMarker, `\n${nextLine}${roundMarker}`).replace(/\n{3,}/g, "\n\n").trim();
+  }
+  return `${next}\n${nextLine}`.trim();
+}
+
+function upsertPrepDiscussionTraceMeta(source: string, fields: Record<string, unknown>) {
+  return Object.entries(fields).reduce((acc, [key, value]) => {
+    return upsertPrepDiscussionTraceMetaLine(acc, key, value);
+  }, String(source || "").trim());
+}
+
+function buildPrepGitLabIssueUrl(projectPath: string, issueIid: number) {
+  const normalizedPath = normalizePrepTraceMetaValue(projectPath);
+  const normalizedIid = Number(issueIid);
+  if (!normalizedPath || !Number.isInteger(normalizedIid) || normalizedIid <= 0) {
+    return "";
+  }
+  return `${PROJECT_PREP_GITLAB_BASE_URL}/${normalizedPath}/-/issues/${normalizedIid}`;
+}
+
+function truncatePrepNoteBlock(value: unknown, maxLength = 1800) {
+  const normalized = String(value || "").trim();
+  if (!normalized) {
+    return "_未生成_";
+  }
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(200, maxLength)).trim()}\n\n...（内容过长，已截断）`;
+}
+
+function buildPostCreatePrepIssueNoteBody(input: {
+  projectId: string;
+  projectName: string;
+  triggeredBy: string;
+  draft: PostCreatePrepDraftLike | undefined;
+}) {
+  return [
+    "### 创建后预备阶段 · 多Agent讨论回填",
+    `- projectId: ${normalizePrepTraceMetaValue(input.projectId)}`,
+    `- projectName: ${normalizePrepTraceMetaValue(input.projectName)}`,
+    `- triggeredBy: ${normalizePrepTraceMetaValue(input.triggeredBy || "projects_route_manual_trigger")}`,
+    `- generatedAt: ${new Date().toISOString()}`,
+    "",
+    "#### 多Agent讨论结论",
+    truncatePrepNoteBlock(input.draft?.discussion),
+    "",
+    "#### 项目详情理解确认草案",
+    truncatePrepNoteBlock(input.draft?.analysis),
+    "",
+    "#### 核心输入回填摘要",
+    `- rawRequirements: ${truncatePrepNoteBlock(input.draft?.rawRequirements, 800)}`,
+    `- prd: ${truncatePrepNoteBlock(input.draft?.prd, 800)}`,
+    `- debateSummary: ${truncatePrepNoteBlock(input.draft?.debateSummary, 800)}`
+  ].join("\n");
+}
 
 function normalizeStringArrayInput(input: unknown) {
   if (!Array.isArray(input)) {
@@ -2729,10 +2825,74 @@ router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) =>
     return;
   }
 
-  const postCreatePrep = await runProjectPostCreatePrep({
+  let postCreatePrep = await runProjectPostCreatePrep({
     projectId,
     triggeredBy: "projects_route_manual_trigger"
   });
+  const issueFirstData = issueFirst.ok && "data" in issueFirst ? issueFirst.data : undefined;
+  const gitLabProjectPath = normalizePrepTraceMetaValue(issueFirstData?.projectPath);
+  const gitLabIssueIid = Number(issueFirstData?.issueIid);
+  const gitlabPublishRequired = Boolean(
+    gitLabProjectPath
+    && Number.isInteger(gitLabIssueIid)
+    && gitLabIssueIid > 0
+  );
+
+  let gitlabPublishStatus = gitlabPublishRequired ? "pending" : "not_required";
+  let gitlabPublishProjectPath = gitLabProjectPath;
+  let gitlabPublishIssueIid = Number.isInteger(gitLabIssueIid) && gitLabIssueIid > 0 ? gitLabIssueIid : undefined;
+  let gitlabPublishIssueUrl = gitlabPublishIssueIid ? buildPrepGitLabIssueUrl(gitlabPublishProjectPath, gitlabPublishIssueIid) : "";
+  let gitlabPublishNoteUrl = "";
+  let gitlabPublishError = "";
+
+  if (gitlabPublishRequired && gitlabPublishIssueIid) {
+    const publishResult = await publishProjectMainIssueNote({
+      projectId,
+      projectPath: gitlabPublishProjectPath,
+      issueIid: gitlabPublishIssueIid,
+      body: buildPostCreatePrepIssueNoteBody({
+        projectId,
+        projectName: project.name,
+        triggeredBy: "projects_route_manual_trigger",
+        draft: postCreatePrep.draft
+      })
+    });
+    if (publishResult.ok) {
+      gitlabPublishStatus = "published";
+      gitlabPublishProjectPath = normalizePrepTraceMetaValue(publishResult.data.projectPath || gitlabPublishProjectPath);
+      gitlabPublishIssueIid = Number(publishResult.data.issueIid || gitlabPublishIssueIid);
+      gitlabPublishIssueUrl = buildPrepGitLabIssueUrl(gitlabPublishProjectPath, gitlabPublishIssueIid);
+      gitlabPublishNoteUrl = normalizePrepTraceMetaValue(publishResult.data.noteUrl);
+      gitlabPublishError = "";
+    } else {
+      gitlabPublishStatus = "failed";
+      gitlabPublishError = normalizePrepTraceMetaValue(`${publishResult.code || "UNKNOWN"}: ${publishResult.message || "发布失败"}`);
+    }
+  }
+
+  const nextDiscussionTrace = upsertPrepDiscussionTraceMeta(
+    String(postCreatePrep.draft?.discussionTrace || ""),
+    {
+      gitlabPublishRequired: gitlabPublishRequired ? "yes" : "no",
+      gitlabPublishStatus,
+      gitlabProjectPath: gitlabPublishProjectPath || undefined,
+      gitlabIssueIid: gitlabPublishIssueIid ? String(gitlabPublishIssueIid) : undefined,
+      gitlabIssueUrl: gitlabPublishIssueUrl || undefined,
+      gitlabNoteUrl: gitlabPublishNoteUrl || undefined,
+      gitlabPublishError: gitlabPublishError || undefined
+    }
+  );
+
+  if (nextDiscussionTrace && nextDiscussionTrace !== String(postCreatePrep.draft?.discussionTrace || "").trim()) {
+    postCreatePrep = await saveProjectPostCreatePrepDraft({
+      projectId,
+      draft: {
+        discussionTrace: nextDiscussionTrace
+      },
+      triggeredBy: "projects_route_manual_trigger_gitlab_publish_status"
+    });
+  }
+
   const refreshed = await findProject(projectId);
   if (!refreshed) {
     res.status(404).json({ message: "Project not found" });
