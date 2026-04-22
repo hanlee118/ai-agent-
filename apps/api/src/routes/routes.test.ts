@@ -443,6 +443,13 @@ describe("Error Matrix: auth + projects", () => {
       assert.ok(inputNames.includes("prd"));
       assert.ok(inputNames.includes("debateSummary"));
       assert.ok(inputNames.includes("prepDiscussionTrace"));
+      const prepTrace = String(
+        (Array.isArray(afterDetail.body?.projectInputs) ? afterDetail.body.projectInputs : [])
+          .find((item: { name?: string }) => String(item?.name || "") === "prepDiscussionTrace")
+          ?.content || ""
+      );
+      assert.match(prepTrace, /gitlabPublishRequired:/);
+      assert.match(prepTrace, /gitlabPublishStatus:/);
       assert.ok(
         Array.isArray(afterDetail.body?.requiredActions)
           && !afterDetail.body.requiredActions.some((item: { action?: string }) => item.action === "run_post_create_prep")
