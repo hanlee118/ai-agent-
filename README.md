@@ -34,7 +34,6 @@
 - 统一修复超时封装，避免超时后晚到异常导致 API 进程退出。
 - Stitch 配额耗尽场景会自动降级为 `pending/degraded`，不中断主流程推进。
 - 增强项目预备与阶段推进链路的错误吸收与日志可观测性，降低“流程卡住”概率。
-- Hermes MCP 接入默认启用并打通单项目全流程验收，`acceptance-real-3modes-v2` 已可稳定识别 Hermes 与 OpenClaw 双参与。
 
 ## 核心能力
 
@@ -77,7 +76,7 @@ GitLab webhook 运维注意：
 
 - Frontend: React 18 + Vite 6 + TypeScript
 - Backend: Express 4 + TypeScript
-- Data: Prisma + PostgreSQL
+- Data: Prisma + SQLite
 - Shared contract: `packages/shared`
 - Runtime: OpenClaw workspace integration + OpenAI-compatible gateway
 - Delivery: GitHub Actions + GitHub Pages + GitLab CI
@@ -101,7 +100,7 @@ site/         GitHub Pages 对外主页
 flowchart LR
   U["User / Admin"] --> W["Web App"]
   W --> A["OCC API"]
-  A --> D["Prisma + PostgreSQL"]
+  A --> D["Prisma + SQLite"]
   A --> O["OpenClaw Workspace"]
   A --> G["GitLab Harness"]
   A --> R["Runtime Provider"]
@@ -116,11 +115,18 @@ flowchart LR
 pnpm install
 ```
 
-### 2. 初始化数据库（PostgreSQL）
+### 2. 初始化数据库
 
 ```bash
 pnpm --filter @occ/api db:generate
-pnpm --filter @occ/api exec prisma migrate deploy
+pnpm --filter @occ/api db:push
+pnpm --filter @occ/api db:seed
+```
+
+如果本机 `db:push` 遇到 SQLite / schema engine 异常，可使用兜底方式：
+
+```bash
+pnpm --filter @occ/api db:bootstrap
 pnpm --filter @occ/api db:seed
 ```
 
@@ -145,25 +151,7 @@ pnpm daemon:status
 pnpm web:daemon:status
 ```
 
-### 5. 快速启动（生产环境）
-
-```bash
-docker-compose up -d
-```
-
-健康检查：
-
-```bash
-curl http://localhost:8787/api/health
-```
-
-数据库迁移（本机 PostgreSQL）：
-
-```bash
-DATABASE_URL="postgresql://occ:occ@127.0.0.1:5432/occ?schema=public" pnpm --filter @occ/api exec prisma migrate dev
-```
-
-### 6. 构建与自检
+### 5. 构建与自检
 
 ```bash
 pnpm build
@@ -173,49 +161,6 @@ pnpm health:check
 pnpm verify:local
 pnpm verify:smoke
 ```
-
-预检体系文档：
-
-- `scripts/lib/README-preflight.md`
-- 说明了 DB/API/Hermes 自愈模块、`preflight-runner` 用法、环境变量和排障建议。
-
-单项目严格真验收（推荐固定一个项目 ID 反复验证）：
-
-```bash
-PROJECT_ID=OCC-20260424-001 pnpm audit:single-project:strict
-```
-
-单项目全量验收（健康检查 + 严格审计）：
-
-```bash
-PROJECT_ID=OCC-20260424-001 pnpm verify:single-project:full
-```
-
-闭环验收（项目创建/提交/驳回/重提/审批/OpenClaw 集成）：
-
-```bash
-# 默认（等同 fast 模式）
-pnpm verify:closure
-
-# 快速模式：优先验证主链路可用性与回归稳定性（推荐日常）
-pnpm verify:closure:fast
-
-# 全量模式：开启重型检查，做发布前深度验收（耗时更长）
-pnpm verify:closure:full
-```
-
-闭环模式相关环境变量：
-
-- `CLOSURE_FAST_PROJECT_FLOW_SCRIPTED=true|false`：是否在项目流阶段临时切换 `scripted` 加速验证
-- `CLOSURE_ENABLE_OPTIONAL_HEAVY_CHECKS=true|false`：是否启用高耗时的可选重型检查（如创建后预备强检查）
-- `OPTIONAL_PROJECT_REQUEST_TIMEOUT_MS=12000`：项目流可降级接口超时
-- `OPTIONAL_OPENCLAW_REQUEST_TIMEOUT_MS=10000`：OpenClaw 可降级接口超时
-
-可选参数：
-
-- `AUDIT_REQUIRE_HERMES=false`：临时关闭 Hermes 必须参与门禁
-- `AUDIT_REQUIRE_NON_SCRIPTED=false`：临时关闭 scripted-like=0 门禁
-- `AUDIT_OUT=/abs/path/report.json`：自定义审计报告输出路径
 
 GitLab webhook 检查与自愈：
 
@@ -243,21 +188,6 @@ pnpm gitlab:webhook:fix
 - 用管理员密码自动登录：`VERIFY_SMOKE_ADMIN_PASSWORD='...' pnpm verify:smoke`
 - 未提供时会回退到临时会话，仅用于本地烟测兜底
 
-知识库搜索（`/api/v1/knowledge`）命令注意事项：
-
-- 查询参数包含中文等非 ASCII 字符时，必须使用 URL 编码写法，否则可能在 HTTP 解析层直接返回 `400 Bad Request`（未进入业务路由）
-- 推荐命令：
-
-```bash
-curl -b cookies.txt --get --data-urlencode "search=测试" "http://localhost:8787/api/v1/knowledge"
-```
-
-- 预期响应（无结果时）：
-
-```json
-{"success":true,"data":{"total":0,"items":[]}}
-```
-
 ## 环境变量
 
 示例文件：[`apps/api/.env.example`](apps/api/.env.example)
@@ -283,11 +213,6 @@ curl -b cookies.txt --get --data-urlencode "search=测试" "http://localhost:878
 - `GITLAB_TOKEN`
 - `GITLAB_DEFAULT_PROJECT`
 - `GITLAB_WEBHOOK_SECRET`
-- `WORKFLOW_V2_HERMES_ENABLED`
-- `WORKFLOW_V2_HERMES_STAGE_MATCH`
-- `WORKFLOW_V2_HERMES_ENDPOINT`
-- `WORKFLOW_V2_HERMES_REQUIRED`
-- `PROJECT_STAGE_HERMES_REQUIRED`
 
 说明：
 
@@ -295,10 +220,6 @@ curl -b cookies.txt --get --data-urlencode "search=测试" "http://localhost:878
 - 当 `MODEL_PROVIDER=openai-compatible` 时，必须同时提供 `MODEL_API_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME`
 - 生产模式必须配置 `ALLOWED_ORIGINS`，不能使用通配符
 - 当 GitLab 部署在 Docker 中时，project webhook 需使用宿主机可达地址，例如 `http://host.docker.internal:8787/api/gitlab/webhook`
-- `WORKFLOW_V2_HERMES_ENDPOINT` 可直接填基础地址（如 `http://127.0.0.1:3001`），服务端会自动归一化到 `/mcp/execute`
-- `WORKFLOW_V2_HERMES_REQUIRED=true` 时，workflow-v2 阶段强制走 Hermes，Hermes 不可用会直接失败（fail-closed）
-- `PROJECT_STAGE_HERMES_REQUIRED=true` 时，项目阶段执行链也会对 Hermes 不可用执行阻断（fail-closed）
-- 两个 `*_REQUIRED` 为 `false` 时，Hermes 不可用会记录 fallback 证据后回退到常规执行链（fail-open）
 
 ## 数据与治理模型
 

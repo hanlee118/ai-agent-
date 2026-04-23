@@ -562,7 +562,14 @@ export const projectsApi = {
     }>(`/projects/${toProjectPathId(id)}`);
   },
 
-  async runPostCreatePrep(id: string) {
+  async runPostCreatePrep(id: string, data?: {
+    discussion?: string;
+    analysis?: string;
+    rawRequirements?: string;
+    prd?: string;
+    debateSummary?: string;
+    discussionTrace?: string;
+  }) {
     return request<{
       success: boolean;
       data: {
@@ -572,7 +579,7 @@ export const projectsApi = {
       };
     }>(`/projects/${toProjectPathId(id)}/post-create-prep`, {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(data || {}),
     });
   },
 

@@ -8,8 +8,6 @@ import {
   OPENCLAW_CONFIG_PATH,
   OPENCLAW_WORKSPACE_ROOT
 } from "../apps/api/dist/openclaw/paths.js";
-import { ensureHermesReachableViaApi, toBool } from "./lib/hermes-self-heal.mjs";
-import { runPreflight } from "./lib/preflight-runner.mjs";
 
 let API_BASE_URL = process.env.OCC_BASE_URL || "";
 let OPENCLAW_BIN = process.env.OPENCLAW_BIN || "";
@@ -17,61 +15,9 @@ const OPENCLAW_DEFAULT_BIN = "/Users/dalongxia/.nvm/versions/node/v24.14.0/bin/o
 const REQUEST_TIMEOUT_MS = Math.max(30_000, Number(process.env.REQUEST_TIMEOUT_MS || 120_000));
 const ISSUE_DEBATE_WAIT_TIMEOUT_MS = Math.max(30_000, Number(process.env.ISSUE_DEBATE_WAIT_TIMEOUT_MS || 180_000));
 const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const LOG_PREFIX = "[verify:closure]";
-const OPTIONAL_OPENCLAW_REQUEST_TIMEOUT_MS = Math.max(
-  5_000,
-  Number(process.env.OPTIONAL_OPENCLAW_REQUEST_TIMEOUT_MS || 15_000)
-);
-const OPTIONAL_PROJECT_REQUEST_TIMEOUT_MS = Math.max(
-  5_000,
-  Number(process.env.OPTIONAL_PROJECT_REQUEST_TIMEOUT_MS || 12_000)
-);
-const ENABLE_OPTIONAL_HEAVY_CHECKS = (() => {
-  const raw = String(process.env.CLOSURE_ENABLE_OPTIONAL_HEAVY_CHECKS || "").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-})();
-const ENABLE_FAST_PROJECT_FLOW_SCRIPTED = (() => {
-  const raw = String(process.env.CLOSURE_FAST_PROJECT_FLOW_SCRIPTED || "true").trim().toLowerCase();
-  return raw === "1" || raw === "true" || raw === "yes" || raw === "on";
-})();
-
-function logStep(message) {
-  const now = new Date().toISOString();
-  console.log(`${LOG_PREFIX} ${now} ${message}`);
-}
-
-const PERF = {
-  requests: [],
-  steps: []
-};
-
-function nowMs() {
-  return Date.now();
-}
-
-function pushStepPerf(name, startedAtMs) {
-  PERF.steps.push({
-    name,
-    durationMs: Math.max(0, nowMs() - startedAtMs)
-  });
-}
-
-function summarizePerf() {
-  const topRequests = [...PERF.requests]
-    .sort((a, b) => b.durationMs - a.durationMs)
-    .slice(0, 12);
-  const topSteps = [...PERF.steps]
-    .sort((a, b) => b.durationMs - a.durationMs)
-    .slice(0, 12);
-  return {
-    topRequests,
-    topSteps
-  };
-}
 
 const state = {
   sessionToken: "",
-  apiDaemonStartedByScript: false,
   createdProjectId: null,
   createdIssueId: null,
   createdAgentId: null,
@@ -82,37 +28,8 @@ const state = {
   originalSopContent: null,
   patchedOpenClawProjectId: null,
   patchedOpenClawTaskId: null,
-  patchedOpenClawTaskOriginal: null,
-  hermesDaemonStartedByScript: false
+  patchedOpenClawTaskOriginal: null
 };
-
-async function ensureHermesReachableIfLocal() {
-  const enabled = toBool(process.env.WORKFLOW_V2_HERMES_ENABLED, false);
-  const endpoint = String(
-    process.env.WORKFLOW_V2_HERMES_ENDPOINT
-    || process.env.HERMES_MCP_ENDPOINT
-    || process.env.HERMES_MCP
-    || ""
-  ).trim();
-  const result = await ensureHermesReachableViaApi({
-    apiBase: API_BASE_URL,
-    enabled,
-    endpoint,
-    cwd: path.resolve(process.cwd()),
-    headers: state.sessionToken ? { Cookie: `occ_session=${state.sessionToken}` } : undefined,
-    autoStartLocal: true,
-    logger: (message) => logStep(`hermes-self-heal: ${message}`)
-  });
-  if (result.daemonStarted) {
-    state.hermesDaemonStartedByScript = true;
-  }
-  return {
-    enabled: result.enabled,
-    attemptedStart: result.attemptedStart,
-    reachable: result.reachable,
-    detail: result.detail
-  };
-}
 
 function buildAnalysisSubmissionContent(versionLabel = "v1") {
   return [
@@ -372,54 +289,7 @@ async function restoreRuntimeSettings() {
   assert(restored.ok, `runtime restore failed: ${formatResponseForError(restored)}`);
 }
 
-async function switchRuntimeProvider(provider) {
-  const saved = await request("/api/system/runtime/config", {
-    method: "PUT",
-    body: JSON.stringify({
-      provider,
-      apiBaseUrl: "",
-      modelName: ""
-    })
-  });
-  assert(saved.ok, `runtime switch failed: ${formatResponseForError(saved)}`);
-}
-
-async function ensurePostCreatePrepCompleted(projectId) {
-  const prepRun = await request(`/api/projects/${projectId}/post-create-prep`, {
-    method: "POST",
-    body: JSON.stringify({})
-  });
-  if (!prepRun.ok) {
-    return { ok: false, stage: "run", response: prepRun };
-  }
-
-  const prepRunData = unwrapEnvelope(prepRun.json) || {};
-  const prepState = prepRunData.postCreatePrep || {};
-  if (!prepState.required || prepState.completed) {
-    return { ok: true, required: Boolean(prepState.required), completed: Boolean(prepState.completed) };
-  }
-
-  const prepConfirm = await request(`/api/projects/${projectId}/post-create-prep/confirm`, {
-    method: "POST",
-    body: JSON.stringify({
-      confirmedBy: "verify-closure",
-      notes: "automated closure validation confirmation"
-    })
-  });
-  if (!prepConfirm.ok) {
-    return { ok: false, stage: "confirm", response: prepConfirm };
-  }
-  const prepConfirmData = unwrapEnvelope(prepConfirm.json) || {};
-  return {
-    ok: Boolean(prepConfirmData.postCreatePrep?.completed),
-    required: true,
-    completed: Boolean(prepConfirmData.postCreatePrep?.completed),
-    response: prepConfirm
-  };
-}
-
-async function approveProjectWithRecovery(projectId, previousStage, options = {}) {
-  const allowNoAdvance = options?.allowNoAdvance === true;
+async function approveProjectWithRecovery(projectId, previousStage) {
   const baselineStage = String(previousStage || "").trim().toUpperCase();
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const approve = await request(`/api/projects/${projectId}/approve`, {
@@ -454,21 +324,6 @@ async function approveProjectWithRecovery(projectId, previousStage, options = {}
       continue;
     }
 
-    if (approve.status === 409 && code === "REQUIRES_USER_INTERVENTION") {
-      const actions = Array.isArray(approve.json?.error?.requiredActions)
-        ? approve.json.error.requiredActions
-        : [];
-      const needsPrep = actions.some((item) => String(item?.action || "").trim() === "run_post_create_prep")
-        || Boolean(approve.json?.error?.postCreatePrep?.required);
-      if (needsPrep) {
-        const prep = await ensurePostCreatePrepCompleted(projectId);
-        if (prep.ok) {
-          await WAIT(1000);
-          continue;
-        }
-      }
-    }
-
     if (approve.status === 409 && code === "NO_PENDING_APPROVAL") {
       const detail = await request(`/api/projects/${projectId}`);
       if (
@@ -486,16 +341,6 @@ async function approveProjectWithRecovery(projectId, previousStage, options = {}
     throw new Error(`stage approve failed: ${formatResponseForError(approve)}`);
   }
 
-  if (allowNoAdvance) {
-    const detail = await request(`/api/projects/${projectId}`);
-    if (detail.ok && detail.json?.pendingApproval === false) {
-      return {
-        status: 200,
-        ok: true,
-        json: detail.json
-      };
-    }
-  }
   throw new Error("stage approve did not advance after retries");
 }
 
@@ -534,71 +379,75 @@ function resolveOpenClawBinary() {
   );
 }
 
-async function request(pathname, init = {}, options = {}) {
-  const reqStartedAt = nowMs();
-  const method = String(init?.method || "GET").toUpperCase();
-  const timeoutMs = Math.max(
-    1_000,
-    Number.isFinite(Number(options?.timeoutMs))
-      ? Number(options.timeoutMs)
-      : REQUEST_TIMEOUT_MS
-  );
-  const retryNetwork = options?.retryNetwork === true || (options?.retryNetwork !== false && method === "GET");
-  const maxAttempts = retryNetwork ? 2 : 1;
-  let lastError = null;
+async function resolveApiBaseUrl() {
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const candidates = [
+    "http://127.0.0.1:8787",
+    "http://127.0.0.1:8794",
+    "http://localhost:8787",
+    "http://localhost:8794"
+  ];
+
+  for (const candidate of candidates) {
     try {
-      const response = await fetch(`${API_BASE_URL}${pathname}`, {
-        ...init,
-        signal: controller.signal,
-        headers: {
-          "Content-Type": "application/json",
-          Cookie: `occ_session=${state.sessionToken}`,
-          ...(init.headers || {})
-        }
-      });
-      const text = await response.text();
-      let json = null;
-
-      try {
-        json = text ? JSON.parse(text) : null;
-      } catch {
-        json = text;
+      const response = await fetch(
+        state.sessionToken ? `${candidate}/api/system/runtime` : `${candidate}/health`,
+        state.sessionToken
+          ? {
+              headers: {
+                Cookie: `occ_session=${state.sessionToken}`
+              }
+            }
+          : undefined
+      );
+      if (response.ok) {
+        return candidate;
       }
-
-      const payload = {
-        status: response.status,
-        ok: response.ok,
-        json
-      };
-      PERF.requests.push({
-        method,
-        pathname,
-        durationMs: Math.max(0, nowMs() - reqStartedAt),
-        ok: response.ok
-      });
-      return payload;
-    } catch (error) {
-      lastError = error;
-      if (attempt < maxAttempts) {
-        await WAIT(300);
-      }
-    } finally {
-      clearTimeout(timer);
+    } catch {
+      // try the next candidate
     }
   }
 
-  const reason = lastError instanceof Error ? lastError.message : String(lastError);
-  PERF.requests.push({
-    method,
-    pathname,
-    durationMs: Math.max(0, nowMs() - reqStartedAt),
-    ok: false
-  });
-  throw new Error(`request failed: ${pathname} (${reason})`);
+  return "http://localhost:8787";
+}
+
+async function request(pathname, init = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`${API_BASE_URL}${pathname}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: `occ_session=${state.sessionToken}`,
+        ...(init.headers || {})
+      }
+    });
+    const text = await response.text();
+    let json = null;
+
+    try {
+      json = text ? JSON.parse(text) : null;
+    } catch {
+      json = text;
+    }
+
+    return {
+      status: response.status,
+      ok: response.ok,
+      json
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`request failed: ${pathname} (${reason})`);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function createSession() {
@@ -670,79 +519,39 @@ async function verifyProjectFlow(results) {
   results.projectDetail = "ok";
   const stageBeforeSubmit = String(detail.json?.currentStage || "").trim().toUpperCase();
 
-  let prepTimedOut = false;
-  if (ENABLE_OPTIONAL_HEAVY_CHECKS) {
-    try {
-      const prepRun = await request(`/api/projects/${state.createdProjectId}/post-create-prep`, {
-        method: "POST",
-        body: JSON.stringify({})
-      }, {
-        timeoutMs: OPTIONAL_PROJECT_REQUEST_TIMEOUT_MS,
-        retryNetwork: false
-      });
-      if (!prepRun.ok) {
-        const code = String(prepRun.json?.error?.code || "");
-        if (prepRun.status === 409 && code === "PROJECT_ISSUE_FIRST_REQUIRED") {
-          results.projectFlow = {
-            status: "skipped",
-            reason: `post-create prep blocked by issue-first gate: ${formatResponseForError(prepRun)}`
-          };
-          return;
-        }
-        throw new Error(`post-create prep run failed: ${formatResponseForError(prepRun)}`);
-      }
-      const prepRunData = unwrapEnvelope(prepRun.json) || {};
-      const prepRunState = prepRunData.postCreatePrep || {};
-      if (prepRunState.required && !prepRunState.completed) {
-        const prepConfirm = await request(`/api/projects/${state.createdProjectId}/post-create-prep/confirm`, {
-          method: "POST",
-          body: JSON.stringify({
-            confirmedBy: "verify-closure",
-            notes: "automated closure validation confirmation"
-          })
-        });
-        assert(prepConfirm.ok, `post-create prep confirm failed: ${formatResponseForError(prepConfirm)}`);
-        const prepConfirmData = unwrapEnvelope(prepConfirm.json) || {};
-        assert(
-          Boolean(prepConfirmData.postCreatePrep?.completed),
-          `post-create prep not completed after confirm: ${formatResponseForError(prepConfirm)}`
-        );
-      }
-      results.projectPostCreatePrep = "ok";
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      prepTimedOut = /This operation was aborted|AbortError/i.test(detail);
-      if (!prepTimedOut) {
-        throw error;
-      }
-      results.projectPostCreatePrep = {
-        warning: "post-create prep timeout",
-        detail
+  const prepRun = await request(`/api/projects/${state.createdProjectId}/post-create-prep`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  if (!prepRun.ok) {
+    const code = String(prepRun.json?.error?.code || "");
+    if (prepRun.status === 409 && code === "PROJECT_ISSUE_FIRST_REQUIRED") {
+      results.projectFlow = {
+        status: "skipped",
+        reason: `post-create prep blocked by issue-first gate: ${formatResponseForError(prepRun)}`
       };
-      try {
-        const prepConfirmDirect = await request(`/api/projects/${state.createdProjectId}/post-create-prep/confirm`, {
-          method: "POST",
-          body: JSON.stringify({
-            confirmedBy: "verify-closure-timeout-fallback",
-            notes: "fallback confirm after prep timeout"
-          })
-        }, {
-          timeoutMs: 6_000,
-          retryNetwork: false
-        });
-        if (prepConfirmDirect.ok) {
-          const prepConfirmData = unwrapEnvelope(prepConfirmDirect.json) || {};
-          if (Boolean(prepConfirmData.postCreatePrep?.completed)) {
-            results.projectPostCreatePrep = "ok-via-fallback-confirm";
-          }
-        }
-      } catch {
-        // keep warning and let approve phase recovery handle it
-      }
+      return;
     }
-  } else {
-    results.projectPostCreatePrep = "deferred-fast-mode";
+    throw new Error(`post-create prep run failed: ${formatResponseForError(prepRun)}`);
   }
+  const prepRunData = unwrapEnvelope(prepRun.json) || {};
+  const prepRunState = prepRunData.postCreatePrep || {};
+  if (prepRunState.required && !prepRunState.completed) {
+    const prepConfirm = await request(`/api/projects/${state.createdProjectId}/post-create-prep/confirm`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirmedBy: "verify-closure",
+        notes: "automated closure validation confirmation"
+      })
+    });
+    assert(prepConfirm.ok, `post-create prep confirm failed: ${formatResponseForError(prepConfirm)}`);
+    const prepConfirmData = unwrapEnvelope(prepConfirm.json) || {};
+    assert(
+      Boolean(prepConfirmData.postCreatePrep?.completed),
+      `post-create prep not completed after confirm: ${formatResponseForError(prepConfirm)}`
+    );
+  }
+  results.projectPostCreatePrep = "ok";
 
   const tasks = await request(`/api/projects/${state.createdProjectId}/tasks`);
   assert(tasks.ok, "project tasks failed");
@@ -750,31 +559,12 @@ async function verifyProjectFlow(results) {
   const firstTaskId = tasks.json[0].id;
   results.projectTasks = tasks.json.length;
 
-  if (ENABLE_OPTIONAL_HEAVY_CHECKS) {
-    try {
-      const guidance = await request(`/api/projects/${state.createdProjectId}/messages`, {
-        method: "POST",
-        body: JSON.stringify({ message: "请继续推进，并写清楚当前阶段边界。" })
-      }, {
-        timeoutMs: OPTIONAL_PROJECT_REQUEST_TIMEOUT_MS,
-        retryNetwork: false
-      });
-      assert(guidance.ok, "project guidance failed");
-      results.projectMessage = "ok";
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      if (prepTimedOut || /This operation was aborted|AbortError/i.test(detail)) {
-        results.projectMessage = {
-          warning: "project guidance timeout",
-          detail
-        };
-      } else {
-        throw error;
-      }
-    }
-  } else {
-    results.projectMessage = "skipped-fast-mode";
-  }
+  const guidance = await request(`/api/projects/${state.createdProjectId}/messages`, {
+    method: "POST",
+    body: JSON.stringify({ message: "请继续推进，并写清楚当前阶段边界。" })
+  });
+  assert(guidance.ok, "project guidance failed");
+  results.projectMessage = "ok";
 
   const intervene = await request(`/api/projects/${state.createdProjectId}/intervene`, {
     method: "POST",
@@ -826,17 +616,8 @@ async function verifyProjectFlow(results) {
   );
   results.projectResubmit = "ok";
 
-  if (ENABLE_FAST_PROJECT_FLOW_SCRIPTED) {
-    results.projectApprove = {
-      warning: "skipped-fast-mode",
-      detail: "approval progression validation is skipped in fast scripted mode"
-    };
-  } else {
-    const approve = await approveProjectWithRecovery(state.createdProjectId, stageBeforeSubmit, {
-      allowNoAdvance: false
-    });
-    results.projectApprove = approve.json.currentStage;
-  }
+  const approve = await approveProjectWithRecovery(state.createdProjectId, stageBeforeSubmit);
+  results.projectApprove = approve.json.currentStage;
 
   const updateTask = await request(`/api/tasks/${firstTaskId}`, {
     method: "PATCH",
@@ -995,77 +776,35 @@ async function verifyOpenClawFlow(results) {
   }
   results.openclawMemory = "ok";
 
-  if (ENABLE_FAST_PROJECT_FLOW_SCRIPTED) {
-    results.openclawMessage = {
-      warning: "skipped-fast-mode",
-      detail: "single-agent live message check skipped in fast scripted mode"
-    };
-    results.openclawBatchMessage = {
-      warning: "skipped-fast-mode",
-      detail: "batch live message check skipped in fast scripted mode"
-    };
+  const message = await request(`/api/openclaw/agents/${targetAgentId}/message`, {
+    method: "POST",
+    body: JSON.stringify({ message: "请简要汇报你当前任务与下一步。" })
+  });
+  if (message.ok && typeof message.json?.summary === "string") {
+    results.openclawMessage = message.json.summary;
   } else {
-    let shouldSkipBatchMessage = false;
-    try {
-      const message = await request(`/api/openclaw/agents/${targetAgentId}/message`, {
-        method: "POST",
-        body: JSON.stringify({ message: "请简要汇报你当前任务与下一步。" })
-      }, {
-        timeoutMs: OPTIONAL_OPENCLAW_REQUEST_TIMEOUT_MS,
-        retryNetwork: false
-      });
-      if (message.ok && typeof message.json?.summary === "string") {
-        results.openclawMessage = message.json.summary;
-      } else {
-        results.openclawMessage = {
-          warning: "openclaw agent message failed",
-          status: message.status,
-          detail: message.json
-        };
-      }
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      if (/This operation was aborted|AbortError/i.test(detail)) {
-        shouldSkipBatchMessage = true;
-      }
-      results.openclawMessage = {
-        warning: "openclaw agent message timeout",
-        detail
-      };
-    }
+    results.openclawMessage = {
+      warning: "openclaw agent message failed",
+      status: message.status,
+      detail: message.json
+    };
+  }
 
-    if (shouldSkipBatchMessage) {
-      results.openclawBatchMessage = {
-        warning: "openclaw batch message skipped",
-        detail: "skipped because single-agent message request timed out"
-      };
-    } else try {
-      const batch = await request("/api/openclaw/agents/batch-message", {
-        method: "POST",
-        body: JSON.stringify({
-          agentIds: [targetAgentId],
-          message: "请同步一条当前状态。"
-        })
-      }, {
-        timeoutMs: OPTIONAL_OPENCLAW_REQUEST_TIMEOUT_MS,
-        retryNetwork: false
-      });
-      if (batch.ok && batch.json?.completedCount >= 1) {
-        results.openclawBatchMessage = batch.json.completedCount;
-      } else {
-        results.openclawBatchMessage = {
-          warning: "openclaw batch message failed",
-          status: batch.status,
-          detail: batch.json
-        };
-      }
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      results.openclawBatchMessage = {
-        warning: "openclaw batch message timeout",
-        detail
-      };
-    }
+  const batch = await request("/api/openclaw/agents/batch-message", {
+    method: "POST",
+    body: JSON.stringify({
+      agentIds: [targetAgentId],
+      message: "请同步一条当前状态。"
+    })
+  });
+  if (batch.ok && batch.json?.completedCount >= 1) {
+    results.openclawBatchMessage = batch.json.completedCount;
+  } else {
+    results.openclawBatchMessage = {
+      warning: "openclaw batch message failed",
+      status: batch.status,
+      detail: batch.json
+    };
   }
 
   const projectId = workspace.json.projects[0].id;
@@ -1222,123 +961,29 @@ async function cleanup() {
     } catch {}
   }
 
-  if (state.apiDaemonStartedByScript) {
-    try {
-      execFileSync("pnpm", ["daemon:stop"], {
-        cwd: path.resolve(process.cwd()),
-        stdio: "ignore"
-      });
-    } catch {}
-  }
-
-  if (state.hermesDaemonStartedByScript) {
-    try {
-      execFileSync("pnpm", ["hermes:daemon:stop"], {
-        cwd: path.resolve(process.cwd()),
-        stdio: "ignore"
-      });
-    } catch {}
-  }
-
   await prisma.$disconnect();
 }
 
 async function main() {
   const results = {};
   const startedAt = Date.now();
-  logStep("starting closure verification");
   OPENCLAW_BIN = resolveOpenClawBinary();
   process.env.OPENCLAW_BIN = OPENCLAW_BIN;
   results.openclawBin = OPENCLAW_BIN;
-  results.closureMode = {
-    fastProjectFlowScripted: ENABLE_FAST_PROJECT_FLOW_SCRIPTED,
-    optionalHeavyChecks: ENABLE_OPTIONAL_HEAVY_CHECKS
-  };
-  logStep(`resolved openclaw binary: ${OPENCLAW_BIN}`);
 
-  logStep("ensuring database connectivity");
-  const preflight = await runPreflight({
-    needDb: true,
-    db: {
-      databaseUrl: process.env.DATABASE_URL || "",
-      cwd: path.resolve(process.cwd()),
-      maxAttempts: 12,
-      intervalMs: 2_000,
-      eagerStartDocker: true,
-      logger: (message) => logStep(`db-self-heal: ${message}`),
-      probe: async () => {
-        await prisma.$queryRawUnsafe("SELECT 1");
-      }
-    },
-    needApi: true,
-    api: {
-      requestedBaseUrl: API_BASE_URL,
-      checkPathname: "/health",
-      autoStartDaemon: true,
-      startCommand: ["pnpm", "daemon:start"],
-      cwd: path.resolve(process.cwd()),
-      logger: (message) => logStep(`api-self-heal: ${message}`)
-    }
-  });
-  logStep("creating temporary auth session");
   await createSession();
-  logStep("resolving reachable api base url");
-  const apiReady = preflight.api || { ok: false, detail: "missing_preflight_api_result", apiBaseUrl: "" };
-  if (!apiReady.ok || !apiReady.apiBaseUrl) {
-    throw new Error(`api base url not reachable (${apiReady.detail})`);
-  }
-  API_BASE_URL = apiReady.apiBaseUrl;
-  state.apiDaemonStartedByScript = apiReady.startedByScript;
+  API_BASE_URL = await resolveApiBaseUrl();
   results.apiBaseUrl = API_BASE_URL;
-  logStep(`api base url ready: ${API_BASE_URL}`);
 
   try {
-    logStep("checking auth status");
     const auth = await request("/api/auth/status");
     assert(auth.ok && auth.json?.setupComplete, "auth status failed");
     results.auth = "ok";
 
-    logStep("checking hermes runtime reachability");
-    results.hermesReachability = await ensureHermesReachableIfLocal();
-
-    logStep("verifying openclaw public endpoints");
-    let stepStart = nowMs();
     await verifyOpenClawEndpoints(results);
-    pushStepPerf("verifyOpenClawEndpoints", stepStart);
-    if (ENABLE_FAST_PROJECT_FLOW_SCRIPTED) {
-      const currentRuntime = await request("/api/system/runtime/config");
-      assert(currentRuntime.ok, "runtime config get failed before project flow");
-      state.originalRuntimeSettings ||= currentRuntime.json;
-      results.projectFlowRuntimeOriginalProvider = currentRuntime.json?.provider;
-      if (currentRuntime.json?.provider !== "scripted") {
-        logStep("switching runtime to scripted for faster project-flow verification");
-        await switchRuntimeProvider("scripted");
-        results.projectFlowRuntimeSwitched = true;
-      } else {
-        results.projectFlowRuntimeSwitched = false;
-      }
-    }
-
-    try {
-      logStep("verifying end-to-end project flow");
-      stepStart = nowMs();
-      await verifyProjectFlow(results);
-      pushStepPerf("verifyProjectFlow", stepStart);
-    } finally {
-      if (ENABLE_FAST_PROJECT_FLOW_SCRIPTED && state.originalRuntimeSettings?.provider) {
-        logStep("restoring runtime provider after project-flow verification");
-        await restoreRuntimeSettings();
-      }
-    }
-    logStep("verifying runtime config and validation flow");
-    stepStart = nowMs();
+    await verifyProjectFlow(results);
     await verifyRuntimeFlow(results);
-    pushStepPerf("verifyRuntimeFlow", stepStart);
-    logStep("verifying openclaw integration flow");
-    stepStart = nowMs();
     await verifyOpenClawFlow(results);
-    pushStepPerf("verifyOpenClawFlow", stepStart);
-    logStep("all verification steps completed");
 
     const finishedAt = Date.now();
     console.log(JSON.stringify({
@@ -1346,13 +991,10 @@ async function main() {
       startedAt: new Date(startedAt).toISOString(),
       finishedAt: new Date(finishedAt).toISOString(),
       durationMs: finishedAt - startedAt,
-      results,
-      perf: summarizePerf()
+      results
     }, null, 2));
   } finally {
-    logStep("running cleanup");
     await cleanup();
-    logStep("cleanup complete");
   }
 }
 
