@@ -235,8 +235,11 @@ type DesignProfileInput = {
 };
 
 export function resolveDesignRequirementProfile(input: DesignProfileInput): DesignRequirementProfile {
+  const primarySource = normalizeText(
+    `${input.projectName || ""} ${input.projectDescription || ""}`
+  );
   const source = normalizeText(
-    `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`
+    `${primarySource} ${(input.keywords || []).join(" ")}`
   );
   const crossBorderSignals = [
     /跨境|选品|跟品|爆品|爆量|sku|listing|类目排名|gmv|带货/i,
@@ -245,11 +248,11 @@ export function resolveDesignRequirementProfile(input: DesignProfileInput): Desi
     /temu/i
   ];
   const crossBorderSignalHits = crossBorderSignals.reduce(
-    (count, pattern) => count + (pattern.test(source) ? 1 : 0),
+    (count, pattern) => count + (pattern.test(primarySource) ? 1 : 0),
     0
   );
   const hasCrossBorderAnchor = /(跨境|选品|跟品|爆品|爆量|sku|listing|类目排名|gmv|带货|tiktok|tik tok|抖音国际|抖音海外|amazon|亚马逊|temu)/i
-    .test(source);
+    .test(primarySource);
   const isCrossBorderProductRadar = crossBorderSignalHits >= 2 && hasCrossBorderAnchor;
   const collaborationSignals = [
     /协作平台|project room|项目房间/i,
@@ -259,12 +262,19 @@ export function resolveDesignRequirementProfile(input: DesignProfileInput): Desi
     /阶段推进|项目推进/i
   ];
   const collaborationSignalHits = collaborationSignals.reduce(
-    (count, pattern) => count + (pattern.test(source) ? 1 : 0),
+    (count, pattern) => count + (pattern.test(primarySource) ? 1 : 0),
     0
   );
+  const hasCollaborationPlatformAnchor = /协作平台|project room|项目房间/i.test(primarySource);
+  const hasCollaborationWorkflowSignal = /需求到研发闭环|研发闭环|角色协作|实时监控|工作流|协同流程|项目协作|预约演示|演示入口/i
+    .test(primarySource);
+  const strongCollaborationIntent = hasCollaborationPlatformAnchor && hasCollaborationWorkflowSignal;
   const hasConsumerOrContentSignals = /(蜡笔小新|奥特曼|剧场版|人物关系|粉丝|动画|影视|互动网站|介绍网站|品牌官网|落地页|dapp|理财|质押)/i
-    .test(source);
-  const isCollaborationPlatform = collaborationSignalHits >= 2 && !hasConsumerOrContentSignals;
+    .test(primarySource);
+  const isCollaborationPlatform = (
+    collaborationSignalHits >= 2
+    || strongCollaborationIntent
+  ) && (!hasConsumerOrContentSignals || strongCollaborationIntent);
 
   if (isCrossBorderProductRadar) {
     const seed = hashSeed(source);
