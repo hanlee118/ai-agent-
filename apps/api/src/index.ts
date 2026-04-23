@@ -222,6 +222,55 @@ const STAGE_PROTOCOL_SKILLS: Partial<Record<StageType, string[]>> = {
   DEV: ["coding-agent"],
   ACCEPT: ["qa-validation"]
 };
+const NON_FATAL_RUNTIME_ERROR_PATTERNS = [
+  /resource has been exhausted/i,
+  /check quota/i,
+  /rate limit/i,
+  /stitch/i,
+  /this operation was aborted/i,
+  /aborted due to timeout/i
+];
+let runtimeErrorGuardsInstalled = false;
+
+function normalizeRuntimeErrorMessage(reason: unknown) {
+  if (reason instanceof Error) {
+    return String(reason.message || "").trim();
+  }
+  return String(reason ?? "").trim();
+}
+
+function isKnownNonFatalRuntimeError(reason: unknown) {
+  const message = normalizeRuntimeErrorMessage(reason);
+  if (!message) {
+    return false;
+  }
+  return NON_FATAL_RUNTIME_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+function installRuntimeErrorGuards() {
+  if (runtimeErrorGuardsInstalled) {
+    return;
+  }
+  runtimeErrorGuardsInstalled = true;
+
+  process.on("unhandledRejection", (reason) => {
+    const message = normalizeRuntimeErrorMessage(reason);
+    if (isKnownNonFatalRuntimeError(reason)) {
+      console.warn(`[runtime.guard] non-fatal unhandledRejection ignored: ${message}`);
+      return;
+    }
+    console.error("[runtime.guard] unhandledRejection:", reason);
+  });
+
+  process.on("uncaughtException", (error) => {
+    const message = normalizeRuntimeErrorMessage(error);
+    if (isKnownNonFatalRuntimeError(error)) {
+      console.warn(`[runtime.guard] non-fatal uncaughtException ignored: ${message}`);
+      return;
+    }
+    console.error("[runtime.guard] uncaughtException:", error);
+  });
+}
 
 function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
   if (!STAGE_AUTO_REAL_MODEL_REQUIRED.has(stageType)) {
@@ -4637,6 +4686,7 @@ function asyncRoute(
 }
 
 async function start() {
+  installRuntimeErrorGuards();
   await ensureSeedData((await getRuntimeStatus()).mode);
   ensureLocalAgentMonitorLive();
   restartProjectAutomationTicker();
