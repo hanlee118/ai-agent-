@@ -535,11 +535,11 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 const STAGE_LABELS: Record<string, string> = {
-  INIT: '立项',
-  ANALYSIS: '分析',
-  DESIGN: '设计',
-  DEV: '开发',
-  ACCEPT: '验收',
+  INIT: '项目立项',
+  ANALYSIS: '需求分析',
+  DESIGN: '需求设计/视觉设计',
+  DEV: '代码开发',
+  ACCEPT: '测试验收',
 };
 
 const WORKFLOW_TEMPLATE_STAGE_LABELS: Record<string, string> = {
@@ -2300,7 +2300,7 @@ const ProjectRoom = ({
     return mapped.length > 0 ? mapped : [{ id: 'empty', name: '暂无交付物', type: '等待任务推进', size: '-' }];
   }, [deliverables, effectiveProjectTasks]);
 
-  const currentStageType = stageItems.find((stage) => stage.status === 'active')?.type || detail?.currentStage || stageItems[0]?.type;
+  const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
   const currentStageDeliverables = currentStageType ? (deliverablesByStage.get(currentStageType) || []) : [];
   const workflowStageRows = workflowOverview?.stages || [];
@@ -3710,11 +3710,15 @@ const ProjectRoom = ({
     addToast('请前往设置页补全模型运行时配置（API Base URL / API Key / Model）', 'info');
   };
 
-  const executePostCreatePrepRun = useCallback(async (source: 'required_action' | 'manual_button' = 'manual_button') => {
+  const executePostCreatePrepRun = useCallback(async (
+    source: 'required_action' | 'manual_button' = 'manual_button',
+    options?: { includeDraft?: boolean },
+  ) => {
     if (!project.id) {
       addToast('当前项目不可用，无法执行创建后需求预备', 'error');
       return;
     }
+    const includeDraft = Boolean(options?.includeDraft);
     setIsRunningPrepDebate(true);
     setPrepDebateProgressStep(0);
     stopPrepDebateProgressTicker();
@@ -3731,19 +3735,38 @@ const ProjectRoom = ({
     setProjectActionHint('正在触发多Agent讨论并回填前期材料，预计 15-60 秒...');
     addToast(
       source === 'manual_button'
-        ? '已触发多Agent讨论，正在生成讨论日志与需求草案...'
+        ? (includeDraft
+          ? '已提交补充信息，正在继续多Agent讨论并刷新回填内容...'
+          : '已触发多Agent讨论，正在生成讨论日志与需求草案...')
         : '正在执行创建后需求预备，请稍候...',
       'info',
     );
     try {
-      const result = await projectsApi.runPostCreatePrep(project.id);
+      const result = await projectsApi.runPostCreatePrep(
+        project.id,
+        includeDraft
+          ? {
+            discussion: prepDraftDiscussion,
+            analysis: prepDraftAnalysis,
+            rawRequirements: prepDraftRawRequirements,
+            prd: prepDraftPrd,
+            debateSummary: prepDraftDebateSummary,
+            discussionTrace: prepDraftDiscussionTrace,
+          }
+          : undefined,
+      );
       setPrepDebateProgressStep(PREP_DISCUSSION_AGENT_ORDER.length - 1);
       await refreshProjectView();
       const completed = Boolean(result?.data?.postCreatePrep?.completed);
       if (completed) {
         addToast('创建后需求预备已完成，已解锁正式项目详情页', 'success');
       } else {
-        addToast('多Agent讨论结果已回填，请审阅并确认通过后进入正式详情页', 'success');
+        addToast(
+          includeDraft
+            ? '补充信息已进入讨论并完成回填，请审阅后确认放行'
+            : '多Agent讨论结果已回填，请审阅并确认通过后进入正式详情页',
+          'success',
+        );
       }
     } catch (error) {
       if (error instanceof ApiRequestError) {
@@ -3759,7 +3782,18 @@ const ProjectRoom = ({
       setIsRunningPrepDebate(false);
       setProjectActionHint(null);
     }
-  }, [addToast, project.id, refreshProjectView, stopPrepDebateProgressTicker]);
+  }, [
+    addToast,
+    project.id,
+    prepDraftAnalysis,
+    prepDraftDebateSummary,
+    prepDraftDiscussion,
+    prepDraftDiscussionTrace,
+    prepDraftPrd,
+    prepDraftRawRequirements,
+    refreshProjectView,
+    stopPrepDebateProgressTicker,
+  ]);
 
   const handleRequiredAction = async (action: ProjectRequiredAction) => {
     setRequiredActionLoadingId(action.id);
@@ -4088,11 +4122,20 @@ const ProjectRoom = ({
                         <Badge variant={prepGitlabStatusVariant}>{prepGitlabStatusLabel}</Badge>
                         <button
                           type="button"
-                          onClick={() => void executePostCreatePrepRun('manual_button')}
+                          onClick={() => void executePostCreatePrepRun('manual_button', { includeDraft: false })}
                           disabled={isRunningPrepDebate || (postCreatePrepRequiredAction ? requiredActionLoadingId === postCreatePrepRequiredAction.id : false)}
                           className="inline-flex min-h-8 items-center justify-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-3 py-1.5 text-[11px] font-semibold text-primary hover:bg-primary/20 disabled:opacity-60"
                         >
                           {isRunningPrepDebate ? '讨论中...' : '进行讨论'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void executePostCreatePrepRun('manual_button', { includeDraft: true })}
+                          disabled={isRunningPrepDebate || !hasPrepDraftChanges || (postCreatePrepRequiredAction ? requiredActionLoadingId === postCreatePrepRequiredAction.id : false)}
+                          className="inline-flex min-h-8 items-center justify-center gap-2 rounded-lg border border-warning/40 bg-warning/10 px-3 py-1.5 text-[11px] font-semibold text-warning hover:bg-warning/20 disabled:opacity-60"
+                          title={hasPrepDraftChanges ? '将当前补充内容提交给多Agent继续讨论' : '请先补充或编辑内容后再触发'}
+                        >
+                          {isRunningPrepDebate ? '讨论中...' : '补充后继续讨论'}
                         </button>
                       </div>
                     </div>
@@ -4433,7 +4476,9 @@ const ProjectRoom = ({
               <div className="space-y-2">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">主链状态</p>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant="primary">当前阶段: {currentStageLabel}</Badge>
+                  <span data-testid="project-room-current-stage" data-stage-type={String(currentStageType || '')}>
+                    <Badge variant="primary">当前阶段: {currentStageLabel}</Badge>
+                  </span>
                   <Badge variant={detail?.pendingApproval ? 'warning' : 'accent'}>
                     {detail?.pendingApproval ? '等待验收决策' : '当前无待验收阶段'}
                   </Badge>

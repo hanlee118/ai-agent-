@@ -3,6 +3,9 @@ import { generateSessionToken, hashSessionToken } from '../apps/api/dist/securit
 
 const REQUEST_TIMEOUT_MS = Math.max(30000, Number(process.env.REQUEST_TIMEOUT_MS || 210000));
 const MAX_IN_PROGRESS_RETRIES = Math.max(8, Number(process.env.MAX_IN_PROGRESS_RETRIES || 40));
+const REQUIRE_COMPLETION = ['1', 'true', 'yes', 'on'].includes(
+  String(process.env.SMOKE_REQUIRE_COMPLETION || '').trim().toLowerCase()
+);
 const SESSION_TTL_MS = Math.max(
   30 * 60 * 1000,
   Number(process.env.SMOKE_SESSION_TTL_MS || 2 * 60 * 60 * 1000)
@@ -138,6 +141,46 @@ function summarizeProject(p) {
   };
 }
 
+function buildInitSmokeSubmissionContent() {
+  return [
+    '# 项目章程（Smoke）',
+    '',
+    '## 项目背景与目标',
+    '- 项目目标：验证项目从创建到立项审批可稳定推进。',
+    '- 阶段目标：确保立项输出可被下一阶段直接使用。',
+    '',
+    '## 范围定义（In Scope / Out of Scope）',
+    '- In Scope：创建、预备、阶段提交、审批推进。',
+    '- Out of Scope：生产部署改造与多租户权限重构。',
+    '',
+    '## 角色分工与责任',
+    '- 阶段负责人：ROLE_PM。',
+    '- 协作角色：ROLE_ANALYST、ROLE_PRODUCT。',
+    '',
+    '## 治理机制与决策规则',
+    '- 规则：门禁未通过不得推进，必须补齐并重提。',
+    '',
+    '## 风险与应急预案',
+    '- 风险：模型调用波动导致推进延迟。',
+    '- 应急：保留草稿并补齐后重新提交审批。',
+    '',
+    '## 验收检查清单',
+    '- 目标、范围、角色、风险四类信息完整且无冲突。',
+    '- 关键决策规则清晰，出现阻塞时可直接执行。',
+    '- 章程可作为分析阶段输入，不依赖口头补充。',
+    '',
+    '## 待确认项',
+    '- 待确认：后续是否需要扩展到多级审批链路。',
+    '',
+    '## 协作交接卡',
+    'factsConfirmed: 已确认立项阶段目标、范围、责任人与验收口径。',
+    'assumptions: 默认按单用户 MVP 推进，新增范围需重新评审。',
+    'decisions: 先通过立项门禁，再进入分析阶段。',
+    'handoff: 下一阶段基于本章程产出需求分析与排期。',
+    'openQuestions: 多级审批是否纳入后续阶段。',
+  ].join('\n');
+}
+
 async function main() {
   const startedAt = Date.now();
   const steps = [];
@@ -162,6 +205,101 @@ async function main() {
   const detail1 = await req('GET', `/api/projects/${projectId}`);
   steps.push({ step: 'detail_after_create', status: detail1.status, durationMs: detail1.durationMs, project: summarizeProject(detail1.body) });
   logProgress('fetched initial detail', formatProjectState(detail1.body));
+
+  if (!REQUIRE_COMPLETION) {
+    const prepRun = await req('POST', `/api/projects/${projectId}/post-create-prep`, {});
+    if (prepRun.status !== 200) {
+      throw new Error(`quick_post_create_prep_run failed: ${prepRun.status} ${JSON.stringify(prepRun.body)}`);
+    }
+    const prepRunData = unwrapEnvelope(prepRun.body);
+    steps.push({
+      step: 'quick_post_create_prep_run',
+      status: prepRun.status,
+      durationMs: prepRun.durationMs,
+      summary: prepRunData?.postCreatePrep || null,
+    });
+    if (prepRunData?.postCreatePrep?.required && !prepRunData?.postCreatePrep?.completed) {
+      const prepConfirm = await req('POST', `/api/projects/${projectId}/post-create-prep/confirm`, {
+        confirmedBy: 'smoke-project-flow',
+        notes: 'quick smoke confirmation',
+      });
+      if (prepConfirm.status !== 200) {
+        throw new Error(`quick_post_create_prep_confirm failed: ${prepConfirm.status} ${JSON.stringify(prepConfirm.body)}`);
+      }
+      const prepConfirmData = unwrapEnvelope(prepConfirm.body);
+      if (!prepConfirmData?.postCreatePrep?.completed) {
+        throw new Error(`quick_post_create_prep_confirm not completed: ${JSON.stringify(prepConfirm.body)}`);
+      }
+      steps.push({
+        step: 'quick_post_create_prep_confirm',
+        status: prepConfirm.status,
+        durationMs: prepConfirm.durationMs,
+        summary: prepConfirmData?.postCreatePrep || null,
+      });
+    }
+
+    const detailBeforeSubmit = await req('GET', `/api/projects/${projectId}`);
+    const stageBeforeSubmit = String(detailBeforeSubmit.body?.currentStage || '').toUpperCase();
+    steps.push({
+      step: 'quick_detail_before_submit',
+      status: detailBeforeSubmit.status,
+      durationMs: detailBeforeSubmit.durationMs,
+      project: summarizeProject(detailBeforeSubmit.body),
+    });
+
+    if (stageBeforeSubmit === 'INIT') {
+      const submit = await req('POST', `/api/projects/${projectId}/stages/submit`, {
+        title: '项目章程.md',
+        content: buildInitSmokeSubmissionContent(),
+      });
+      if (submit.status !== 200) {
+        throw new Error(`quick_submit failed: ${submit.status} ${JSON.stringify(submit.body)}`);
+      }
+      steps.push({
+        step: 'quick_submit',
+        status: submit.status,
+        durationMs: submit.durationMs,
+        project: summarizeProject(submit.body),
+      });
+
+      const approve = await req('POST', `/api/projects/${projectId}/approve`);
+      if (approve.status !== 200) {
+        throw new Error(`quick_approve failed: ${approve.status} ${JSON.stringify(approve.body)}`);
+      }
+      steps.push({
+        step: 'quick_approve',
+        status: approve.status,
+        durationMs: approve.durationMs,
+        project: summarizeProject(approve.body),
+      });
+    } else {
+      logProgress('quick smoke skip init submit/approve', `stage=${stageBeforeSubmit || '<unknown>'}`);
+    }
+
+    const finalDetail = await req('GET', `/api/projects/${projectId}`);
+    const finalProject = unwrapEnvelope(finalDetail.body);
+    steps.push({ step: 'detail_final', status: finalDetail.status, durationMs: finalDetail.durationMs, project: summarizeProject(finalProject) });
+    logProgress('final detail', formatProjectState(finalProject));
+    if (String(finalProject?.currentStage || '').toUpperCase() === 'INIT') {
+      throw new Error(`project did not pass init stage in quick smoke: ${JSON.stringify(summarizeProject(finalProject))}`);
+    }
+
+    const timed = steps.filter((step) => typeof step.durationMs === 'number');
+    const slowest = [...timed]
+      .sort((a, b) => Number(b.durationMs || 0) - Number(a.durationMs || 0))
+      .slice(0, 5)
+      .map((item) => ({ step: item.step, durationMs: item.durationMs, status: item.status }));
+
+    console.log(JSON.stringify({
+      ok: true,
+      mode: 'quick',
+      projectId,
+      totalDurationMs: Date.now() - startedAt,
+      slowestSteps: slowest,
+      steps,
+    }, null, 2));
+    return;
+  }
 
   // iterate advance path until completed or max rounds
   for (let i = 1; i <= 18; i += 1) {
@@ -210,6 +348,43 @@ async function main() {
         actions.map((a) => `${a.action}:${a.severity}`).join(', ')
       );
 
+      const hasPostCreatePrep = actions.some((a) => a.action === 'run_post_create_prep');
+      if (hasPostCreatePrep) {
+        const prepRun = await req('POST', `/api/projects/${projectId}/post-create-prep`, {});
+        if (prepRun.status !== 200) {
+          throw new Error(`post_create_prep_run_${i} failed: ${prepRun.status} ${JSON.stringify(prepRun.body)}`);
+        }
+        const prepRunData = unwrapEnvelope(prepRun.body);
+        steps.push({
+          step: `post_create_prep_run_${i}`,
+          status: prepRun.status,
+          durationMs: prepRun.durationMs,
+          summary: prepRunData?.postCreatePrep || null,
+        });
+        logProgress(`post-create prep run round ${i}`, `status=${prepRun.status}`);
+
+        if (prepRunData?.postCreatePrep?.required && !prepRunData?.postCreatePrep?.completed) {
+          const prepConfirm = await req('POST', `/api/projects/${projectId}/post-create-prep/confirm`, {
+            confirmedBy: 'smoke-project-flow',
+            notes: 'automated smoke confirmation',
+          });
+          if (prepConfirm.status !== 200) {
+            throw new Error(`post_create_prep_confirm_${i} failed: ${prepConfirm.status} ${JSON.stringify(prepConfirm.body)}`);
+          }
+          const prepConfirmData = unwrapEnvelope(prepConfirm.body);
+          if (!prepConfirmData?.postCreatePrep?.completed) {
+            throw new Error(`post_create_prep_confirm_${i} not completed: ${JSON.stringify(prepConfirm.body)}`);
+          }
+          steps.push({
+            step: `post_create_prep_confirm_${i}`,
+            status: prepConfirm.status,
+            durationMs: prepConfirm.durationMs,
+            summary: prepConfirmData?.postCreatePrep || null,
+          });
+          logProgress(`post-create prep confirmed round ${i}`, `status=${prepConfirm.status}`);
+        }
+      }
+
       const hasReviewPending = actions.some((a) => a.action === 'review_pending_stage');
       if (hasReviewPending) {
         const approve = await req('POST', `/api/projects/${projectId}/approve`);
@@ -243,35 +418,45 @@ async function main() {
     if (detail.body?.status === 'completed') {
       break;
     }
+    if (!REQUIRE_COMPLETION && String(detail.body?.currentStage || '').toUpperCase() !== 'INIT') {
+      logProgress(`smoke quick gate reached`, `stage=${detail.body?.currentStage || '<unknown>'}`);
+      break;
+    }
   }
 
   const finalDetail = await req('GET', `/api/projects/${projectId}`);
   const finalProject = unwrapEnvelope(finalDetail.body);
   steps.push({ step: 'detail_final', status: finalDetail.status, durationMs: finalDetail.durationMs, project: summarizeProject(finalProject) });
   logProgress('final detail', formatProjectState(finalProject));
-  if (finalProject?.status !== 'completed') {
-    throw new Error(`project did not complete within smoke flow budget: ${JSON.stringify(summarizeProject(finalProject))}`);
+  if (REQUIRE_COMPLETION) {
+    if (finalProject?.status !== 'completed') {
+      throw new Error(`project did not complete within smoke flow budget: ${JSON.stringify(summarizeProject(finalProject))}`);
+    }
+  } else if (String(finalProject?.currentStage || '').toUpperCase() === 'INIT') {
+    throw new Error(`project did not pass init stage within smoke flow budget: ${JSON.stringify(summarizeProject(finalProject))}`);
   }
 
-  const artifacts = await req('GET', `/api/projects/${projectId}/final-artifacts`);
-  const artifactsData = unwrapEnvelope(artifacts.body);
-  if (artifacts.status === 200 && artifactsData?.readyForAcceptance !== true) {
-    throw new Error(`final artifacts not ready for acceptance: ${JSON.stringify(artifactsData)}`);
+  if (finalProject?.status === 'completed') {
+    const artifacts = await req('GET', `/api/projects/${projectId}/final-artifacts`);
+    const artifactsData = unwrapEnvelope(artifacts.body);
+    if (artifacts.status === 200 && artifactsData?.readyForAcceptance !== true) {
+      throw new Error(`final artifacts not ready for acceptance: ${JSON.stringify(artifactsData)}`);
+    }
+    steps.push({
+      step: 'final_artifacts',
+      status: artifacts.status,
+      durationMs: artifacts.durationMs,
+      summary:
+        artifacts.status === 200
+          ? {
+              readyForAcceptance: artifactsData?.readyForAcceptance,
+              coverage: artifactsData?.coverage,
+              missingRequired: artifactsData?.missingRequired,
+            }
+          : artifacts.body,
+    });
+    logProgress('final artifacts ready', `status=${artifacts.status}`);
   }
-  steps.push({
-    step: 'final_artifacts',
-    status: artifacts.status,
-    durationMs: artifacts.durationMs,
-    summary:
-      artifacts.status === 200
-        ? {
-            readyForAcceptance: artifactsData?.readyForAcceptance,
-            coverage: artifactsData?.coverage,
-            missingRequired: artifactsData?.missingRequired,
-          }
-        : artifacts.body,
-  });
-  logProgress('final artifacts ready', `status=${artifacts.status}`);
 
   const timed = steps.filter((step) => typeof step.durationMs === 'number');
   const slowest = [...timed]

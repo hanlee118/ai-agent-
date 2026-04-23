@@ -1083,15 +1083,32 @@ async function withTimeout<T>(
     MIN_ATTEMPT_BUDGET_MS,
     Math.min(timeoutMs, maxBudgetMs)
   );
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<T>((_, reject) => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const taskResult = promise.then(
+    (value) => ({ type: "task" as const, ok: true as const, value }),
+    (error) => ({ type: "task" as const, ok: false as const, error })
+  );
+  const timeoutPromise = new Promise<{ type: "timeout" }>((resolve) => {
     timer = setTimeout(() => {
-      reject(new Error(`MODEL_ATTEMPT_TIMEOUT: ${label} exceeded ${budget}ms`));
+      resolve({ type: "timeout" });
     }, budget);
   });
 
   try {
-    return await Promise.race([promise, timeoutPromise]);
+    const winner = await Promise.race([taskResult, timeoutPromise] as const);
+    if (winner.type === "timeout") {
+      void taskResult.then((late) => {
+        if (!late.ok) {
+          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
+          console.warn(`[runtime.withTimeout] late rejection after timeout ignored: ${lateMessage}`);
+        }
+      });
+      throw new Error(`MODEL_ATTEMPT_TIMEOUT: ${label} exceeded ${budget}ms`);
+    }
+    if (!winner.ok) {
+      throw winner.error;
+    }
+    return winner.value;
   } finally {
     if (timer) {
       clearTimeout(timer);

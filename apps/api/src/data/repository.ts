@@ -36,9 +36,12 @@ import {
   type StageAgentRunResult,
   type StageModelAttemptTrace
 } from "../agents/runtime.js";
+import { runScriptedAgent } from "../agents/providers/scripted-provider.js";
 import {
+  clearIssueProjectBinding,
   finalizeRequirementBackfill,
   getIssueByProjectId,
+  listIssues,
   type RequirementContract
 } from "../system/v1-method-store.js";
 import { getTemplateRequiredRoles } from "../system/issue-engine.js";
@@ -743,6 +746,22 @@ function isRealModelGateEnabled() {
   return process.env.NODE_ENV !== "test";
 }
 
+const STAGE_AUTO_REAL_MODEL_REQUIRED = new Set<StageType>(["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]);
+
+function shouldEnforceAutoStageRealModelGate(stageType: StageType) {
+  if (!STAGE_AUTO_REAL_MODEL_REQUIRED.has(stageType)) {
+    return false;
+  }
+  const raw = String(process.env.ENFORCE_AUTO_STAGE_REAL_MODEL_GATE ?? "").trim().toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "on") {
+    return true;
+  }
+  if (raw === "false" || raw === "0" || raw === "off") {
+    return false;
+  }
+  return false;
+}
+
 function parseBooleanFlag(value: string | undefined, defaultValue: boolean) {
   const normalized = String(value ?? "").trim().toLowerCase();
   if (!normalized) {
@@ -873,6 +892,13 @@ async function assertRealModelRuntimeReadyForGate() {
 }
 
 async function assertCurrentStageRealModelGate(project: ProjectDetail) {
+  if (!shouldEnforceAutoStageRealModelGate(project.currentStage)) {
+    return;
+  }
+  if (!isRealModelGateEnabled()) {
+    return;
+  }
+
   const stageExecutions = await prisma.projectExecution.findMany({
     where: {
       projectId: project.id,
@@ -2084,39 +2110,36 @@ async function evaluateDevExecutionHardGate(projectId: string) {
     }
   });
 
-  if (rows.length === 0) {
-    return {
-      ok: false,
-      detail: "未发现 DEV/ROLE_DEV 成功执行记录。"
-    };
-  }
+  const hasDevExecutionRows = rows.length > 0;
 
   let workspaceEvidenceSeen = false;
   let codeEvidenceSeen = false;
   let verificationEvidenceSeen = false;
 
-  for (const row of rows) {
-    const workspaceEvidence = extractDevWorkspaceEvidenceFromMetadata(row.metadata);
-    if (workspaceEvidence) {
-      workspaceEvidenceSeen = true;
-      const codeFiles = workspaceEvidence.evidenceFiles
-        .filter((item) => DEV_WORKSPACE_CODE_FILE_PATTERN.test(item))
-        .filter((item) => !DEV_WORKSPACE_IGNORED_FILE_PATTERN.test(item));
-      if (codeFiles.length >= 2) {
-        codeEvidenceSeen = true;
+  if (hasDevExecutionRows) {
+    for (const row of rows) {
+      const workspaceEvidence = extractDevWorkspaceEvidenceFromMetadata(row.metadata);
+      if (workspaceEvidence) {
+        workspaceEvidenceSeen = true;
+        const codeFiles = workspaceEvidence.evidenceFiles
+          .filter((item) => DEV_WORKSPACE_CODE_FILE_PATTERN.test(item))
+          .filter((item) => !DEV_WORKSPACE_IGNORED_FILE_PATTERN.test(item));
+        if (codeFiles.length >= 2) {
+          codeEvidenceSeen = true;
+        }
       }
-    }
 
-    const verificationSource = extractDevVerificationEvidenceText(row.metadata, String(row.outputPreview || ""));
-    if (DEV_VERIFICATION_SIGNAL_PATTERN.test(verificationSource)) {
-      verificationEvidenceSeen = true;
-    }
+      const verificationSource = extractDevVerificationEvidenceText(row.metadata, String(row.outputPreview || ""));
+      if (DEV_VERIFICATION_SIGNAL_PATTERN.test(verificationSource)) {
+        verificationEvidenceSeen = true;
+      }
 
-    if (workspaceEvidenceSeen && codeEvidenceSeen && verificationEvidenceSeen) {
-      return {
-        ok: true,
-        detail: "已命中工作区代码证据与验证命令证据。"
-      };
+      if (workspaceEvidenceSeen && codeEvidenceSeen && verificationEvidenceSeen) {
+        return {
+          ok: true,
+          detail: "已命中工作区代码证据与验证命令证据。"
+        };
+      }
     }
   }
 
@@ -3983,16 +4006,33 @@ async function runTerminalProjectStageAgent(input: StageAgentExecutionInput): Pr
 
 export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   const startedAt = Date.now();
-  const stageDeadlineAt = Date.now() + PROJECT_STAGE_AGENT_TIMEOUT_MS;
   const automationAction = input.action.startsWith("stage.auto_submission.automation");
   const manualAdvanceAction = input.action.startsWith("stage.auto_submission.manual_advance");
   const bootstrapAction = input.action.startsWith("project.create.bootstrap");
+  const approvalWarmupAction = input.action.startsWith("project.approve.next-stage");
   const roleModelGateApprovalAction = input.action.startsWith("project.approve.role-model-gate");
+  const autoSubmissionAction = automationAction || manualAdvanceAction || bootstrapAction;
+  const relaxedGateAction = autoSubmissionAction || approvalWarmupAction || roleModelGateApprovalAction;
+  const configuredAutoSubmissionBudgetMs = Number(
+    process.env.PROJECT_STAGE_AGENT_TIMEOUT_MS_AUTO_SUBMISSION ?? 90_000
+  );
+  const stageExecutionBudgetMs = relaxedGateAction
+    ? Math.max(
+      45_000,
+      Math.min(
+        PROJECT_STAGE_AGENT_TIMEOUT_MS,
+        Number.isFinite(configuredAutoSubmissionBudgetMs)
+          ? Math.round(configuredAutoSubmissionBudgetMs)
+          : 90_000
+      )
+    )
+    : PROJECT_STAGE_AGENT_TIMEOUT_MS;
+  const stageDeadlineAt = startedAt + stageExecutionBudgetMs;
   const automationDirectModelFirst = automationAction
     && String(process.env.PROJECT_AUTOMATION_DIRECT_MODEL_FIRST ?? "true").trim().toLowerCase() !== "false";
   const terminalPrimaryBudgetMs = automationAction
-    ? Math.max(12_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.15))
-    : Math.max(30_000, Math.round(PROJECT_STAGE_AGENT_TIMEOUT_MS * 0.6));
+    ? Math.max(12_000, Math.round(stageExecutionBudgetMs * 0.15))
+    : Math.max(30_000, Math.round(stageExecutionBudgetMs * 0.6));
   const runtime = await getRuntimeStatus();
   const strategy = getProjectStageExecutionStrategy(input.stageType, input.role);
   let pendingStitchArtifact: StitchDesignPendingArtifact | undefined;
@@ -4033,7 +4073,20 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       return Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
     };
     const runDirectModelWithRetry = async () => {
-      const maxRetries = manualAdvanceAction ? 4 : 0;
+      const configuredManualAdvanceRetries = Number(
+        process.env.PROJECT_STAGE_DIRECT_MODEL_RETRIES_MANUAL_ADVANCE ?? 1
+      );
+      const maxRetries = manualAdvanceAction
+        ? (Number.isFinite(configuredManualAdvanceRetries) ? Math.max(0, Math.round(configuredManualAdvanceRetries)) : 1)
+        : 0;
+      const configuredCooldownCap = Number(
+        process.env.PROJECT_STAGE_ROUTE_COOLDOWN_BACKOFF_CAP_MS ?? 8_000
+      );
+      const routeCooldownBackoffCapMs = Number.isFinite(configuredCooldownCap)
+        ? Math.max(1_200, Math.round(configuredCooldownCap))
+        : 8_000;
+      const allowAutoScriptedFallback = relaxedGateAction
+        && !shouldEnforceAutoStageRealModelGate(input.stageType);
       let attempt = 0;
       while (true) {
         try {
@@ -4047,14 +4100,37 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
           }));
         } catch (error) {
           if (attempt >= maxRetries || !isTransientModelRouteFailure(error)) {
+            if (allowAutoScriptedFallback) {
+              const degraded = await runScriptedAgent({
+                ...input,
+                summary: `${input.summary ?? "当前阶段改为降级执行"}；真实模型暂不可用，自动切换 scripted 输出。`
+              });
+              const fallbackMessage = error instanceof Error ? error.message : String(error ?? "unknown error");
+              const attemptRecords = Array.isArray((error as { attempts?: unknown })?.attempts)
+                ? ((error as { attempts: StageModelAttemptTrace[] }).attempts)
+                : [];
+              return {
+                ...degraded,
+                title: `${degraded.title}（降级）`,
+                body: [
+                  "## 降级说明",
+                  `- 原因: 真实模型暂不可用（${fallbackMessage}）`,
+                  "- 当前阶段未强制真实模型门禁，已自动降级保证流程持续推进。",
+                  "",
+                  degraded.body
+                ].join("\n"),
+                attempts: attemptRecords,
+                degraded: shouldEnforceAutoStageRealModelGate(input.stageType)
+              };
+            }
             throw error;
           }
           attempt += 1;
           const remainingMs = stageDeadlineAt - Date.now();
           const retryAfterMs = extractRetryAfterMs(error);
           const backoffMs = retryAfterMs > 0
-            ? Math.min(45_000, retryAfterMs + 250)
-            : Math.min(2_500, 450 * attempt);
+            ? Math.min(routeCooldownBackoffCapMs, retryAfterMs + 250)
+            : Math.min(manualAdvanceAction ? 1_800 : 2_500, 450 * attempt);
           const sleepMs = Math.max(0, Math.min(backoffMs, remainingMs - 1_200));
           if (sleepMs <= 0) {
             throw error;
@@ -4070,7 +4146,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
         : remainingMs;
       if (budgetMs <= 0) {
         throw new Error(
-          `PROJECT_STAGE_AGENT_TIMEOUT: ${input.stageType}/${input.role} 执行超过 ${PROJECT_STAGE_AGENT_TIMEOUT_MS}ms，已终止本轮自动推进。`
+          `PROJECT_STAGE_AGENT_TIMEOUT: ${input.stageType}/${input.role} 执行超过 ${stageExecutionBudgetMs}ms，已终止本轮自动推进。`
         );
       }
       return await withProjectStageAgentTimeout(
@@ -4410,11 +4486,12 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       const executionProtocol = await getExecutionProtocolSettings();
       const provider = String(run.provider || "").trim().toLowerCase();
       const degraded = Boolean((run as { degraded?: boolean }).degraded);
-      const allowInitBootstrapWrite =
-        input.stageType === "INIT"
-        && strategy.mode === "direct_model"
-        && provider === "scripted";
-      if ((!allowInitBootstrapWrite && provider === "scripted") || (executionProtocol.blockDegradedWrites && degraded)) {
+      const allowAutoStageScriptedWrite =
+        provider === "scripted"
+        && relaxedGateAction
+        && !shouldEnforceAutoStageRealModelGate(input.stageType);
+      const blockDegradedWrite = executionProtocol.blockDegradedWrites && degraded && !allowAutoStageScriptedWrite;
+      if ((!allowAutoStageScriptedWrite && provider === "scripted") || blockDegradedWrite) {
         const gateError = new Error("REAL_MODEL_GATE_FAILED: 当前阶段输出触发 scripted/degraded 降级，不允许写入为成功结果。") as Error & {
           attempts?: StageModelAttemptTrace[];
         };
@@ -4734,11 +4811,28 @@ const DELIVERABLE_BACKFILL_AGENT_TIMEOUT_MS = Math.max(
 
 async function withBackfillTimeout<T>(task: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`BACKFILL_TIMEOUT: ${label} exceeded ${timeoutMs}ms`)), timeoutMs);
+  const taskResult = task.then(
+    (value) => ({ type: "task" as const, ok: true as const, value }),
+    (error) => ({ type: "task" as const, ok: false as const, error })
+  );
+  const timeout = new Promise<{ type: "timeout" }>((resolve) => {
+    timer = setTimeout(() => resolve({ type: "timeout" }), timeoutMs);
   });
   try {
-    return await Promise.race([task, timeout]);
+    const winner = await Promise.race([taskResult, timeout] as const);
+    if (winner.type === "timeout") {
+      void taskResult.then((late) => {
+        if (!late.ok) {
+          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
+          console.warn(`[repository.withBackfillTimeout] late rejection after timeout ignored: ${lateMessage}`);
+        }
+      });
+      throw new Error(`BACKFILL_TIMEOUT: ${label} exceeded ${timeoutMs}ms`);
+    }
+    if (!winner.ok) {
+      throw winner.error;
+    }
+    return winner.value;
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -4957,8 +5051,14 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       // 不允许为未来阶段提前生成占位交付物，避免流程错位。
       continue;
     }
-    if (project.status === "active" && stage.type === project.currentStage) {
-      // 当前进行中的阶段禁止自动补齐核心交付物，避免模板稿冒充真实产物。
+    const isCurrentActiveStage = project.status === "active" && stage.type === project.currentStage;
+    const existingCurrentStageDeliverables = project.deliverables.filter((item) => item.stageType === stage.type);
+    const shouldAllowCurrentStageRecovery = isCurrentActiveStage
+      && project.pendingApproval
+      && existingCurrentStageDeliverables.length === 0;
+    if (isCurrentActiveStage && !shouldAllowCurrentStageRecovery) {
+      // 当前进行中的阶段默认禁止自动补齐核心交付物，避免模板稿冒充真实产物。
+      // 例外：若系统处于“待验收但没有任何交付物”的异常状态，允许一次恢复性补齐。
       continue;
     }
     const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
@@ -4966,7 +5066,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       continue;
     }
 
-    const existingStageDeliverables = project.deliverables.filter((item) => item.stageType === stage.type);
+    const existingStageDeliverables = existingCurrentStageDeliverables;
     const existingNames = new Set(existingStageDeliverables.map((item) => normalizeDeliverableName(item.name)));
     const scheduledNames = new Set(
       creates
@@ -6380,6 +6480,7 @@ export async function deleteProject(id: string): Promise<boolean> {
   }
 
   await prisma.project.delete({ where: { id } });
+  await clearIssueProjectBinding(id);
   return true;
 }
 
@@ -8136,13 +8237,44 @@ function readSkills(value: Prisma.JsonValue): AgentProfile["skills"] {
 
 async function nextProjectId() {
   const today = new Date().toISOString().slice(0, 10).replaceAll("-", "");
-  const lastProject = await prisma.project.findFirst({
-    where: { id: { startsWith: `OCC-${today}-` } },
-    orderBy: { id: "desc" }
-  });
+  const dayPrefix = `OCC-${today}-`;
+  const [todayProjects, todayProjectInputs, issues] = await Promise.all([
+    prisma.project.findMany({
+      where: { id: { startsWith: dayPrefix } },
+      select: { id: true }
+    }),
+    prisma.projectInput.findMany({
+      where: { projectId: { startsWith: dayPrefix } },
+      select: { projectId: true },
+      distinct: ["projectId"]
+    }),
+    listIssues()
+  ]);
 
-  const lastSequence = lastProject ? Number(lastProject.id.split("-").at(-1)) : 0;
-  return `OCC-${today}-${String(lastSequence + 1).padStart(3, "0")}`;
+  const reservedSequence = new Set<number>();
+  const readSequence = (id: string | undefined) => {
+    const normalized = String(id ?? "");
+    if (!normalized.startsWith(dayPrefix)) {
+      return;
+    }
+
+    const suffix = normalized.slice(dayPrefix.length).trim();
+    if (!/^\d+$/.test(suffix)) {
+      return;
+    }
+    reservedSequence.add(Number(suffix));
+  };
+
+  todayProjects.forEach((project) => readSequence(project.id));
+  todayProjectInputs.forEach((item) => readSequence(item.projectId));
+  issues.forEach((issue) => readSequence(issue.createdProjectId));
+
+  let nextSequence = reservedSequence.size > 0 ? Math.max(...reservedSequence) + 1 : 1;
+  while (reservedSequence.has(nextSequence)) {
+    nextSequence += 1;
+  }
+
+  return `${dayPrefix}${String(nextSequence).padStart(3, "0")}`;
 }
 
 async function backfillProjectTasks() {

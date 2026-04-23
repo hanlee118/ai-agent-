@@ -455,6 +455,36 @@ export async function getIssueByProjectId(projectId: string) {
   return store.issues.find((item) => item.createdProjectId === projectId) ?? null;
 }
 
+export async function clearIssueProjectBinding(projectId: string) {
+  const normalizedProjectId = String(projectId ?? "").trim();
+  if (!normalizedProjectId) {
+    return 0;
+  }
+
+  const store = await loadStoreOrDefault();
+  let changed = 0;
+  const nextIssues = store.issues.map((issue) => {
+    if (issue.createdProjectId !== normalizedProjectId) {
+      return issue;
+    }
+    changed += 1;
+    return {
+      ...issue,
+      createdProjectId: undefined,
+      updatedAt: nowIso()
+    };
+  });
+
+  if (changed > 0) {
+    await saveStore({
+      ...store,
+      issues: nextIssues
+    });
+  }
+
+  return changed;
+}
+
 export async function createIssueDraft(input: {
   title: string;
   sourceType: IssueSourceType;

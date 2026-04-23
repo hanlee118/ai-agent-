@@ -273,15 +273,30 @@ function extractOpinionFields(body: string, thinkingSummary: string, roleId: Rol
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const taskResult = promise.then(
+    (value) => ({ type: "task" as const, ok: true as const, value }),
+    (error) => ({ type: "task" as const, ok: false as const, error })
+  );
   try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`ISSUE_DEBATE_TIMEOUT:${label}:${timeoutMs}ms`));
-        }, timeoutMs);
-      })
-    ]);
+    const timeout = new Promise<{ type: "timeout" }>((resolve) => {
+      timer = setTimeout(() => {
+        resolve({ type: "timeout" });
+      }, timeoutMs);
+    });
+    const winner = await Promise.race([taskResult, timeout] as const);
+    if (winner.type === "timeout") {
+      void taskResult.then((late) => {
+        if (!late.ok) {
+          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
+          console.warn(`[issue-debate.withTimeout] late rejection after timeout ignored: ${lateMessage}`);
+        }
+      });
+      throw new Error(`ISSUE_DEBATE_TIMEOUT:${label}:${timeoutMs}ms`);
+    }
+    if (!winner.ok) {
+      throw winner.error;
+    }
+    return winner.value;
   } finally {
     if (timer) {
       clearTimeout(timer);

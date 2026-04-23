@@ -6,6 +6,7 @@ import {
   clearStitchTransportCooldown,
   generateStitchDesignArtifact,
   isRetryableTransportError,
+  isStitchQuotaExhaustedError,
   isStitchTransportCooldownError,
   isStitchTransportCooldownActive,
   noteStitchTransportFailure,
@@ -202,6 +203,15 @@ test("stitch timeout errors are treated as recoverable transport failures", () =
   assert.equal(isRetryableTransportError(new Error("MCP error -32001: Request timed out")), true);
 });
 
+test("stitch quota exhaustion errors are detected for graceful degrade", () => {
+  assert.equal(
+    isStitchQuotaExhaustedError(new Error("Tool Call Failed [generate_screen_from_text]: Resource has been exhausted (e.g. check quota).")),
+    true
+  );
+  assert.equal(isStitchQuotaExhaustedError(new Error("429 Too Many Requests: rate limit exceeded")), true);
+  assert.equal(isStitchQuotaExhaustedError(new Error("socket hang up")), false);
+});
+
 test("stitch transport cooldown opens and auto-expires", () => {
   clearStitchTransportCooldown();
   assert.equal(isStitchTransportCooldownActive(1_000), false);
@@ -238,4 +248,61 @@ test("stitch transport console filter suppresses only stitch transport noise", (
 
   assert.equal(captured.length, 1);
   assert.equal(String(captured[0]?.[0] ?? ""), "normal runtime error");
+});
+
+test("stitch async start degrades to pending when cooldown is active", async () => {
+  const previousApiKey = process.env.STITCH_API_KEY;
+  delete process.env.STITCH_API_KEY;
+  clearStitchTransportCooldown();
+  noteStitchTransportFailure(Date.now(), 60_000);
+
+  try {
+    const result = await startStitchDesignGeneration({
+      projectId: "OCC-TEST-COOLDOWN-START",
+      projectName: "Cooldown Start",
+      projectDescription: "验证 cooldown 激活时异步启动应降级为 pending 而非抛错",
+      parsedIntent: {
+        keywords: ["ui", "design"],
+        constraints: ["真实产物"],
+        risks: ["stitch transport cooldown"],
+        suggestedTeam: ["ROLE_DESIGN"],
+        summary: "设计阶段测试"
+      },
+      stageType: "DESIGN",
+      role: "ROLE_DESIGN",
+      summary: "生成测试界面"
+    });
+
+    assert.equal(result.status, "pending");
+    assert.equal(result.pending.projectId, "OCC-TEST-COOLDOWN-START");
+  } finally {
+    clearStitchTransportCooldown();
+    if (typeof previousApiKey === "undefined") {
+      delete process.env.STITCH_API_KEY;
+    } else {
+      process.env.STITCH_API_KEY = previousApiKey;
+    }
+  }
+});
+
+test("stitch async recover returns null when cooldown is active", async () => {
+  const previousApiKey = process.env.STITCH_API_KEY;
+  delete process.env.STITCH_API_KEY;
+  clearStitchTransportCooldown();
+  noteStitchTransportFailure(Date.now(), 60_000);
+
+  try {
+    const artifact = await recoverStitchDesignArtifact({
+      stitchProjectId: "stitch-project-cooldown",
+      prompt: "设计协作平台重构界面"
+    });
+    assert.equal(artifact, null);
+  } finally {
+    clearStitchTransportCooldown();
+    if (typeof previousApiKey === "undefined") {
+      delete process.env.STITCH_API_KEY;
+    } else {
+      process.env.STITCH_API_KEY = previousApiKey;
+    }
+  }
 });

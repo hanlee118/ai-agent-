@@ -13,11 +13,11 @@ export const ROLE_LABELS: Record<string, string> = {
 };
 
 export const STAGE_LABELS: Record<string, string> = {
-  INIT: '立项',
-  ANALYSIS: '分析',
-  DESIGN: '设计',
-  DEV: '开发',
-  ACCEPT: '验收',
+  INIT: '项目立项',
+  ANALYSIS: '需求分析',
+  DESIGN: '需求设计/视觉设计',
+  DEV: '代码开发',
+  ACCEPT: '测试验收',
 };
 
 export const TASK_STATUS_LABELS: Record<string, string> = {
