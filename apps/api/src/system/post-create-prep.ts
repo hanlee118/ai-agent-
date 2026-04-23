@@ -283,6 +283,22 @@ function normalizeRawInputSeed(source: string) {
     .trim();
 }
 
+function extractMarkdownSubSection(source: string, heading: string) {
+  const text = String(source || "");
+  if (!text.trim()) {
+    return "";
+  }
+  const pattern = new RegExp(`##\\s*${escapeRegExp(heading)}\\s*\\n([\\s\\S]*?)(?=\\n##\\s+|$)`, "i");
+  const matched = text.match(pattern);
+  return String(matched?.[1] || "").trim();
+}
+
+function normalizeRawRequirementsSeed(source: string) {
+  const text = String(source || "");
+  const explicitRawInput = extractMarkdownSubSection(text, "原始需求输入");
+  return normalizeRawInputSeed(stripPrepGeneratedSections(explicitRawInput || text));
+}
+
 function extractStructuredLines(description: string, fallback: string) {
   const raw = stripMarkdownDecorators(description).replace(/\r/g, "\n");
   const chunks = raw
@@ -297,7 +313,7 @@ function inferRawInputFromProject(input: {
   projectDescription: string;
   projectInputs: ProjectInputLike[];
 }) {
-  const rawRequirements = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "rawRequirements")));
+  const rawRequirements = normalizeRawRequirementsSeed(getInputContentByName(input.projectInputs, "rawRequirements"));
   const description = normalizeRawInputSeed(stripPrepGeneratedSections(input.projectDescription));
   const prd = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "prd")));
   const debateSummary = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "debateSummary")));
@@ -397,15 +413,30 @@ function buildFallbackDebate(input: {
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  const taskResult = promise.then(
+    (value) => ({ type: "task" as const, ok: true as const, value }),
+    (error) => ({ type: "task" as const, ok: false as const, error })
+  );
   try {
-    return await Promise.race([
-      promise,
-      new Promise<T>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(new Error(`PREP_DISCUSSION_TIMEOUT:${label}:${timeoutMs}ms`));
-        }, timeoutMs);
-      })
-    ]);
+    const timeout = new Promise<{ type: "timeout" }>((resolve) => {
+      timer = setTimeout(() => {
+        resolve({ type: "timeout" });
+      }, timeoutMs);
+    });
+    const winner = await Promise.race([taskResult, timeout] as const);
+    if (winner.type === "timeout") {
+      void taskResult.then((late) => {
+        if (!late.ok) {
+          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
+          console.warn(`[post-create-prep.withTimeout] late rejection after timeout ignored: ${lateMessage}`);
+        }
+      });
+      throw new Error(`PREP_DISCUSSION_TIMEOUT:${label}:${timeoutMs}ms`);
+    }
+    if (!winner.ok) {
+      throw winner.error;
+    }
+    return winner.value;
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -809,22 +840,34 @@ function buildSeededInputsFromRawInput(input: {
     trace: string;
   };
 }) {
+  const normalizedRawInput = sanitizeLine(input.rawInput, "待补充原始需求");
+  const rawIntentLines = dedupeLines(
+    extractStructuredLines(normalizedRawInput, "待补充用户原始诉求").slice(0, 6),
+    "待补充用户原始诉求"
+  );
   const rawRequirementsContent = [
     "# rawRequirements",
     "",
-    sanitizeLine(input.rawInput, "待补充原始需求"),
+    "## 原始需求输入",
+    normalizedRawInput,
     "",
-    input.blocks.debate,
+    "## 用户诉求提炼",
+    ...rawIntentLines.map((item) => `- ${item}`),
     "",
-    input.blocks.analysis,
+    "## 输入边界说明",
+    "- 本文档保留用户原始意图与上下文素材，供多Agent讨论复用。",
+    "- 结构化目标、范围、验收条款请以 `prd` 文档为准。",
     "",
-    input.blocks.requirement
+    "## 关联讨论摘要",
+    "- 讨论详情见 debateSummary 与 prepDiscussionTrace。"
   ].join("\n");
   const prdContent = [
     "# prd",
     "",
+    "## 结构化需求草案",
     input.blocks.analysis,
     "",
+    "## 需求确认单",
     input.blocks.requirement
   ].join("\n");
   const debateSummaryContent = [
@@ -837,13 +880,13 @@ function buildSeededInputsFromRawInput(input: {
     {
       name: "rawRequirements",
       type: "document",
-      description: "项目创建后自动生成：原始需求 + 多Agent讨论结论 + 需求分析草案",
+      description: "项目创建后自动生成：原始需求输入与用户诉求提炼",
       content: rawRequirementsContent
     },
     {
       name: "prd",
       type: "document",
-      description: "项目创建后自动生成：需求分析草案与需求确认单",
+      description: "项目创建后自动生成：结构化需求草案与需求确认单",
       content: prdContent
     },
     {

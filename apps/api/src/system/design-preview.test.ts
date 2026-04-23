@@ -50,6 +50,27 @@ describe("design preview alignment", () => {
     assert.match(profile.visualDirection, /项目|任务|质量门禁|agent/i);
   });
 
+  it("recognizes collaboration platform intent from workflow-oriented business wording", () => {
+    const profile = resolveDesignRequirementProfile({
+      projectName: "smoke-1776928418443",
+      projectDescription: "请做一个AI协作平台官网，突出需求到研发闭环、角色协作、实时监控，并提供预约演示入口",
+      keywords: ["协作", "研发"]
+    });
+
+    assert.equal(profile.scenarioId, "collaboration_platform");
+  });
+
+  it("keeps collaboration-platform profile even when description contains noisy fan-site leftovers", () => {
+    const profile = resolveDesignRequirementProfile({
+      projectName: "smoke-1776928418443",
+      projectDescription:
+        "请做一个AI协作平台官网，突出需求到研发闭环、角色协作、实时监控，并提供预约演示入口。附注：历史讨论里出现过动漫介绍网站等噪声文本。",
+      keywords: ["协作", "研发"]
+    });
+
+    assert.equal(profile.scenarioId, "collaboration_platform");
+  });
+
   it("builds collaboration-platform preview with project and quality signals", () => {
     const html = buildRequirementAwareVisualPreviewHtml({
       projectName: "协作平台 UI 重构",

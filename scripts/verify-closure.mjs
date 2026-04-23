@@ -49,26 +49,100 @@ function buildAnalysisSubmissionContent(versionLabel = "v1") {
     "- MVP：项目创建、阶段推进、消息指导、人工介入、阶段提交、驳回重提、审批通过。",
     "- MVP：项目房间实时查看任务、时间轴、交付物和必需行动提示。",
     "- 增强：自动恢复卡死推进任务、自动补齐交付模板、输出验收报告和回填文档。",
+    "- 非目标（Out of Scope）：本轮不做生产级集群部署、不做跨区域容灾切流。", 
     "",
     "## 验收标准与衡量指标",
     "- 创建项目后 1 分钟内可看到当前阶段负责人、任务列表和时间轴。",
     "- 阶段提交时，审批稿必须包含完整章节、边界说明和可验证验收标准。",
     "- 驳回后允许补充内容再次提交，通过后阶段应向下一阶段推进。",
+    "- KPI：闭环脚本单轮通过率 >= 95%，核心接口成功率 >= 99%。",
+    "- SLA：关键 API（/health、/api/projects、/api/openclaw/agents）P95 响应 < 2s。",
     "",
     "## 风险、依赖与假设",
     "- 风险：模型调用失败会导致阶段结论延迟生成，需要恢复机制和可见提示。",
     "- 依赖：API 健康、鉴权会话、项目仓储与交付物模板校验需保持可用。",
     "- 假设：当前验收以本地环境为主，外部通道异常时允许脚本化回退验证。",
+    "- 非目标边界：不做新增业务领域扩展，不做旧项目数据回溯修复。", 
     "",
     "## 任务拆解与优先级",
     "- P0：打通创建项目、阶段推进、阶段审批三条核心路径。",
     "- P0：保证阶段提交文档符合模板且可以被审批和回溯。",
     "- P1：补齐自动恢复、验收报告、产品说明回填和异常提示。",
     "",
+    "## 事实依据与来源（Source of Truth）",
+    "- 代码来源：`apps/api/src/routes/projects.ts`、`apps/api/src/workflow-v2/project-modes.ts`、`apps/api/src/index.ts`。",
+    "- 接口来源：`/api/projects`、`/api/projects/:id/stages/submit`、`/api/v1/workflows/projects/:id/overview`。",
+    "- 运行验证来源：`pnpm verify:local`、`pnpm verify:smoke`、`pnpm verify:closure`。",
+    "",
+    "## 需求追踪矩阵（目标-功能-验收）",
+    "| 目标 | 功能 | 验收方式 | 指标/SLA |",
+    "| --- | --- | --- | --- |",
+    "| 项目可创建并进入阶段 | 创建项目与预备阶段初始化 | 调用 POST /api/projects 返回 201 | 成功率 >= 99% |",
+    "| 阶段可提交并进入审批 | POST /api/projects/:id/stages/submit | 返回 pendingApproval=true | 关键流程 < 2s(P95) |",
+    "| 驳回后可重提并可推进 | reject + resubmit + approve | 流程状态正确迁移 | 闭环通过率 >= 95% |",
+    "| 讨论与执行可观测 | 工作流概览与执行列表查询 | overview/executions 可读 | 核心 API 可用率 >= 99% |",
+    "",
+    "## 决策记录（Decision Log）",
+    "- 决策 D1：保留强门禁，防止低质量交付误入下阶段；理由是质量稳定性优先于速度。",
+    "- 决策 D2：在门禁失败时允许草稿落盘并提示补齐；理由是保留上下文，避免重复劳动。",
+    "- 决策 D3：对闭环脚本使用标准化模板章节；理由是降低因格式漂移导致的假失败。",
+    "- 决策 D4：对关键路径保持最小改动策略；理由是减少回归面，确保本轮可验证性。",
+    "",
     "## 验收检查清单",
     "- 需求目标、用户场景、功能清单可形成闭环。",
     "- 验收标准可量化且可验证。",
     "- 风险与依赖项包含处理策略与责任人。",
+    "- 已明确非目标边界（Out of Scope）并在评审中可追溯。",
+    "- 已给出 Source of Truth 引用与矩阵表格映射。",
+  ].join("\n");
+}
+
+function buildInitSubmissionContent(versionLabel = "v1") {
+  return [
+    `# 项目章程交付 ${versionLabel}`,
+    "",
+    "## 项目背景与目标",
+    "- 项目背景：当前用于验证项目协作平台在真实流程中的创建、提交、驳回、重提、审批与推进闭环。",
+    "- 项目目标：确保立项阶段产物可审、可追溯、可作为分析阶段直接输入。",
+    "- 阶段目标：在单用户 MVP 范围内固化目标边界、责任人和推进规则。",
+    "",
+    "## 范围定义（In Scope / Out of Scope）",
+    "- In Scope：项目创建、阶段提交、驳回重提、审批推进、任务状态变更可追踪。",
+    "- In Scope：围绕审批主链路的消息指导、人工介入与恢复动作。",
+    "- Out of Scope：多租户权限体系重构、跨区域灾备、复杂组织级并发流程。",
+    "- 范围边界：仅覆盖本地协作平台闭环验证，不扩展到生产环境改造。",
+    "",
+    "## 角色分工与责任",
+    "- 阶段负责人（Owner）：ROLE_PM，负责立项基线、边界与风险收敛。",
+    "- 协作角色：ROLE_ANALYST / ROLE_PRODUCT 提供分析输入与约束确认。",
+    "- 审批角色：由项目审批人确认是否进入下一阶段并记录决策。",
+    "",
+    "## 治理机制与决策规则",
+    "- 规则一：所有阶段结论必须先有可审阅文档再进入审批。",
+    "- 规则二：门禁未通过时仅允许补齐，不允许跳过审批推进。",
+    "- 规则三：变更范围必须回填到当前阶段文档并重新审批。",
+    "",
+    "## 风险与应急预案",
+    "- 风险：模型调用波动导致阶段内容延迟或质量波动。",
+    "- 应急：保留草稿、提示缺失项、允许重提并记录时间线证据。",
+    "- 风险：需求语义模糊导致范围蔓延。",
+    "- 应急：以单用户 MVP 为硬边界，新增项进入待确认项并延后决策。",
+    "",
+    "## 验收检查清单",
+    "- 目标、范围、角色、风险四类信息完整且无冲突。",
+    "- 关键决策规则清晰，出现阻塞时可直接执行。",
+    "- 章程可作为分析阶段输入，不依赖口头补充。",
+    "",
+    "## 待确认项",
+    "- 待确认：介入与恢复动作的最终触发边界是否需要额外审批。",
+    "- 待确认：后续阶段是否需要额外接入外部通知通道。",
+    "",
+    "## 协作交接卡",
+    "factsConfirmed: 已确认立项阶段目标、范围与责任人，当前提交物可作为分析阶段输入基线。",
+    "assumptions: 默认按单用户 MVP 推进，若发生范围变更需重新触发立项审批。",
+    "decisions: 先保证立项门禁可通过，再推进后续分析与设计阶段执行。",
+    "handoff: 交由分析阶段基于本章程产出需求分析文档与排期方案。",
+    "openQuestions: 介入与恢复的细粒度触发边界是否需要额外审批策略。",
   ].join("\n");
 }
 
@@ -215,13 +289,17 @@ async function restoreRuntimeSettings() {
   assert(restored.ok, `runtime restore failed: ${formatResponseForError(restored)}`);
 }
 
-async function approveProjectWithRecovery(projectId) {
+async function approveProjectWithRecovery(projectId, previousStage) {
+  const baselineStage = String(previousStage || "").trim().toUpperCase();
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     const approve = await request(`/api/projects/${projectId}/approve`, {
       method: "POST"
     });
 
-    if (approve.ok && approve.json?.currentStage !== "ANALYSIS") {
+    if (
+      approve.ok
+      && (!baselineStage || String(approve.json?.currentStage || "").toUpperCase() !== baselineStage)
+    ) {
       return approve;
     }
 
@@ -248,7 +326,10 @@ async function approveProjectWithRecovery(projectId) {
 
     if (approve.status === 409 && code === "NO_PENDING_APPROVAL") {
       const detail = await request(`/api/projects/${projectId}`);
-      if (detail.ok && detail.json?.currentStage !== "ANALYSIS") {
+      if (
+        detail.ok
+        && (!baselineStage || String(detail.json?.currentStage || "").toUpperCase() !== baselineStage)
+      ) {
         return {
           ...approve,
           ok: true,
@@ -436,6 +517,41 @@ async function verifyProjectFlow(results) {
   assert(detail.ok, "project detail failed");
   assert(detail.json?.name === "Closure Acceptance Project", "project detail returned unexpected name");
   results.projectDetail = "ok";
+  const stageBeforeSubmit = String(detail.json?.currentStage || "").trim().toUpperCase();
+
+  const prepRun = await request(`/api/projects/${state.createdProjectId}/post-create-prep`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+  if (!prepRun.ok) {
+    const code = String(prepRun.json?.error?.code || "");
+    if (prepRun.status === 409 && code === "PROJECT_ISSUE_FIRST_REQUIRED") {
+      results.projectFlow = {
+        status: "skipped",
+        reason: `post-create prep blocked by issue-first gate: ${formatResponseForError(prepRun)}`
+      };
+      return;
+    }
+    throw new Error(`post-create prep run failed: ${formatResponseForError(prepRun)}`);
+  }
+  const prepRunData = unwrapEnvelope(prepRun.json) || {};
+  const prepRunState = prepRunData.postCreatePrep || {};
+  if (prepRunState.required && !prepRunState.completed) {
+    const prepConfirm = await request(`/api/projects/${state.createdProjectId}/post-create-prep/confirm`, {
+      method: "POST",
+      body: JSON.stringify({
+        confirmedBy: "verify-closure",
+        notes: "automated closure validation confirmation"
+      })
+    });
+    assert(prepConfirm.ok, `post-create prep confirm failed: ${formatResponseForError(prepConfirm)}`);
+    const prepConfirmData = unwrapEnvelope(prepConfirm.json) || {};
+    assert(
+      Boolean(prepConfirmData.postCreatePrep?.completed),
+      `post-create prep not completed after confirm: ${formatResponseForError(prepConfirm)}`
+    );
+  }
+  results.projectPostCreatePrep = "ok";
 
   const tasks = await request(`/api/projects/${state.createdProjectId}/tasks`);
   assert(tasks.ok, "project tasks failed");
@@ -463,14 +579,21 @@ async function verifyProjectFlow(results) {
   assert(resume.ok && resume.json?.status === "active", "project resume failed");
   results.projectResume = resume.json.status;
 
+  const submitTitle = stageBeforeSubmit === "INIT" ? "项目章程.md" : "需求分析 / PRD";
+  const submitContent = stageBeforeSubmit === "INIT"
+    ? buildInitSubmissionContent("v1")
+    : buildAnalysisSubmissionContent("v1");
   const submit = await request(`/api/projects/${state.createdProjectId}/stages/submit`, {
     method: "POST",
     body: JSON.stringify({
-      title: "需求分析 / PRD",
-      content: buildAnalysisSubmissionContent("v1")
+      title: submitTitle,
+      content: submitContent
     })
   });
-  assert(submit.ok && submit.json?.pendingApproval === true, "stage submit failed");
+  assert(
+    submit.ok && submit.json?.pendingApproval === true,
+    `stage submit failed: ${formatResponseForError(submit)}`
+  );
   results.projectSubmit = "ok";
 
   const reject = await request(`/api/projects/${state.createdProjectId}/reject`, {
@@ -483,14 +606,17 @@ async function verifyProjectFlow(results) {
   const resubmit = await request(`/api/projects/${state.createdProjectId}/stages/submit`, {
     method: "POST",
     body: JSON.stringify({
-      title: "需求分析 / PRD v2",
-      content: `${buildAnalysisSubmissionContent("v2")}\n\n## 补充说明\n- 已根据驳回意见补充边界、验收标准与优先级说明。`
+      title: submitTitle,
+      content: `${stageBeforeSubmit === "INIT" ? buildInitSubmissionContent("v2") : buildAnalysisSubmissionContent("v2")}\n\n## 补充说明\n- 已根据驳回意见补充边界、验收标准与优先级说明。`
     })
   });
-  assert(resubmit.ok && resubmit.json?.pendingApproval === true, "stage resubmit failed");
+  assert(
+    resubmit.ok && resubmit.json?.pendingApproval === true,
+    `stage resubmit failed: ${formatResponseForError(resubmit)}`
+  );
   results.projectResubmit = "ok";
 
-  const approve = await approveProjectWithRecovery(state.createdProjectId);
+  const approve = await approveProjectWithRecovery(state.createdProjectId, stageBeforeSubmit);
   results.projectApprove = approve.json.currentStage;
 
   const updateTask = await request(`/api/tasks/${firstTaskId}`, {

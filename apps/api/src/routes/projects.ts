@@ -63,11 +63,11 @@ const PROJECT_DIRECT_CREATE_ENABLED = String(process.env.PROJECT_DIRECT_CREATE_E
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
 const QUALITY_GATE_REPAIR_DEFAULT_LIMIT = 80;
 const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
-  INIT: "立项",
-  ANALYSIS: "分析",
-  DESIGN: "设计",
-  DEV: "开发",
-  ACCEPT: "验收"
+  INIT: "项目立项",
+  ANALYSIS: "需求分析",
+  DESIGN: "需求设计/视觉设计",
+  DEV: "代码开发",
+  ACCEPT: "测试验收"
 };
 const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
   "pnpm --filter @occ/api typecheck",
@@ -86,6 +86,35 @@ type PostCreatePrepDraftLike = {
   debateSummary?: string;
   discussionTrace?: string;
 };
+
+function parsePostCreatePrepDraft(body: unknown): PostCreatePrepDraftLike | undefined {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return undefined;
+  }
+  const record = body as Record<string, unknown>;
+  return {
+    discussion: typeof record.discussion === "string" ? record.discussion : undefined,
+    analysis: typeof record.analysis === "string" ? record.analysis : undefined,
+    rawRequirements: typeof record.rawRequirements === "string" ? record.rawRequirements : undefined,
+    prd: typeof record.prd === "string" ? record.prd : undefined,
+    debateSummary: typeof record.debateSummary === "string" ? record.debateSummary : undefined,
+    discussionTrace: typeof record.discussionTrace === "string" ? record.discussionTrace : undefined
+  };
+}
+
+function hasPostCreatePrepDraftValue(draft: PostCreatePrepDraftLike | undefined) {
+  if (!draft) {
+    return false;
+  }
+  return [
+    draft.discussion,
+    draft.analysis,
+    draft.rawRequirements,
+    draft.prd,
+    draft.debateSummary,
+    draft.discussionTrace
+  ].some((item) => typeof item === "string");
+}
 
 function normalizePrepTraceMetaValue(value: unknown) {
   return String(value || "").replace(/\s+/g, " ").trim();
@@ -2825,9 +2854,22 @@ router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) =>
     return;
   }
 
+  const draft = parsePostCreatePrepDraft(req.body);
+  const hasDraft = hasPostCreatePrepDraftValue(draft);
+  const triggeredBy = hasDraft
+    ? "projects_route_manual_trigger_with_draft"
+    : "projects_route_manual_trigger";
+  if (hasDraft && draft) {
+    await saveProjectPostCreatePrepDraft({
+      projectId,
+      draft,
+      triggeredBy: "projects_route_manual_trigger_draft_prefill"
+    });
+  }
+
   let postCreatePrep = await runProjectPostCreatePrep({
     projectId,
-    triggeredBy: "projects_route_manual_trigger"
+    triggeredBy
   });
   const issueFirstData = issueFirst.ok && "data" in issueFirst ? issueFirst.data : undefined;
   const gitLabProjectPath = normalizePrepTraceMetaValue(issueFirstData?.projectPath);
@@ -2853,7 +2895,7 @@ router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) =>
       body: buildPostCreatePrepIssueNoteBody({
         projectId,
         projectName: project.name,
-        triggeredBy: "projects_route_manual_trigger",
+        triggeredBy,
         draft: postCreatePrep.draft
       })
     });
@@ -2934,16 +2976,7 @@ router.post("/api/projects/:id/post-create-prep/draft", asyncRoute(async (req, r
     res.status(404).json({ message: "Project not found" });
     return;
   }
-  const draft = req.body && typeof req.body === "object"
-    ? {
-      discussion: typeof req.body?.discussion === "string" ? req.body.discussion : undefined,
-      analysis: typeof req.body?.analysis === "string" ? req.body.analysis : undefined,
-      rawRequirements: typeof req.body?.rawRequirements === "string" ? req.body.rawRequirements : undefined,
-      prd: typeof req.body?.prd === "string" ? req.body.prd : undefined,
-      debateSummary: typeof req.body?.debateSummary === "string" ? req.body.debateSummary : undefined,
-      discussionTrace: typeof req.body?.discussionTrace === "string" ? req.body.discussionTrace : undefined
-    }
-    : undefined;
+  const draft = parsePostCreatePrepDraft(req.body);
   const postCreatePrep = await saveProjectPostCreatePrepDraft({
     projectId,
     draft,
@@ -2979,16 +3012,7 @@ router.post("/api/projects/:id/post-create-prep/confirm", asyncRoute(async (req,
     res.status(404).json({ message: "Project not found" });
     return;
   }
-  const draft = req.body && typeof req.body === "object"
-    ? {
-      discussion: typeof req.body?.discussion === "string" ? req.body.discussion : undefined,
-      analysis: typeof req.body?.analysis === "string" ? req.body.analysis : undefined,
-      rawRequirements: typeof req.body?.rawRequirements === "string" ? req.body.rawRequirements : undefined,
-      prd: typeof req.body?.prd === "string" ? req.body.prd : undefined,
-      debateSummary: typeof req.body?.debateSummary === "string" ? req.body.debateSummary : undefined,
-      discussionTrace: typeof req.body?.discussionTrace === "string" ? req.body.discussionTrace : undefined
-    }
-    : undefined;
+  const draft = parsePostCreatePrepDraft(req.body);
   const postCreatePrep = await confirmProjectPostCreatePrep({
     projectId,
     confirmedBy: typeof req.body?.confirmedBy === "string" ? req.body.confirmedBy : undefined,

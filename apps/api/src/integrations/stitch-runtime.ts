@@ -240,6 +240,11 @@ export function isRetryableTransportError(error: unknown) {
   );
 }
 
+export function isStitchQuotaExhaustedError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /resource has been exhausted|quota|rate limit/i.test(message);
+}
+
 export function isStitchTransportCooldownError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes(STITCH_TRANSPORT_COOLDOWN_ERROR);
@@ -595,7 +600,7 @@ async function recoverGeneratedArtifact(input: {
       retryableErrorStreak = 0;
     } catch (error) {
       if (isStitchTransportCooldownError(error)) {
-        throw error;
+        return null;
       }
       if (!isRetryableTransportError(error)) {
         throw error;
@@ -632,7 +637,7 @@ async function recoverGeneratedArtifact(input: {
         });
       } catch (error) {
         if (isStitchTransportCooldownError(error)) {
-          throw error;
+          return null;
         }
         if (!isRetryableTransportError(error)) {
           throw error;
@@ -688,8 +693,19 @@ async function generateViaDirectSdk(
     recoveryTimeoutMs?: number;
   }
 ): Promise<StitchDesignRequestResult> {
+  const prompt = buildPrompt(input);
   if (isStitchTransportCooldownActive()) {
-    throw new Error("STITCH_TRANSPORT_COOLDOWN_ACTIVE");
+    if (options?.allowPending) {
+      return {
+        status: "pending",
+        pending: buildPendingArtifact({
+          projectId: input.projectId,
+          prompt,
+          executor
+        })
+      };
+    }
+    throw new Error(STITCH_TRANSPORT_COOLDOWN_ERROR);
   }
   const runtimeConfig = withRuntimeConfigOverrides(readStitchRuntimeConfig(), {
     requestTimeoutMs: options?.requestTimeoutMs,
@@ -699,17 +715,18 @@ async function generateViaDirectSdk(
     0,
     Number(options?.recoveryTimeoutMs ?? runtimeConfig.recoveryTimeoutMs)
   );
-  const prompt = buildPrompt(input);
   const title = truncate(`${input.projectId} ${input.projectName}`, 90);
   const context = await createStitchClientContext({
     apiKey: runtimeConfig.apiKey,
     baseUrl: runtimeConfig.baseUrl,
     timeoutMs: runtimeConfig.timeoutMs
   });
+  let stitchProjectIdForPending = normalizeText(input.projectId, "unknown");
 
   try {
     const createdProject = await callStitchTool<unknown>(context, "create_project", { title });
     const stitchProjectId = extractProjectId(createdProject);
+    stitchProjectIdForPending = stitchProjectId;
 
     try {
       const generatedScreen = await callStitchTool<unknown>(
@@ -741,19 +758,29 @@ async function generateViaDirectSdk(
         };
       }
     } catch (error) {
-      if (!isRetryableTransportError(error)) {
+      if (!isRetryableTransportError(error) && !isStitchQuotaExhaustedError(error)) {
         throw error;
       }
       noteStitchTransportFailure();
     }
 
-    const recoveredArtifact = await recoverGeneratedArtifact({
-      context,
-      projectId: stitchProjectId,
-      prompt,
-      executor,
-      timeoutMs: recoveryTimeoutMs
-    });
+    let recoveredArtifact: StitchDesignArtifact | null = null;
+    try {
+      recoveredArtifact = await recoverGeneratedArtifact({
+        context,
+        projectId: stitchProjectId,
+        prompt,
+        executor,
+        timeoutMs: recoveryTimeoutMs
+      });
+    } catch (error) {
+      if (!isStitchTransportCooldownError(error)) {
+        throw error;
+      }
+      if (!options?.allowPending) {
+        throw error;
+      }
+    }
     if (recoveredArtifact) {
       clearStitchTransportCooldown();
       return {
@@ -774,6 +801,23 @@ async function generateViaDirectSdk(
     }
 
     throw new Error(`STITCH_RECOVERY_TIMEOUT: project=${stitchProjectId}`);
+  } catch (error) {
+    const isQuota = isStitchQuotaExhaustedError(error);
+    const isCooldown = isStitchTransportCooldownError(error);
+    if (isQuota) {
+      noteStitchTransportFailure();
+    }
+    if ((isQuota || isCooldown) && options?.allowPending) {
+      return {
+        status: "pending",
+        pending: buildPendingArtifact({
+          projectId: stitchProjectIdForPending,
+          prompt,
+          executor
+        })
+      };
+    }
+    throw error;
   } finally {
     await closeStitchClientContext(context);
   }
@@ -821,7 +865,7 @@ export async function recoverStitchDesignArtifact(input: {
   timeoutMs?: number;
 }): Promise<StitchDesignArtifact | null> {
   if (isStitchTransportCooldownActive()) {
-    throw new Error("STITCH_TRANSPORT_COOLDOWN_ACTIVE");
+    return null;
   }
   const runtimeConfig = withRuntimeConfigOverrides(readStitchRuntimeConfig(), {
     requestTimeoutMs: input.requestTimeoutMs
