@@ -658,31 +658,61 @@ function buildNormalizationSuggestion(item: KnowledgeRow): KnowledgeNormalizatio
 }
 
 async function moveAgentPreferencesToCanonical(input: { canonicalId: string; duplicateId: string }) {
-  const preferences = await prisma.agentKnowledgePreference.findMany({
-    where: { knowledgeId: input.duplicateId }
-  });
-  for (const pref of preferences) {
-    const existing = await prisma.agentKnowledgePreference.findFirst({
-      where: {
-        agentId: pref.agentId,
-        knowledgeId: input.canonicalId,
-        context: pref.context
-      }
+  let preferences: Awaited<ReturnType<typeof prisma.agentKnowledgePreference.findMany>> = [];
+  try {
+    preferences = await prisma.agentKnowledgePreference.findMany({
+      where: { knowledgeId: input.duplicateId }
     });
-    if (!existing) {
-      await prisma.agentKnowledgePreference.create({
-        data: {
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      return;
+    }
+    throw error;
+  }
+  for (const pref of preferences) {
+    let existing: Awaited<ReturnType<typeof prisma.agentKnowledgePreference.findFirst>> = null;
+    try {
+      existing = await prisma.agentKnowledgePreference.findFirst({
+        where: {
           agentId: pref.agentId,
           knowledgeId: input.canonicalId,
-          context: pref.context,
-          preferenceScore: pref.preferenceScore
+          context: pref.context
         }
       });
+    } catch (error) {
+      if (isMissingTableError(error)) {
+        return;
+      }
+      throw error;
+    }
+    if (!existing) {
+      try {
+        await prisma.agentKnowledgePreference.create({
+          data: {
+            agentId: pref.agentId,
+            knowledgeId: input.canonicalId,
+            context: pref.context,
+            preferenceScore: pref.preferenceScore
+          }
+        });
+      } catch (error) {
+        if (isMissingTableError(error)) {
+          return;
+        }
+        throw error;
+      }
     } else if (pref.preferenceScore > existing.preferenceScore) {
-      await prisma.agentKnowledgePreference.update({
-        where: { id: existing.id },
-        data: { preferenceScore: pref.preferenceScore }
-      });
+      try {
+        await prisma.agentKnowledgePreference.update({
+          where: { id: existing.id },
+          data: { preferenceScore: pref.preferenceScore }
+        });
+      } catch (error) {
+        if (isMissingTableError(error)) {
+          return;
+        }
+        throw error;
+      }
     }
   }
 }
@@ -782,8 +812,9 @@ export async function ingestTextAsKnowledge(input: {
   agentId?: string;
   tags?: string[];
   importanceScore?: number;
+  triggeredBy?: string;
 }) {
-  return ingestKnowledgeItem({
+  const item = await ingestKnowledgeItem({
     scope: input.scope,
     projectId: input.projectId,
     agentId: input.agentId,
@@ -795,6 +826,21 @@ export async function ingestTextAsKnowledge(input: {
     techStack: [],
     importanceScore: input.importanceScore
   });
+  await createKnowledgeOperationLog({
+    operationType: "create_text",
+    summary: `created text knowledge: ${item.title}`,
+    scope: item.scope,
+    projectId: item.projectId,
+    agentId: item.agentId,
+    triggeredBy: normalizeText(input.triggeredBy) || null,
+    canRollback: false,
+    payload: {
+      knowledgeId: item.id,
+      memoryType: item.memoryType ?? null,
+      tags: asStringArray(item.tags)
+    }
+  });
+  return item;
 }
 
 export async function ingestDocumentText(input: {
@@ -827,14 +873,20 @@ export async function ingestDocumentText(input: {
     });
     created.push(item);
     if (i > 0) {
-      await prisma.knowledgeRelation.create({
-        data: {
-          sourceId: created[i - 1].id,
-          targetId: item.id,
-          relationType: "relates_to",
-          strength: 0.8
+      try {
+        await prisma.knowledgeRelation.create({
+          data: {
+            sourceId: created[i - 1].id,
+            targetId: item.id,
+            relationType: "relates_to",
+            strength: 0.8
+          }
+        });
+      } catch (error) {
+        if (!isMissingTableError(error)) {
+          throw error;
         }
-      });
+      }
     }
   }
   await createKnowledgeOperationLog({
@@ -1062,13 +1114,48 @@ export async function listKnowledgeItems(filters: KnowledgeListFilters) {
   return filtered.slice(offset, offset + limit);
 }
 
+export async function countKnowledgeItems(filters: Omit<KnowledgeListFilters, "limit" | "offset">) {
+  const query = normalizeText(filters.query);
+  const normalizedStageContext = normalizeStageContextList([normalizeText(filters.stageContext)]).at(0);
+  const whereClause: Prisma.KnowledgeItemWhereInput = {
+    scope: filters.scope,
+    projectId: filters.projectId,
+    agentId: filters.agentId,
+    type: filters.type,
+    memoryType: filters.memoryType,
+    OR: query
+      ? [
+        { title: { contains: query } },
+        { content: { contains: query } }
+      ]
+      : undefined
+  };
+
+  if (!normalizedStageContext) {
+    return prisma.knowledgeItem.count({ where: whereClause });
+  }
+
+  const rows = await prisma.knowledgeItem.findMany({
+    where: whereClause,
+    select: { stageContext: true }
+  });
+  return rows.filter((row) => {
+    const stageContext = normalizeStageContextList(asStringArray(row.stageContext));
+    return stageContext.includes(normalizedStageContext);
+  }).length;
+}
+
 export async function getKnowledgeItemById(id: string) {
   return prisma.knowledgeItem.findUnique({
     where: { id: normalizeText(id) }
   });
 }
 
-export async function updateKnowledgeItemById(id: string, patch: KnowledgeUpdateInput) {
+export async function updateKnowledgeItemById(
+  id: string,
+  patch: KnowledgeUpdateInput,
+  options?: { triggeredBy?: string }
+) {
   const normalizedId = normalizeText(id);
   if (!normalizedId) {
     throw new Error("knowledge id is required");
@@ -1114,7 +1201,7 @@ export async function updateKnowledgeItemById(id: string, patch: KnowledgeUpdate
     }))
     : clampImportanceScore(patch.importanceScore, current.importanceScore ?? 0.5);
 
-  return prisma.knowledgeItem.update({
+  const updated = await prisma.knowledgeItem.update({
     where: { id: normalizedId },
     data: {
       scope: patch.scope ?? current.scope,
@@ -1136,6 +1223,23 @@ export async function updateKnowledgeItemById(id: string, patch: KnowledgeUpdate
       fileType: patch.fileType === undefined ? current.fileType : patch.fileType
     }
   });
+
+  const changedFields = Object.keys(patch).filter((field) => (patch as Record<string, unknown>)[field] !== undefined);
+  await createKnowledgeOperationLog({
+    operationType: "update_single",
+    summary: `updated knowledge: ${updated.title}`,
+    scope: updated.scope,
+    projectId: updated.projectId,
+    agentId: updated.agentId,
+    triggeredBy: normalizeText(options?.triggeredBy) || null,
+    canRollback: false,
+    payload: {
+      knowledgeId: updated.id,
+      changedFields
+    }
+  });
+
+  return updated;
 }
 
 export async function deleteKnowledgeItemById(id: string, input?: { triggeredBy?: string }) {
@@ -1367,9 +1471,17 @@ export async function applyKnowledgeCuration(input: {
         }>;
       }> = [];
       for (const item of duplicates) {
-        const prefs = await prisma.agentKnowledgePreference.findMany({
-          where: { knowledgeId: item.id }
-        });
+        let prefs: Awaited<ReturnType<typeof prisma.agentKnowledgePreference.findMany>> = [];
+        try {
+          prefs = await prisma.agentKnowledgePreference.findMany({
+            where: { knowledgeId: item.id }
+          });
+        } catch (error) {
+          if (!isMissingTableError(error)) {
+            throw error;
+          }
+          prefs = [];
+        }
         duplicatePreferences.push({
           duplicateId: item.id,
           preferences: prefs.map((pref) => ({
@@ -1697,22 +1809,37 @@ export async function rollbackKnowledgeOperation(input: {
             continue;
           }
           const context = pref.context ? normalizeText(pref.context) : null;
-          const existing = await prisma.agentKnowledgePreference.findFirst({
-            where: {
-              agentId,
-              knowledgeId: duplicateId,
-              context
-            }
-          });
-          if (!existing) {
-            await prisma.agentKnowledgePreference.create({
-              data: {
+          let existing: Awaited<ReturnType<typeof prisma.agentKnowledgePreference.findFirst>> = null;
+          try {
+            existing = await prisma.agentKnowledgePreference.findFirst({
+              where: {
                 agentId,
                 knowledgeId: duplicateId,
-                context,
-                preferenceScore: Number(pref.preferenceScore ?? 0)
+                context
               }
             });
+          } catch (error) {
+            if (isMissingTableError(error)) {
+              break;
+            }
+            throw error;
+          }
+          if (!existing) {
+            try {
+              await prisma.agentKnowledgePreference.create({
+                data: {
+                  agentId,
+                  knowledgeId: duplicateId,
+                  context,
+                  preferenceScore: Number(pref.preferenceScore ?? 0)
+                }
+              });
+            } catch (error) {
+              if (isMissingTableError(error)) {
+                break;
+              }
+              throw error;
+            }
           }
         }
       }

@@ -11,6 +11,7 @@ const STITCH_TRANSPORT_COOLDOWN_ERROR = "STITCH_TRANSPORT_COOLDOWN_ACTIVE";
 let stitchTransportCooldownUntilMs = 0;
 let stitchTransportLogFilterInstalled = false;
 let stitchTransportOriginalConsoleError: typeof console.error | null = null;
+let stitchFetchPatchLock: Promise<void> = Promise.resolve();
 
 type UndiciModule = typeof import("undici");
 
@@ -424,20 +425,59 @@ function extractListedScreens(payload: unknown) {
 
 async function withPatchedFetch<T>(
   dispatcher: Awaited<ReturnType<typeof createStitchDispatcher>>,
+  stitchBaseUrl: string,
   run: () => Promise<T>
 ): Promise<T> {
   if (!dispatcher) {
     return run();
   }
 
-  const undici: UndiciModule = await import("undici");
-  const originalDispatcher = undici.getGlobalDispatcher();
-  undici.setGlobalDispatcher(dispatcher);
-  try {
-    return await run();
-  } finally {
-    undici.setGlobalDispatcher(originalDispatcher);
-  }
+  const patchWindow = async () => {
+    const originalFetch = globalThis.fetch;
+    let stitchOrigin = "";
+    try {
+      stitchOrigin = new URL(stitchBaseUrl).origin;
+    } catch {
+      stitchOrigin = "";
+    }
+
+    const patchedFetch: typeof fetch = (input, init) => {
+      const requestUrl = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (typeof Request !== "undefined" && input instanceof Request
+            ? input.url
+            : "");
+      const shouldInjectDispatcher = !stitchOrigin || requestUrl.startsWith(stitchOrigin);
+      if (!shouldInjectDispatcher) {
+        return originalFetch(input, init);
+      }
+      const initRecord = init as (RequestInit & { dispatcher?: unknown }) | undefined;
+      if (initRecord?.dispatcher) {
+        return originalFetch(input, init);
+      }
+      const nextInit = {
+        ...(init || {}),
+        dispatcher
+      };
+      return (originalFetch as any)(input, nextInit);
+    };
+
+    globalThis.fetch = patchedFetch;
+    try {
+      return await run();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  };
+
+  const guarded = stitchFetchPatchLock.then(patchWindow, patchWindow);
+  stitchFetchPatchLock = guarded.then(
+    () => undefined,
+    () => undefined
+  );
+  return guarded;
 }
 
 async function createStitchClientContext(input: {
@@ -527,7 +567,7 @@ async function callStitchTool<T>(
       });
 
       try {
-        const result = await withPatchedFetch(dispatcher, () => client.callTool<T>(toolName, args));
+        const result = await withPatchedFetch(dispatcher, context.baseUrl, () => client.callTool<T>(toolName, args));
         clearStitchTransportCooldown();
         return result;
       } catch (error) {
