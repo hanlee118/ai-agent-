@@ -58,6 +58,18 @@
 - `OPENCLAW_CONFIG_PATH=/var/data/openclaw/openclaw.json`
 - `OPENCLAW_WORKSPACE_ROOT=/var/data/openclaw/workspace`
 - `MODEL_PROVIDER=scripted`
+- `WORKFLOW_V2_HERMES_ENABLED=false`
+- `WORKFLOW_V2_HERMES_STAGE_MATCH=design`
+- `WORKFLOW_V2_HERMES_ENDPOINT=`
+- `WORKFLOW_V2_HERMES_REQUIRED=false`
+- `PROJECT_STAGE_HERMES_REQUIRED=false`
+
+Hermes 配置说明：
+
+- `WORKFLOW_V2_HERMES_ENDPOINT` 可以是基础地址（例如 `http://127.0.0.1:3001`），服务会归一化到 `/mcp/execute`
+- `WORKFLOW_V2_HERMES_REQUIRED=true` 时，workflow-v2 对 Hermes 失败采用 fail-closed（直接阻断）
+- `PROJECT_STAGE_HERMES_REQUIRED=true` 时，项目阶段执行链对 Hermes 失败也采用 fail-closed
+- 当两个 `*_REQUIRED=false` 时，Hermes 不可用会回退常规执行链，并在产物中记录 fallback 证据
 
 ### 4.3 首次上线后的事项
 

@@ -34,9 +34,9 @@ const STAGE_TIMEOUT_BASELINE_MS: Record<StageType, number> = {
   DEV: 40000,
   ACCEPT: 30000
 };
-const ROUTE_TIMEOUT_COOLDOWN_MS = Math.max(30000, Number(process.env.MODEL_ROUTE_TIMEOUT_COOLDOWN_MS ?? 180000));
+const ROUTE_TIMEOUT_COOLDOWN_MS = Math.max(15000, Number(process.env.MODEL_ROUTE_TIMEOUT_COOLDOWN_MS ?? 30000));
 const ROUTE_AUTH_COOLDOWN_MS = Math.max(60000, Number(process.env.MODEL_ROUTE_AUTH_COOLDOWN_MS ?? 900000));
-const ROUTE_NETWORK_COOLDOWN_MS = Math.max(15000, Number(process.env.MODEL_ROUTE_NETWORK_COOLDOWN_MS ?? 60000));
+const ROUTE_NETWORK_COOLDOWN_MS = Math.max(5000, Number(process.env.MODEL_ROUTE_NETWORK_COOLDOWN_MS ?? 15000));
 const MODEL_ROUTE_PREWARM_ENABLED = String(process.env.MODEL_ROUTE_PREWARM_ENABLED ?? "true").trim().toLowerCase() !== "false";
 const MODEL_ROUTE_PREWARM_TIMEOUT_MS = Math.max(1200, Number(process.env.MODEL_ROUTE_PREWARM_TIMEOUT_MS ?? 4500));
 const MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS = Math.max(10000, Number(process.env.MODEL_ROUTE_PREWARM_HEALTHY_TTL_MS ?? 90000));
@@ -49,23 +49,23 @@ const modelRouteCooldown = new Map<string, number>();
 const routePrewarmCache = new Map<string, { reason: string | null; expiresAt: number }>();
 
 const ROLE_STAGE_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
-  ROLE_PM: 120000,
-  ROLE_ANALYST: 120000,
-  ROLE_PRODUCT: 120000,
-  ROLE_DESIGN: 360000, // 设计任务内容重，3分钟
-  ROLE_ARCH: 160000,
-  ROLE_DEV: 180000,
-  ROLE_QA: 180000
+  ROLE_PM: 180000,
+  ROLE_ANALYST: 180000,
+  ROLE_PRODUCT: 150000,
+  ROLE_DESIGN: 180000, // 设计任务内容相对更重，保留更高预算
+  ROLE_ARCH: 120000,
+  ROLE_DEV: 120000,
+  ROLE_QA: 120000
 };
 
 const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_PM: 90000,
   ROLE_ANALYST: 90000,
   ROLE_PRODUCT: 90000,
-  ROLE_DESIGN: 300000, // 设计任务需要更长单次生成时间，5分钟
-  ROLE_ARCH: 100000,
-  ROLE_DEV: 120000,
-  ROLE_QA: 140000
+  ROLE_DESIGN: 90000,
+  ROLE_ARCH: 60000,
+  ROLE_DEV: 60000,
+  ROLE_QA: 60000
 };
 
 const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
@@ -81,18 +81,16 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
     "minima/MiniMax-M2.7-highspeed",
     "glm-5"
   ],
-  DEV: ["openai/gpt-5.3-codex", "openai/gpt-5.4", "qwen3-coder-plus", "qwen3-coder-next", "qwen3-max-2026-01-23", "glm-5"],
+  DEV: ["openai/gpt-5.3-codex", "openai/gpt-5.4", "qwen3-coder-plus", "qwen3-coder-next", "qwen3-max-2026-01-23"],
   ACCEPT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "glm-5"]
 };
 
 // Issue 讨论优先走当前网关已实测可用的模型链，避免把不可用模型写成首选。
 const ISSUE_DEBATE_MODEL_PREFERENCES = [
   "openai/gpt-5.4",
-  "gpt-5.4",
   "openai/gpt-5.3-codex",
-  "qwen3-max-2026-01-23",
-  "qwen3.5-plus",
-  "qwen3-coder-plus"
+  "gpt-5.4",
+  "hermes-v2.1"
 ] as const;
 
 const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: string }> = {
@@ -117,6 +115,30 @@ const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: str
     bestFit: "gpt-5.4（质量复核） -> gpt-5.3-codex（总结评审） -> qwen3-max / glm-5（兜底）"
   }
 };
+
+const RUNTIME_DISABLED_MODELS = String(process.env.RUNTIME_DISABLED_MODELS ?? "qwen3-*,glm-5")
+  .split(",")
+  .map((item) => item.trim().toLowerCase())
+  .filter(Boolean);
+
+function isRuntimeDisabledModel(model: string) {
+  const normalized = String(model || "").trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  const variants = normalized.includes("/")
+    ? [normalized, normalized.split("/").slice(-1)[0]]
+    : [normalized];
+  for (const rule of RUNTIME_DISABLED_MODELS) {
+    const isPrefixRule = rule.endsWith("*");
+    const token = isPrefixRule ? rule.slice(0, -1) : rule;
+    if (!token) continue;
+    if (variants.some((item) => (isPrefixRule ? item.startsWith(token) : item === token))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 type StageModelAttemptStatus = "success" | "failed" | "skipped";
 
@@ -147,6 +169,11 @@ export type StageAgentRunResult = AgentRunResult & {
   degraded?: boolean;
   skillEvidence?: Record<string, unknown> | null;
   collaborationEvidence?: Record<string, unknown> | null;
+  workspaceEvidence?: {
+    workspacePath: string;
+    relativePath?: string;
+    evidenceFiles: string[];
+  } | null;
 };
 
 type ExecutionRoute = {
@@ -792,6 +819,12 @@ function shouldFastFailRealRuntime(
 }
 
 async function markRuntimeExecutionFailed(error: unknown) {
+  if (process.env.NODE_ENV === "test") {
+    return;
+  }
+  if (String(process.env.RUNTIME_SKIP_FAILURE_PERSIST ?? "").trim().toLowerCase() === "true") {
+    return;
+  }
   const message = normalizeErrorMessage(error || "模型调用失败，已自动降级。");
   try {
     await prisma.systemConfig.update({
@@ -952,6 +985,9 @@ async function resolveRoleModelPlan(
     if (!normalized || models.includes(normalized)) {
       return;
     }
+    if (isRuntimeDisabledModel(normalized)) {
+      return;
+    }
     if (designPhase && isDesignBlockedModel(normalized)) {
       return;
     }
@@ -991,6 +1027,11 @@ async function resolveRoleModelPlan(
     for (const preferredModel of ISSUE_DEBATE_MODEL_PREFERENCES) {
       push(preferredModel);
     }
+    push(runtimeModel);
+    push(managedFallbackModel);
+    push(process.env.OPENAI_RUNTIME_FALLBACK_MODEL);
+    const maxIssueDebateModels = Math.max(2, Number(process.env.ISSUE_DEBATE_MAX_MODELS ?? 4));
+    return models.slice(0, maxIssueDebateModels);
   }
 
   // 3) 阶段级策略优先，确保自动推进优先命中稳定可用的真实模型链。
@@ -1048,15 +1089,32 @@ async function withTimeout<T>(
     MIN_ATTEMPT_BUDGET_MS,
     Math.min(timeoutMs, maxBudgetMs)
   );
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<T>((_, reject) => {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const taskResult = promise.then(
+    (value) => ({ type: "task" as const, ok: true as const, value }),
+    (error) => ({ type: "task" as const, ok: false as const, error })
+  );
+  const timeoutPromise = new Promise<{ type: "timeout" }>((resolve) => {
     timer = setTimeout(() => {
-      reject(new Error(`MODEL_ATTEMPT_TIMEOUT: ${label} exceeded ${budget}ms`));
+      resolve({ type: "timeout" });
     }, budget);
   });
 
   try {
-    return await Promise.race([promise, timeoutPromise]);
+    const winner = await Promise.race([taskResult, timeoutPromise] as const);
+    if (winner.type === "timeout") {
+      void taskResult.then((late) => {
+        if (!late.ok) {
+          const lateMessage = late.error instanceof Error ? late.error.message : String(late.error);
+          console.warn(`[runtime.withTimeout] late rejection after timeout ignored: ${lateMessage}`);
+        }
+      });
+      throw new Error(`MODEL_ATTEMPT_TIMEOUT: ${label} exceeded ${budget}ms`);
+    }
+    if (!winner.ok) {
+      throw winner.error;
+    }
+    return winner.value;
   } finally {
     if (timer) {
       clearTimeout(timer);
@@ -1288,6 +1346,9 @@ function normalizeStageType(value: string): StageType | null {
 function resolveStageMaxModelsPerRun(stageType: StageType, role: RoleType) {
   if (stageType === "DESIGN" || role === "ROLE_DESIGN") {
     return STAGE_AGENT_MAX_MODELS_DESIGN;
+  }
+  if (stageType === "DEV") {
+    return Math.min(STAGE_AGENT_MAX_MODELS, 2);
   }
   return STAGE_AGENT_MAX_MODELS;
 }

@@ -91,6 +91,60 @@ export type KnowledgeOperationLog = {
   createdAt: string;
 };
 
+export type KnowledgeStatus = {
+  checkedAt: string;
+  schema: {
+    ready: boolean;
+    optionalReady?: boolean;
+    reason?: string;
+    missingCoreTables?: string[];
+    missingOptionalTables?: string[];
+    checkedAt: number;
+  };
+  filters: {
+    scope: KnowledgeScope | null;
+    projectId: string | null;
+    agentId: string | null;
+    stageContext: string | null;
+    query: string | null;
+  };
+  inventory: {
+    total: number;
+    byScope: Record<KnowledgeScope, number>;
+    byType: Record<KnowledgeType, number>;
+    byMemoryType: Record<MemoryType, number>;
+  };
+  operations: {
+    ready: boolean;
+    reason: string | null;
+    rollbackableCount: number;
+    recent: Array<{
+      id: string;
+      operationType: string;
+      summary: string;
+      canRollback: boolean;
+      rolledBackAt: string | null;
+      triggeredBy: string | null;
+      createdAt: string;
+    }>;
+  };
+  routes: {
+    totalTracked: number;
+    topFailing: Array<{
+      route: string;
+      requests: number;
+      success: number;
+      failed: number;
+      avgLatencyMs: number;
+      lastLatencyMs: number;
+      lastStatus: number | null;
+      lastFailureAt: string | null;
+      lastFailureMessage: string | null;
+      errorRate: number;
+    }>;
+  };
+};
+
 export const knowledgeApi = {
   async list(params?: {
     scope?: KnowledgeScope;
@@ -131,6 +185,7 @@ export const knowledgeApi = {
     agentId?: string;
     tags?: string[];
     importanceScore?: number;
+    triggeredBy?: string;
   }) {
     return request<{ id: string }>('/v1/knowledge/text', {
       method: 'POST',
@@ -184,6 +239,7 @@ export const knowledgeApi = {
     sourceUrl?: string | null;
     filePath?: string | null;
     fileType?: string | null;
+    triggeredBy?: string;
   }) {
     return request<{ id: string; updatedAt: string }>(`/v1/knowledge/${id}`, {
       method: 'PATCH',
@@ -264,5 +320,24 @@ export const knowledgeApi = {
 
   async projectSummary(projectId: string) {
     return request<{ summary: string }>(`/v1/knowledge/project/${projectId}/summary`);
+  },
+
+  async status(params?: {
+    scope?: KnowledgeScope;
+    projectId?: string;
+    agentId?: string;
+    stageContext?: string;
+    query?: string;
+    forceRefresh?: boolean;
+  }) {
+    const query = new URLSearchParams();
+    if (params?.scope) query.set('scope', params.scope);
+    if (params?.projectId) query.set('projectId', params.projectId);
+    if (params?.agentId) query.set('agentId', params.agentId);
+    if (params?.stageContext) query.set('stageContext', params.stageContext);
+    if (params?.query) query.set('query', params.query);
+    if (params?.forceRefresh) query.set('forceRefresh', 'true');
+    const suffix = query.toString();
+    return request<KnowledgeStatus>(`/v1/knowledge/status${suffix ? `?${suffix}` : ''}`);
   },
 };

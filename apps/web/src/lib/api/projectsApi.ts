@@ -171,6 +171,8 @@ export type ProjectFinalArtifactsReport = {
     content?: string;
     excerpt?: string;
     url?: string;
+    localUrl?: string;
+    publicUrl?: string;
     filePath?: string;
   }>;
   missingRequired: string[];
@@ -229,10 +231,29 @@ export type ProjectRequiredAction = {
     | 'review_pending_stage'
     | 'resolve_blocked_tasks'
     | 'reconcile_deliverables'
-    | 'refresh_runtime';
+    | 'refresh_runtime'
+    | 'run_post_create_prep';
   ctaLabel: string;
   reasonCode?: 'design_ambiguity';
   prefillContent?: string;
+};
+
+export type ProjectPostCreatePrep = {
+  required: boolean;
+  completed: boolean;
+  missingItems: string[];
+  draft?: {
+    discussion: string;
+    analysis: string;
+    rawRequirements: string;
+    prd: string;
+    debateSummary: string;
+    discussionTrace: string;
+    confirmed: boolean;
+    confirmedBy?: string;
+    confirmedAt?: string;
+    confirmationNotes?: string;
+  };
 };
 
 export type ProjectTemplateGatePrecheck = {
@@ -537,7 +558,73 @@ export const projectsApi = {
   async getDetail(id: string) {
     return request<ProjectDetail & {
       requiredActions?: ProjectRequiredAction[];
+      postCreatePrep?: ProjectPostCreatePrep;
     }>(`/projects/${toProjectPathId(id)}`);
+  },
+
+  async runPostCreatePrep(id: string, data?: {
+    discussion?: string;
+    analysis?: string;
+    rawRequirements?: string;
+    prd?: string;
+    debateSummary?: string;
+    discussionTrace?: string;
+  }) {
+    return request<{
+      success: boolean;
+      data: {
+        project: ProjectDetail;
+        postCreatePrep?: ProjectPostCreatePrep;
+        requiredActions?: ProjectRequiredAction[];
+      };
+    }>(`/projects/${toProjectPathId(id)}/post-create-prep`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    });
+  },
+
+  async savePostCreatePrepDraft(id: string, data: {
+    discussion?: string;
+    analysis?: string;
+    rawRequirements?: string;
+    prd?: string;
+    debateSummary?: string;
+    discussionTrace?: string;
+  }) {
+    return request<{
+      success: boolean;
+      data: {
+        project: ProjectDetail;
+        postCreatePrep?: ProjectPostCreatePrep;
+        requiredActions?: ProjectRequiredAction[];
+      };
+    }>(`/projects/${toProjectPathId(id)}/post-create-prep/draft`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    });
+  },
+
+  async confirmPostCreatePrep(id: string, data: {
+    discussion?: string;
+    analysis?: string;
+    rawRequirements?: string;
+    prd?: string;
+    debateSummary?: string;
+    discussionTrace?: string;
+    confirmedBy?: string;
+    notes?: string;
+  }) {
+    return request<{
+      success: boolean;
+      data: {
+        project: ProjectDetail;
+        postCreatePrep?: ProjectPostCreatePrep;
+        requiredActions?: ProjectRequiredAction[];
+      };
+    }>(`/projects/${toProjectPathId(id)}/post-create-prep/confirm`, {
+      method: 'POST',
+      body: JSON.stringify(data || {}),
+    });
   },
 
   async create(data: {

@@ -29,6 +29,13 @@
 
 当前代码已支持阶段协议、真实模型门禁、最佳模型门禁、协作交接卡和技能执行记录等关键约束，避免把模板稿、降级结果或残留静态页面误判成真实交付。
 
+最新稳定性更新（2026-04-24）：
+
+- 统一修复超时封装，避免超时后晚到异常导致 API 进程退出。
+- Stitch 配额耗尽场景会自动降级为 `pending/degraded`，不中断主流程推进。
+- 增强项目预备与阶段推进链路的错误吸收与日志可观测性，降低“流程卡住”概率。
+- Hermes MCP 接入默认启用并打通单项目全流程验收，`acceptance-real-3modes-v2` 已可稳定识别 Hermes 与 OpenClaw 双参与。
+
 ## 核心能力
 
 ### 1. 项目与协议治理
@@ -207,6 +214,11 @@ pnpm gitlab:webhook:fix
 - `GITLAB_TOKEN`
 - `GITLAB_DEFAULT_PROJECT`
 - `GITLAB_WEBHOOK_SECRET`
+- `WORKFLOW_V2_HERMES_ENABLED`
+- `WORKFLOW_V2_HERMES_STAGE_MATCH`
+- `WORKFLOW_V2_HERMES_ENDPOINT`
+- `WORKFLOW_V2_HERMES_REQUIRED`
+- `PROJECT_STAGE_HERMES_REQUIRED`
 
 说明：
 
@@ -214,6 +226,10 @@ pnpm gitlab:webhook:fix
 - 当 `MODEL_PROVIDER=openai-compatible` 时，必须同时提供 `MODEL_API_BASE_URL`、`MODEL_API_KEY`、`MODEL_NAME`
 - 生产模式必须配置 `ALLOWED_ORIGINS`，不能使用通配符
 - 当 GitLab 部署在 Docker 中时，project webhook 需使用宿主机可达地址，例如 `http://host.docker.internal:8787/api/gitlab/webhook`
+- `WORKFLOW_V2_HERMES_ENDPOINT` 可直接填基础地址（如 `http://127.0.0.1:3001`），服务端会自动归一化到 `/mcp/execute`
+- `WORKFLOW_V2_HERMES_REQUIRED=true` 时，workflow-v2 阶段强制走 Hermes，Hermes 不可用会直接失败（fail-closed）
+- `PROJECT_STAGE_HERMES_REQUIRED=true` 时，项目阶段执行链也会对 Hermes 不可用执行阻断（fail-closed）
+- 两个 `*_REQUIRED` 为 `false` 时，Hermes 不可用会记录 fallback 证据后回退到常规执行链（fail-open）
 
 ## 数据与治理模型
 

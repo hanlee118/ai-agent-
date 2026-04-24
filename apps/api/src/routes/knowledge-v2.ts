@@ -1,11 +1,13 @@
 import express from "express";
 import { extname } from "node:path";
 import multer from "multer";
+import { Prisma } from "@prisma/client";
 import {
   applyKnowledgeCuration,
   autoOrganizeKnowledge,
   buildAgentContext,
   bulkDeleteKnowledgeItems,
+  countKnowledgeItems,
   deleteKnowledgeItemById,
   getKnowledgeItemById,
   getProjectMemorySummary,
@@ -20,6 +22,7 @@ import {
   updateKnowledgeItemById
 } from "../workflow-v2/knowledge-service.js";
 import { getKnowledgeV2SchemaStatus } from "../workflow-v2/schema-ready.js";
+import { prisma } from "../db.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { asStringArray, normalizeText, type KnowledgeScope } from "../workflow-v2/types.js";
 import { validateHermesApiKey } from "./hermes-auth.js";
@@ -42,6 +45,7 @@ type CreateTextKnowledgeBody = {
   agentId?: unknown;
   tags?: unknown;
   importanceScore?: unknown;
+  triggeredBy?: unknown;
 };
 
 type SearchKnowledgeBody = {
@@ -69,6 +73,7 @@ type UpdateKnowledgeBody = {
   sourceUrl?: unknown;
   filePath?: unknown;
   fileType?: unknown;
+  triggeredBy?: unknown;
 };
 
 type BulkDeleteBody = {
@@ -293,8 +298,81 @@ function resolveKnowledgeSourceMeta(metadata: unknown) {
   return { sourceEngine: "manual", sourceTag: "manual" };
 }
 
+type KnowledgeRouteMetric = {
+  route: string;
+  requests: number;
+  success: number;
+  failed: number;
+  avgLatencyMs: number;
+  lastLatencyMs: number;
+  lastStatus: number | null;
+  lastFailureAt: string | null;
+  lastFailureMessage: string | null;
+};
+
+const KNOWLEDGE_ROUTE_METRICS = new Map<string, KnowledgeRouteMetric>();
+
+function ensureRouteMetric(route: string) {
+  const existing = KNOWLEDGE_ROUTE_METRICS.get(route);
+  if (existing) {
+    return existing;
+  }
+  const created: KnowledgeRouteMetric = {
+    route,
+    requests: 0,
+    success: 0,
+    failed: 0,
+    avgLatencyMs: 0,
+    lastLatencyMs: 0,
+    lastStatus: null,
+    lastFailureAt: null,
+    lastFailureMessage: null
+  };
+  KNOWLEDGE_ROUTE_METRICS.set(route, created);
+  return created;
+}
+
+function isMissingTableError(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2021";
+}
+
 export function createKnowledgeV2Router() {
   const router = express.Router();
+
+  router.use((req, res, next) => {
+    const startedAt = Date.now();
+    let failureMessage: string | null = null;
+    const originalJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      if (res.statusCode >= 400) {
+        const errorBody = body as { error?: { message?: unknown }; message?: unknown };
+        const message = errorBody?.error?.message ?? errorBody?.message ?? "";
+        failureMessage = normalizeText(message) || null;
+      }
+      return originalJson(body);
+    }) as express.Response["json"];
+
+    res.on("finish", () => {
+      const routePath = normalizeText(req.route?.path) || req.path || "unknown";
+      const metric = ensureRouteMetric(`${req.method} ${routePath}`);
+      const latency = Math.max(0, Date.now() - startedAt);
+      metric.requests += 1;
+      metric.lastStatus = res.statusCode;
+      metric.lastLatencyMs = latency;
+      metric.avgLatencyMs = Number(
+        ((metric.avgLatencyMs * (metric.requests - 1)) + latency) / Math.max(1, metric.requests)
+      );
+      if (res.statusCode >= 400) {
+        metric.failed += 1;
+        metric.lastFailureAt = new Date().toISOString();
+        metric.lastFailureMessage = failureMessage;
+      } else {
+        metric.success += 1;
+      }
+    });
+
+    next();
+  });
 
   async function ensureSchemaReady(res: express.Response) {
     const status = await getKnowledgeV2SchemaStatus();
@@ -304,6 +382,185 @@ export function createKnowledgeV2Router() {
     sendError(res, 503, "SERVICE_UNAVAILABLE", `knowledge schema not ready: ${status.reason || "unknown"}`);
     return false;
   }
+
+  router.get("/status", asyncRoute(async (req, res) => {
+    const forceRefresh = parseBoolean(req.query.forceRefresh ?? req.query.refresh, false);
+    const scope = normalizeOptionalScope(req.query.scope);
+    const projectId = normalizeText(req.query.projectId) || undefined;
+    const agentId = normalizeText(req.query.agentId) || undefined;
+    const stageContext = normalizeText(req.query.stageContext) || normalizeText(req.query.stage) || undefined;
+    const query = normalizeText(req.query.query) || undefined;
+    const schema = await getKnowledgeV2SchemaStatus(forceRefresh);
+
+    const baseFilters = {
+      scope,
+      projectId,
+      agentId,
+      stageContext,
+      query
+    } as const;
+
+    let total = 0;
+    let byScope: Record<KnowledgeScope, number> = {
+      global: 0,
+      project: 0,
+      agent: 0,
+      template: 0
+    };
+    let byType: Record<"document" | "text" | "url" | "code" | "sop", number> = {
+      document: 0,
+      text: 0,
+      url: 0,
+      code: 0,
+      sop: 0
+    };
+    let byMemoryType: Record<"episodic" | "semantic" | "procedural", number> = {
+      episodic: 0,
+      semantic: 0,
+      procedural: 0
+    };
+
+    if (schema.ready) {
+      const [totalCount, typeCounts, memoryTypeCounts] = await Promise.all([
+        countKnowledgeItems(baseFilters),
+        Promise.all([
+          countKnowledgeItems({ ...baseFilters, type: "document" }),
+          countKnowledgeItems({ ...baseFilters, type: "text" }),
+          countKnowledgeItems({ ...baseFilters, type: "url" }),
+          countKnowledgeItems({ ...baseFilters, type: "code" }),
+          countKnowledgeItems({ ...baseFilters, type: "sop" })
+        ]),
+        Promise.all([
+          countKnowledgeItems({ ...baseFilters, memoryType: "episodic" }),
+          countKnowledgeItems({ ...baseFilters, memoryType: "semantic" }),
+          countKnowledgeItems({ ...baseFilters, memoryType: "procedural" })
+        ])
+      ]);
+      total = totalCount;
+      byType = {
+        document: typeCounts[0],
+        text: typeCounts[1],
+        url: typeCounts[2],
+        code: typeCounts[3],
+        sop: typeCounts[4]
+      };
+      byMemoryType = {
+        episodic: memoryTypeCounts[0],
+        semantic: memoryTypeCounts[1],
+        procedural: memoryTypeCounts[2]
+      };
+      if (scope) {
+        byScope[scope] = totalCount;
+      } else {
+        const scopeCounts = await Promise.all([
+          countKnowledgeItems({ ...baseFilters, scope: "global" }),
+          countKnowledgeItems({ ...baseFilters, scope: "project" }),
+          countKnowledgeItems({ ...baseFilters, scope: "agent" }),
+          countKnowledgeItems({ ...baseFilters, scope: "template" })
+        ]);
+        byScope = {
+          global: scopeCounts[0],
+          project: scopeCounts[1],
+          agent: scopeCounts[2],
+          template: scopeCounts[3]
+        };
+      }
+    }
+
+    let recentOperations: Array<{
+      id: string;
+      operationType: string;
+      summary: string;
+      canRollback: boolean;
+      rolledBackAt: string | null;
+      triggeredBy: string | null;
+      createdAt: string;
+    }> = [];
+    let rollbackableCount = 0;
+    let operationLogReady = !(schema.missingOptionalTables ?? []).includes("KnowledgeOperationLog");
+    let operationLogReason: string | null = null;
+    if (operationLogReady) {
+      try {
+        const [recentLogs, rollbackable] = await Promise.all([
+          prisma.knowledgeOperationLog.findMany({
+            where: {
+              projectId,
+              agentId
+            },
+            orderBy: { createdAt: "desc" },
+            take: 6
+          }),
+          prisma.knowledgeOperationLog.count({
+            where: {
+              projectId,
+              agentId,
+              canRollback: true,
+              rolledBackAt: null
+            }
+          })
+        ]);
+        recentOperations = recentLogs.map((log) => ({
+          id: log.id,
+          operationType: log.operationType,
+          summary: log.summary,
+          canRollback: log.canRollback,
+          rolledBackAt: log.rolledBackAt ? log.rolledBackAt.toISOString() : null,
+          triggeredBy: log.triggeredBy ?? null,
+          createdAt: log.createdAt.toISOString()
+        }));
+        rollbackableCount = rollbackable;
+      } catch (error) {
+        if (isMissingTableError(error)) {
+          operationLogReady = false;
+          operationLogReason = "KnowledgeOperationLog table missing";
+        } else {
+          throw error;
+        }
+      }
+    } else {
+      operationLogReason = "KnowledgeOperationLog is optional and currently missing";
+    }
+
+    const routeMetrics = [...KNOWLEDGE_ROUTE_METRICS.values()]
+      .map((metric) => ({
+        ...metric,
+        errorRate: metric.requests > 0 ? Number((metric.failed / metric.requests).toFixed(4)) : 0
+      }))
+      .sort((a, b) => {
+        if (b.failed !== a.failed) {
+          return b.failed - a.failed;
+        }
+        return b.requests - a.requests;
+      });
+
+    sendSuccess(res, {
+      checkedAt: new Date().toISOString(),
+      schema,
+      filters: {
+        scope: scope ?? null,
+        projectId: projectId ?? null,
+        agentId: agentId ?? null,
+        stageContext: stageContext ?? null,
+        query: query ?? null
+      },
+      inventory: {
+        total,
+        byScope,
+        byType,
+        byMemoryType
+      },
+      operations: {
+        ready: operationLogReady,
+        reason: operationLogReason,
+        rollbackableCount,
+        recent: recentOperations
+      },
+      routes: {
+        totalTracked: routeMetrics.length,
+        topFailing: routeMetrics.slice(0, 10)
+      }
+    });
+  }));
 
   router.post("/upload", upload.single("file"), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
@@ -390,7 +647,8 @@ export function createKnowledgeV2Router() {
       tags: asStringArray(payload.tags),
       importanceScore: payload.importanceScore === undefined
         ? undefined
-        : Number(payload.importanceScore)
+        : Number(payload.importanceScore),
+      triggeredBy: normalizeText(payload.triggeredBy) || undefined
     });
     if (KNOWLEDGE_AUTO_ORGANIZE_ON_INGEST) {
       void autoOrganizeKnowledge({
@@ -589,19 +847,34 @@ export function createKnowledgeV2Router() {
     const type = normalizeKnowledgeType(req.query.type);
     const memoryType = normalizeMemoryType(req.query.memoryType);
     const stageContext = normalizeText(req.query.stageContext) || normalizeText(req.query.stage) || undefined;
-    const items = await listKnowledgeItems({
-      scope: normalizeOptionalScope(req.query.scope),
-      projectId: normalizeText(req.query.projectId) || undefined,
-      agentId: normalizeText(req.query.agentId) || undefined,
-      type,
-      memoryType,
-      stageContext,
-      query: normalizeText(req.query.query) || undefined,
-      limit,
-      offset
-    });
+    const scope = normalizeOptionalScope(req.query.scope);
+    const projectId = normalizeText(req.query.projectId) || undefined;
+    const agentId = normalizeText(req.query.agentId) || undefined;
+    const searchQuery = normalizeText(req.query.query) || undefined;
+    const [items, total] = await Promise.all([
+      listKnowledgeItems({
+        scope,
+        projectId,
+        agentId,
+        type,
+        memoryType,
+        stageContext,
+        query: searchQuery,
+        limit,
+        offset
+      }),
+      countKnowledgeItems({
+        scope,
+        projectId,
+        agentId,
+        type,
+        memoryType,
+        stageContext,
+        query: searchQuery
+      })
+    ]);
     sendSuccess(res, {
-      total: items.length,
+      total,
       items: items.map((item) => ({
         ...resolveKnowledgeSourceMeta(item.metadata),
         id: item.id,
@@ -770,25 +1043,31 @@ export function createKnowledgeV2Router() {
       return;
     }
 
-    const updated = await updateKnowledgeItemById(knowledgeId, {
-      scope: nextScope,
-      projectId: nextProjectId,
-      agentId: nextAgentId,
-      type: nextType,
-      title: payload.title === undefined ? undefined : normalizeText(payload.title),
-      content: payload.content === undefined ? undefined : String(payload.content ?? ""),
-      metadata: payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
-        ? payload.metadata as Record<string, unknown>
-        : undefined,
-      tags: payload.tags === undefined ? undefined : asStringArray(payload.tags),
-      stageContext: payload.stageContext === undefined ? undefined : asStringArray(payload.stageContext),
-      techStack: payload.techStack === undefined ? undefined : asStringArray(payload.techStack),
-      memoryType: nextMemoryType,
-      importanceScore: payload.importanceScore === undefined ? undefined : Number(payload.importanceScore),
-      sourceUrl: payload.sourceUrl === undefined ? undefined : (normalizeText(payload.sourceUrl) || null),
-      filePath: payload.filePath === undefined ? undefined : (normalizeText(payload.filePath) || null),
-      fileType: payload.fileType === undefined ? undefined : (normalizeText(payload.fileType) || null)
-    });
+    const updated = await updateKnowledgeItemById(
+      knowledgeId,
+      {
+        scope: nextScope,
+        projectId: nextProjectId,
+        agentId: nextAgentId,
+        type: nextType,
+        title: payload.title === undefined ? undefined : normalizeText(payload.title),
+        content: payload.content === undefined ? undefined : String(payload.content ?? ""),
+        metadata: payload.metadata && typeof payload.metadata === "object" && !Array.isArray(payload.metadata)
+          ? payload.metadata as Record<string, unknown>
+          : undefined,
+        tags: payload.tags === undefined ? undefined : asStringArray(payload.tags),
+        stageContext: payload.stageContext === undefined ? undefined : asStringArray(payload.stageContext),
+        techStack: payload.techStack === undefined ? undefined : asStringArray(payload.techStack),
+        memoryType: nextMemoryType,
+        importanceScore: payload.importanceScore === undefined ? undefined : Number(payload.importanceScore),
+        sourceUrl: payload.sourceUrl === undefined ? undefined : (normalizeText(payload.sourceUrl) || null),
+        filePath: payload.filePath === undefined ? undefined : (normalizeText(payload.filePath) || null),
+        fileType: payload.fileType === undefined ? undefined : (normalizeText(payload.fileType) || null)
+      },
+      {
+        triggeredBy: normalizeText(payload.triggeredBy) || undefined
+      }
+    );
     if (!updated) {
       sendError(res, 404, "NOT_FOUND", `knowledge not found: ${knowledgeId}`);
       return;

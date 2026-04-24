@@ -578,6 +578,7 @@ function extractFirstSentence(rawInput: string) {
 
 type IssueScenarioProfile = {
   isCrossBorderEcomSelection: boolean;
+  isStorylineContentSite: boolean;
   isMeetingLike: boolean;
   isCompetitorLike: boolean;
 };
@@ -585,13 +586,26 @@ type IssueScenarioProfile = {
 function detectScenarioProfile(rawInput: string): IssueScenarioProfile {
   const text = normalizeText(rawInput);
   const isCrossBorderEcomSelection = /(跨境|跨境电商|选品|跟品|爆品|tiktok|亚马逊|amazon|temu|ebay|shopify|榜单|热卖|爆单)/i.test(text);
+  const hasSiteIntent = /(网站|网页|站点|官网|h5|landing|专题页|介绍页|介绍网站)/i.test(text);
+  const hasStorylineIntent = /(动漫|动画|漫画|番剧|故事线|剧情线|角色关系|人物关系|时间线|篇章|世界观|设定|角色)/i.test(text);
+  const isStorylineContentSite = hasSiteIntent && hasStorylineIntent;
   const isMeetingLike = /(会议|纪要|meeting)/i.test(text);
   const isCompetitorLike = /(竞品|对标|competitor)/i.test(text);
   return {
     isCrossBorderEcomSelection,
+    isStorylineContentSite,
     isMeetingLike,
     isCompetitorLike
   };
+}
+
+function inferStorylineSubject(rawInput: string) {
+  const sentence = extractFirstSentence(rawInput);
+  const cleaned = sentence
+    .replace(/^(我想|想要|想做|做一个|做一套|请做|需要|希望|帮我做|帮我创建)\s*/i, "")
+    .replace(/(项目|网站|网页|站点|平台)\s*$/i, "")
+    .trim();
+  return truncateText(cleaned || sentence || "该动漫内容站点", 28);
 }
 
 export function buildRequirementRefinement(rawInput: string): RequirementRefinement {
@@ -619,6 +633,32 @@ export function buildRequirementRefinement(rawInput: string): RequirementRefinem
         "支持对重点商品进行持续跟踪，关键指标变化可在约定时效内触发告警",
         "至少完成 2 条从“发现→评估→确认”的真实样例闭环",
         "输出可验收的交付物：选品策略说明、监控规则、Demo 演示与排期计划"
+      ]
+    };
+  }
+
+  if (profile.isStorylineContentSite) {
+    const subject = inferStorylineSubject(rawInput);
+    return {
+      problemStatement: `当前缺少面向“${subject}”的结构化内容入口，用户难以快速理解故事时间线与角色关系。`,
+      expectedOutcome: `交付可交互的“${subject}”故事线介绍网站 MVP，支持剧情主线浏览、角色关系理解与关键事件检索。`,
+      inScopeDraft: [
+        "建立故事线时间轴（按篇章/事件节点组织）",
+        "建立角色关系图与角色详情卡（阵营、关系、关键事件）",
+        "提供剧情章节导航与关键词检索（角色/篇章/事件）",
+        "提供故事主线说明页与世界观简介页",
+        "移动端优先，保证首屏可读与主路径可交互"
+      ],
+      outOfScopeDraft: [
+        "不做账号体系、UGC 发帖/评论等社区能力",
+        "不做复杂后台 CMS 与多角色运营系统",
+        "不覆盖二期扩展（如电商周边、内容订阅、推荐系统）"
+      ],
+      acceptanceDraft: [
+        "用户可在 3 次点击内定位任一主要篇章与关键事件",
+        "角色关系图可交互查看且角色详情信息完整",
+        "剧情时间线、角色关系、篇章导航三条主路径均可演示",
+        "首屏加载与移动端阅读体验满足 MVP 可用性要求"
       ]
     };
   }
@@ -810,6 +850,83 @@ function buildCrossBorderDiscussion(
   };
 }
 
+function buildStorylineSiteDiscussion(
+  roleId: RoleType,
+  roleLabel: string,
+  index: number,
+  issue: string
+): IssueDiscussionItem {
+  const subject = inferStorylineSubject(issue);
+  if (roleId === "ROLE_ANALYST") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "故事线资料结构化与边界确认",
+      concern: `“${subject}”存在多版本剧情口径差异，若不先统一会导致内容回填与页面结构失真。`,
+      proposal: `结论：先确认篇章边界、时间线粒度与角色名单，再输出信息架构与字段清单。`
+    };
+  }
+  if (roleId === "ROLE_PM") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "MVP 里程碑与交付节奏",
+      concern: "若首期同时覆盖全部设定与支线内容，研发周期不可控且验收口径会失焦。",
+      proposal: "结论：MVP 先交付“时间线 + 角色关系 + 章节导航”主链路，二期再扩展深度内容。"
+    };
+  }
+  if (roleId === "ROLE_PRODUCT") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "核心用户价值定义",
+      concern: "若只堆叠资料而缺少引导路径，新用户无法快速建立世界观认知。",
+      proposal: `结论：围绕“新用户快速看懂、老用户快速定位”双目标设计内容组织与交互路径。`
+    };
+  }
+  if (roleId === "ROLE_DESIGN") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "叙事型交互与视觉语言",
+      concern: "时间轴、角色关系、详情卡同时呈现时，容易造成信息密度过高和阅读疲劳。",
+      proposal: "结论：采用“篇章时间轴 + 角色关系图 + 事件详情面板”三层结构，强化主次层级与动效反馈。"
+    };
+  }
+  if (roleId === "ROLE_ARCH" || roleId === "ROLE_DEV") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "内容模型与交互可实现性",
+      concern: "若角色关系与事件节点缺少统一数据模型，后续维护与交互联动会快速失控。",
+      proposal: "结论：先定义篇章/事件/角色三类实体与关系映射，再实现时间线筛选与关系联动交互。"
+    };
+  }
+  if (roleId === "ROLE_QA") {
+    return {
+      id: `discussion-${roleId}-${index}`,
+      roleId,
+      roleLabel,
+      focus: "可用性与内容一致性验收",
+      concern: "若没有“可检索、可跳转、可关联”的量化标准，验收会停留在主观审美层面。",
+      proposal: "结论：以“3 次点击命中内容、主路径可达、关系联动正确”作为首期验收基线。"
+    };
+  }
+  return {
+    id: `discussion-${roleId}-${index}`,
+    roleId,
+    roleLabel,
+    focus: "协同推进与风险控制",
+    concern: `围绕“${subject}”已形成方向，但仍需明确上下游交接与阶段门禁。`,
+    proposal: "结论：先冻结需求确认单，再按角色分工进入设计与研发实施。"
+  };
+}
+
 function buildGenericDiscussion(
   roleId: RoleType,
   roleLabel: string,
@@ -884,6 +1001,8 @@ export function buildIssueDiscussion(
     const label = ROLE_LABELS[roleId];
     return profile.isCrossBorderEcomSelection
       ? buildCrossBorderDiscussion(roleId, label, index, issue, signals)
+      : profile.isStorylineContentSite
+        ? buildStorylineSiteDiscussion(roleId, label, index, issue)
       : buildGenericDiscussion(roleId, label, index, issue);
   });
 }
@@ -1387,6 +1506,31 @@ export function buildDesignBlueprint(input: {
     };
   }
 
+  if (profile.isStorylineContentSite) {
+    const subject = inferStorylineSubject(input.rawInput);
+    return {
+      designTheme: `${subject} · 动漫故事线互动介绍网站`,
+      valueNarrative: `围绕“${input.alignment.missionAnchor || subject}”构建可浏览、可关联、可检索的剧情知识入口，降低理解门槛并提升探索体验。`,
+      targetUsers: [
+        "新入坑观众",
+        "核心粉丝",
+        "内容编辑/策展人员"
+      ],
+      coreScenarios: [
+        "按篇章浏览故事主线并定位关键事件",
+        "查看角色关系图并跳转角色详情",
+        "通过关键词快速检索剧情节点与人物关系",
+        "在移动端完成主路径浏览与内容切换"
+      ],
+      proposedMilestones: [
+        "冻结篇章边界、时间线粒度与角色清单",
+        "完成信息架构、关系图交互与视觉方向",
+        "实现时间轴/关系图/详情面板联动交互",
+        "完成主路径验收与移动端适配"
+      ]
+    };
+  }
+
   const targetUsers: string[] = [];
   if (/(客户|client|用户|user)/i.test(normalized)) {
     targetUsers.push("客户/终端用户");
@@ -1451,6 +1595,30 @@ export function buildSuggestedAnswers(input: {
       }
     };
 
+    return input.questions
+      .filter((question) => Boolean(byId[question.id]))
+      .map((question) => byId[question.id]);
+  }
+
+  if (profile.isStorylineContentSite) {
+    const subject = inferStorylineSubject(input.rawInput);
+    const byId: Record<string, IssueSuggestedAnswer> = {
+      goal: {
+        questionId: "goal",
+        answer: `构建“${subject}”的可交互故事线介绍网站 MVP，让用户能快速理解剧情主线、角色关系与关键事件脉络。`,
+        reason: "根据输入中的动漫/故事线/网站意图自动生成。"
+      },
+      scope: {
+        questionId: "scope",
+        answer: "必须交付：时间线浏览、角色关系图、章节导航与关键词检索；不做：社区发帖、账号体系、复杂后台 CMS。",
+        reason: "按内容型网站 MVP 收敛原则自动提炼。"
+      },
+      acceptance: {
+        questionId: "acceptance",
+        answer: "验收标准：主路径可交互演示；3 次点击内可定位目标篇章或角色；关系联动正确且移动端可用。",
+        reason: "根据故事线站点可用性指标自动生成。"
+      }
+    };
     return input.questions
       .filter((question) => Boolean(byId[question.id]))
       .map((question) => byId[question.id]);

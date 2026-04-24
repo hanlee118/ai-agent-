@@ -53,6 +53,9 @@ const APP_TABS = [
 
 const isAppTab = (value: string | null): value is (typeof APP_TABS)[number] =>
   Boolean(value) && APP_TABS.includes(value as (typeof APP_TABS)[number]);
+const LEGACY_APP_TAB_REDIRECTS: Record<string, (typeof APP_TABS)[number]> = {
+  'dapp-mvp-mobile': 'projects',
+};
 const PROJECT_ROOM_URL_KEYS = [
   'project_id',
   'signoff_project_id',
@@ -107,9 +110,34 @@ const clearAuthStateCache = () => {
   window.sessionStorage.removeItem(AUTH_CACHE_KEY);
 };
 
+const resolveInitialRouteState = () => {
+  if (typeof window === 'undefined') {
+    return {
+      activeTab: 'dashboard',
+      selectedProjectId: null as string | null,
+      selectedAgentId: null as string | null,
+    };
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const appTabParam = params.get('app_tab');
+  const legacyRedirectTab = appTabParam ? LEGACY_APP_TAB_REDIRECTS[appTabParam] : undefined;
+  const resolvedTab = isAppTab(appTabParam) ? appTabParam : (legacyRedirectTab || 'dashboard');
+  const selectedProjectId = (params.get('signoff_project_id') || params.get('project_id') || '').trim() || null;
+  const selectedAgentId = (params.get('agent_id') || '').trim() || null;
+
+  return {
+    activeTab: resolvedTab,
+    selectedProjectId,
+    selectedAgentId,
+  };
+};
+
 export default function App() {
   const cachedAuthStateRef = useRef<{ setupComplete: boolean; authenticated: boolean } | null>(readCachedAuthState());
   const cachedAuthState = cachedAuthStateRef.current;
+  const initialRouteStateRef = useRef(resolveInitialRouteState());
+  const initialRouteState = initialRouteStateRef.current;
   const [toasts, setToasts] = useState<any[]>([]);
   const toastCounterRef = useRef(0);
 
@@ -123,7 +151,7 @@ export default function App() {
     }, 3000);
   };
 
-  const [activeTab, setActiveTab] = useState('dashboard');
+  const [activeTab, setActiveTab] = useState(initialRouteState.activeTab);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isInitialized, setIsInitialized] = useState<boolean>(
     AUTH_BYPASS_IN_DEV ? true : (cachedAuthState?.setupComplete ?? true),
@@ -251,8 +279,8 @@ export default function App() {
     }
   };
 
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(initialRouteState.selectedProjectId);
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(initialRouteState.selectedAgentId);
   const [recentProjectId, setRecentProjectId] = useState<string | null>(null);
   const [urlSearch, setUrlSearch] = useState<string>(() => (typeof window !== 'undefined' ? window.location.search : ''));
   const deepLinkRouteHandledRef = useRef<string | null>(null);
@@ -275,11 +303,8 @@ export default function App() {
       return;
     }
 
+    // Keep deep-link target while data is still syncing; avoid bouncing back to Projects.
     if (projects.length === 0) {
-      if (selectedProjectId !== null) {
-        setSelectedProjectId(null);
-      }
-      setActiveTab('projects');
       return;
     }
 
@@ -288,10 +313,6 @@ export default function App() {
       return;
     }
 
-    const exists = projects.some((project) => project.id === selectedProjectId);
-    if (!exists) {
-      setSelectedProjectId(projects[0].id);
-    }
   }, [activeTab, projects, selectedProjectId]);
 
   useEffect(() => {
@@ -321,8 +342,21 @@ export default function App() {
     const appTabParam = params.get('app_tab');
     const targetProjectId = params.get('signoff_project_id') || params.get('project_id');
     const targetAgentId = params.get('agent_id');
-    const nextTab = isAppTab(appTabParam) ? appTabParam : null;
+    const legacyRedirectTab = appTabParam ? LEGACY_APP_TAB_REDIRECTS[appTabParam] : undefined;
+    const nextTab = isAppTab(appTabParam) ? appTabParam : (legacyRedirectTab || null);
     const shouldIgnoreProjectUrlParams = Boolean(nextTab && nextTab !== 'project-room');
+
+    if (legacyRedirectTab && typeof window !== 'undefined') {
+      const nextParams = new URLSearchParams(params);
+      nextParams.set('app_tab', legacyRedirectTab);
+      if (legacyRedirectTab !== 'project-room') {
+        PROJECT_ROOM_URL_KEYS.forEach((key) => nextParams.delete(key));
+      }
+      const nextSearch = nextParams.toString();
+      const nextUrl = `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ''}${window.location.hash}`;
+      window.history.replaceState(window.history.state, '', nextUrl);
+      setUrlSearch(window.location.search);
+    }
 
     if (!nextTab && !targetProjectId && !targetAgentId) {
       return;

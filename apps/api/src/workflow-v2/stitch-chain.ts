@@ -8,6 +8,33 @@ import {
   type StitchDesignPendingArtifact
 } from "../integrations/stitch-runtime.js";
 import { normalizeText } from "./types.js";
+const STITCH_MIN_SIGNAL_LENGTH = Math.max(8, Number(process.env.STITCH_MIN_SIGNAL_LENGTH ?? 10));
+const STITCH_PLACEHOLDER_PATTERN = /待补充|占位|todo|tbd|lorem ipsum|\bxxx\b|^\s*(?:n\/a|none|null|无|暂无)\s*$/i;
+
+function hasMeaningfulStitchSignal(input: unknown) {
+  const value = normalizeText(String(input ?? ""));
+  if (!value) {
+    return false;
+  }
+  if (value.length < STITCH_MIN_SIGNAL_LENGTH) {
+    return false;
+  }
+  if (STITCH_PLACEHOLDER_PATTERN.test(value)) {
+    return false;
+  }
+  return true;
+}
+
+function isStitchRequestInputValid(input: { summary?: string; projectDescription: string; parsedIntent: ParsedIntent }) {
+  const signals = [
+    input.summary ?? "",
+    input.projectDescription,
+    ...input.parsedIntent.keywords,
+    ...input.parsedIntent.constraints,
+    ...input.parsedIntent.risks
+  ];
+  return signals.some((item) => hasMeaningfulStitchSignal(item));
+}
 
 function resolveStageType(stageKey: string): StageType {
   const normalized = normalizeText(stageKey).toLowerCase();
@@ -95,6 +122,13 @@ export async function maybeGenerateStitchArtifacts(input: {
 
   const parsedIntent = toParsedIntent(input.projectDescription, input.summary ?? input.projectName);
   const role = resolveRole(input.stageKey);
+  if (!isStitchRequestInputValid({
+    summary: input.summary,
+    projectDescription: input.projectDescription,
+    parsedIntent
+  })) {
+    return [];
+  }
   const baseRequest = {
     projectId: input.projectId,
     projectName: input.projectName,

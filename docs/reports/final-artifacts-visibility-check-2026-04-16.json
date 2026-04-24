@@ -1,0 +1,57 @@
+{
+  "generatedAt": "2026-04-16T00:00:00+08:00",
+  "scope": "project-room final-artifacts visibility",
+  "projectId": "OCC-20260415-002",
+  "api": {
+    "endpoint": "/api/projects/OCC-20260415-002/final-artifacts",
+    "status": 200,
+    "readyForAcceptance": true,
+    "coverage": {
+      "required": 4,
+      "provided": 4,
+      "missing": 0
+    }
+  },
+  "artifacts": [
+    {
+      "name": "设计审查卡.md",
+      "required": true,
+      "ready": true,
+      "stage": "DESIGN",
+      "status": "approved"
+    },
+    {
+      "name": "视觉定稿单页.preview.html.md",
+      "required": true,
+      "ready": true,
+      "stage": "DESIGN",
+      "status": "approved"
+    },
+    {
+      "name": "技术方案与选型.md",
+      "required": true,
+      "ready": true,
+      "stage": "DEV",
+      "status": "approved"
+    },
+    {
+      "name": "产品说明文档回填.md",
+      "required": true,
+      "ready": true,
+      "stage": "ACCEPT",
+      "status": "approved"
+    },
+    {
+      "name": "交付成果导航页",
+      "required": false,
+      "ready": true,
+      "stage": "ACCEPT",
+      "status": "approved"
+    }
+  ],
+  "fixes": [
+    "frontend request 默认 no-store",
+    "前端 request 在 GET/HEAD 304 时自动追加 __ts 强制无缓存重试",
+    "project-room 最终成果加载失败时显示显式错误与重试按钮"
+  ]
+}

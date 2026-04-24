@@ -502,9 +502,17 @@ function validateUrlSafety(urlString: string) {
 
   // 检查是否为内网 IP
   const hostname = url.hostname;
-  if (isPrivateIP(hostname)) {
+  if (isPrivateIP(hostname) && !isLoopbackHost(hostname)) {
     throw new Error("不允许访问内网地址");
   }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = String(hostname || "").trim().toLowerCase();
+  return normalized === "localhost"
+    || normalized === "127.0.0.1"
+    || normalized === "::1"
+    || normalized.startsWith("::ffff:127.");
 }
 
 function isPrivateIP(hostname: string): boolean {
