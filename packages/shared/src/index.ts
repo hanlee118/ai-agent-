@@ -309,6 +309,22 @@ export interface ProjectDetail extends ProjectSummary {
   stages: Stage[];
   tasks: Task[];
   deliverables: Deliverable[];
+  stitchArtifacts?: Array<{
+    executionId: string;
+    stageType: StageType;
+    role: RoleType;
+    status: "ready" | "pending" | "degraded";
+    provider?: string;
+    projectId: string;
+    screenId?: string;
+    htmlUrl?: string;
+    imageUrl?: string;
+    prompt?: string;
+    error?: string;
+    executor?: string;
+    requestedAt?: string;
+    updatedAt: string;
+  }>;
   timeline: TimelineEvent[];
   liveSession: LiveSession;
 }
@@ -1031,11 +1047,11 @@ export interface TaskUpdateInput {
 }
 
 export const STAGE_LABELS: Record<StageType, string> = {
-  INIT: "立项",
-  ANALYSIS: "分析",
-  DESIGN: "设计",
-  DEV: "开发",
-  ACCEPT: "验收"
+  INIT: "项目立项",
+  ANALYSIS: "需求分析",
+  DESIGN: "需求设计/视觉设计",
+  DEV: "代码开发",
+  ACCEPT: "测试验收"
 };
 
 export const ROLE_LABELS: Record<RoleType, string> = {

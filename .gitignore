@@ -20,6 +20,7 @@ apps/api/.occ-secret
 backups/
 
 # Runtime generated static artifacts
+generated/
 apps/web/public/generated/
 site/generated/
 

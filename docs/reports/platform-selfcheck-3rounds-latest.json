@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-04-12T14:55:19.178Z",
-  "startedAt": "2026-04-12T14:54:59.840Z",
+  "generatedAt": "2026-04-22T07:04:50.581Z",
+  "startedAt": "2026-04-22T06:56:16.873Z",
   "rounds": 3,
   "stepTimeoutMs": 1080000,
   "summary": {
@@ -19,19 +19,19 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 3349,
+          "durationMs": 1699,
           "stdout": "> occ-workspace@1.0.3 verify:smoke /Users/dalongxia/Documents/agentteam\n> bash scripts/verify-smoke.sh\n\nverify-smoke: checking public endpoints\nverify-smoke: creating temporary authenticated session\nverify-smoke: session source = temporary-session\nverify-smoke: checking protected APIs\nverify-smoke: checking local monitor SSE stream\nverify-smoke: ok",
           "stderr": ""
         },
         {
           "step": "smoke-project-flow",
           "ok": true,
-          "status": "skipped_issue_first",
-          "exitCode": 1,
+          "status": "passed",
+          "exitCode": 0,
           "signal": null,
-          "durationMs": 502,
-          "stdout": "",
-          "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n{\n  \"ok\": false,\n  \"error\": \"Error: create failed: 409 {\\\"success\\\":false,\\\"error\\\":{\\\"code\\\":\\\"PROJECT_ISSUE_FIRST_REQUIRED\\\",\\\"message\\\":\\\"当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。\\\"}}\"\n}"
+          "durationMs": 154054,
+          "stdout": "{\n  \"ok\": true,\n  \"mode\": \"quick\",\n  \"projectId\": \"OCC-20260422-016\",\n  \"totalDurationMs\": 153966,\n  \"slowestSteps\": [\n    {\n      \"step\": \"quick_approve\",\n      \"durationMs\": 88380,\n      \"status\": 200\n    },\n    {\n      \"step\": \"quick_post_create_prep_run\",\n      \"durationMs\": 64954,\n      \"status\": 200\n    },\n    {\n      \"step\": \"detail_final\",\n      \"durationMs\": 142,\n      \"status\": 200\n    },\n    {\n      \"step\": \"quick_post_create_prep_confirm\",\n      \"durationMs\": 135,\n      \"status\": 200\n    },\n    {\n      \"step\": \"detail_after_create\",\n      \"durationMs\": 132,\n      \"status\": 200\n    }\n  ],\n  \"steps\": [\n    {\n      \"step\": \"resolve_base\",\n      \"status\": 200,\n      \"durationMs\": 0,\n      \"summary\": {\n        \"base\": \"http://127.0.0.1:8787\"\n      }\n    },\n    {\n      \"step\": \"create\",\n      \"status\": 201,\n      \"durationMs\": 78,\n      \"project\": {\n        \"id\": \"OCC-20260422-016\",\n        \"status\": \"active\",\n        \"currentStage\": \"INIT\",\n        \"pendingApproval\": false,\n        \"progress\": 4\n      }\n    },\n    {\n      \"step\": \"detail_after_create\",\n      \"status\": 200,\n      \"durationMs\": 132,\n      \"project\": {\n        \"id\": \"OCC-20260422-016\",\n        \"status\": \"active\n...<truncated>",
+          "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n[smoke] created project project=OCC-20260422-016 stage=INIT status=active pending=0 progress=4\n[smoke] fetched initial detail project=OCC-20260422-016 stage=INIT status=active pending=0 progress=4\n[smoke] final detail project=OCC-20260422-016 stage=ANALYSIS status=active pending=0 progress=20"
         },
         {
           "step": "health-check",
@@ -39,8 +39,8 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 991,
-          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (12ms) - 1\n✅ 核心表结构 (4ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (41ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (62ms) - real-model ready\n✅ GitLab webhook 真链路 (655ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (33ms) - HTTP 200\n✅ 关键路由 /ready (33ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (2ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: none\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-12T14-55-03-722Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
+          "durationMs": 1257,
+          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (22ms) - 1\n✅ 核心表结构 (7ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (4ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (54ms) - real-model ready\n✅ GitLab webhook 真链路 (947ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (32ms) - HTTP 200\n✅ 关键路由 /ready (33ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (32ms) - HTTP 200\n✅ 关键路由 /api/projects (13ms) - HTTP 200\n✅ 关键路由 /api/product-context (17ms) - HTTP 200\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=true, status=401\nissues: none\n一键修复步骤: 2\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-22T06-58-52-660Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
           "stderr": ""
         }
       ]
@@ -55,19 +55,19 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 7370,
+          "durationMs": 7234,
           "stdout": "> occ-workspace@1.0.3 verify:smoke /Users/dalongxia/Documents/agentteam\n> bash scripts/verify-smoke.sh\n\nverify-smoke: checking public endpoints\nverify-smoke: creating temporary authenticated session\nverify-smoke: session source = temporary-session\nverify-smoke: checking protected APIs\nverify-smoke: checking local monitor SSE stream\nverify-smoke: ok",
           "stderr": ""
         },
         {
           "step": "smoke-project-flow",
           "ok": true,
-          "status": "skipped_issue_first",
-          "exitCode": 1,
+          "status": "passed",
+          "exitCode": 0,
           "signal": null,
-          "durationMs": 244,
-          "stdout": "",
-          "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n{\n  \"ok\": false,\n  \"error\": \"Error: create failed: 409 {\\\"success\\\":false,\\\"error\\\":{\\\"code\\\":\\\"PROJECT_ISSUE_FIRST_REQUIRED\\\",\\\"message\\\":\\\"当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。\\\"}}\"\n}"
+          "durationMs": 212186,
+          "stdout": "{\n  \"ok\": true,\n  \"mode\": \"quick\",\n  \"projectId\": \"OCC-20260422-017\",\n  \"totalDurationMs\": 212095,\n  \"slowestSteps\": [\n    {\n      \"step\": \"quick_approve\",\n      \"durationMs\": 149100,\n      \"status\": 200\n    },\n    {\n      \"step\": \"quick_post_create_prep_run\",\n      \"durationMs\": 62305,\n      \"status\": 200\n    },\n    {\n      \"step\": \"quick_post_create_prep_confirm\",\n      \"durationMs\": 150,\n      \"status\": 200\n    },\n    {\n      \"step\": \"detail_after_create\",\n      \"durationMs\": 149,\n      \"status\": 200\n    },\n    {\n      \"step\": \"detail_final\",\n      \"durationMs\": 147,\n      \"status\": 200\n    }\n  ],\n  \"steps\": [\n    {\n      \"step\": \"resolve_base\",\n      \"status\": 200,\n      \"durationMs\": 0,\n      \"summary\": {\n        \"base\": \"http://127.0.0.1:8787\"\n      }\n    },\n    {\n      \"step\": \"create\",\n      \"status\": 201,\n      \"durationMs\": 72,\n      \"project\": {\n        \"id\": \"OCC-20260422-017\",\n        \"status\": \"active\",\n        \"currentStage\": \"INIT\",\n        \"pendingApproval\": false,\n        \"progress\": 4\n      }\n    },\n    {\n      \"step\": \"detail_after_create\",\n      \"status\": 200,\n      \"durationMs\": 149,\n      \"project\": {\n        \"id\": \"OCC-20260422-017\",\n        \"status\": \"activ\n...<truncated>",
+          "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n[smoke] created project project=OCC-20260422-017 stage=INIT status=active pending=0 progress=4\n[smoke] fetched initial detail project=OCC-20260422-017 stage=INIT status=active pending=0 progress=4\n[smoke] final detail project=OCC-20260422-017 stage=ANALYSIS status=active pending=0 progress=20"
         },
         {
           "step": "health-check",
@@ -75,8 +75,8 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 674,
-          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (21ms) - 1\n✅ 核心表结构 (8ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (1ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (33ms) - real-model ready\n✅ GitLab webhook 真链路 (453ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (34ms) - HTTP 200\n✅ 关键路由 /ready (31ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: none\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-12T14-55-12-328Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
+          "durationMs": 1019,
+          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (20ms) - 1\n✅ 核心表结构 (5ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (2ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (29ms) - real-model ready\n✅ GitLab webhook 真链路 (716ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (32ms) - HTTP 200\n✅ 关键路由 /ready (35ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (32ms) - HTTP 200\n✅ 关键路由 /api/projects (15ms) - HTTP 200\n✅ 关键路由 /api/product-context (20ms) - HTTP 200\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=true, status=401\nissues: none\n一键修复步骤: 2\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-22T07-02-33-341Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
           "stderr": ""
         }
       ]
@@ -91,19 +91,19 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 5018,
+          "durationMs": 7533,
           "stdout": "> occ-workspace@1.0.3 verify:smoke /Users/dalongxia/Documents/agentteam\n> bash scripts/verify-smoke.sh\n\nverify-smoke: checking public endpoints\nverify-smoke: creating temporary authenticated session\nverify-smoke: session source = temporary-session\nverify-smoke: checking protected APIs\nverify-smoke: checking local monitor SSE stream\nverify-smoke: ok",
           "stderr": ""
         },
         {
           "step": "smoke-project-flow",
           "ok": true,
-          "status": "skipped_issue_first",
-          "exitCode": 1,
+          "status": "passed",
+          "exitCode": 0,
           "signal": null,
-          "durationMs": 534,
-          "stdout": "",
-          "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n{\n  \"ok\": false,\n  \"error\": \"Error: create failed: 409 {\\\"success\\\":false,\\\"error\\\":{\\\"code\\\":\\\"PROJECT_ISSUE_FIRST_REQUIRED\\\",\\\"message\\\":\\\"当前环境已启用 issue-first 门禁，不允许直接创建项目。请先通过 New Project Issue 流程完成需求确认后再创建。\\\"}}\"\n}"
+          "durationMs": 127447,
+          "stdout": "{\n  \"ok\": true,\n  \"mode\": \"quick\",\n  \"projectId\": \"OCC-20260422-018\",\n  \"totalDurationMs\": 127329,\n  \"slowestSteps\": [\n    {\n      \"step\": \"quick_approve\",\n      \"durationMs\": 76292,\n      \"status\": 200\n    },\n    {\n      \"step\": \"quick_post_create_prep_run\",\n      \"durationMs\": 50352,\n      \"status\": 200\n    },\n    {\n      \"step\": \"detail_final\",\n      \"durationMs\": 157,\n      \"status\": 200\n    },\n    {\n      \"step\": \"quick_post_create_prep_confirm\",\n      \"durationMs\": 147,\n      \"status\": 200\n    },\n    {\n      \"step\": \"detail_after_create\",\n      \"durationMs\": 141,\n      \"status\": 200\n    }\n  ],\n  \"steps\": [\n    {\n      \"step\": \"resolve_base\",\n      \"status\": 200,\n      \"durationMs\": 0,\n      \"summary\": {\n        \"base\": \"http://127.0.0.1:8787\"\n      }\n    },\n    {\n      \"step\": \"create\",\n      \"status\": 201,\n      \"durationMs\": 74,\n      \"project\": {\n        \"id\": \"OCC-20260422-018\",\n        \"status\": \"active\",\n        \"currentStage\": \"INIT\",\n        \"pendingApproval\": false,\n        \"progress\": 4\n      }\n    },\n    {\n      \"step\": \"detail_after_create\",\n      \"status\": 200,\n      \"durationMs\": 141,\n      \"project\": {\n        \"id\": \"OCC-20260422-018\",\n        \"status\": \"active\n...<truncated>",
+          "stderr": "[smoke] resolved api base http://127.0.0.1:8787\n[smoke] created project project=OCC-20260422-018 stage=INIT status=active pending=0 progress=4\n[smoke] fetched initial detail project=OCC-20260422-018 stage=INIT status=active pending=0 progress=4\n[smoke] final detail project=OCC-20260422-018 stage=ANALYSIS status=active pending=0 progress=20"
         },
         {
           "step": "health-check",
@@ -111,8 +111,8 @@
           "status": "passed",
           "exitCode": 0,
           "signal": null,
-          "durationMs": 654,
-          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (6ms) - 1\n✅ 核心表结构 (5ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (46ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (60ms) - real-model ready\n✅ GitLab webhook 真链路 (340ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (32ms) - HTTP 200\n✅ 关键路由 /ready (32ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (2ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/projects (0ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n✅ 关键路由 /api/product-context (1ms) - HTTP 401 (anonymous mode; 未注入管理员会话；受保护接口以匿名模式检查)\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=false, status=401\nissues: none\n一键修复步骤: 3\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-12T14-55-18-552Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
+          "durationMs": 1275,
+          "stdout": "=== 一键健康检查结果 ===\n✅ DB 连接 (25ms) - 1\n✅ 核心表结构 (5ms) - Project | AuthSession | SystemConfig\n✅ OpenAPI docs (7ms) - openapi=3.0.3\n✅ 运行时模型就绪度 (36ms) - real-model ready\n✅ GitLab webhook 真链路 (869ms) - gitlab-webhook-doctor: ok\n✅ 关键路由 /health (42ms) - HTTP 200\n✅ 关键路由 /ready (47ms) - HTTP 200\n✅ 关键路由 /api/openclaw/agents (42ms) - HTTP 200\n✅ 关键路由 /api/projects (34ms) - HTTP 200\n✅ 关键路由 /api/product-context (35ms) - HTTP 200\n\n总计: 10, 通过: 10, 失败: 0\n\n=== 真实模型配置自检 ===\nready: true\nruntime: mode=openai-compatible, requestedMode=openai-compatible, configured=true\nvalidate: ok=true, status=401\nissues: none\n一键修复步骤: 2\n报告: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-2026-04-22T07-04-49-342Z.json\n最新: /Users/dalongxia/Documents/agentteam/docs/reports/system-health-check-latest.json",
           "stderr": ""
         }
       ]

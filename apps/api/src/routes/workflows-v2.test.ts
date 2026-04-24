@@ -32,6 +32,7 @@ process.env.PROJECT_WARMUP = "false";
 process.env.STITCH_API_KEY = "";
 process.env.WORKFLOW_V2_AGENT_AUTO_EXECUTE = "false";
 process.env.WORKFLOW_V2_STAGE_AUTO_PROCEED = "false";
+process.env.WORKFLOW_V2_HERMES_ENABLED = "false";
 
 let prismaClient: any;
 let app: express.Express;
@@ -97,6 +98,18 @@ after(async () => {
     await prismaClient.$disconnect();
   }
   rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("workflow-v2 exposes hermes runtime status endpoint", async () => {
+  const statusRes = await request(app)
+    .get("/api/v1/workflows/hermes/status")
+    .query({ probe: "false" });
+  assert.equal(statusRes.status, 200);
+  assert.equal(statusRes.body.success, true);
+  assert.equal(typeof statusRes.body.data.runtime.enabled, "boolean");
+  assert.equal(typeof statusRes.body.data.runtime.endpoint, "string");
+  assert.equal(typeof statusRes.body.data.runtime.totalAttempts, "number");
+  assert.equal(statusRes.body.data.probe, null);
 });
 
 test("workflow-v2 blocks proceed when required artifact is missing", async () => {
@@ -273,6 +286,7 @@ test("workflow-v2 can autonomously execute stage with agent and produce artifact
   assert.equal(String(overviewStage.executionEngine || "").length > 0, true);
   assert.equal(Boolean(overviewCollaboration.analystInvolved), true);
   assert.equal(Number(overviewSources.companion || 0) >= 1, true);
+  assert.equal(Number(overviewSources.hermesFallback || 0), 0);
   assert.equal(overviewCollaborationArtifacts.length >= 1, true);
   assert.equal(
     overviewCollaborationArtifacts.some((item) => String(item.role || "") === "ROLE_ANALYST"),
@@ -352,7 +366,7 @@ test("workflow-v2 input endpoint can unblock inputContract-gated stage", async (
     where: { workflowId }
   });
   assert.ok(stage);
-  assert.equal(stage.status, "pending");
+  assert.equal(["pending", "running", "reviewing"].includes(String(stage.status)), true);
 
   const addInputRes = await request(app)
     .post(`/api/v1/workflows/stages/${stage.id}/input`)

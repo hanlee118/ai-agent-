@@ -57,26 +57,62 @@ export default function IssueInputPanel({ controller }: Props) {
     autoStartWorkflow,
     setAutoStartWorkflow,
   } = controller;
+  const isFileMode = issueSourceType === 'file_import';
+  const isPrdMode = issueSourceType === 'prd';
+  const isNaturalLanguageMode = !isFileMode && !isPrdMode;
 
   return (
     <div className="space-y-4">
-      <div className="space-y-2">
-        <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">需求来源类型</label>
-        <select
-          value={issueSourceType}
-          onChange={(event) => setIssueSourceType(event.target.value as typeof issueSourceType)}
-          className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
-        >
-          <option value="text">一句话需求</option>
-          <option value="journey">用户旅程</option>
-          <option value="meeting_notes">会议纪要</option>
-          <option value="competitor">竞品分析</option>
-          <option value="file_import">文件导入</option>
-          <option value="prd">PRD输入</option>
-        </select>
+      <div className="rounded-2xl border border-border-subtle bg-white/5 p-4 space-y-3">
+        <div className="space-y-2">
+          <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">需求输入方式</label>
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setIssueSourceType('text')}
+              className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                isNaturalLanguageMode
+                  ? 'border-primary/50 bg-primary/15 text-primary'
+                  : 'border-border-subtle bg-white/5 text-slate-300 hover:bg-white/10'
+              }`}
+            >
+              文字描述需求
+            </button>
+            <button
+              type="button"
+              onClick={() => setIssueSourceType('file_import')}
+              className={`rounded-xl border px-3 py-2 text-xs font-semibold transition ${
+                isFileMode
+                  ? 'border-primary/50 bg-primary/15 text-primary'
+                  : 'border-border-subtle bg-white/5 text-slate-300 hover:bg-white/10'
+              }`}
+            >
+              上传文档需求
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-500">
+            你可以先选“文字描述”或“上传文档”，也可以在下方切换高级需求来源类型。
+          </p>
+        </div>
+
+        <div className="space-y-2">
+          <label className="text-[11px] font-semibold text-slate-400">高级来源类型</label>
+          <select
+            value={issueSourceType}
+            onChange={(event) => setIssueSourceType(event.target.value as typeof issueSourceType)}
+            className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 appearance-none"
+          >
+            <option value="text">一句话需求</option>
+            <option value="journey">用户旅程</option>
+            <option value="meeting_notes">会议纪要</option>
+            <option value="competitor">竞品分析</option>
+            <option value="file_import">文件导入</option>
+            <option value="prd">PRD输入</option>
+          </select>
+        </div>
       </div>
 
-      {issueSourceType === 'file_import' ? (
+      {isFileMode ? (
         <div className="space-y-3">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">需求文件导入</label>
           <div className="p-4 border border-dashed border-border-subtle rounded-xl bg-white/5 flex items-center justify-between gap-3">
@@ -113,7 +149,7 @@ export default function IssueInputPanel({ controller }: Props) {
             className="w-full bg-surface-muted border border-border-subtle rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 resize-none"
           />
         </div>
-      ) : issueSourceType === 'prd' ? (
+      ) : isPrdMode ? (
         <div className="space-y-2">
           <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">PRD 输入</label>
           <textarea

@@ -14,6 +14,7 @@ export type WorkflowStageOverview = {
   executionEngine: 'hybrid' | 'hermes' | 'openclaw' | 'manual' | 'unknown' | string;
   artifactSources: {
     hermes: number;
+    hermesFallback: number;
     openclaw: number;
     companion: number;
     companionError: number;
@@ -79,9 +80,38 @@ export type WorkflowProjectOverview = {
   updatedAt: string;
 };
 
+export type WorkflowHermesRuntimeStatus = {
+  checkedAt: string;
+  runtime: {
+    enabled: boolean;
+    endpoint: string;
+    stageMatchMode: string;
+    timeoutMs: number;
+    lastStageKey: string | null;
+    lastAttemptAt: string | null;
+    lastSuccessAt: string | null;
+    lastFailureAt: string | null;
+    lastFailureReason: string | null;
+    lastSkipReason: string | null;
+    totalAttempts: number;
+    totalSuccess: number;
+    totalFailures: number;
+  };
+  probe: {
+    reachable: boolean;
+    statusCode: number | null;
+    latencyMs: number;
+    message: string;
+  } | null;
+};
+
 export const workflowsApi = {
   async getProjectOverview(projectId: string) {
     const id = encodeURIComponent(String(projectId || '').trim());
     return request<WorkflowProjectOverview>(`/v1/workflows/projects/${id}/overview`);
+  },
+
+  async getHermesRuntimeStatus(probe = true) {
+    return request<WorkflowHermesRuntimeStatus>(`/v1/workflows/hermes/status?probe=${probe ? 'true' : 'false'}`);
   },
 };

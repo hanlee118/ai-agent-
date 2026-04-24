@@ -22,6 +22,12 @@ export type DeliverableTemplate = {
   sectionBlueprint: string[];
   acceptanceChecklist: string[];
   authoringRules: string[];
+  standardsProfile?: Array<{
+    code: string;
+    title: string;
+    focus: string;
+    source: string;
+  }>;
 };
 
 export type DeliverableProfessionalEvidenceRule = {
@@ -62,6 +68,20 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "优先写结论，再给证据与边界。",
       "避免口号式描述，要求条目可执行。"
+    ],
+    standardsProfile: [
+      {
+        code: "ISO/IEC/IEEE 15288:2023",
+        title: "System life cycle processes",
+        focus: "章程中的流程边界、角色职责与生命周期衔接需可追溯。",
+        source: "https://www.iso.org/standard/81702.html"
+      },
+      {
+        code: "ISO 31000:2018",
+        title: "Risk management — Guidelines",
+        focus: "风险识别、评估、应对与监控策略必须成体系。",
+        source: "https://www.iso.org/standard/65694.html"
+      }
     ]
   },
   requirements_prd: {
@@ -88,6 +108,20 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "禁止只写抽象愿景，必须落到可执行条目。",
       "优先使用“用户行为 + 系统响应 + 验收方式”表达。"
+    ],
+    standardsProfile: [
+      {
+        code: "ISO/IEC/IEEE 29148:2018",
+        title: "Requirements engineering",
+        focus: "需求应具备可验证性、一致性、可追踪性并可回填。",
+        source: "https://www.iso.org/standard/72089.html"
+      },
+      {
+        code: "ISO/IEC 25010",
+        title: "System and software quality models",
+        focus: "验收指标需覆盖关键质量特性（如可靠性、易用性、可维护性）。",
+        source: "https://www.iso.org/standard/35733.html"
+      }
     ]
   },
   schedule: {
@@ -164,6 +198,26 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "优先给设计决策和权衡，不只给结果。",
       "对复杂模块补充输入/输出/失败处理。"
+    ],
+    standardsProfile: [
+      {
+        code: "IEEE 1016-2009",
+        title: "Software Design Descriptions",
+        focus: "设计文档应包含架构视图、接口、约束与设计决策组织结构。",
+        source: "https://standards.ieee.org/standard/1016-2009.html"
+      },
+      {
+        code: "OpenAPI Specification",
+        title: "OAS (authoritative specs)",
+        focus: "接口契约建议按 OAS 描述，便于联调、校验与自动化。",
+        source: "https://spec.openapis.org/oas/"
+      },
+      {
+        code: "ISO/IEC/IEEE 12207:2017",
+        title: "Software life cycle processes",
+        focus: "实施计划应覆盖开发、验证、发布与维护过程衔接。",
+        source: "https://www.iso.org/standard/63712.html"
+      }
     ]
   },
   implementation_result: {
@@ -191,6 +245,20 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "不要只写“已完成”，必须写清实现证据。",
       "优先给真实路径、接口、文件和验证结果。"
+    ],
+    standardsProfile: [
+      {
+        code: "ISO/IEC/IEEE 12207:2017",
+        title: "Software life cycle processes",
+        focus: "实现结果需体现构建、验证、配置与变更追踪证据。",
+        source: "https://www.iso.org/standard/63712.html"
+      },
+      {
+        code: "OpenAPI Specification",
+        title: "OAS (authoritative specs)",
+        focus: "对外接口变更应可映射到 API 契约版本与验证结果。",
+        source: "https://spec.openapis.org/oas/"
+      }
     ]
   },
   runtime_delivery: {
@@ -244,6 +312,20 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "避免泛化视觉词，需绑定业务场景。",
       "所有重点页面需给交互反馈策略。"
+    ],
+    standardsProfile: [
+      {
+        code: "IEEE 1016-2009",
+        title: "Software Design Descriptions",
+        focus: "设计审查应体现结构化设计描述与决策依据。",
+        source: "https://standards.ieee.org/standard/1016-2009.html"
+      },
+      {
+        code: "WCAG 2.2",
+        title: "Web Content Accessibility Guidelines",
+        focus: "可访问性检查需对应 WCAG 成功准则并可验证。",
+        source: "https://www.w3.org/TR/WCAG22/"
+      }
     ]
   },
   visual_mockup: {
@@ -326,6 +408,14 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "避免“测试通过”一句话式结论。",
       "关键风险要给处置建议与时限。"
+    ],
+    standardsProfile: [
+      {
+        code: "ISO/IEC/IEEE 29119 Series",
+        title: "Software testing",
+        focus: "测试文档、测试条件、用例设计、执行与报告结构需完整。",
+        source: "https://standards.ieee.org/wp-content/uploads/import/documents/tocs/ISO_IEC_IEEE_29119.pdf"
+      }
     ]
   },
   product_backfill: {
@@ -352,6 +442,14 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "优先写“已验证事实”，不要写模糊判断。",
       "冲突检查必须输出“无冲突”或“待决策”。"
+    ],
+    standardsProfile: [
+      {
+        code: "ISO/IEC/IEEE 29148:2018",
+        title: "Requirements engineering",
+        focus: "回填内容应保留需求到交付、到验收的追踪关系。",
+        source: "https://www.iso.org/standard/72089.html"
+      }
     ]
   },
   generic: {
@@ -694,6 +792,14 @@ export function buildDeliverableTemplatePromptBlock(title: string, stageType: St
   const template = resolveDeliverableTemplate(title, stageType);
   const professionalRule = resolveDeliverableProfessionalFormatRule(title, stageType);
   const keywordLine = keywords.slice(0, 6).join(" / ") || "无";
+  const standardsLines = Array.isArray(template.standardsProfile) && template.standardsProfile.length > 0
+    ? [
+      "标准规范对齐（写入交付物，不得只罗列名词）:",
+      "- 必须新增章节: ## 标准对齐与裁剪说明",
+      "- 在该章节以 Markdown 表格给出: 标准条款/要求 | 当前交付对应内容 | 不适用项与原因",
+      ...template.standardsProfile.map((item) => `- ${item.code} (${item.title}): ${item.focus}；来源 ${item.source}`)
+    ]
+    : [];
   const professionalLines = professionalRule
     ? [
       "专业格式硬要求:",
@@ -714,6 +820,7 @@ export function buildDeliverableTemplatePromptBlock(title: string, stageType: St
     ...template.authoringRules.map((rule) => `- ${rule}`),
     "验收关注点:",
     ...template.acceptanceChecklist.map((item) => `- ${item}`),
+    ...standardsLines,
     ...professionalLines
   ];
 }

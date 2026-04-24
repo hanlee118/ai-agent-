@@ -10,6 +10,7 @@ import {
   transitionWorkflowStage,
   upsertWorkflowTemplate
 } from "../workflow-v2/workflow-orchestrator.js";
+import { getHermesMcpRuntimeStatus, probeHermesMcpEndpoint } from "../workflow-v2/hermes-mcp.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import { asRecord, asRecordArray, normalizeText } from "../workflow-v2/types.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
@@ -82,9 +83,24 @@ function inferAgentEngine(input: { agentId: string; model?: string | null }) {
   return "unknown" as const;
 }
 
+function parseBoolean(value: unknown, fallback: boolean) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = normalizeText(value).toLowerCase();
+  if (normalized === "true" || normalized === "1" || normalized === "yes" || normalized === "on") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") {
+    return false;
+  }
+  return fallback;
+}
+
 function summarizeStageArtifacts(outputArtifacts: unknown[]) {
   const sourceCounts = {
     hermes: 0,
+    hermesFallback: 0,
     openclaw: 0,
     companion: 0,
     companionError: 0,
@@ -131,6 +147,10 @@ function summarizeStageArtifacts(outputArtifacts: unknown[]) {
     if (source === "workflow_v2_hermes") {
       sourceCounts.hermes += 1;
       applyAgentEngineHint(agentId, "hermes");
+      continue;
+    }
+    if (source === "workflow_v2_hermes_fallback") {
+      sourceCounts.hermesFallback += 1;
       continue;
     }
     if (source === "workflow_v2_agent") {
@@ -342,6 +362,17 @@ export function createWorkflowsV2Router() {
     sendSuccess(res, {
       ready: true,
       checkedAt: new Date(status.checkedAt).toISOString()
+    });
+  }));
+
+  router.get("/hermes/status", asyncRoute(async (req, res) => {
+    const includeProbe = parseBoolean(req.query.probe, true);
+    const runtime = getHermesMcpRuntimeStatus();
+    const probe = includeProbe ? await probeHermesMcpEndpoint() : null;
+    sendSuccess(res, {
+      checkedAt: new Date().toISOString(),
+      runtime,
+      probe
     });
   }));
 

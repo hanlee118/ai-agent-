@@ -235,11 +235,46 @@ type DesignProfileInput = {
 };
 
 export function resolveDesignRequirementProfile(input: DesignProfileInput): DesignRequirementProfile {
-  const source = normalizeText(
-    `${input.projectName || ""} ${input.projectDescription || ""} ${(input.keywords || []).join(" ")}`
+  const primarySource = normalizeText(
+    `${input.projectName || ""} ${input.projectDescription || ""}`
   );
-  const isCrossBorderProductRadar = /(跨境|电商|选品|跟品|爆品|商品|sku|tiktok|tik tok|亚马逊|amazon|temu|榜单|排名|监控|告警)/i.test(source);
-  const isCollaborationPlatform = /(协作平台|项目房间|任务流转|验收报告|质量门禁|agent\s*名册|agent roster|project room|quality gate|signoff|项目详情|多\s*agent|执行证据|阶段推进|项目推进)/i.test(source);
+  const source = normalizeText(
+    `${primarySource} ${(input.keywords || []).join(" ")}`
+  );
+  const crossBorderSignals = [
+    /跨境|选品|跟品|爆品|爆量|sku|listing|类目排名|gmv|带货/i,
+    /tiktok|tik tok|抖音国际|抖音海外/i,
+    /amazon|亚马逊/i,
+    /temu/i
+  ];
+  const crossBorderSignalHits = crossBorderSignals.reduce(
+    (count, pattern) => count + (pattern.test(primarySource) ? 1 : 0),
+    0
+  );
+  const hasCrossBorderAnchor = /(跨境|选品|跟品|爆品|爆量|sku|listing|类目排名|gmv|带货|tiktok|tik tok|抖音国际|抖音海外|amazon|亚马逊|temu)/i
+    .test(primarySource);
+  const isCrossBorderProductRadar = crossBorderSignalHits >= 2 && hasCrossBorderAnchor;
+  const collaborationSignals = [
+    /协作平台|project room|项目房间/i,
+    /任务流转|看板|泳道|blocked|review|todo|running/i,
+    /质量门禁|quality gate|signoff|验收报告|审批/i,
+    /agent\s*名册|agent roster|多\s*agent|执行证据/i,
+    /阶段推进|项目推进/i
+  ];
+  const collaborationSignalHits = collaborationSignals.reduce(
+    (count, pattern) => count + (pattern.test(primarySource) ? 1 : 0),
+    0
+  );
+  const hasCollaborationPlatformAnchor = /协作平台|project room|项目房间/i.test(primarySource);
+  const hasCollaborationWorkflowSignal = /需求到研发闭环|研发闭环|角色协作|实时监控|工作流|协同流程|项目协作|预约演示|演示入口/i
+    .test(primarySource);
+  const strongCollaborationIntent = hasCollaborationPlatformAnchor && hasCollaborationWorkflowSignal;
+  const hasConsumerOrContentSignals = /(蜡笔小新|奥特曼|剧场版|人物关系|粉丝|动画|影视|互动网站|介绍网站|品牌官网|落地页|dapp|理财|质押)/i
+    .test(primarySource);
+  const isCollaborationPlatform = (
+    collaborationSignalHits >= 2
+    || strongCollaborationIntent
+  ) && (!hasConsumerOrContentSignals || strongCollaborationIntent);
 
   if (isCrossBorderProductRadar) {
     const seed = hashSeed(source);
@@ -743,13 +778,73 @@ export function buildRequirementAwareVisualPreviewHtml(input: DesignProfileInput
 }
 
 const GENERIC_DESIGN_TEMPLATE_PATTERNS = [
+  /项目协作平台/i,
   /需求输入/i,
   /多\s*agent\s*协作/i,
   /执行证据回写/i,
   /阶段验收与回填/i,
   /项目观测室/i,
-  /agent\s*中心/i
+  /agent\s*中心/i,
+  /执行看板/i,
+  /质量门禁|quality\s*gate/i,
+  /创建项目并选择阶段模板/i
 ];
+
+const PROJECT_KEYWORD_STOPWORDS = new Set([
+  "项目",
+  "平台",
+  "系统",
+  "方案",
+  "需求",
+  "页面",
+  "网站",
+  "应用",
+  "产品",
+  "模块",
+  "阶段",
+  "流程",
+  "全流程",
+  "单阶段",
+  "接力",
+  "验收",
+  "视觉",
+  "定稿",
+  "设计",
+  "预览",
+  "介绍",
+  "粉丝",
+  "mvp"
+]);
+
+function collectProjectAnchors(input: DesignProfileInput) {
+  const source = `${input.projectName || ""} ${(input.keywords || []).join(" ")}`;
+  const zhTokens = source.match(/[\u4e00-\u9fff]{2,}/g) || [];
+  const enTokens = source.match(/[a-zA-Z][a-zA-Z0-9+._-]{2,}/g) || [];
+  const tokens = [...zhTokens, ...enTokens]
+    .map((item) => normalizeText(item))
+    .map((item) => item.replace(/[-_]/g, " ").trim())
+    .filter(Boolean)
+    .filter((item) => !PROJECT_KEYWORD_STOPWORDS.has(item.toLowerCase()))
+    .slice(0, 12);
+  return Array.from(new Set(tokens));
+}
+
+function countProjectAnchorHits(content: string, anchors: string[]) {
+  const normalized = String(content || "");
+  if (!normalized || anchors.length === 0) {
+    return 0;
+  }
+  const normalizedLower = normalized.toLowerCase();
+  return anchors.filter((token) => {
+    const target = String(token || "").trim();
+    if (!target) {
+      return false;
+    }
+    return /[a-zA-Z]/.test(target)
+      ? normalizedLower.includes(target.toLowerCase())
+      : normalized.includes(target);
+  }).length;
+}
 
 export function evaluateVisualDesignRequirementAlignment(input: DesignProfileInput & { content: string }) {
   const profile = resolveDesignRequirementProfile(input);
@@ -757,8 +852,15 @@ export function evaluateVisualDesignRequirementAlignment(input: DesignProfileInp
   const issues: string[] = [];
   const diagnostics: string[] = [];
   const genericHits = GENERIC_DESIGN_TEMPLATE_PATTERNS.filter((pattern) => pattern.test(content));
+  const projectAnchors = collectProjectAnchors(input);
+  const projectAnchorHits = countProjectAnchorHits(content, projectAnchors);
 
-  if (profile.scenarioId !== "collaboration_platform" && genericHits.length >= 2) {
+  diagnostics.push(`项目关键词命中: ${projectAnchorHits}/${projectAnchors.length}`);
+  if (projectAnchors.length > 0 && projectAnchorHits === 0) {
+    issues.push("视觉稿未体现项目关键词，疑似沿用历史模板而未围绕当前命题产出。");
+  }
+
+  if (profile.scenarioId !== "collaboration_platform" && genericHits.length >= 1) {
     issues.push("视觉稿仍在描述协作平台流程，而不是用户真实业务界面。");
   }
 

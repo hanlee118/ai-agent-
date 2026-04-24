@@ -11,6 +11,7 @@ const STITCH_TRANSPORT_COOLDOWN_ERROR = "STITCH_TRANSPORT_COOLDOWN_ACTIVE";
 let stitchTransportCooldownUntilMs = 0;
 let stitchTransportLogFilterInstalled = false;
 let stitchTransportOriginalConsoleError: typeof console.error | null = null;
+let stitchFetchPatchLock: Promise<void> = Promise.resolve();
 
 type UndiciModule = typeof import("undici");
 
@@ -240,6 +241,11 @@ export function isRetryableTransportError(error: unknown) {
   );
 }
 
+export function isStitchQuotaExhaustedError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /resource has been exhausted|quota|rate limit/i.test(message);
+}
+
 export function isStitchTransportCooldownError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes(STITCH_TRANSPORT_COOLDOWN_ERROR);
@@ -419,20 +425,59 @@ function extractListedScreens(payload: unknown) {
 
 async function withPatchedFetch<T>(
   dispatcher: Awaited<ReturnType<typeof createStitchDispatcher>>,
+  stitchBaseUrl: string,
   run: () => Promise<T>
 ): Promise<T> {
   if (!dispatcher) {
     return run();
   }
 
-  const undici: UndiciModule = await import("undici");
-  const originalDispatcher = undici.getGlobalDispatcher();
-  undici.setGlobalDispatcher(dispatcher);
-  try {
-    return await run();
-  } finally {
-    undici.setGlobalDispatcher(originalDispatcher);
-  }
+  const patchWindow = async () => {
+    const originalFetch = globalThis.fetch;
+    let stitchOrigin = "";
+    try {
+      stitchOrigin = new URL(stitchBaseUrl).origin;
+    } catch {
+      stitchOrigin = "";
+    }
+
+    const patchedFetch: typeof fetch = (input, init) => {
+      const requestUrl = typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : (typeof Request !== "undefined" && input instanceof Request
+            ? input.url
+            : "");
+      const shouldInjectDispatcher = !stitchOrigin || requestUrl.startsWith(stitchOrigin);
+      if (!shouldInjectDispatcher) {
+        return originalFetch(input, init);
+      }
+      const initRecord = init as (RequestInit & { dispatcher?: unknown }) | undefined;
+      if (initRecord?.dispatcher) {
+        return originalFetch(input, init);
+      }
+      const nextInit = {
+        ...(init || {}),
+        dispatcher
+      };
+      return (originalFetch as any)(input, nextInit);
+    };
+
+    globalThis.fetch = patchedFetch;
+    try {
+      return await run();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  };
+
+  const guarded = stitchFetchPatchLock.then(patchWindow, patchWindow);
+  stitchFetchPatchLock = guarded.then(
+    () => undefined,
+    () => undefined
+  );
+  return guarded;
 }
 
 async function createStitchClientContext(input: {
@@ -522,7 +567,7 @@ async function callStitchTool<T>(
       });
 
       try {
-        const result = await withPatchedFetch(dispatcher, () => client.callTool<T>(toolName, args));
+        const result = await withPatchedFetch(dispatcher, context.baseUrl, () => client.callTool<T>(toolName, args));
         clearStitchTransportCooldown();
         return result;
       } catch (error) {
@@ -595,7 +640,7 @@ async function recoverGeneratedArtifact(input: {
       retryableErrorStreak = 0;
     } catch (error) {
       if (isStitchTransportCooldownError(error)) {
-        throw error;
+        return null;
       }
       if (!isRetryableTransportError(error)) {
         throw error;
@@ -632,7 +677,7 @@ async function recoverGeneratedArtifact(input: {
         });
       } catch (error) {
         if (isStitchTransportCooldownError(error)) {
-          throw error;
+          return null;
         }
         if (!isRetryableTransportError(error)) {
           throw error;
@@ -688,8 +733,19 @@ async function generateViaDirectSdk(
     recoveryTimeoutMs?: number;
   }
 ): Promise<StitchDesignRequestResult> {
+  const prompt = buildPrompt(input);
   if (isStitchTransportCooldownActive()) {
-    throw new Error("STITCH_TRANSPORT_COOLDOWN_ACTIVE");
+    if (options?.allowPending) {
+      return {
+        status: "pending",
+        pending: buildPendingArtifact({
+          projectId: input.projectId,
+          prompt,
+          executor
+        })
+      };
+    }
+    throw new Error(STITCH_TRANSPORT_COOLDOWN_ERROR);
   }
   const runtimeConfig = withRuntimeConfigOverrides(readStitchRuntimeConfig(), {
     requestTimeoutMs: options?.requestTimeoutMs,
@@ -699,17 +755,18 @@ async function generateViaDirectSdk(
     0,
     Number(options?.recoveryTimeoutMs ?? runtimeConfig.recoveryTimeoutMs)
   );
-  const prompt = buildPrompt(input);
   const title = truncate(`${input.projectId} ${input.projectName}`, 90);
   const context = await createStitchClientContext({
     apiKey: runtimeConfig.apiKey,
     baseUrl: runtimeConfig.baseUrl,
     timeoutMs: runtimeConfig.timeoutMs
   });
+  let stitchProjectIdForPending = normalizeText(input.projectId, "unknown");
 
   try {
     const createdProject = await callStitchTool<unknown>(context, "create_project", { title });
     const stitchProjectId = extractProjectId(createdProject);
+    stitchProjectIdForPending = stitchProjectId;
 
     try {
       const generatedScreen = await callStitchTool<unknown>(
@@ -741,19 +798,29 @@ async function generateViaDirectSdk(
         };
       }
     } catch (error) {
-      if (!isRetryableTransportError(error)) {
+      if (!isRetryableTransportError(error) && !isStitchQuotaExhaustedError(error)) {
         throw error;
       }
       noteStitchTransportFailure();
     }
 
-    const recoveredArtifact = await recoverGeneratedArtifact({
-      context,
-      projectId: stitchProjectId,
-      prompt,
-      executor,
-      timeoutMs: recoveryTimeoutMs
-    });
+    let recoveredArtifact: StitchDesignArtifact | null = null;
+    try {
+      recoveredArtifact = await recoverGeneratedArtifact({
+        context,
+        projectId: stitchProjectId,
+        prompt,
+        executor,
+        timeoutMs: recoveryTimeoutMs
+      });
+    } catch (error) {
+      if (!isStitchTransportCooldownError(error)) {
+        throw error;
+      }
+      if (!options?.allowPending) {
+        throw error;
+      }
+    }
     if (recoveredArtifact) {
       clearStitchTransportCooldown();
       return {
@@ -774,6 +841,23 @@ async function generateViaDirectSdk(
     }
 
     throw new Error(`STITCH_RECOVERY_TIMEOUT: project=${stitchProjectId}`);
+  } catch (error) {
+    const isQuota = isStitchQuotaExhaustedError(error);
+    const isCooldown = isStitchTransportCooldownError(error);
+    if (isQuota) {
+      noteStitchTransportFailure();
+    }
+    if ((isQuota || isCooldown) && options?.allowPending) {
+      return {
+        status: "pending",
+        pending: buildPendingArtifact({
+          projectId: stitchProjectIdForPending,
+          prompt,
+          executor
+        })
+      };
+    }
+    throw error;
   } finally {
     await closeStitchClientContext(context);
   }
@@ -821,7 +905,7 @@ export async function recoverStitchDesignArtifact(input: {
   timeoutMs?: number;
 }): Promise<StitchDesignArtifact | null> {
   if (isStitchTransportCooldownActive()) {
-    throw new Error("STITCH_TRANSPORT_COOLDOWN_ACTIVE");
+    return null;
   }
   const runtimeConfig = withRuntimeConfigOverrides(readStitchRuntimeConfig(), {
     requestTimeoutMs: input.requestTimeoutMs

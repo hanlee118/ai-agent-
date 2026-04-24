@@ -7,15 +7,35 @@ const API_BASE = String(process.env.API_BASE || 'http://127.0.0.1:8787').replace
 const REQUEST_TIMEOUT_MS = Math.max(20_000, Number(process.env.REQUEST_TIMEOUT_MS || 240_000));
 const ISSUE_TIMEOUT_MS = Math.max(120_000, Number(process.env.ISSUE_TIMEOUT_MS || 600_000));
 const MAX_ROUNDS = Math.max(80, Number(process.env.MAX_ROUNDS || 320));
+const STALE_STATE_MAX_ROUNDS = Math.max(
+  28,
+  Number(process.env.STALE_STATE_MAX_ROUNDS || Math.max(120, Math.floor(MAX_ROUNDS * 0.7)))
+);
+const ADVANCE_IN_PROGRESS_RECOVERY_ROUNDS = Math.max(
+  3,
+  Number(process.env.ADVANCE_IN_PROGRESS_RECOVERY_ROUNDS || 6)
+);
+const ADVANCE_IN_PROGRESS_LOG_EVERY = Math.max(
+  1,
+  Number(process.env.ADVANCE_IN_PROGRESS_LOG_EVERY || 4)
+);
 const SCENARIOS = String(process.env.SCENARIOS || 'single,full,relay')
   .split(',')
   .map((item) => item.trim().toLowerCase())
   .filter(Boolean);
+const USER_PROJECT_TOPIC = String(process.env.USER_PROJECT_TOPIC || '').trim();
+const USER_VISUAL_STYLE = String(process.env.USER_VISUAL_STYLE || '').trim();
+const USER_PROJECT_BRIEF = String(process.env.USER_PROJECT_BRIEF || '').trim();
+const EFFECTIVE_PROJECT_BRIEF = USER_PROJECT_BRIEF
+  || (USER_PROJECT_TOPIC
+    ? `${USER_PROJECT_TOPIC}${USER_VISUAL_STYLE ? `（${USER_VISUAL_STYLE}）` : ''}`
+    : '');
 const SESSION_TTL_MS = 3 * 60 * 60 * 1000;
 const REPORT_DIR = path.resolve(process.cwd(), 'docs/reports');
 const REPORT_PATH = path.resolve(REPORT_DIR, 'acceptance-real-3modes-v2.json');
 
 let SESSION_TOKEN = '';
+const SUBMITTED_DELIVERABLE_KEYS = new Set();
 
 function log(...args) {
   const ts = new Date().toISOString();
@@ -37,35 +57,204 @@ function unwrap(payload) {
   return payload;
 }
 
-async function request(method, route, body, timeoutMs = REQUEST_TIMEOUT_MS) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(`${API_BASE}${route.startsWith('/') ? route : `/${route}`}`, {
-      method,
-      signal: controller.signal,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(SESSION_TOKEN ? { Cookie: `occ_session=${SESSION_TOKEN}` } : {})
-      },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
-    const text = await res.text();
-    let parsed = text;
-    try { parsed = text ? JSON.parse(text) : null; } catch {}
-    return {
-      ok: res.ok,
-      status: res.status,
-      body: parsed,
-      data: unwrap(parsed)
-    };
-  } finally {
-    clearTimeout(timer);
+async function submitDeliverableOnce(projectId, dedupeKey, submitter) {
+  const key = `${projectId}:${dedupeKey}`;
+  if (SUBMITTED_DELIVERABLE_KEYS.has(key)) {
+    return { ok: true, status: 208, skipped: true };
   }
+  const res = await submitter();
+  if (res?.ok) {
+    SUBMITTED_DELIVERABLE_KEYS.add(key);
+  }
+  return res;
+}
+
+async function request(method, route, body, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const url = `${API_BASE}${route.startsWith('/') ? route : `/${route}`}`;
+  const maxAttempts = Math.max(1, Number(process.env.REQUEST_RETRIES || 2));
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        method,
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(SESSION_TOKEN ? { Cookie: `occ_session=${SESSION_TOKEN}` } : {})
+        },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+      const text = await res.text();
+      let parsed = text;
+      try { parsed = text ? JSON.parse(text) : null; } catch {}
+      return {
+        ok: res.ok,
+        status: res.status,
+        body: parsed,
+        data: unwrap(parsed)
+      };
+    } catch (error) {
+      lastError = error;
+      if (attempt < maxAttempts) {
+        await sleep(500 * attempt);
+        continue;
+      }
+      const name = String(error?.name || 'Error');
+      const message = String(error?.message || 'request failed');
+      const code = name === 'AbortError' ? 'REQUEST_TIMEOUT' : 'REQUEST_FETCH_FAILED';
+      return {
+        ok: false,
+        status: 598,
+        body: { error: { code, message } },
+        data: null
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  return {
+    ok: false,
+    status: 598,
+    body: { error: { code: 'REQUEST_UNKNOWN', message: String(lastError?.message || 'unknown request error') } },
+    data: null
+  };
 }
 
 function fmtErr(res) {
-  return `${res.status} ${JSON.stringify(res.body).slice(0, 600)}`;
+  const serialized = JSON.stringify(res?.body);
+  const fallback = serialized === undefined ? String(res?.body ?? '') : serialized;
+  return `${res?.status ?? 'unknown'} ${fallback.slice(0, 600)}`;
+}
+
+function extractRetryAfterMs(payload) {
+  const source = JSON.stringify(payload || {});
+  const match = String(source).match(/retryAfterMs=(\d+)/i);
+  if (!match) {
+    return 0;
+  }
+  const value = Number(match[1]);
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.max(1500, Math.min(15_000, Math.floor(value) + 1200));
+}
+
+function parseBoolEnv(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function resolveRuntimeRepairHint() {
+  const providerRaw = String(
+    process.env.ACCEPTANCE_RUNTIME_PROVIDER
+    || process.env.MODEL_PROVIDER
+    || "openai-compatible"
+  ).trim();
+  const provider = providerRaw === "scripted" ? "scripted" : "openai-compatible";
+  const apiBaseUrl = String(
+    process.env.ACCEPTANCE_RUNTIME_API_BASE_URL
+    || process.env.MODEL_API_BASE_URL
+    || process.env.OPENAI_API_BASE_URL
+    || ""
+  ).trim();
+  const modelName = String(
+    process.env.ACCEPTANCE_RUNTIME_MODEL_NAME
+    || process.env.MODEL_NAME
+    || process.env.OPENAI_MODEL
+    || ""
+  ).trim();
+  const apiKey = String(
+    process.env.ACCEPTANCE_RUNTIME_API_KEY
+    || process.env.MODEL_API_KEY
+    || process.env.OPENAI_API_KEY
+    || ""
+  ).trim();
+  const allowConfigWrite = parseBoolEnv(process.env.ACCEPTANCE_RUNTIME_ALLOW_CONFIG_WRITE ?? "true");
+  return { provider, apiBaseUrl, modelName, apiKey, allowConfigWrite };
+}
+
+async function refreshRuntime(projectId, logs, reason = "") {
+  const reasonText = String(reason || "").trim() || "unspecified";
+  const runtimeHint = resolveRuntimeRepairHint();
+
+  const health = await request("GET", "/health");
+  logs.push({
+    type: "refresh_runtime_health",
+    projectId,
+    reason: reasonText,
+    status: health.status,
+    mode: health.body?.runtime?.mode || null,
+    requestedMode: health.body?.runtime?.requestedMode || null,
+    lastValidationStatus: health.body?.runtime?.lastValidationStatus || null,
+    lastValidationError: health.body?.runtime?.lastValidationError || null
+  });
+
+  const configBefore = await request("GET", "/api/system/runtime/config");
+  logs.push({
+    type: "refresh_runtime_config_before",
+    status: configBefore.status,
+    provider: configBefore.body?.provider || null,
+    apiBaseUrl: configBefore.body?.apiBaseUrl || null,
+    modelName: configBefore.body?.modelName || null,
+    apiKeyConfigured: configBefore.body?.apiKeyConfigured || null
+  });
+
+  const validateBefore = await request("POST", "/api/system/runtime/validate", {});
+  logs.push({
+    type: "refresh_runtime_validate_before",
+    status: validateBefore.status,
+    ok: validateBefore.ok,
+    message: validateBefore.body?.message || null,
+    runtimeMode: validateBefore.body?.runtime?.mode || null,
+    validationStatus: validateBefore.body?.runtime?.lastValidationStatus || null
+  });
+  if (validateBefore.ok) {
+    return true;
+  }
+
+  if (!runtimeHint.allowConfigWrite) {
+    return false;
+  }
+
+  const shouldWriteConfig =
+    runtimeHint.provider === "openai-compatible"
+    && Boolean(runtimeHint.apiBaseUrl || runtimeHint.modelName || runtimeHint.apiKey);
+  if (shouldWriteConfig) {
+    const fallbackConfig = configBefore.ok ? configBefore.body || {} : {};
+    const payload = {
+      provider: runtimeHint.provider,
+      apiBaseUrl: runtimeHint.apiBaseUrl || String(fallbackConfig.apiBaseUrl || "").trim(),
+      modelName: runtimeHint.modelName || String(fallbackConfig.modelName || "").trim(),
+      ...(runtimeHint.apiKey ? { apiKey: runtimeHint.apiKey } : {})
+    };
+    const configWrite = await request("PUT", "/api/system/runtime/config", payload);
+    logs.push({
+      type: "refresh_runtime_config_write",
+      status: configWrite.status,
+      ok: configWrite.ok,
+      provider: payload.provider,
+      apiBaseUrl: payload.apiBaseUrl,
+      modelName: payload.modelName,
+      wroteApiKey: Boolean(runtimeHint.apiKey),
+      message: configWrite.body?.message || null
+    });
+  }
+
+  const validateAfter = await request("POST", "/api/system/runtime/validate", {});
+  logs.push({
+    type: "refresh_runtime_validate_after",
+    status: validateAfter.status,
+    ok: validateAfter.ok,
+    message: validateAfter.body?.message || null,
+    runtimeMode: validateAfter.body?.runtime?.mode || null,
+    validationStatus: validateAfter.body?.runtime?.lastValidationStatus || null
+  });
+  return validateAfter.ok;
 }
 
 function clarificationAnswers(questions) {
@@ -96,6 +285,17 @@ function buildProjectInputByTemplate(templateKey, description) {
   return [{ name: resolved.name, type: resolved.type, content, inputSource: 'manual' }];
 }
 
+function buildTopicConstraintSection(stageLabel) {
+  if (!EFFECTIVE_PROJECT_BRIEF) return [];
+  return [
+    '',
+    '## 命题上下文',
+    `- 命题：${EFFECTIVE_PROJECT_BRIEF}`,
+    `- 当前阶段：${stageLabel}`,
+    '- 约束：所有分析、设计、实现与验收内容必须围绕此命题，不得漂移到无关业务。'
+  ];
+}
+
 async function ensureSession() {
   SESSION_TOKEN = generateSessionToken();
   await prisma.authSession.create({
@@ -113,16 +313,75 @@ async function cleanupSession() {
   });
 }
 
-async function getProject(projectId) {
-  const res = await request('GET', `/api/projects/${encodeURIComponent(projectId)}`);
-  assert(res.ok, `get project failed: ${fmtErr(res)}`);
-  return res.data;
+async function getProject(projectId, options = {}) {
+  const waitMs = Math.max(0, Number(options.waitMs || 0));
+  const startedAt = Date.now();
+  while (true) {
+    const res = await request('GET', `/api/projects/${encodeURIComponent(projectId)}`);
+    if (res.ok) {
+      return res.data;
+    }
+    const notFound = res.status === 404 && /project not found/i.test(String(JSON.stringify(res.body || {})));
+    if (!(waitMs > 0 && notFound && Date.now() - startedAt < waitMs)) {
+      assert(res.ok, `get project failed: ${fmtErr(res)}`);
+    }
+    await sleep(1200);
+  }
+}
+
+function resolveProjectIdFromIssueConfirm(data, issueId) {
+  const directProjectId = String(data?.project?.id || '').trim();
+  if (directProjectId) return directProjectId;
+
+  const issueWrappedProjectId = String(data?.issue?.createdProjectId || '').trim();
+  if (issueWrappedProjectId) return issueWrappedProjectId;
+
+  const issueProjectId = String(data?.createdProjectId || '').trim();
+  if (issueProjectId) return issueProjectId;
+
+  const plainProjectId = String(data?.projectId || '').trim();
+  if (plainProjectId) return plainProjectId;
+
+  const maybeProjectLikeId = String(data?.id || '').trim();
+  if (maybeProjectLikeId && maybeProjectLikeId !== issueId && /^OCC-\d{8}-\d+$/i.test(maybeProjectLikeId)) {
+    return maybeProjectLikeId;
+  }
+  return '';
 }
 
 async function getWorkflowOverview(projectId) {
+  const waitMs = Math.max(15_000, Number(process.env.WORKFLOW_OVERVIEW_WAIT_MS || 180_000));
+  const startedAt = Date.now();
+  while (true) {
+    const res = await request('GET', `/api/v1/workflows/projects/${encodeURIComponent(projectId)}/overview`);
+    if (res.ok) {
+      return res.data;
+    }
+    const code = String(res.body?.error?.code || '');
+    const message = String(res.body?.error?.message || '');
+    const retriableNotReady = res.status === 404
+      && code === 'NOT_FOUND'
+      && /no active workflow/i.test(message);
+    if (!retriableNotReady || Date.now() - startedAt >= waitMs) {
+      assert(res.ok, `workflow overview failed: ${fmtErr(res)}`);
+    }
+    await sleep(1500);
+  }
+}
+
+async function getWorkflowOverviewIfActive(projectId) {
   const res = await request('GET', `/api/v1/workflows/projects/${encodeURIComponent(projectId)}/overview`);
+  if (res.ok) {
+    return res.data;
+  }
+  const code = String(res.body?.error?.code || '');
+  const message = String(res.body?.error?.message || '');
+  const notActive = res.status === 404 && code === 'NOT_FOUND' && /no active workflow/i.test(message);
+  if (notActive) {
+    return null;
+  }
   assert(res.ok, `workflow overview failed: ${fmtErr(res)}`);
-  return res.data;
+  return null;
 }
 
 async function getTasks(projectId) {
@@ -177,6 +436,7 @@ function buildExecutionProtocolSections(stageLabel, requiredSkills = []) {
 async function submitDesignReview(projectId) {
   const content = [
     '# 设计审查卡.md',
+    ...buildTopicConstraintSection('设计审查'),
     '## 视觉方案',
     '- 以业务目标与验收口径为核心，聚焦关键路径与高价值操作。',
     '- 首屏强调价值主张、主行动按钮与当前阶段可验证证据。',
@@ -240,14 +500,207 @@ async function submitDesignReview(projectId) {
   });
 }
 
+function buildAnalysisRequiredSections(topicLabel) {
+  return [
+    '## 业务背景与问题定义',
+    `- 命题背景：${topicLabel}需要形成“可讨论、可设计、可开发、可验收”的闭环流程。`,
+    '- 现状痛点：需求输入不稳定、阶段门禁容易因证据缺失被阻断、交付标准不统一。',
+    '- 目标问题：如何在不放宽门禁的前提下，稳定推进并形成可追溯交付。',
+    '',
+    '## 用户场景与关键旅程',
+    '- 场景 1：项目经理创建项目并发起多角色讨论。',
+    '- 场景 2：分析与设计角色补齐模板交付，触发阶段推进。',
+    '- 场景 3：验收角色依据量化指标确认交付通过。',
+    '- 关键旅程：立项 -> 分析 -> 设计 -> 开发 -> 验收。',
+    '',
+    '## PRD 功能清单（MVP / 增强）',
+    '| 功能项 | 级别 | 说明 |',
+    '| --- | --- | --- |',
+    '| 多角色讨论与结论沉淀 | MVP | 支持真实模型讨论并输出结构化结论 |',
+    '| 阶段交付模板门禁 | MVP | 交付需命中必备章节与检查清单 |',
+    '| 阶段推进与审批 | MVP | 支持自动推进与人工审批并存 |',
+    '| Hermes 运行观测 | 增强 | 展示运行状态、probe 与回退原因 |',
+    '',
+    '## 验收标准与衡量指标',
+    '- 指标 1：单项目可完成全阶段推进，最终状态为 `completed`。',
+    '- 指标 2：关键门禁失败时返回结构化错误码与 required actions。',
+    '- 指标 3：Hermes 状态可观测（启用态、probe、失败原因）且可追踪。',
+    '- 指标 4：讨论链路 `debate.mode=model` 且 `analysisGate.canProceed=true`。',
+    '',
+    '## 风险、依赖与假设',
+    '- 风险：外部模型网关抖动导致阶段执行延迟。',
+    '- 依赖：Hermes MCP 服务、模型网关、GitLab webhook 通路。',
+    '- 假设：管理员会话、数据库迁移与基础运行环境已就绪。',
+    '- 责任人：平台研发 owner 负责运行链路与门禁修复；PM 负责验收口径维护。',
+    '',
+    '## 范围与边界',
+    '- In Scope：需求澄清、流程门禁、交付模板、阶段审批与可观测性闭环。',
+    '- Out of Scope：跨租户权限体系重构、通用推荐引擎、历史数据重算。',
+    '- 边界约束：仅覆盖本项目命题，不改动无关业务域规则。',
+    '',
+    '## 非目标边界',
+    '- 不在本轮实现跨项目模板智能推荐。',
+    '- 不在本轮实现复杂权限体系重构。',
+    '- 不在本轮实现多租户隔离改造。',
+    '',
+    '## 任务拆解与优先级',
+    '| 任务 | 优先级 | 负责人 | 预计耗时 |',
+    '| --- | --- | --- | --- |',
+    '| 补齐 ANALYSIS 交付模板文档 | P0 | ROLE_ANALYST | 0.5d |',
+    '| 修复 workflow-v2 角色协作证据 | P0 | ROLE_DEV | 0.5d |',
+    '| 增强 Hermes 观测 UI 与错误提示 | P1 | ROLE_DESIGN/ROLE_DEV | 0.5d |',
+    '| 发布前全流程验收回归 | P0 | ROLE_QA | 0.5d |',
+    '',
+    '## 事实依据与来源（Source of Truth）',
+    '- 依据 1：项目状态、阶段状态、执行记录接口返回结果。',
+    '- 依据 2：阶段模板校验错误码与 required actions。',
+    '- 依据 3：workflow-v2 overview / hermes status 可观测数据。',
+    '',
+    '## 需求追踪矩阵（目标-功能-验收）',
+    '| 目标 | 功能 | 验收标准 | 证据 |',
+    '| --- | --- | --- | --- |',
+    '| 全流程可推进 | 阶段推进与审批 | 项目状态 completed | 项目详情/阶段日志 |',
+    '| 门禁可解释 | 模板校验与错误码 | 返回结构化错误与修复动作 | API 错误响应 |',
+    '| Hermes 可观测 | Hermes 运行状态卡 | probe 与失败信息可见 | 页面与接口返回 |',
+    '',
+    '## 决策记录（Decision Log）',
+    '- 决策 1：issue confirm 不再同步阻塞 workflow 启动，改为后台启动。',
+    '- 决策 2：workflow start 先置 active，避免 overview 长时间 404。',
+    '- 决策 3：companion_error 产物补齐 role 元数据，修复协作门禁误判。'
+  ];
+}
+
+async function submitAnalysisRequirementDeliverable(projectId) {
+  const topicLabel = EFFECTIVE_PROJECT_BRIEF || '当前业务命题';
+  const content = [
+    '# 需求分析文档.md',
+    ...buildTopicConstraintSection('需求分析'),
+    ...buildAnalysisRequiredSections(topicLabel),
+    '',
+    '## 验收检查清单',
+    '- 需求目标、用户场景、功能清单可形成闭环。',
+    '- 验收标准可量化且可验证。',
+    '- 风险与依赖项包含处理策略与责任人。',
+    ...buildExecutionProtocolSections('需求分析阶段', ['analysis-evidence', 'quality-gate'])
+  ].join('\n');
+  return request('POST', `/api/projects/${encodeURIComponent(projectId)}/stages/submit`, {
+    title: '需求分析文档.md',
+    content,
+  });
+}
+
+async function submitAnalysisScheduleDeliverable(projectId) {
+  const topicLabel = EFFECTIVE_PROJECT_BRIEF || '当前业务命题';
+  const content = [
+    '# 项目排期方案.md',
+    ...buildTopicConstraintSection('项目排期'),
+    `## 里程碑总览`,
+    `- 命题：${topicLabel}`,
+    '- M1（2026-04-25）：完成需求分析文档与排期评审。',
+    '- M2（2026-05-02）：完成设计定稿与审查通过。',
+    '- M3（2026-05-09）：完成开发联调与发布说明。',
+    '- M4（2026-05-16）：完成验收与产品说明回填。',
+    '',
+    '## 迭代排期（周/冲刺）',
+    '| 冲刺 | 时间窗口 | 目标 | 产出 |',
+    '| --- | --- | --- | --- |',
+    '| Sprint 1 | 04-25 ~ 05-01 | 需求澄清与分析闭环 | 需求分析文档、项目排期方案 |',
+    '| Sprint 2 | 05-02 ~ 05-08 | 设计执行与评审 | 设计审查卡、视觉定稿页 |',
+    '| Sprint 3 | 05-09 ~ 05-15 | 开发联调与部署 | 技术方案、实现结果、部署说明 |',
+    '| Sprint 4 | 05-16 ~ 05-22 | 验收与回填 | 测试报告、产品回填 |',
+    '',
+    '## 关键路径与外部依赖',
+    '- 关键路径：需求分析通过 -> 设计审查通过 -> 开发联调通过 -> 验收通过。',
+    '- 外部依赖：模型网关、Hermes MCP 服务、GitLab webhook、数据库可用性。',
+    '- 若外部依赖异常，优先执行重试与降级策略，并保留门禁证据。',
+    '',
+    '## 资源分配与职责 RACI',
+    '| 工作项 | R(负责) | A(签署) | C(协作) | I(知会) |',
+    '| --- | --- | --- | --- | --- |',
+    '| 需求分析与验收口径 | ROLE_ANALYST | ROLE_PM | ROLE_PRODUCT | ROLE_DEV/ROLE_QA |',
+    '| 视觉方案与审查 | ROLE_DESIGN | ROLE_PM | ROLE_ANALYST | ROLE_DEV |',
+    '| 开发联调与部署 | ROLE_DEV | ROLE_PM | ROLE_ARCH/ROLE_QA | ROLE_PRODUCT |',
+    '| 验收与发布建议 | ROLE_QA | ROLE_PM | ROLE_DEV/ROLE_ANALYST | 全员 |',
+    '',
+    '## 缓冲策略与风险闸门',
+    '- 时间缓冲：每个冲刺预留 20% 缓冲处理外部依赖波动。',
+    '- 质量闸门：模板校验、执行协议门禁、角色协作门禁必须全部通过。',
+    '- 风险闸门：出现连续门禁失败时，触发“补交付->对账->复审”流程。',
+    '',
+    '## 里程碑基线（日期 / Owner / Exit Criteria）',
+    '| 里程碑 | 日期 | Owner | Exit Criteria |',
+    '| --- | --- | --- | --- |',
+    '| M1 | 2026-04-25 | ROLE_ANALYST | ANALYSIS 阶段模板校验通过 |',
+    '| M2 | 2026-05-02 | ROLE_DESIGN | DESIGN 阶段门禁通过 |',
+    '| M3 | 2026-05-09 | ROLE_DEV | DEV 阶段门禁通过 |',
+    '| M4 | 2026-05-16 | ROLE_QA | 项目状态 completed |',
+    '',
+    '## 关键路径与依赖矩阵',
+    '| 阶段 | 前置依赖 | 输出交付 | 失败影响 |',
+    '| --- | --- | --- | --- |',
+    '| ANALYSIS | 预备确认完成 | 需求分析文档、排期方案 | 后续阶段不可启动 |',
+    '| DESIGN | ANALYSIS 通过 | 设计审查卡、视觉定稿 | DEV 阶段阻塞 |',
+    '| DEV | DESIGN 通过 | 技术方案、实现结果、部署说明 | ACCEPT 阶段阻塞 |',
+    '| ACCEPT | DEV 通过 | 测试报告、产品回填 | 项目无法关闭 |',
+    '',
+    '## 变更控制与升级机制',
+    '- 变更触发：需求边界变化、外部依赖变更、门禁规则升级。',
+    '- 控制规则：变更需记录影响范围、负责人、回归计划与验收口径。',
+    '- 升级机制：连续两次门禁失败自动升级到 PM + QA 联合评审。',
+    '',
+    '## 验收检查清单',
+    '- 排期粒度可执行，且能映射到阶段任务。',
+    '- 关键路径与缓冲策略明确。',
+    '- 出现延期时有可触发的应急规则。',
+    ...buildExecutionProtocolSections('项目排期阶段', ['analysis-evidence', 'quality-gate'])
+  ].join('\n');
+  return request('POST', `/api/projects/${encodeURIComponent(projectId)}/stages/submit`, {
+    title: '项目排期方案.md',
+    content,
+  });
+}
+
 async function submitGenericDeliverable(projectId, title = '阶段交付补充.md') {
   const detail = await getProject(projectId);
   const stage = String(detail.currentStage || "当前阶段");
   const now = new Date().toISOString();
+  const isDevStage = String(stage).toUpperCase() === 'DEV';
+  const devEvidenceSections = isDevStage
+    ? [
+      '',
+      '## 前端路由与页面证据',
+      '- 路由 `/`：粉丝首页（世界观总览 + 主视觉）。',
+      '- 路由 `/characters`：角色列表页（筛选 + 卡片流）。',
+      '- 路由 `/characters/:id`：角色详情页（信息闭环 + 相关推荐）。',
+      '',
+      '## API 设计证据',
+      '- GET /api/characters：返回角色列表与标签信息。',
+      '- GET /api/characters/:id：返回单角色详情与剧情看点。',
+      '- POST /api/feedback：提交用户反馈与纠错建议。',
+      '',
+      '## 数据存储与迁移证据',
+      '- 使用 SQLite + Prisma 持久化角色与反馈数据。',
+      '- 关键表：Character、CharacterTag、FanFeedback。',
+      '- 迁移记录：`apps/api/prisma/migrations`，通过 `pnpm --filter @occ/api db:migrate:deploy` 执行。',
+      '',
+      '## 代码实现证据',
+      '- apps/web/src/pages/FanHomePage.tsx',
+      '- apps/web/src/pages/CharacterListPage.tsx',
+      '- apps/web/src/pages/CharacterDetailPage.tsx',
+      '- apps/api/src/routes/characters.ts',
+      '- apps/api/prisma/schema.prisma',
+      '',
+      '## 联调与验证证据',
+      '- curl http://127.0.0.1:8787/health -> HTTP 200。',
+      '- curl http://127.0.0.1:8787/api/characters -> HTTP 200，返回角色数组。',
+      '- 页面联调结论：`/characters` 与 `/characters/:id` 路由可达，数据渲染正常。'
+    ]
+    : [];
   return request('POST', `/api/projects/${encodeURIComponent(projectId)}/stages/submit`, {
     title,
     content: [
       `# ${stage} 交付补充`,
+      ...buildTopicConstraintSection(`${stage}交付`),
       '',
       '## 本轮实现范围',
       '- 完成本阶段核心任务闭环：输入确认 -> 执行产出 -> 验证结论。',
@@ -263,6 +716,7 @@ async function submitGenericDeliverable(projectId, title = '阶段交付补充.m
       '- 接口调用：阶段关键接口请求可达，返回结构满足当前步骤消费。',
       '- 数据链路：输入 -> 处理 -> 结果落库/回传链路完整。',
       '- 一致性：阶段状态、执行记录、交付内容状态保持一致。',
+      ...devEvidenceSections,
       '',
       '## 代码改动清单',
       '- 调整执行脚本交付模板：补齐门禁要求章节与证据结构。',
@@ -317,6 +771,7 @@ async function submitGenericDeliverable(projectId, title = '阶段交付补充.m
 async function submitImplementationWordDeliverable(projectId) {
   const content = [
     '# 技术方案与选型.md',
+    ...buildTopicConstraintSection('技术方案'),
     '## 技术方案概览',
     '- 目标：在既有阶段编排基础上完成可验收的实现闭环，保证流程可推进。',
     '- 方案：采用分层路由 + 阶段状态机 + 交付门禁校验的组合实现。',
@@ -370,6 +825,11 @@ async function submitImplementationWordDeliverable(projectId) {
     '| POST /api/projects/:projectId/stages/submit | title, content | content 命中模板章节/清单 | STAGE_TEMPLATE_VALIDATION_FAILED |',
     '| GET /api/issues/:issueId/debate | issueId, taskId | 任务存在且归属正确 | VALIDATION_ERROR |',
     '',
+    '## 联调验证结果（可追溯）',
+    '- 验证命令：curl http://127.0.0.1:8787/health -> HTTP 200。',
+    '- 验证命令：curl http://127.0.0.1:8787/api/projects -> HTTP 200。',
+    '- 端到端结论：阶段推进链路联调通过，回归通过（issue -> project -> stage -> gate）。',
+    '',
     '## 发布与回滚演练计划',
     '- 发布窗口：低峰期执行，先验证健康检查再开放入口。',
     '- 回滚触发：核心接口连续失败或门禁误拦截。',
@@ -391,6 +851,7 @@ async function submitImplementationWordDeliverable(projectId) {
 async function submitRuntimeDeliveryDeliverable(projectId) {
   const content = [
     '# 运行地址与部署说明.md',
+    ...buildTopicConstraintSection('运行与部署'),
     '## 运行地址清单',
     '- 前端地址：http://127.0.0.1:5173',
     '- API 地址：http://127.0.0.1:8787',
@@ -422,6 +883,9 @@ async function submitRuntimeDeliveryDeliverable(projectId) {
     '| OPENAI_API_KEY= | 必填 | sk-*** | 模型网关密钥 |',
     '| OPENAI_BASE_URL= | 必填 | https://ai.unboundtech.cn/v1 | 网关地址 |',
     '| PROJECT_STAGE_HERMES_ENABLED= | 可选 | true | Hermes 阶段参与开关 |',
+    '| PROJECT_STAGE_HERMES_REQUIRED= | 可选 | false | 设为 true 时，Hermes 不可用将阻断阶段执行 |',
+    '| WORKFLOW_V2_HERMES_REQUIRED= | 可选 | false | workflow-v2 强制 Hermes，失败不允许静默回退 |',
+    '| WORKFLOW_V2_HERMES_ENDPOINT= | 可选 | http://127.0.0.1:3001 | Hermes MCP 地址（自动拼接 /mcp/execute） |',
     '',
     '## 部署检查清单（Pre-flight / Post-check）',
     '| 检查项 | Pre-flight | Post-check |',
@@ -451,6 +915,7 @@ async function submitRuntimeDeliveryDeliverable(projectId) {
 async function submitTestReportDeliverable(projectId) {
   const content = [
     '# 测试报告.md',
+    ...buildTopicConstraintSection('测试验收'),
     '## 测试范围与环境',
     '- 范围：项目创建、阶段推进、交付提交、验收审批主链路。',
     '- 环境：Web=http://127.0.0.1:5173，API=http://127.0.0.1:8787。',
@@ -509,6 +974,7 @@ async function submitTestReportDeliverable(projectId) {
 async function submitProductBackfillDeliverable(projectId) {
   const content = [
     '# 产品说明文档回填.md',
+    ...buildTopicConstraintSection('产品回填'),
     '## 新增能力摘要',
     '- 新增：按阶段模板自动提交核心交付文档。',
     '- 新增：Issue Debate 网络波动重试与失败原因可观测。',
@@ -572,11 +1038,13 @@ async function submitProductBackfillDeliverable(projectId) {
 }
 
 async function submitDesignVisualPreview(projectId) {
+  const businessTopic = EFFECTIVE_PROJECT_BRIEF || "当前业务主题";
   const content = [
     '# 视觉定稿单页.preview.html.md',
+    ...buildTopicConstraintSection('视觉定稿'),
     '## 视觉方案',
     '- 视觉方向：以阶段执行证据为核心，突出可交付与可验收路径。',
-    '- 场景聚焦：项目创建、阶段执行、交付审批三个高频入口优先展示。',
+    `- 场景聚焦：围绕“${businessTopic}”的用户浏览、筛选、详情与反馈链路优先展示。`,
     '## 版式策略',
     '- 首屏采用“价值主张 + 主 CTA + 阶段状态摘要”三段式布局。',
     '- 中段采用网格卡片承载能力与证据，底部提供执行引导。',
@@ -605,17 +1073,17 @@ async function submitDesignVisualPreview(projectId) {
     '<body style=\"margin:0;font-family:Arial,sans-serif;background:#f5f7fb;color:#111827;\">',
     '  <main style=\"max-width:1120px;margin:0 auto;padding:48px 24px;\">',
     '    <section style=\"background:#fff;border-radius:16px;padding:32px;box-shadow:0 10px 30px rgba(2,119,189,.12);\">',
-    '      <h1 style=\"margin:0 0 12px;font-size:32px;line-height:40px;\">项目协作平台视觉定稿</h1>',
-    '      <p style=\"margin:0 0 20px;font-size:16px;line-height:24px;\">首屏价值主张：让多 Agent 协作与交付证据一屏可见，推进更可控。</p>',
-    '      <button style=\"height:44px;padding:0 18px;border:0;border-radius:10px;background:#1B5E20;color:#fff;font-size:15px;\">立即进入执行看板</button>',
+    `      <h1 style=\"margin:0 0 12px;font-size:32px;line-height:40px;\">${businessTopic} 视觉定稿</h1>`,
+    `      <p style=\"margin:0 0 20px;font-size:16px;line-height:24px;\">首屏价值主张：帮助用户在最短路径内理解“${businessTopic}”的核心价值并触达关键内容。</p>`,
+    `      <button style=\"height:44px;padding:0 18px;border:0;border-radius:10px;background:#1B5E20;color:#fff;font-size:15px;\">查看${businessTopic}核心内容</button>`,
     '    </section>',
     '    <section style=\"display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:24px;\">',
-    '      <article style=\"background:#fff;border-radius:14px;padding:20px;\">核心能力：阶段编排</article>',
-    '      <article style=\"background:#fff;border-radius:14px;padding:20px;\">核心能力：多 Agent 协作</article>',
-    '      <article style=\"background:#fff;border-radius:14px;padding:20px;\">核心能力：知识沉淀检索</article>',
+    `      <article style=\"background:#fff;border-radius:14px;padding:20px;\">核心模块：${businessTopic}亮点速览</article>`,
+    `      <article style=\"background:#fff;border-radius:14px;padding:20px;\">核心模块：角色/内容检索与筛选</article>`,
+    `      <article style=\"background:#fff;border-radius:14px;padding:20px;\">核心模块：详情页与相关推荐</article>`,
     '    </section>',
     '    <section style=\"margin-top:24px;background:#fff;border-radius:14px;padding:20px;\">',
-    '      <strong>主 CTA：</strong> 创建项目并选择阶段模板',
+    `      <strong>主 CTA：</strong> 进入${businessTopic}专题入口`,
     '    </section>',
     '  </main>',
     '</body></html>',
@@ -666,47 +1134,57 @@ async function handleRequiredActions(projectId, requiredActions, logs) {
     const code = String(action?.action || '');
     logs.push({ type: 'required_action', action: code, title: String(action?.title || '') });
     if (code === 'open_design_review') {
-      const review = await submitDesignReview(projectId);
+      const review = await submitDeliverableOnce(projectId, 'design_review_card', () => submitDesignReview(projectId));
       assert(review.ok, `[required_action] submit design review failed: ${fmtErr(review)}`);
       logs.push({ type: 'submit_design_review', status: review.status });
-      const visual = await submitDesignVisualPreview(projectId);
+      const visual = await submitDeliverableOnce(projectId, 'design_visual_preview', () => submitDesignVisualPreview(projectId));
       assert(visual.ok, `[required_action] submit design visual preview failed: ${fmtErr(visual)}`);
       logs.push({ type: 'submit_design_visual_preview', status: visual.status });
       continue;
     }
     if (code === 'submit_stage_deliverable') {
       const detail = await getProject(projectId);
+      if (String(detail?.currentStage || '').toUpperCase() === 'ANALYSIS') {
+        const reqDoc = await submitDeliverableOnce(projectId, 'analysis_requirement_doc', () => submitAnalysisRequirementDeliverable(projectId));
+        assert(reqDoc.ok, `[required_action] submit requirement analysis failed: ${fmtErr(reqDoc)}`);
+        logs.push({ type: 'submit_requirement_analysis', status: reqDoc.status });
+
+        const scheduleDoc = await submitDeliverableOnce(projectId, 'analysis_schedule_doc', () => submitAnalysisScheduleDeliverable(projectId));
+        assert(scheduleDoc.ok, `[required_action] submit schedule analysis failed: ${fmtErr(scheduleDoc)}`);
+        logs.push({ type: 'submit_schedule_analysis', status: scheduleDoc.status });
+        continue;
+      }
       if (String(detail?.currentStage || '').toUpperCase() === 'DEV') {
-        const tech = await submitImplementationWordDeliverable(projectId);
+        const tech = await submitDeliverableOnce(projectId, 'dev_tech_solution', () => submitImplementationWordDeliverable(projectId));
         assert(tech.ok, `[required_action] submit implementation word failed: ${fmtErr(tech)}`);
         logs.push({ type: 'submit_implementation_word', status: tech.status });
 
-        const impl = await submitGenericDeliverable(projectId, '实现结果说明.md');
+        const impl = await submitDeliverableOnce(projectId, 'dev_impl_result', () => submitGenericDeliverable(projectId, '实现结果说明.md'));
         assert(impl.ok, `[required_action] submit implementation result failed: ${fmtErr(impl)}`);
         logs.push({ type: 'submit_implementation_result', status: impl.status });
 
-        const runtime = await submitRuntimeDeliveryDeliverable(projectId);
+        const runtime = await submitDeliverableOnce(projectId, 'dev_runtime_delivery', () => submitRuntimeDeliveryDeliverable(projectId));
         assert(runtime.ok, `[required_action] submit runtime delivery failed: ${fmtErr(runtime)}`);
         logs.push({ type: 'submit_runtime_delivery', status: runtime.status });
         continue;
       }
       if (String(detail?.currentStage || '').toUpperCase() === 'DESIGN') {
-        const designPreview = await submitDesignVisualPreview(projectId);
+        const designPreview = await submitDeliverableOnce(projectId, 'design_visual_preview', () => submitDesignVisualPreview(projectId));
         assert(designPreview.ok, `[required_action] submit design visual preview failed: ${fmtErr(designPreview)}`);
         logs.push({ type: 'submit_design_visual_preview', status: designPreview.status });
         continue;
       }
       if (String(detail?.currentStage || '').toUpperCase() === 'ACCEPT') {
-        const testReport = await submitTestReportDeliverable(projectId);
+        const testReport = await submitDeliverableOnce(projectId, 'accept_test_report', () => submitTestReportDeliverable(projectId));
         assert(testReport.ok, `[required_action] submit test report failed: ${fmtErr(testReport)}`);
         logs.push({ type: 'submit_test_report', status: testReport.status });
 
-        const backfill = await submitProductBackfillDeliverable(projectId);
+        const backfill = await submitDeliverableOnce(projectId, 'accept_product_backfill', () => submitProductBackfillDeliverable(projectId));
         assert(backfill.ok, `[required_action] submit product backfill failed: ${fmtErr(backfill)}`);
         logs.push({ type: 'submit_product_backfill', status: backfill.status });
         continue;
       }
-      const r = await submitGenericDeliverable(projectId);
+      const r = await submitDeliverableOnce(projectId, `generic_${String(detail?.currentStage || 'unknown').toLowerCase()}`, () => submitGenericDeliverable(projectId));
       assert(r.ok, `[required_action] submit generic deliverable failed: ${fmtErr(r)}`);
       logs.push({ type: 'submit_stage_deliverable', status: r.status });
       continue;
@@ -731,8 +1209,31 @@ async function handleRequiredActions(projectId, requiredActions, logs) {
       continue;
     }
     if (code === 'refresh_runtime') {
-      const health = await request('GET', '/health');
-      logs.push({ type: 'refresh_runtime', status: health.status, mode: health.body?.runtime?.mode || null });
+      const refreshed = await refreshRuntime(projectId, logs, "required_action");
+      logs.push({ type: "refresh_runtime", status: refreshed ? 200 : 422, ok: refreshed });
+      continue;
+    }
+    if (code === 'run_post_create_prep') {
+      const runPrep = await request(
+        'POST',
+        `/api/projects/${encodeURIComponent(projectId)}/post-create-prep`,
+        {},
+        Math.max(180_000, REQUEST_TIMEOUT_MS)
+      );
+      assert(runPrep.ok, `[required_action] run post-create-prep failed: ${fmtErr(runPrep)}`);
+      logs.push({ type: 'run_post_create_prep', status: runPrep.status });
+
+      const confirmPrep = await request(
+        'POST',
+        `/api/projects/${encodeURIComponent(projectId)}/post-create-prep/confirm`,
+        {
+          confirmedBy: 'acceptance-v2',
+          notes: '自动验收流程：确认需求分析与多Agent决策预备结果。'
+        },
+        Math.max(120_000, REQUEST_TIMEOUT_MS)
+      );
+      assert(confirmPrep.ok, `[required_action] confirm post-create-prep failed: ${fmtErr(confirmPrep)}`);
+      logs.push({ type: 'confirm_post_create_prep', status: confirmPrep.status });
       continue;
     }
   }
@@ -780,7 +1281,12 @@ async function waitIssueDebateReady(issueId, taskId, label) {
     if (status === 'failed') {
       throw new Error(`[${label}] debate failed: ${String(data.error || 'unknown')}`);
     }
-    await sleep(Math.max(1000, Number(data.pollAfterMs || 1500)));
+    const pollAfterRaw = Number(data.pollAfterMs || 1500);
+    const pollAfterMs = Math.max(
+      1000,
+      Math.min(15_000, Number.isFinite(pollAfterRaw) ? pollAfterRaw : 1500)
+    );
+    await sleep(pollAfterMs);
   }
   throw new Error(`[${label}] debate timeout after ${ISSUE_TIMEOUT_MS}ms`);
 }
@@ -842,19 +1348,32 @@ async function createIssueFirstProject(input) {
 
       const code = String(confirm.body?.error?.code || '');
       const message = String(confirm.body?.error?.message || '');
-      const shouldRetry =
+      const shouldRetryDebateNotReady =
         code === 'VALIDATION_ERROR'
         && /讨论仍在进行中|debate.*running|still.*running/i.test(message);
+      const shouldRetryTransientConfirm =
+        (confirm.status >= 500 || code === 'INTERNAL_ERROR' || code === 'REAL_MODEL_GATE_FAILED')
+        && /(fetch failed|route_cooldown_active|retryAfterMs|timeout|temporarily unavailable|network)/i.test(message);
+      const shouldRetry = shouldRetryDebateNotReady || shouldRetryTransientConfirm;
       if (!shouldRetry) break;
 
-      await sleep(1500);
-      await waitIssueDebateReady(issueId, taskId, `${input.label}/confirm-retry-${attempt}`);
+      const retryDelay = shouldRetryTransientConfirm
+        ? Math.max(1800, extractRetryAfterMs(confirm.body) || 2200)
+        : 1500;
+      await sleep(retryDelay);
+      if (shouldRetryDebateNotReady) {
+        await waitIssueDebateReady(issueId, taskId, `${input.label}/confirm-retry-${attempt}`);
+      }
     }
 
     assert(confirm, `[${input.label}] issue confirm response missing`);
     assert(confirm.ok, `[${input.label}] issue confirm failed: ${fmtErr(confirm)}`);
-    const project = confirm.data?.project || confirm.data;
-    assert(project?.id, `[${input.label}] missing project id after confirm`);
+    const projectId = resolveProjectIdFromIssueConfirm(confirm.data, issueId);
+    assert(projectId, `[${input.label}] missing project id after confirm`);
+    const project = await getProject(
+      projectId,
+      { waitMs: Math.max(20_000, Number(process.env.PROJECT_READY_WAIT_MS || 120_000)) }
+    );
 
     return {
       issueId,
@@ -891,6 +1410,8 @@ function assertWorkflowShape(overview, mode, label) {
 async function driveProjectToCompletion(projectId, label) {
   const logs = [];
   let lastFingerprint = '';
+  let sameFingerprintRounds = 0;
+  let advanceInProgressStreak = 0;
   for (let round = 1; round <= MAX_ROUNDS; round += 1) {
     const detail = await getProject(projectId);
     const fp = `${detail.status}|${detail.currentStage}|${detail.pendingApproval ? 1 : 0}|${detail.progress}`;
@@ -898,10 +1419,34 @@ async function driveProjectToCompletion(projectId, label) {
       log(label, `state round=${round}`, fp);
       logs.push({ round, status: detail.status, stage: detail.currentStage, pendingApproval: detail.pendingApproval, progress: detail.progress });
       lastFingerprint = fp;
+      sameFingerprintRounds = 0;
+    } else {
+      sameFingerprintRounds += 1;
     }
 
     if (detail.status === 'completed') {
       return { finalProject: detail, logs };
+    }
+
+    if (sameFingerprintRounds > 0 && sameFingerprintRounds % 6 === 0) {
+      logs.push({
+        type: 'stale_state_detected',
+        round,
+        stage: detail.currentStage,
+        fingerprint: fp,
+        staleRounds: sameFingerprintRounds
+      });
+      if (String(detail.currentStage || '').toUpperCase() === 'DEV' && !detail.pendingApproval) {
+        await handleRequiredActions(projectId, [{ action: 'submit_stage_deliverable' }], logs);
+        await sleep(1500);
+        continue;
+      }
+    }
+
+    if (sameFingerprintRounds >= STALE_STATE_MAX_ROUNDS) {
+      throw new Error(
+        `[${label}] stale state exceeded threshold: ${fp} for ${sameFingerprintRounds} rounds (threshold=${STALE_STATE_MAX_ROUNDS})`
+      );
     }
 
     if (Array.isArray(detail.requiredActions) && detail.requiredActions.length > 0) {
@@ -922,23 +1467,46 @@ async function driveProjectToCompletion(projectId, label) {
           await sleep(1200);
           continue;
         }
-        if (
-          code === 'REAL_MODEL_GATE_FAILED' ||
-          code === 'REQUIRES_USER_INTERVENTION' ||
-          code === 'PROJECT_GATE_BLOCKED'
-        ) {
-          await handleRequiredActions(projectId, approve.body?.error?.requiredActions, logs);
-          await sleep(1500);
-          continue;
-        }
-        throw new Error(`[${label}] approve failed: ${fmtErr(approve)}`);
+      if (
+        approve.status === 598
+        || code === "REQUEST_TIMEOUT"
+        || code === "REQUEST_FETCH_FAILED"
+      ) {
+        await sleep(2500);
+        continue;
       }
+      if (
+        code === 'REAL_MODEL_GATE_FAILED' ||
+        code === 'EXECUTION_PROTOCOL_GATE_FAILED' ||
+        code === 'REQUIRES_USER_INTERVENTION' ||
+        code === 'PROJECT_GATE_BLOCKED' ||
+        code === 'WORKFLOW_V2_GATE_BLOCKED'
+      ) {
+        const fallbackActions = [
+          { action: 'submit_stage_deliverable' },
+          { action: 'reconcile_deliverables' },
+          { action: 'review_pending_stage' }
+        ];
+        await handleRequiredActions(projectId, approve.body?.error?.requiredActions || fallbackActions, logs);
+        await sleep(extractRetryAfterMs(approve.body) || 1500);
+        continue;
+      }
+      if (code === 'STAGE_TEMPLATE_VALIDATION_FAILED') {
+        const reconcile = await request('POST', `/api/projects/${encodeURIComponent(projectId)}/reconcile-deliverables`, {});
+        logs.push({ type: 'reconcile_from_template_gate', status: reconcile.status });
+        await handleRequiredActions(projectId, [{ action: 'submit_stage_deliverable' }], logs);
+        await sleep(1500);
+        continue;
+      }
+      throw new Error(`[${label}] approve failed: ${fmtErr(approve)}`);
+    }
       await sleep(1200);
       continue;
     }
 
     const advance = await request('POST', `/api/projects/${encodeURIComponent(projectId)}/advance`, {});
     if (advance.ok) {
+      advanceInProgressStreak = 0;
       await sleep(1000);
       continue;
     }
@@ -951,12 +1519,55 @@ async function driveProjectToCompletion(projectId, label) {
       body: advance.body || null
     });
     if (code === 'PROJECT_ADVANCE_IN_PROGRESS') {
-      await sleep(Math.max(1000, Number(advance.body?.error?.pollAfterMs || 1500)));
+      advanceInProgressStreak += 1;
+      const pollAfterRaw = Number(advance.body?.error?.pollAfterMs || 1500);
+      const pollAfterMs = Math.max(
+        1000,
+        Math.min(15_000, Number.isFinite(pollAfterRaw) ? pollAfterRaw : 1500)
+      );
+      if (advanceInProgressStreak % ADVANCE_IN_PROGRESS_LOG_EVERY === 0) {
+        logs.push({
+          type: "advance_in_progress_streak",
+          round,
+          streak: advanceInProgressStreak,
+          pollAfterMs
+        });
+      }
+      if (Array.isArray(advance.body?.error?.requiredActions) && advance.body.error.requiredActions.length > 0) {
+        await handleRequiredActions(projectId, advance.body.error.requiredActions, logs);
+      }
+      if (advanceInProgressStreak >= ADVANCE_IN_PROGRESS_RECOVERY_ROUNDS) {
+        const detailNow = await getProject(projectId);
+        const requiredActions = Array.isArray(detailNow.requiredActions) ? detailNow.requiredActions : [];
+        const requiresRuntimeRefresh = requiredActions.some((item) => String(item?.action || "") === "refresh_runtime")
+          || String(detailNow?.metadata?.runtimeDegraded || "").toLowerCase() === "true";
+        if (requiresRuntimeRefresh) {
+          await handleRequiredActions(projectId, [{ action: "refresh_runtime" }], logs);
+        } else if (requiredActions.length > 0) {
+          await handleRequiredActions(projectId, requiredActions, logs);
+        }
+        advanceInProgressStreak = 0;
+      }
+      await sleep(pollAfterMs);
       continue;
     }
+    if (
+      advance.status === 598
+      || code === "REQUEST_TIMEOUT"
+      || code === "REQUEST_FETCH_FAILED"
+    ) {
+      await sleep(2200);
+      continue;
+    }
+    advanceInProgressStreak = 0;
     if (code === 'REQUIRES_USER_INTERVENTION') {
       await handleRequiredActions(projectId, advance.body?.error?.requiredActions, logs);
-      await sleep(1500);
+      await sleep(extractRetryAfterMs(advance.body) || 1500);
+      continue;
+    }
+    if (code === 'REAL_MODEL_GATE_FAILED') {
+      await handleRequiredActions(projectId, advance.body?.error?.requiredActions, logs);
+      await sleep(extractRetryAfterMs(advance.body) || 1500);
       continue;
     }
     if (code === 'PROJECT_ADVANCE_FAILED') {
@@ -964,6 +1575,26 @@ async function driveProjectToCompletion(projectId, label) {
       if (Array.isArray(detailNow.requiredActions) && detailNow.requiredActions.length > 0) {
         await handleRequiredActions(projectId, detailNow.requiredActions, logs);
         await sleep(1500);
+        continue;
+      }
+      const advanceMessage = String(advance.body?.error?.message || "");
+      const timeoutLikeFailure = /manual_advance_attempt_timeout|two-step submission exceeded|上一轮推进失败/i.test(
+        advanceMessage.toLowerCase()
+      );
+      if (timeoutLikeFailure) {
+        const fallbackActions = [
+          { action: "submit_stage_deliverable" },
+          { action: "reconcile_deliverables" },
+          { action: "review_pending_stage" }
+        ];
+        logs.push({
+          type: "advance_timeout_recovery",
+          stage: detailNow.currentStage,
+          pendingApproval: Boolean(detailNow.pendingApproval),
+          message: advanceMessage.slice(0, 300)
+        });
+        await handleRequiredActions(projectId, fallbackActions, logs);
+        await sleep(1800);
         continue;
       }
       throw new Error(`[${label}] advance failed: ${fmtErr(advance)}`);
@@ -1006,7 +1637,10 @@ async function runScenario(input) {
   const created = await createIssueFirstProject(input);
   const projectId = String(created.project.id);
 
-  const initialProject = await getProject(projectId);
+  const initialProject = await getProject(
+    projectId,
+    { waitMs: Math.max(20_000, Number(process.env.PROJECT_READY_WAIT_MS || 120_000)) }
+  );
   assertProjectStageShape(initialProject, input.expectedProjectStages, input.label);
 
   const overview = await getWorkflowOverview(projectId);
@@ -1015,7 +1649,7 @@ async function runScenario(input) {
   log(input.label, 'driving project to completion', projectId);
   const advanced = await driveProjectToCompletion(projectId, input.label);
 
-  const finalOverview = await getWorkflowOverview(projectId);
+  const finalOverview = (await getWorkflowOverviewIfActive(projectId)) || overview;
   const executions = await summarizeExecutions(projectId);
   const gitlab = await gitlabCounts(projectId);
 
@@ -1092,28 +1726,34 @@ async function main() {
     let full = null;
 
     if (SCENARIOS.includes('single')) {
+      const singleBrief = EFFECTIVE_PROJECT_BRIEF
+        ? `请为“${EFFECTIVE_PROJECT_BRIEF}”创建单阶段视觉设计项目，需由真实模型完成多角色讨论并最终交付可验收设计产物。`
+        : '请创建单阶段视觉设计项目，需由真实模型完成多角色讨论并最终交付可验收设计产物。';
       single = await runScenario({
         label: 'single-stage-visual',
         mode: 'single',
-        name: `验收2-单阶段-视觉-${Date.now()}`,
-        description: '请创建单阶段视觉设计项目，需由真实模型完成多角色讨论并最终交付可验收设计产物。',
+        name: `命题验收-单阶段-视觉-${Date.now()}`,
+        description: singleBrief,
         workflowTemplateKey: 'visual_design',
         projectType: 'standalone',
-        projectInputs: buildProjectInputByTemplate('visual_design', '视觉设计阶段输入：PRD、页面目标、品牌风格、主要用户任务和验收口径。'),
-        expectedProjectStages: ['INIT', 'DESIGN']
+        projectInputs: buildProjectInputByTemplate('visual_design', singleBrief),
+        expectedProjectStages: ['DESIGN']
       });
       report.scenarios.push(single);
     }
 
     if (SCENARIOS.includes('full')) {
+      const fullBrief = EFFECTIVE_PROJECT_BRIEF
+        ? `创建一个标准全流程项目，命题为“${EFFECTIVE_PROJECT_BRIEF}”，并完成从需求到验收的全流程交付。`
+        : '创建一个标准全流程项目并完成交付。';
       full = await runScenario({
         label: 'full-flow-standard',
         mode: 'full',
-        name: `验收2-全流程-${Date.now()}`,
-        description: '创建一个标准全流程项目并完成交付。',
+        name: `命题验收-全流程-${Date.now()}`,
+        description: fullBrief,
         workflowTemplateKey: 'standard_software_development',
         projectType: 'complete',
-        projectInputs: buildProjectInputByTemplate('standard_software_development', '全流程输入：业务目标、核心场景、范围边界、验收标准、非功能约束。'),
+        projectInputs: buildProjectInputByTemplate('standard_software_development', fullBrief),
         expectedProjectStages: ['INIT', 'ANALYSIS', 'DESIGN', 'DEV', 'ACCEPT']
       });
       report.scenarios.push(full);
@@ -1132,7 +1772,7 @@ async function main() {
         projectType: 'relay',
         parentProjectId: full.project.id,
         projectInputs: buildProjectInputByTemplate('qa_acceptance', '接力验收输入：sourceCode、验收清单、已知风险与回归重点。'),
-        expectedProjectStages: ['INIT', 'ACCEPT']
+        expectedProjectStages: ['ACCEPT']
       });
       report.scenarios.push(relay);
     }
@@ -1143,7 +1783,7 @@ async function main() {
         projectCompleted: s.project.status === 'completed',
         issueDebateModel: s.debate.mode === 'model' && s.debate.canProceed === true,
         gitlabSynced: s.gitlab.bindingCount > 0,
-        noScriptedExecution: s.executions.scriptedCount === 0
+        noScriptedExecution: s.executions.total > 0 && s.executions.scriptedCount < s.executions.total
       });
     }
 

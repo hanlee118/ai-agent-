@@ -24,15 +24,16 @@ export async function runOpenAICompatibleAgent(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const promptInput = buildPromptInput(context);
     const userPrompt = [
-      `项目名称：${context.projectName}`,
-      `项目描述：${context.projectDescription}`,
+      `项目名称：${promptInput.projectName}`,
+      `项目描述：${promptInput.projectDescription}`,
       `当前阶段：${STAGE_LABELS[context.stageType]}`,
       `当前角色：${ROLE_LABELS[context.role]}`,
-      `关键词：${context.parsedIntent.keywords.join(" / ") || "无"}`,
-      `约束：${context.parsedIntent.constraints.join("；") || "无"}`,
-      `风险：${context.parsedIntent.risks.join("；") || "无"}`,
-      `补充摘要：${context.summary ?? "无"}`,
+      `关键词：${promptInput.keywords}`,
+      `约束：${promptInput.constraints}`,
+      `风险：${promptInput.risks}`,
+      `补充摘要：${promptInput.summary}`,
       "",
       ...buildOutputGuidance(context)
     ].join("\n");
@@ -282,12 +283,77 @@ function resolveMaxTokens(context: AgentRunContext, model: string) {
   const normalized = String(model ?? "").trim().toLowerCase();
   const designMode = context.role === "ROLE_DESIGN" || context.stageType === "DESIGN";
   if (normalized.startsWith("gpt-5.4")) {
-    return designMode ? 2200 : 1600;
+    return designMode ? 2200 : 1300;
   }
   if (normalized.startsWith("gpt-5.3-codex")) {
-    return designMode ? 2000 : 1500;
+    return designMode ? 2000 : 1200;
   }
-  return designMode ? 1800 : 1200;
+  return designMode ? 1800 : 1000;
+}
+
+function buildPromptInput(context: AgentRunContext) {
+  return {
+    projectName: compactPromptText(context.projectName, 120),
+    projectDescription: compactPromptText(context.projectDescription, 900),
+    keywords: compactPromptList(context.parsedIntent.keywords, {
+      maxItems: 8,
+      itemMaxChars: 72,
+      totalMaxChars: 420
+    }),
+    constraints: compactPromptList(context.parsedIntent.constraints, {
+      maxItems: 8,
+      itemMaxChars: 100,
+      totalMaxChars: 760
+    }),
+    risks: compactPromptList(context.parsedIntent.risks, {
+      maxItems: 6,
+      itemMaxChars: 100,
+      totalMaxChars: 520
+    }),
+    summary: compactPromptText(context.summary ?? "无", 640)
+  };
+}
+
+function compactPromptText(value: unknown, maxChars: number) {
+  const normalized = String(value ?? "").replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "无";
+  }
+  if (!Number.isFinite(maxChars) || maxChars <= 0 || normalized.length <= maxChars) {
+    return normalized;
+  }
+  const safeMax = Math.max(8, Math.floor(maxChars));
+  return `${normalized.slice(0, safeMax - 3)}...`;
+}
+
+function compactPromptList(
+  items: unknown[],
+  limits: {
+    maxItems: number;
+    itemMaxChars: number;
+    totalMaxChars: number;
+  }
+) {
+  const maxItems = Math.max(1, Math.floor(limits.maxItems));
+  const totalMaxChars = Math.max(32, Math.floor(limits.totalMaxChars));
+  const entries = Array.isArray(items) ? items : [];
+  const selected: string[] = [];
+  let currentTotal = 0;
+
+  for (const raw of entries) {
+    const normalized = compactPromptText(raw, limits.itemMaxChars);
+    if (!normalized || normalized === "无" || selected.includes(normalized)) {
+      continue;
+    }
+    const nextTotal = currentTotal + normalized.length + (selected.length > 0 ? 3 : 0);
+    if (selected.length >= maxItems || nextTotal > totalMaxChars) {
+      break;
+    }
+    selected.push(normalized);
+    currentTotal = nextTotal;
+  }
+
+  return selected.length > 0 ? selected.join(" / ") : "无";
 }
 
 function isTransientStatus(status: number) {
