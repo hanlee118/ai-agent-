@@ -33,6 +33,7 @@ import {
   type ProjectExecutionRecord,
   type ProjectFinalArtifactsReport,
   type ProjectRequiredAction,
+  type WorkflowHermesRuntimeStatus,
   type WorkflowProjectOverview,
 } from '../lib/api';
 import { agents, projects } from '../lib/runtimeCollections';
@@ -1023,8 +1024,11 @@ const ProjectRoom = ({
   const [activeTab, setActiveTab] = useState<ProjectRoomTab>('任务');
   const [detail, setDetail] = useState<ProjectDetailResponse | null>(null);
   const [workflowOverview, setWorkflowOverview] = useState<WorkflowProjectOverview | null>(null);
+  const [workflowHermesStatus, setWorkflowHermesStatus] = useState<WorkflowHermesRuntimeStatus | null>(null);
+  const [workflowHermesStatusError, setWorkflowHermesStatusError] = useState<string | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [isLoadingWorkflowOverview, setIsLoadingWorkflowOverview] = useState(false);
+  const [isLoadingWorkflowHermesStatus, setIsLoadingWorkflowHermesStatus] = useState(false);
   const [isIntervening, setIsIntervening] = useState(false);
   const [isReviewingStage, setIsReviewingStage] = useState(false);
   const [stageReviewAction, setStageReviewAction] = useState<'approve' | 'reject' | null>(null);
@@ -1145,6 +1149,7 @@ const ProjectRoom = ({
     setWorkflowOverviewFilter('all');
     setExpandedWorkflowStageIds([]);
     setWorkflowCollaborationRoleFilters({});
+    setWorkflowHermesStatus(null);
   }, [effectiveProjectId]);
 
   const loadProjectDetail = useCallback(async () => {
@@ -1194,13 +1199,34 @@ const ProjectRoom = ({
   const loadWorkflowOverview = useCallback(async () => {
     if (!effectiveProjectId) {
       setWorkflowOverview(null);
+      setWorkflowHermesStatus(null);
+      setWorkflowHermesStatusError(null);
       return;
     }
     setIsLoadingWorkflowOverview(true);
+    setIsLoadingWorkflowHermesStatus(true);
     try {
-      const next = await workflowsApi.getProjectOverview(effectiveProjectId);
-      setWorkflowOverview(next);
-    } catch (error) {
+      const [overviewResult, hermesResult] = await Promise.allSettled([
+        workflowsApi.getProjectOverview(effectiveProjectId),
+        workflowsApi.getHermesRuntimeStatus(true),
+      ]);
+
+      if (hermesResult.status === 'fulfilled') {
+        setWorkflowHermesStatus(hermesResult.value);
+        setWorkflowHermesStatusError(null);
+      } else {
+        setWorkflowHermesStatus(null);
+        setWorkflowHermesStatusError(
+          hermesResult.reason instanceof Error ? hermesResult.reason.message : 'Hermes 探测失败',
+        );
+      }
+
+      if (overviewResult.status === 'fulfilled') {
+        setWorkflowOverview(overviewResult.value);
+        return;
+      }
+
+      const error = overviewResult.reason;
       const requestError = error instanceof ApiRequestError ? error : null;
       const code = String(requestError?.code || '').toUpperCase();
       const isExpectedEmpty =
@@ -1225,6 +1251,7 @@ const ProjectRoom = ({
       }
     } finally {
       setIsLoadingWorkflowOverview(false);
+      setIsLoadingWorkflowHermesStatus(false);
     }
   }, [effectiveProjectId]);
 
@@ -5221,6 +5248,45 @@ const ProjectRoom = ({
                   </div>
                 </div>
 
+                <div className="flex flex-wrap items-center gap-2">
+                  {workflowHermesStatus ? (
+                    <>
+                      <Badge
+                        variant={
+                          workflowHermesStatus.runtime.enabled
+                            ? (workflowHermesStatus.probe?.reachable ? 'primary' : 'warning')
+                            : 'default'
+                        }
+                      >
+                        Hermes {workflowHermesStatus.runtime.enabled ? '启用' : '关闭'} · {workflowHermesStatus.probe?.reachable ? '在线' : '不可达'}
+                      </Badge>
+                      <Badge variant="default">Probe HTTP {workflowHermesStatus.probe?.statusCode ?? '-'}</Badge>
+                      <Badge variant="default">Probe 延迟 {workflowHermesStatus.probe?.latencyMs ?? '-'}ms</Badge>
+                      <Badge variant="default">
+                        Hermes 调用 {workflowHermesStatus.runtime.totalSuccess}/{workflowHermesStatus.runtime.totalAttempts}
+                      </Badge>
+                      {isLoadingWorkflowHermesStatus ? (
+                        <Badge variant="default">Hermes 状态刷新中</Badge>
+                      ) : null}
+                    </>
+                  ) : (
+                    <Badge variant={isLoadingWorkflowHermesStatus ? 'default' : 'warning'}>
+                      {isLoadingWorkflowHermesStatus ? 'Hermes 状态加载中' : 'Hermes 状态未知'}
+                    </Badge>
+                  )}
+                </div>
+                {workflowHermesStatus?.probe?.message ? (
+                  <p className="text-[11px] text-slate-400">Probe 消息: {workflowHermesStatus.probe.message}</p>
+                ) : null}
+                {workflowHermesStatus?.runtime.lastFailureReason ? (
+                  <p className="text-[11px] text-warning">
+                    Hermes 最近失败: {workflowHermesStatus.runtime.lastFailureReason}
+                  </p>
+                ) : null}
+                {workflowHermesStatusError ? (
+                  <p className="text-[11px] text-warning">Hermes 探测失败: {workflowHermesStatusError}</p>
+                ) : null}
+
                 {workflowOverview ? (
                   <>
                     <div className="flex flex-wrap items-center gap-2">
@@ -5296,6 +5362,11 @@ const ProjectRoom = ({
                             <Badge variant="default">
                               协作产物 {item.artifactSources?.companion ?? 0}
                             </Badge>
+                            {(item.artifactSources?.hermesFallback ?? 0) > 0 ? (
+                              <Badge variant="warning">
+                                Hermes 回退 {item.artifactSources?.hermesFallback ?? 0}
+                              </Badge>
+                            ) : null}
                             <button
                               onClick={() => toggleWorkflowStageDetails(item.id)}
                               className="px-2 py-1 rounded-lg text-[11px] border bg-white/5 text-slate-300 border-border-subtle hover:bg-white/10"
@@ -5320,7 +5391,7 @@ const ProjectRoom = ({
                           </div>
 
                           <p className="text-[11px] text-slate-500">
-                            来源: Hermes {item.artifactSources?.hermes ?? 0} · OpenClaw {item.artifactSources?.openclaw ?? 0} · Companion {item.artifactSources?.companion ?? 0} · Stitch {item.artifactSources?.stitch ?? 0}
+                            来源: Hermes {item.artifactSources?.hermes ?? 0} · HermesFallback {item.artifactSources?.hermesFallback ?? 0} · OpenClaw {item.artifactSources?.openclaw ?? 0} · Companion {item.artifactSources?.companion ?? 0} · Stitch {item.artifactSources?.stitch ?? 0}
                           </p>
 
                           {expandedWorkflowStageIds.includes(item.id) ? (() => {
