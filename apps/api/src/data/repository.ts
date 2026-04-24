@@ -4171,6 +4171,7 @@ function isTerminalInfrastructureFailure(message: string) {
     return false;
   }
   return normalized.includes("OPENCLAW COMMAND RETURNED NO JSON PAYLOAD")
+    || normalized.includes("OPENCLAW_AGENT_NOT_FOUND")
     || normalized.includes("OPENCLAW RETURNED INTERRUPTED RESULT")
     || normalized.includes("STOPREASON=ERROR")
     || normalized.includes("SESSION FILE LOCKED")
