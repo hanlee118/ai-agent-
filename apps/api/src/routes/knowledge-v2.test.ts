@@ -125,6 +125,7 @@ test("knowledge-v2 ingests text and can search/context/summary", async () => {
     .query({ projectId: "KBV2-PROJECT-001", limit: 10 });
   assert.equal(listRes.status, 200);
   assert.equal(listRes.body.success, true);
+  assert.equal(Number(listRes.body.data.total) >= 1, true);
   const listItems = Array.isArray(listRes.body.data.items)
     ? listRes.body.data.items as Array<{ sourceEngine?: string }>
     : [];
@@ -325,6 +326,38 @@ test("knowledge-v2 supports hermes sync and export endpoints", async () => {
     .query({ projectId: "KBV2-PROJECT-001", limit: 10 });
   assert.equal(unauthorizedRes.status, 401);
   assert.equal(unauthorizedRes.body.success, false);
+});
+
+test("knowledge-v2 exposes status observability and stable totals", async () => {
+  const seedRes = await request(app)
+    .post("/api/v1/knowledge/text")
+    .send({
+      title: "状态观测条目",
+      content: "用于验证 status 端点和分页 total 统计。",
+      scope: "project",
+      projectId: "KBV2-PROJECT-001",
+      tags: ["status", "observability"]
+    });
+  assert.equal(seedRes.status, 201);
+  assert.equal(seedRes.body.success, true);
+
+  const pagedListRes = await request(app)
+    .get("/api/v1/knowledge")
+    .query({ projectId: "KBV2-PROJECT-001", limit: 1, offset: 0 });
+  assert.equal(pagedListRes.status, 200);
+  assert.equal(pagedListRes.body.success, true);
+  assert.equal(Number(pagedListRes.body.data.total) >= Number(pagedListRes.body.data.items.length), true);
+  assert.equal(Number(pagedListRes.body.data.total) >= 1, true);
+
+  const statusRes = await request(app)
+    .get("/api/v1/knowledge/status")
+    .query({ projectId: "KBV2-PROJECT-001", scope: "project" });
+  assert.equal(statusRes.status, 200);
+  assert.equal(statusRes.body.success, true);
+  assert.equal(typeof statusRes.body.data.schema.ready, "boolean");
+  assert.equal(typeof statusRes.body.data.inventory.total, "number");
+  assert.equal(typeof statusRes.body.data.operations.ready, "boolean");
+  assert.equal(Array.isArray(statusRes.body.data.routes.topFailing), true);
 });
 
 test("knowledge-v2 supports CRUD and curation workflow", async () => {

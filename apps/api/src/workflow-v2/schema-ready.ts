@@ -4,12 +4,19 @@ type WorkflowV2SchemaStatus = {
   ready: boolean;
   checkedAt: number;
   reason?: string;
+  missingCoreTables?: string[];
+  missingOptionalTables?: string[];
+  optionalReady?: boolean;
 };
 
-const KNOWLEDGE_REQUIRED_TABLES = [
-  "KnowledgeItem",
+const KNOWLEDGE_CORE_TABLES = [
+  "KnowledgeItem"
+] as const;
+
+const KNOWLEDGE_OPTIONAL_TABLES = [
   "KnowledgeRelation",
-  "AgentKnowledgePreference"
+  "AgentKnowledgePreference",
+  "KnowledgeOperationLog"
 ] as const;
 
 const WORKFLOW_REQUIRED_TABLES = [
@@ -68,6 +75,7 @@ async function listDatabaseTables() {
 async function checkSchemaTables(input: {
   scope: "knowledge" | "workflow" | "skills";
   requiredTables: readonly string[];
+  optionalTables?: readonly string[];
   forceRefresh?: boolean;
 }) {
   const forceRefresh = input.forceRefresh === true;
@@ -77,12 +85,21 @@ async function checkSchemaTables(input: {
 
   try {
     const tables = await listDatabaseTables();
-    const missing = input.requiredTables.filter((name) => !tables.has(name));
-    const ready = missing.length === 0;
+    const missingCore = input.requiredTables.filter((name) => !tables.has(name));
+    const optionalTables = Array.isArray(input.optionalTables) ? input.optionalTables : [];
+    const missingOptional = optionalTables.filter((name) => !tables.has(name));
+    const ready = missingCore.length === 0;
+    const optionalReady = missingOptional.length === 0;
+    const reason = ready
+      ? (optionalReady ? undefined : `optional tables missing: ${missingOptional.join(", ")}`)
+      : `missing tables: ${missingCore.join(", ")}`;
     const status = {
       ready,
+      optionalReady,
       checkedAt: Date.now(),
-      reason: ready ? undefined : `missing tables: ${missing.join(", ")}`
+      reason,
+      missingCoreTables: missingCore,
+      missingOptionalTables: missingOptional
     };
     cachedStatusByScope.set(input.scope, status);
     return status;
@@ -101,7 +118,8 @@ async function checkSchemaTables(input: {
 export async function getKnowledgeV2SchemaStatus(forceRefresh = false): Promise<WorkflowV2SchemaStatus> {
   return checkSchemaTables({
     scope: "knowledge",
-    requiredTables: KNOWLEDGE_REQUIRED_TABLES,
+    requiredTables: KNOWLEDGE_CORE_TABLES,
+    optionalTables: KNOWLEDGE_OPTIONAL_TABLES,
     forceRefresh
   });
 }
@@ -109,7 +127,8 @@ export async function getKnowledgeV2SchemaStatus(forceRefresh = false): Promise<
 export async function getWorkflowV2SchemaStatus(forceRefresh = false): Promise<WorkflowV2SchemaStatus> {
   return checkSchemaTables({
     scope: "workflow",
-    requiredTables: [...KNOWLEDGE_REQUIRED_TABLES, ...WORKFLOW_REQUIRED_TABLES],
+    requiredTables: [...KNOWLEDGE_CORE_TABLES, ...WORKFLOW_REQUIRED_TABLES],
+    optionalTables: KNOWLEDGE_OPTIONAL_TABLES,
     forceRefresh
   });
 }

@@ -211,3 +211,69 @@ test("workflow-v2 design stage runs through hermes mcp and writes hermes artifac
     true
   );
 });
+
+test("workflow-v2 records hermes fallback notice when endpoint is unreachable", async () => {
+  const originalEndpoint = String(process.env.WORKFLOW_V2_HERMES_ENDPOINT || "");
+  process.env.WORKFLOW_V2_HERMES_ENDPOINT = "http://127.0.0.1:9";
+  try {
+    const templateRes = await request(app)
+      .post("/api/v1/workflows/templates")
+      .send({
+        key: "visual_design",
+        name: "视觉设计（fallback）",
+        category: "design",
+        executorConfig: {
+          type: "agent",
+          agentRole: "UI_Designer",
+          requiredCapabilities: ["figma", "ui_ux"],
+          modelPreference: "hermes-v2.1"
+        },
+        inputSchema: {},
+        outputSchema: { required: ["mockups"] },
+        acceptanceCriteria: [
+          { type: "artifact_exists", config: { artifact: "mockups" } },
+          { type: "auto_check", config: { validator: "no_placeholder", artifact: "mockups" } }
+        ],
+        integrationConfig: { useStitch: false }
+      });
+    assert.equal(templateRes.status, 201);
+
+    const initRes = await request(app)
+      .post("/api/v1/workflows/projects/WFV2-HERMES-001/init")
+      .send({
+        templateKey: "visual_design",
+        name: "UI 设计流程-fallback"
+      });
+    assert.equal(initRes.status, 201);
+    const workflowId = String(initRes.body.data.workflowId);
+
+    const startRes = await request(app)
+      .post(`/api/v1/workflows/${workflowId}/start`)
+      .send({});
+    assert.equal(startRes.status, 200);
+
+    const stage = await prismaClient.workflowStage.findFirst({ where: { workflowId } });
+    assert.ok(stage);
+    assert.equal(stage.status, "reviewing");
+
+    const artifacts = Array.isArray(stage.outputArtifacts)
+      ? (stage.outputArtifacts as Array<{ name?: string; metadata?: Record<string, unknown> }>)
+      : [];
+
+    assert.equal(
+      artifacts.some((item) => String(item.metadata?.source || "") === "workflow_v2_hermes_fallback"),
+      true
+    );
+
+    const overviewRes = await request(app)
+      .get("/api/v1/workflows/projects/WFV2-HERMES-001/overview");
+    assert.equal(overviewRes.status, 200);
+    const stages = Array.isArray(overviewRes.body?.data?.stages)
+      ? (overviewRes.body.data.stages as Array<{ artifactSources?: Record<string, number> }>)
+      : [];
+    const matched = stages.find((item) => Number(item?.artifactSources?.hermesFallback || 0) > 0);
+    assert.equal(Boolean(matched), true);
+  } finally {
+    process.env.WORKFLOW_V2_HERMES_ENDPOINT = originalEndpoint;
+  }
+});

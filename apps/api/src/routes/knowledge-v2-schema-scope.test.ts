@@ -70,6 +70,16 @@ test("knowledge-v2 remains available when HermesSkill table is missing", async (
   assert.equal(listRes.body.success, true);
   assert.equal(Array.isArray(listRes.body.data.items), true);
   assert.equal(listRes.body.data.items.length >= 1, true);
+
+  const statusRes = await request(app)
+    .get("/api/v1/knowledge/status")
+    .query({ scope: "global" });
+  assert.equal(statusRes.status, 200);
+  assert.equal(statusRes.body.success, true);
+  assert.equal(statusRes.body.data.schema.ready, true);
+  assert.equal(statusRes.body.data.schema.optionalReady, false);
+  assert.equal(Array.isArray(statusRes.body.data.schema.missingOptionalTables), true);
+  assert.equal(statusRes.body.data.schema.missingOptionalTables.includes("KnowledgeOperationLog"), true);
 });
 
 test("skills-v2 still blocks when HermesSkill table is missing", async () => {
@@ -82,4 +92,3 @@ test("skills-v2 still blocks when HermesSkill table is missing", async () => {
   assert.equal(res.body.success, false);
   assert.equal(res.body.error.code, "SERVICE_UNAVAILABLE");
 });
-

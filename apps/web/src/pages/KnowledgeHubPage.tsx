@@ -21,6 +21,7 @@ import {
   type KnowledgeListItem,
   type KnowledgeOperationLog,
   type KnowledgeScope,
+  type KnowledgeStatus,
 } from '../lib/api';
 import HermesSyncPanel from '../features/knowledge/HermesSyncPanel';
 
@@ -242,7 +243,10 @@ export default function KnowledgeHubPage({ addToast }: Props) {
   const [sourceEngineFilter, setSourceEngineFilter] = useState<'all' | 'hermes' | 'openclaw' | 'stitch' | 'manual' | 'system'>('all');
 
   const [items, setItems] = useState<KnowledgeListItem[]>([]);
+  const [listTotal, setListTotal] = useState(0);
   const [loadingList, setLoadingList] = useState(false);
+  const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
+  const [loadingKnowledgeStatus, setLoadingKnowledgeStatus] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedBulkIds, setSelectedBulkIds] = useState<string[]>([]);
   const [selectedDetail, setSelectedDetail] = useState<KnowledgeDetailItem | null>(null);
@@ -319,6 +323,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         limit: 100,
       });
       const nextItems = result.items || [];
+      setListTotal(Number(result.total || 0));
       setItems(nextItems);
       setSelectedBulkIds((prev) => prev.filter((id) => nextItems.some((item) => item.id === id)));
 
@@ -356,6 +361,28 @@ export default function KnowledgeHubPage({ addToast }: Props) {
   useEffect(() => {
     void listKnowledge();
   }, [listKnowledge]);
+
+  const loadKnowledgeStatus = useCallback(async () => {
+    setLoadingKnowledgeStatus(true);
+    try {
+      const result = await knowledgeApi.status({
+        scope: scopeFilter === 'all' ? undefined : scopeFilter,
+        projectId: projectIdFilter.trim() || undefined,
+        agentId: agentIdFilter.trim() || undefined,
+        stageContext: stageContextFilter.trim() || undefined,
+        query: query.trim() || undefined,
+      });
+      setKnowledgeStatus(result);
+    } catch (error) {
+      addToast(error instanceof Error ? error.message : '加载知识库状态失败', 'error');
+    } finally {
+      setLoadingKnowledgeStatus(false);
+    }
+  }, [addToast, agentIdFilter, projectIdFilter, query, scopeFilter, stageContextFilter]);
+
+  useEffect(() => {
+    void loadKnowledgeStatus();
+  }, [loadKnowledgeStatus]);
 
   const loadOperationLogs = useCallback(async () => {
     setLoadingOperationLogs(true);
@@ -449,9 +476,10 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         techStack: CSV_SPLIT(editTechStack),
         memoryType: (editMemoryType || undefined) as 'episodic' | 'semantic' | 'procedural' | undefined,
         metadata: parsedMetadata,
+        triggeredBy: 'knowledge_hub_ui',
       });
       addToast('知识条目已更新', 'success');
-      await listKnowledge();
+      await Promise.all([listKnowledge(), loadKnowledgeStatus()]);
       await loadDetail(selectedId);
     } catch (error) {
       addToast(error instanceof Error ? error.message : '更新失败', 'error');
@@ -469,7 +497,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       addToast('知识条目已删除', 'success');
       setSelectedId(null);
       setSelectedDetail(null);
-      await listKnowledge();
+      await Promise.all([listKnowledge(), loadKnowledgeStatus()]);
       await loadOperationLogs();
     } catch (error) {
       addToast(error instanceof Error ? error.message : '删除失败', 'error');
@@ -488,7 +516,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       const result = await knowledgeApi.bulkDelete(selectedBulkIds, 'knowledge_hub_ui');
       addToast(`批量删除完成，删除 ${result.count} 条`, 'success');
       setSelectedBulkIds([]);
-      await listKnowledge();
+      await Promise.all([listKnowledge(), loadKnowledgeStatus()]);
       await loadOperationLogs();
     } catch (error) {
       addToast(error instanceof Error ? error.message : '批量删除失败', 'error');
@@ -514,11 +542,12 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         projectId: newProjectId.trim() || undefined,
         agentId: newAgentId.trim() || undefined,
         tags: CSV_SPLIT(newTags),
+        triggeredBy: 'knowledge_hub_ui',
       });
       addToast('文本知识已创建', 'success');
       setNewTitle('');
       setNewContent('');
-      await listKnowledge();
+      await Promise.all([listKnowledge(), loadKnowledgeStatus()]);
     } catch (error) {
       addToast(error instanceof Error ? error.message : '创建文本知识失败', 'error');
     } finally {
@@ -549,7 +578,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       });
       addToast(`文档已导入，共切分 ${result.count} 条知识`, 'success');
       setUploadFile(null);
-      await listKnowledge();
+      await Promise.all([listKnowledge(), loadKnowledgeStatus()]);
       await loadOperationLogs();
     } catch (error) {
       addToast(error instanceof Error ? error.message : '文档导入失败', 'error');
@@ -600,7 +629,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         `整理完成：规范化 ${result.normalizedCount}，合并 ${result.mergedCount}，删除 ${result.deletedCount}`,
         'success',
       );
-      await listKnowledge();
+      await Promise.all([listKnowledge(), loadKnowledgeStatus()]);
       await loadOperationLogs();
     } catch (error) {
       addToast(error instanceof Error ? error.message : '执行整理失败', 'error');
@@ -637,7 +666,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
       } else {
         addToast(`回滚完成，影响条目 ${result.restoredCount}`, 'success');
       }
-      await Promise.all([listKnowledge(), loadOperationLogs()]);
+      await Promise.all([listKnowledge(), loadOperationLogs(), loadKnowledgeStatus()]);
     } catch (error) {
       addToast(error instanceof Error ? error.message : '回滚失败', 'error');
     } finally {
@@ -646,13 +675,13 @@ export default function KnowledgeHubPage({ addToast }: Props) {
   };
 
   const summaryStats = useMemo(() => {
-    const scopedCount = visibleItems.length;
+    const scopedCount = listTotal;
     const selectedCount = selectedBulkIds.length;
     const duplicateGroups = curationPreview?.duplicateGroups.length || 0;
     const normalizeSuggestions = curationPreview?.normalizationSuggestions.length || 0;
     const selectedDuplicateGroups = selectedDuplicateCanonicalIds.length;
     return { scopedCount, selectedCount, duplicateGroups, normalizeSuggestions, selectedDuplicateGroups };
-  }, [curationPreview, visibleItems.length, selectedBulkIds.length, selectedDuplicateCanonicalIds.length]);
+  }, [curationPreview, listTotal, selectedBulkIds.length, selectedDuplicateCanonicalIds.length]);
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-6">
@@ -666,7 +695,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
           <p className="text-slate-400 mt-1">支持手动新增/编辑/删除，并提供 Agent 沉淀知识自动整理能力。</p>
         </div>
         <button
-          onClick={() => void listKnowledge()}
+          onClick={() => void Promise.all([listKnowledge(), loadKnowledgeStatus()])}
           disabled={loadingList}
           className="px-4 py-2 rounded-lg border border-border-subtle bg-white/5 text-sm font-semibold text-slate-200 hover:bg-white/10 transition-colors inline-flex items-center gap-2 disabled:opacity-60"
         >
@@ -692,6 +721,94 @@ export default function KnowledgeHubPage({ addToast }: Props) {
           <p className="text-[11px] uppercase tracking-widest text-slate-500">可规范化条目</p>
           <p className="text-2xl font-bold text-primary mt-2">{summaryStats.normalizeSuggestions}</p>
         </div>
+      </section>
+
+      <section className="rounded-2xl border border-border-subtle bg-surface-soft p-5 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold text-slate-100">知识库可用性与观测状态</p>
+            <p className="text-xs text-slate-500 mt-1">实时显示 schema、路由错误率、最近可回滚操作。</p>
+          </div>
+          <button
+            onClick={() => void loadKnowledgeStatus()}
+            disabled={loadingKnowledgeStatus}
+            className="px-3 py-2 rounded-lg border border-border-subtle bg-white/5 text-xs font-semibold text-slate-200 hover:bg-white/10 disabled:opacity-60 inline-flex items-center gap-2"
+          >
+            <RefreshCw size={13} className={loadingKnowledgeStatus ? 'animate-spin' : ''} />
+            刷新状态
+          </button>
+        </div>
+        {!knowledgeStatus && (
+          <div className="text-sm text-slate-400">状态加载中...</div>
+        )}
+        {knowledgeStatus && (
+          <>
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <div className="rounded-xl border border-border-subtle bg-surface-muted p-3">
+                <p className="text-[11px] uppercase tracking-widest text-slate-500">Schema</p>
+                <p className={`text-sm font-semibold mt-1 ${knowledgeStatus.schema.ready ? 'text-primary' : 'text-danger'}`}>
+                  {knowledgeStatus.schema.ready ? '核心可用' : '核心异常'}
+                </p>
+              </div>
+              <div className="rounded-xl border border-border-subtle bg-surface-muted p-3">
+                <p className="text-[11px] uppercase tracking-widest text-slate-500">Optional</p>
+                <p className={`text-sm font-semibold mt-1 ${knowledgeStatus.schema.optionalReady === false ? 'text-warning' : 'text-slate-200'}`}>
+                  {knowledgeStatus.schema.optionalReady === false ? '部分降级' : '完整可用'}
+                </p>
+              </div>
+              <div className="rounded-xl border border-border-subtle bg-surface-muted p-3">
+                <p className="text-[11px] uppercase tracking-widest text-slate-500">当前范围总数</p>
+                <p className="text-sm font-semibold mt-1 text-slate-100">{knowledgeStatus.inventory.total}</p>
+              </div>
+              <div className="rounded-xl border border-border-subtle bg-surface-muted p-3">
+                <p className="text-[11px] uppercase tracking-widest text-slate-500">可回滚操作</p>
+                <p className="text-sm font-semibold mt-1 text-slate-100">{knowledgeStatus.operations.rollbackableCount}</p>
+              </div>
+            </div>
+
+            {(knowledgeStatus.schema.reason || (knowledgeStatus.schema.missingCoreTables || []).length > 0 || (knowledgeStatus.schema.missingOptionalTables || []).length > 0) && (
+              <div className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-warning space-y-1">
+                {knowledgeStatus.schema.reason && <p>schema: {knowledgeStatus.schema.reason}</p>}
+                {(knowledgeStatus.schema.missingCoreTables || []).length > 0 && (
+                  <p>缺失核心表: {(knowledgeStatus.schema.missingCoreTables || []).join(', ')}</p>
+                )}
+                {(knowledgeStatus.schema.missingOptionalTables || []).length > 0 && (
+                  <p>缺失可选表: {(knowledgeStatus.schema.missingOptionalTables || []).join(', ')}</p>
+                )}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div className="rounded-xl border border-border-subtle bg-surface-muted p-3 space-y-2">
+                <p className="text-[11px] uppercase tracking-widest text-slate-500">高失败路由</p>
+                {knowledgeStatus.routes.topFailing.slice(0, 4).map((metric) => (
+                  <div key={metric.route} className="text-xs text-slate-300">
+                    <p className="font-semibold text-slate-200">{metric.route}</p>
+                    <p className="text-slate-500">
+                      fail={metric.failed}/{metric.requests} · rate={(metric.errorRate * 100).toFixed(1)}% · last={metric.lastStatus ?? '-'}
+                    </p>
+                    {metric.lastFailureMessage && <p className="text-warning">{metric.lastFailureMessage}</p>}
+                  </div>
+                ))}
+                {knowledgeStatus.routes.topFailing.length === 0 && (
+                  <p className="text-xs text-slate-500">暂无路由指标</p>
+                )}
+              </div>
+              <div className="rounded-xl border border-border-subtle bg-surface-muted p-3 space-y-2">
+                <p className="text-[11px] uppercase tracking-widest text-slate-500">最近操作日志</p>
+                {knowledgeStatus.operations.recent.slice(0, 4).map((item) => (
+                  <div key={item.id} className="text-xs text-slate-300">
+                    <p className="font-semibold text-slate-200">{item.summary}</p>
+                    <p className="text-slate-500">{item.operationType} · {HUMAN_DATE(item.createdAt)}</p>
+                  </div>
+                ))}
+                {knowledgeStatus.operations.recent.length === 0 && (
+                  <p className="text-xs text-slate-500">暂无操作记录或操作日志表未启用</p>
+                )}
+              </div>
+            </div>
+          </>
+        )}
       </section>
 
       <section className="rounded-2xl border border-border-subtle bg-surface-soft p-5 space-y-4">
@@ -748,7 +865,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         </div>
         <div className="flex flex-wrap gap-2">
           <button
-            onClick={() => void listKnowledge()}
+            onClick={() => void Promise.all([listKnowledge(), loadKnowledgeStatus()])}
             disabled={loadingList}
             className="px-3 py-2 rounded-lg bg-primary text-surface text-sm font-semibold hover:bg-primary/90 disabled:opacity-60"
           >
@@ -769,7 +886,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
           <div className="rounded-2xl border border-border-subtle bg-surface-soft overflow-hidden">
             <div className="px-5 py-4 border-b border-border-subtle flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">知识条目列表</h2>
-              <span className="text-xs text-slate-400">{visibleItems.length} 条</span>
+              <span className="text-xs text-slate-400">当前显示 {visibleItems.length} / 总计 {summaryStats.scopedCount}</span>
             </div>
             <div className="max-h-[420px] overflow-auto">
               <table className="w-full text-sm">
@@ -1039,7 +1156,7 @@ export default function KnowledgeHubPage({ addToast }: Props) {
             addToast={addToast}
             defaultProjectId={projectIdFilter || summaryProjectId}
             onSynced={async () => {
-              await Promise.all([listKnowledge(), loadOperationLogs()]);
+              await Promise.all([listKnowledge(), loadOperationLogs(), loadKnowledgeStatus()]);
             }}
           />
 
