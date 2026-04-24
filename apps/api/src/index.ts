@@ -371,7 +371,7 @@ const DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN =
 const DELIVERABLE_PLACEHOLDER_PATTERN = /待补充|占位(词|符)?|lorem ipsum|\bxxx\b/gi;
 const DELIVERABLE_TODO_TBD_PLACEHOLDER_PATTERN = /(^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/gi;
 
-const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 1));
+const MANUAL_ADVANCE_MAX_ATTEMPTS = Math.max(1, Number(process.env.MANUAL_ADVANCE_MAX_ATTEMPTS ?? 3));
 const MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS = Math.max(
   45_000,
   Number(process.env.MANUAL_ADVANCE_ATTEMPT_TIMEOUT_MS ?? 60_000)

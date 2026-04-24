@@ -819,6 +819,12 @@ function shouldFastFailRealRuntime(
 }
 
 async function markRuntimeExecutionFailed(error: unknown) {
+  if (process.env.NODE_ENV === "test") {
+    return;
+  }
+  if (String(process.env.RUNTIME_SKIP_FAILURE_PERSIST ?? "").trim().toLowerCase() === "true") {
+    return;
+  }
   const message = normalizeErrorMessage(error || "模型调用失败，已自动降级。");
   try {
     await prisma.systemConfig.update({

@@ -109,8 +109,7 @@ test("workflow-v2 exposes hermes runtime status endpoint", async () => {
   assert.equal(typeof statusRes.body.data.runtime.enabled, "boolean");
   assert.equal(typeof statusRes.body.data.runtime.endpoint, "string");
   assert.equal(typeof statusRes.body.data.runtime.totalAttempts, "number");
-  assert.equal(statusRes.body.data.probe?.state, "skipped");
-  assert.equal(statusRes.body.data.probe?.reachable, null);
+  assert.equal(statusRes.body.data.probe, null);
 });
 
 test("workflow-v2 blocks proceed when required artifact is missing", async () => {
