@@ -1,4 +1,5 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
 import { extname } from "node:path";
 import multer from "multer";
 import { Prisma } from "@prisma/client";
@@ -26,6 +27,8 @@ import { prisma } from "../db.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { asStringArray, normalizeText, type KnowledgeScope } from "../workflow-v2/types.js";
 import { validateHermesApiKey } from "./hermes-auth.js";
+import { validateBody } from "../validation/middleware.js";
+import { KnowledgeCreateSchema } from "../validation/schemas.js";
 
 type UploadKnowledgeBody = {
   scope?: unknown;
@@ -562,7 +565,7 @@ export function createKnowledgeV2Router() {
     });
   }));
 
-  router.post("/upload", upload.single("file"), asyncRoute(async (req, res) => {
+  router.post("/upload", upload.single("file"), validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -618,7 +621,7 @@ export function createKnowledgeV2Router() {
     });
   }));
 
-  router.post("/text", asyncRoute(async (req, res) => {
+  router.post("/text", validateBody(KnowledgeCreateSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -660,7 +663,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, { id: item.id }, 201);
   }));
 
-  router.post("/sync-from-hermes", asyncRoute(async (req, res) => {
+  router.post("/sync-from-hermes", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -716,7 +719,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, { id: item.id }, 201);
   }));
 
-  router.post("/search", asyncRoute(async (req, res) => {
+  router.post("/search", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -747,7 +750,7 @@ export function createKnowledgeV2Router() {
     });
   }));
 
-  router.post("/context", asyncRoute(async (req, res) => {
+  router.post("/context", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -850,7 +853,7 @@ export function createKnowledgeV2Router() {
     const scope = normalizeOptionalScope(req.query.scope);
     const projectId = normalizeText(req.query.projectId) || undefined;
     const agentId = normalizeText(req.query.agentId) || undefined;
-    const searchQuery = normalizeText(req.query.query) || undefined;
+    const searchQuery = normalizeText(req.query.search) || normalizeText(req.query.query) || undefined;
     const [items, total] = await Promise.all([
       listKnowledgeItems({
         scope,
@@ -894,7 +897,7 @@ export function createKnowledgeV2Router() {
     });
   }));
 
-  router.post("/bulk-delete", asyncRoute(async (req, res) => {
+  router.post("/bulk-delete", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -910,7 +913,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, result);
   }));
 
-  router.post("/curation/preview", asyncRoute(async (req, res) => {
+  router.post("/curation/preview", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -924,7 +927,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, preview);
   }));
 
-  router.post("/curation/apply", asyncRoute(async (req, res) => {
+  router.post("/curation/apply", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -956,7 +959,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, { logs });
   }));
 
-  router.post("/history/:operationId/rollback", asyncRoute(async (req, res) => {
+  router.post("/history/:operationId/rollback", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
@@ -999,7 +1002,7 @@ export function createKnowledgeV2Router() {
     sendSuccess(res, item);
   }));
 
-  router.patch("/:knowledgeId", asyncRoute(async (req, res) => {
+  router.patch("/:knowledgeId", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
