@@ -755,7 +755,7 @@ function isRealModelGateEnabled() {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return process.env.NODE_ENV !== "test";
+  return process.env.NODE_ENV === "production";
 }
 
 const STAGE_AUTO_REAL_MODEL_REQUIRED = new Set<StageType>(["ANALYSIS", "DESIGN", "DEV", "ACCEPT"]);
@@ -5479,6 +5479,9 @@ async function buildDeliverableBackfillContentWithAgent(
 async function reconcileProjectDeliverables(project: ProjectRecord) {
   const stageStatusByType = new Map(project.stages.map((stage) => [stage.type, stage.status]));
   const stageRunCache = new Map<string, Awaited<ReturnType<typeof runStageAgent>>>();
+  const allowAgentBackfill =
+    process.env.NODE_ENV !== "test"
+    && String(process.env.DELIVERABLE_BACKFILL_USE_AGENT ?? "true").trim().toLowerCase() !== "false";
   const currentStageType = resolveStageType(project.currentStage);
   const currentStageIndex = currentStageType ? stageOrder.indexOf(currentStageType) : -1;
   const updates: Array<{ id: string; content: string; status?: string }> = [];
@@ -5536,7 +5539,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
       ? (
           // When the current active stage is already stuck in recovery, prioritize
           // deterministic, template-complete content over another round of slow model retries.
-          useDeterministicRecovery
+          (!allowAgentBackfill || useDeterministicRecovery)
             ? buildDeliverableBackfillContent(project, deliverable)
             : await buildDeliverableBackfillContentWithAgent(project, deliverable, stageRunCache)
         )
@@ -5616,6 +5619,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         updatedAt: now
       };
       const content = shouldFastFillHistoricalStage
+        || !allowAgentBackfill
         ? buildDeliverableBackfillContent(project, templateDeliverable)
         : await buildDeliverableBackfillContentWithAgent(project, templateDeliverable, stageRunCache);
       creates.push({
@@ -5983,26 +5987,27 @@ export async function createProject(
   project.parentProjectId = parentProjectId;
   project.relaySourceStageId = relaySourceStageId;
 
-  await persistProject(project);
+  await persistProjectWithRetry(project);
+  const persistedProjectId = project.id;
   if (projectType === "relay" && parentProjectId) {
     await importRelayInputs({
-      targetProjectId: project.id,
+      targetProjectId: persistedProjectId,
       sourceProjectId: parentProjectId,
       sourceStageId: relaySourceStageId,
       relayType: "full"
     });
   }
   if (mergedProjectInputs.length > 0) {
-    await createProjectInputs(project.id, mergedProjectInputs);
+    await createProjectInputs(persistedProjectId, mergedProjectInputs);
   }
-  const created = await findProject(id).then((value) => value as ProjectDetail);
+  const created = await findProject(persistedProjectId).then((value) => value as ProjectDetail);
   await tryAutoInitializeProjectWorkflowV2(created, {
     ...input,
     workflowTemplateKey,
     projectType
   });
-  await alignLegacyStagesWithCurrentStage(id);
-  return (await findProject(id).then((value) => value as ProjectDetail));
+  await alignLegacyStagesWithCurrentStage(persistedProjectId);
+  return (await findProject(persistedProjectId).then((value) => value as ProjectDetail));
 }
 
 async function tryAutoInitializeProjectWorkflowV2(
@@ -8121,6 +8126,44 @@ async function persistProject(project: ProjectDetail) {
       }))
     });
   });
+}
+
+async function persistProjectWithRetry(project: ProjectDetail, maxRetries = 3) {
+  let remaining = maxRetries;
+  while (true) {
+    try {
+      await persistProject(project);
+      return;
+    } catch (error) {
+      const isUniqueProjectIdConflict =
+        error instanceof Prisma.PrismaClientKnownRequestError
+        && error.code === "P2002"
+        && String((error.meta as { target?: unknown } | undefined)?.target ?? "").includes("id");
+      if (!isUniqueProjectIdConflict || remaining <= 0) {
+        throw error;
+      }
+      remaining -= 1;
+      const nextId = await nextProjectId();
+      rebindProjectId(project, nextId);
+    }
+  }
+}
+
+function rebindProjectId(project: ProjectDetail, nextId: string) {
+  const previousId = project.id;
+  if (!nextId || nextId === previousId) {
+    return;
+  }
+  project.id = nextId;
+  project.tasks = project.tasks.map((task) => ({
+    ...task,
+    projectId: nextId
+  }));
+  project.deliverables = project.deliverables.map((deliverable) => ({
+    ...deliverable,
+    projectId: nextId
+  }));
+  project.summary = project.summary.replaceAll(previousId, nextId);
 }
 
 function toProjectSummary(project: {

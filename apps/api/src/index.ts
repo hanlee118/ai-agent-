@@ -1,6 +1,4 @@
 import express from "express";
-import cors from "cors";
-import helmet from "helmet";
 import swaggerUi from "swagger-ui-express";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
@@ -97,9 +95,12 @@ import {
   clearSessionCookie,
   createSessionCookie,
   getAuthStatus,
+  getCurrentUser,
+  loginUserByEmail,
   loginAdmin,
   logoutAdmin,
   parseSessionToken,
+  registerUserByAdmin,
   setupAdmin,
   validateSession
 } from "./security/auth.js";
@@ -131,7 +132,7 @@ import { createTeamRouter } from "./routes/team.js";
 import { createRoleSetsRouter } from "./routes/role-sets.js";
 import { createProductContextRouter } from "./routes/product-context.js";
 import { createIssuesRouter } from "./routes/issues.js";
-import { createSystemRouter } from "./routes/system.js";
+import { createSystemRouter, getObservabilitySummarySnapshot } from "./routes/system.js";
 import { createNotificationsRouter } from "./routes/notifications.js";
 import { createOpenClawRouter } from "./routes/openclaw.js";
 import { createProjectsRouter } from "./routes/projects.js";
@@ -140,6 +141,10 @@ import { createGitLabRouter, syncProjectGitLabHarness } from "./routes/gitlab.js
 import { createKnowledgeV2Router } from "./routes/knowledge-v2.js";
 import { createSkillsV2Router } from "./routes/skills-v2.js";
 import { createWorkflowsV2Router } from "./routes/workflows-v2.js";
+import { createUsersRouter } from "./routes/users.js";
+import { configureSecurityMiddleware } from "./middleware/security.js";
+import { requestLogger } from "./middleware/request-logger.js";
+import { validateJsonMutationBody } from "./validation/middleware.js";
 import {
   buildProjectIssueFirstMessage,
   ensureProjectIssueFirst
@@ -356,7 +361,7 @@ function isRealModelGateEnabled() {
   if (raw === "false" || raw === "0" || raw === "off") {
     return false;
   }
-  return process.env.NODE_ENV !== "test";
+  return process.env.NODE_ENV === "production";
 }
 
 const GENERIC_OUTPUT_PATTERNS = [
@@ -3805,7 +3810,9 @@ const ACCEPTANCE_REPORT_LOW_SIGNAL_TIMELINE_TYPES = new Set<string>([
   "project_created"
 ]);
 const ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN =
-  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/i;
+  /模板章节骨架|自动补齐|请补全本节|待补充|占位(词|符)?|lorem ipsum|\bxxx\b/i;
+const ACCEPTANCE_REPORT_SUSPICIOUS_TODO_PATTERN =
+  /(?:^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/;
 
 type AcceptanceExecutionRecord = {
   role: string;
@@ -3840,6 +3847,9 @@ function detectSuspiciousDeliverableReasons(content: string) {
   }
   if (ACCEPTANCE_REPORT_SUSPICIOUS_DELIVERABLE_PATTERN.test(normalized)) {
     reasons.push("命中模板/占位/自动补齐特征");
+  }
+  if (ACCEPTANCE_REPORT_SUSPICIOUS_TODO_PATTERN.test(normalized)) {
+    reasons.push("命中 TODO/TBD 占位词特征");
   }
   if (!normalized.includes("## 验收检查清单")) {
     reasons.push("缺少“## 验收检查清单”章节");
@@ -4288,98 +4298,9 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
   ].join("\n");
 }
 
-// CORS 配置
-const configuredAllowedOrigins = (process.env.ALLOWED_ORIGINS?.split(",").map(origin => origin.trim()).filter(Boolean) || []);
-const loopbackOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
-const desktopOriginPatterns = [
-  /^app:\/\//i,
-  /^tauri:\/\//i,
-  /^capacitor:\/\/localhost$/i
-];
-
-if (process.env.NODE_ENV === "production" && configuredAllowedOrigins.length === 0) {
-  throw new Error("生产环境必须设置 ALLOWED_ORIGINS 环境变量，不允许使用通配符");
-}
-
-const corsOrigin: cors.CorsOptions["origin"] = process.env.NODE_ENV === "production"
-  ? (origin, callback) => {
-    if (!origin) {
-      callback(null, true);
-      return;
-    }
-
-    if (configuredAllowedOrigins.includes(origin)) {
-      callback(null, true);
-      return;
-    }
-
-    if (loopbackOriginPattern.test(origin)) {
-      callback(null, true);
-      return;
-    }
-
-    const isDesktopOrigin = desktopOriginPatterns.some((pattern) => pattern.test(origin));
-    if (isDesktopOrigin) {
-      callback(null, true);
-      return;
-    }
-
-    callback(new Error(`Not allowed by CORS: ${origin}`));
-  }
-  : true; // 开发环境允许任意源
-
-app.use(cors({
-  origin: corsOrigin,
-  credentials: true
-}));
-
-// 安全 Headers
-app.use(helmet({
-  strictTransportSecurity: {
-    maxAge: 31536000, // 1 year
-    includeSubDomains: true,
-    preload: true
-  },
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", "data:", "https:"],
-      connectSrc: ["'self'"],
-      fontSrc: ["'self'"],
-      objectSrc: ["'none'"],
-      mediaSrc: ["'self'"],
-      frameSrc: ["'none'"]
-    }
-  },
-  xFrameOptions: { action: "deny" },
-  xContentTypeOptions: true,
-  referrerPolicy: { policy: "strict-origin-when-cross-origin" },
-  xDownloadOptions: false,
-  xPermittedCrossDomainPolicies: false
-}));
-app.use(express.json({ limit: "1mb" }));
-app.use((req, res, next) => {
-  const requestId = randomUUID();
-  const startedAt = Date.now();
-
-  res.locals.requestId = requestId;
-  res.setHeader("x-request-id", requestId);
-  res.on("finish", () => {
-    console.log(
-      JSON.stringify({
-        requestId,
-        method: req.method,
-        path: req.originalUrl,
-        statusCode: res.statusCode,
-        durationMs: Date.now() - startedAt
-      })
-    );
-  });
-
-  next();
-});
+configureSecurityMiddleware(app);
+app.use(requestLogger);
+app.use(validateJsonMutationBody());
 
 app.use("/api", (_req, res, next) => {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
@@ -4422,6 +4343,7 @@ app.post("/api/auth/setup", asyncRoute(async (req, res) => {
 app.post("/api/auth/login", asyncRoute(async (req, res) => {
   const payload = req.body as AuthLoginInput;
   const password = String(payload?.password ?? "").trim();
+  const email = String((payload as { email?: unknown })?.email ?? "").trim();
 
   if (!password) {
     res.status(400).json({ message: "password is required" });
@@ -4429,7 +4351,9 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   }
 
   try {
-    const session = await loginAdmin(password);
+    const session = email
+      ? await loginUserByEmail(email, password)
+      : await loginAdmin(password);
     res.setHeader("Set-Cookie", createSessionCookie(session.token));
     await safeAudit(req, res, {
       actorType: "admin",
@@ -4443,6 +4367,68 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
     const message = error instanceof Error ? error.message : "登录失败";
     const statusCode = message.includes("尚未完成初始化") ? 428 : 401;
     res.status(statusCode).json({ message });
+  }
+}));
+
+app.post("/api/auth/register", asyncRoute(async (req, res) => {
+  const payload = req.body as {
+    email?: unknown;
+    name?: unknown;
+    password?: unknown;
+    role?: unknown;
+  };
+  const sessionToken = parseSessionToken(req.headers.cookie);
+
+  try {
+    const user = await registerUserByAdmin(sessionToken, {
+      email: String(payload.email ?? ""),
+      name: String(payload.name ?? ""),
+      password: String(payload.password ?? ""),
+      role: String(payload.role ?? "viewer")
+    });
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "auth.register",
+      resourceType: "user",
+      resourceId: user.id,
+      summary: `创建用户 ${user.email}`,
+      detail: `role=${user.role}`
+    });
+
+    res.json({
+      success: true,
+      data: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "REGISTER_FAILED";
+    if (code === "AUTH_REQUIRED") {
+      res.status(401).json({ success: false, error: { code, message: "authentication required" } });
+      return;
+    }
+    if (code === "FORBIDDEN") {
+      res.status(403).json({ success: false, error: { code, message: "forbidden" } });
+      return;
+    }
+    if (code === "USER_EXISTS") {
+      res.status(409).json({ success: false, error: { code, message: "user already exists" } });
+      return;
+    }
+    if (code === "INVALID_EMAIL" || code === "INVALID_NAME") {
+      res.status(400).json({ success: false, error: { code, message: "invalid user payload" } });
+      return;
+    }
+    if (code.startsWith("密码")) {
+      res.status(400).json({ success: false, error: { code: "WEAK_PASSWORD", message: code } });
+      return;
+    }
+    res.status(400).json({ success: false, error: { code: "REGISTER_FAILED", message: String(code) } });
   }
 }));
 
@@ -4461,6 +4447,15 @@ app.post("/api/auth/logout", asyncRoute(async (req, res) => {
 }));
 
 app.get("/health", asyncRoute(async (_req, res) => {
+  res.json({
+    ok: true,
+    service: "occ-api",
+    runtime: await getRuntimeStatus(),
+    timestamp: new Date().toISOString()
+  });
+}));
+
+app.get("/api/health", asyncRoute(async (_req, res) => {
   res.json({
     ok: true,
     service: "occ-api",
@@ -4572,6 +4567,15 @@ app.use("/api", (req, res, next) => {
       return;
     }
 
+    const currentUser = await getCurrentUser(sessionToken);
+    if (!currentUser) {
+      res.status(401).json({
+        message: "authentication required"
+      });
+      return;
+    }
+    res.locals.currentUser = currentUser;
+
     next();
   })().catch(next);
 });
@@ -4579,6 +4583,7 @@ app.use("/api", (req, res, next) => {
 app.use("/api/models", createModelsRouter());
 app.use("/api/agents", createAgentsRouter());
 app.use("/api/team", createTeamRouter());
+app.use("/api/users", createUsersRouter());
 app.use("/api/role-sets", createRoleSetsRouter());
 app.use("/api/product-context", createProductContextRouter());
 app.use("/api/issues", createIssuesRouter({
@@ -4590,6 +4595,9 @@ app.use("/api/system", createSystemRouter({
   asyncRoute,
   safeAudit,
   sendEvent
+}));
+app.get("/api/observability/summary", asyncRoute(async (_req, res) => {
+  res.json(await getObservabilitySummarySnapshot());
 }));
 app.use("/api/gitlab", createGitLabRouter());
 app.use("/api/v1/knowledge", createKnowledgeV2Router());

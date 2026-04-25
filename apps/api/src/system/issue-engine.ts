@@ -1904,7 +1904,14 @@ export function buildRelatedHistory(rawInput: string, history: RequirementBackfi
     return [];
   }
 
-  return history
+  const reusableHistory = history.filter(
+    (item) => item.status === "done" && item.validationStatus === "matched"
+  );
+  if (reusableHistory.length === 0) {
+    return [];
+  }
+
+  return reusableHistory
     .map((item) => {
       const base = `${item.title} ${item.refinedRequirement}`.toLowerCase();
       let hit = 0;
@@ -1914,12 +1921,7 @@ export function buildRelatedHistory(rawInput: string, history: RequirementBackfi
         }
       }
       const relevance = Math.round((hit / tokens.length) * 100);
-      const hint =
-        item.validationStatus === "matched"
-          ? "可复用历史方案"
-          : item.validationStatus === "mismatch"
-            ? "历史存在偏差，需谨慎复用"
-            : "可参考执行中的经验";
+      const hint = "可复用历史方案";
 
       return {
         id: item.id,

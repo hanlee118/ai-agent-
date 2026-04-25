@@ -337,12 +337,15 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
   const getActionState = (project: (typeof projects)[number]) => {
     const isBlocked = project.status === 'Blocked';
     const isCompleted = project.status === 'Completed';
+    const permissions = (project as { permissions?: { canApprove?: boolean; canDelete?: boolean } }).permissions;
+    const canApprove = typeof permissions?.canApprove === 'boolean' ? permissions.canApprove : true;
+    const canDelete = typeof permissions?.canDelete === 'boolean' ? permissions.canDelete : true;
     return {
       canPause: !isBlocked && !isCompleted,
       canResume: isBlocked,
-      canAdvance: !isBlocked && !isCompleted,
+      canAdvance: !isBlocked && !isCompleted && canApprove,
       canClose: !isCompleted,
-      canDelete: true,
+      canDelete,
     };
   };
 

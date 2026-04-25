@@ -24,6 +24,8 @@ export function sendError(
 ) {
   res.status(status).json({
     success: false,
+    code,
+    message,
     error: {
       code,
       message
@@ -36,7 +38,15 @@ export function asyncRoute(
 ): express.RequestHandler {
   return (req, res) => {
     void handler(req, res).catch((error) => {
-      console.error("Route error:", error);
+      const requestIdHeader = res.getHeader("X-Request-ID");
+      const requestId = typeof requestIdHeader === "string" ? requestIdHeader : "unknown";
+      console.error("[ROUTE_ERROR]", JSON.stringify({
+        requestId,
+        route: req.path,
+        method: req.method,
+        error: error instanceof Error ? error.message : String(error),
+        timestamp: new Date().toISOString()
+      }));
 
       if (res.headersSent) {
         return;

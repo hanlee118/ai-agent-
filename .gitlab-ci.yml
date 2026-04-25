@@ -61,3 +61,9 @@ build:
       exit 1
     - pnpm health:check
     - CI_SKIP_OPENCLAW_CHECKS=true pnpm test:smoke
+    - |
+      if [ -n "${PROJECT_ID:-}" ]; then
+        AUDIT_STRICT=true AUDIT_REQUIRE_HERMES=true AUDIT_REQUIRE_NON_SCRIPTED=true pnpm audit:single-project:strict
+      else
+        echo "skip single-project strict audit: PROJECT_ID is empty"
+      fi

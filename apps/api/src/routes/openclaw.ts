@@ -1,4 +1,6 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import {
   addOpenClawAgentMemory,
   buildOpenClawProjectReport,
@@ -121,7 +123,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.json(report);
   }));
 
-  router.patch("/projects/:projectId/tasks", asyncRoute(async (req, res) => {
+  router.patch("/projects/:projectId/tasks", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const projectId = String(req.params.projectId ?? "").trim();
     const { updates } = normalizeBatchTaskUpdatesPayload(req.body);
     if (updates.length === 0) {
@@ -136,7 +138,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.json(updated);
   }));
 
-  router.patch("/projects/:projectId/tasks/:taskId", asyncRoute(async (req, res) => {
+  router.patch("/projects/:projectId/tasks/:taskId", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const projectId = String(req.params.projectId ?? "").trim();
     const taskId = String(req.params.taskId ?? "").trim();
     const updated = await updateOpenClawProjectTask(projectId, taskId, req.body ?? {});
@@ -165,7 +167,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.json(agent);
   }));
 
-  router.post("/agents", asyncRoute(async (req, res) => {
+  router.post("/agents", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const created = await createOpenClawAgent(req.body ?? {});
     if (!created) {
       res.status(500).json({ message: "Agent creation failed" });
@@ -211,7 +213,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     });
   }));
 
-  router.patch("/agents/:agentId/settings", asyncRoute(async (req, res) => {
+  router.patch("/agents/:agentId/settings", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.agentId ?? "").trim();
     const updated = await updateOpenClawAgentSettings(agentId, req.body ?? {});
     if (!updated) {
@@ -236,8 +238,8 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     }
     res.json(updated);
   });
-  router.patch("/agents/:agentId/document", patchAgentDocument);
-  router.patch("/agents/:agentId/document/:documentKey", patchAgentDocument);
+  router.patch("/agents/:agentId/document", validateBody(MutationPassthroughSchema), patchAgentDocument);
+  router.patch("/agents/:agentId/document/:documentKey", validateBody(MutationPassthroughSchema), patchAgentDocument);
 
   router.get("/agents/:agentId/memory", asyncRoute(async (req, res) => {
     const agentId = String(req.params.agentId ?? "").trim();
@@ -249,7 +251,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.json(detail.memoryEntries || []);
   }));
 
-  router.post("/agents/:agentId/memory", asyncRoute(async (req, res) => {
+  router.post("/agents/:agentId/memory", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.agentId ?? "").trim();
     const saved = await addOpenClawAgentMemory(agentId, req.body ?? {});
     if (!saved) {
@@ -259,7 +261,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.status(201).json(saved);
   }));
 
-  router.post("/agents/:agentId/preview-instruction", asyncRoute(async (req, res) => {
+  router.post("/agents/:agentId/preview-instruction", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.agentId ?? "").trim();
     const preview = await previewOpenClawAgentInstruction(agentId, req.body ?? {});
     if (!preview) {
@@ -269,7 +271,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.json(preview);
   }));
 
-  router.post("/agents/:agentId/message", asyncRoute(async (req, res) => {
+  router.post("/agents/:agentId/message", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.agentId ?? "").trim();
     const message = String(req.body?.message ?? "").trim();
     if (!message) {
@@ -279,7 +281,7 @@ export function createOpenClawRouter(options: CreateOpenClawRouterOptions) {
     res.json(await sendOpenClawAgentMessage(agentId, { message }));
   }));
 
-  router.post("/agents/batch-message", asyncRoute(async (req, res) => {
+  router.post("/agents/batch-message", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const message = String(req.body?.message ?? "").trim();
     const agentIds = Array.isArray(req.body?.agentIds)
       ? req.body.agentIds.map((item: unknown) => String(item).trim()).filter(Boolean)

@@ -7,7 +7,7 @@ ALTER TABLE "Task" ADD COLUMN "syncPolicy" TEXT NOT NULL DEFAULT 'db_plus_gitlab
 ALTER TABLE "Task" ADD COLUMN "contextScope" TEXT;
 ALTER TABLE "Task" ADD COLUMN "parentTaskId" TEXT;
 ALTER TABLE "Task" ADD COLUMN "pendingDelegationCount" INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE "Task" ADD COLUMN "lastDelegatedAt" DATETIME;
+ALTER TABLE "Task" ADD COLUMN "lastDelegatedAt" TIMESTAMP(3);
 
 -- CreateTable
 CREATE TABLE IF NOT EXISTS "TaskParticipant" (
@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS "TaskParticipant" (
     "taskId" TEXT NOT NULL,
     "agentId" TEXT NOT NULL,
     "role" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "TaskParticipant_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "TaskParticipant_taskId_fkey" FOREIGN KEY ("taskId") REFERENCES "Task" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -28,7 +28,7 @@ CREATE TABLE IF NOT EXISTS "TaskDependency" (
     "taskId" TEXT NOT NULL,
     "dependsOnTaskId" TEXT NOT NULL,
     "type" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "TaskDependency_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "TaskDependency_taskId_fkey" FOREIGN KEY ("taskId") REFERENCES "Task" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "TaskDependency_dependsOnTaskId_fkey" FOREIGN KEY ("dependsOnTaskId") REFERENCES "Task" ("id") ON DELETE CASCADE ON UPDATE CASCADE
@@ -57,12 +57,12 @@ CREATE TABLE IF NOT EXISTS "TaskDelegation" (
     "spawnDepth" INTEGER NOT NULL DEFAULT 0,
     "retryCount" INTEGER NOT NULL DEFAULT 0,
     "maxRetries" INTEGER NOT NULL DEFAULT 0,
-    "startedAt" DATETIME,
-    "completedAt" DATETIME,
-    "expiredAt" DATETIME,
+    "startedAt" TIMESTAMP(3),
+    "completedAt" TIMESTAMP(3),
+    "expiredAt" TIMESTAMP(3),
     "failureReason" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "TaskDelegation_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "TaskDelegation_taskId_fkey" FOREIGN KEY ("taskId") REFERENCES "Task" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -78,10 +78,10 @@ CREATE TABLE IF NOT EXISTS "GitLabSyncBinding" (
     "issueIid" INTEGER,
     "bindingType" TEXT NOT NULL,
     "syncPolicy" TEXT NOT NULL,
-    "lastSyncedAt" DATETIME,
+    "lastSyncedAt" TIMESTAMP(3),
     "lastSyncHash" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "GitLabSyncBinding_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "GitLabSyncBinding_taskId_fkey" FOREIGN KEY ("taskId") REFERENCES "Task" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );

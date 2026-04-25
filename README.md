@@ -77,7 +77,7 @@ GitLab webhook 运维注意：
 
 - Frontend: React 18 + Vite 6 + TypeScript
 - Backend: Express 4 + TypeScript
-- Data: Prisma + SQLite
+- Data: Prisma + PostgreSQL
 - Shared contract: `packages/shared`
 - Runtime: OpenClaw workspace integration + OpenAI-compatible gateway
 - Delivery: GitHub Actions + GitHub Pages + GitLab CI
@@ -101,7 +101,7 @@ site/         GitHub Pages 对外主页
 flowchart LR
   U["User / Admin"] --> W["Web App"]
   W --> A["OCC API"]
-  A --> D["Prisma + SQLite"]
+  A --> D["Prisma + PostgreSQL"]
   A --> O["OpenClaw Workspace"]
   A --> G["GitLab Harness"]
   A --> R["Runtime Provider"]
@@ -116,18 +116,11 @@ flowchart LR
 pnpm install
 ```
 
-### 2. 初始化数据库
+### 2. 初始化数据库（PostgreSQL）
 
 ```bash
 pnpm --filter @occ/api db:generate
-pnpm --filter @occ/api db:push
-pnpm --filter @occ/api db:seed
-```
-
-如果本机 `db:push` 遇到 SQLite / schema engine 异常，可使用兜底方式：
-
-```bash
-pnpm --filter @occ/api db:bootstrap
+pnpm --filter @occ/api exec prisma migrate deploy
 pnpm --filter @occ/api db:seed
 ```
 
@@ -152,7 +145,25 @@ pnpm daemon:status
 pnpm web:daemon:status
 ```
 
-### 5. 构建与自检
+### 5. 快速启动（生产环境）
+
+```bash
+docker-compose up -d
+```
+
+健康检查：
+
+```bash
+curl http://localhost:8787/api/health
+```
+
+数据库迁移（本机 PostgreSQL）：
+
+```bash
+DATABASE_URL="postgresql://occ:occ@127.0.0.1:5432/occ?schema=public" pnpm --filter @occ/api exec prisma migrate dev
+```
+
+### 6. 构建与自检
 
 ```bash
 pnpm build
@@ -162,6 +173,24 @@ pnpm health:check
 pnpm verify:local
 pnpm verify:smoke
 ```
+
+单项目严格真验收（推荐固定一个项目 ID 反复验证）：
+
+```bash
+PROJECT_ID=OCC-20260424-001 pnpm audit:single-project:strict
+```
+
+单项目全量验收（健康检查 + 严格审计）：
+
+```bash
+PROJECT_ID=OCC-20260424-001 pnpm verify:single-project:full
+```
+
+可选参数：
+
+- `AUDIT_REQUIRE_HERMES=false`：临时关闭 Hermes 必须参与门禁
+- `AUDIT_REQUIRE_NON_SCRIPTED=false`：临时关闭 scripted-like=0 门禁
+- `AUDIT_OUT=/abs/path/report.json`：自定义审计报告输出路径
 
 GitLab webhook 检查与自愈：
 
@@ -188,6 +217,21 @@ pnpm gitlab:webhook:fix
 - 复用现有管理员会话：`VERIFY_SMOKE_SESSION_COOKIE='occ_session=...' pnpm verify:smoke`
 - 用管理员密码自动登录：`VERIFY_SMOKE_ADMIN_PASSWORD='...' pnpm verify:smoke`
 - 未提供时会回退到临时会话，仅用于本地烟测兜底
+
+知识库搜索（`/api/v1/knowledge`）命令注意事项：
+
+- 查询参数包含中文等非 ASCII 字符时，必须使用 URL 编码写法，否则可能在 HTTP 解析层直接返回 `400 Bad Request`（未进入业务路由）
+- 推荐命令：
+
+```bash
+curl -b cookies.txt --get --data-urlencode "search=测试" "http://localhost:8787/api/v1/knowledge"
+```
+
+- 预期响应（无结果时）：
+
+```json
+{"success":true,"data":{"total":0,"items":[]}}
+```
 
 ## 环境变量
 

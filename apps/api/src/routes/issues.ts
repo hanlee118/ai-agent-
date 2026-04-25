@@ -1,3 +1,11 @@
+/**
+ * ⚠️ V1 维护模式
+ * 此文件仅接受 bug 修复，不接受新功能。
+ * 新功能请在 workflows-v2.ts 或 workflow-v2/ 目录下实现。
+ * 详见 docs/ARCHITECTURE-EVOLUTION.md
+ */
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import type { ParsedIntent, RoleType } from "@occ/shared";
 import { randomUUID } from "node:crypto";
 import express from "express";
@@ -1025,7 +1033,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     sendSuccess(res, issue);
   }));
 
-  router.post("/preview", asyncRoute(async (req, res) => {
+  router.post("/preview", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as PreviewIssueBody;
     const input = String(payload.input ?? "").trim();
     const industryCode = String(payload.industryCode ?? "").trim().toLowerCase();
@@ -1198,7 +1206,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     });
   }));
 
-  router.post("/:issueId/confirm", asyncRoute(async (req, res) => {
+  router.post("/:issueId/confirm", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const issueId = String(req.params.issueId ?? "").trim();
     const payload = (req.body ?? {}) as ConfirmIssueBody;
     const issue = await getIssue(issueId);
@@ -1381,7 +1389,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     });
   }));
 
-  router.post("/:issueId/cancel", asyncRoute(async (req, res) => {
+  router.post("/:issueId/cancel", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const issueId = String(req.params.issueId ?? "").trim();
     const updated = await updateIssue(issueId, (current) => ({
       ...current,

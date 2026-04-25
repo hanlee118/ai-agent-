@@ -2,13 +2,14 @@ import { request } from './core';
 import type {
   DebateCompareLogInput,
   DebateCompareLogResult,
-  RuntimeRouteHealthSnapshot,
+  DesignModelPolicyHealthSnapshot,
   SystemExecutionProtocolInput,
   SystemExecutionProtocolSnapshot,
   SystemHealth,
   SystemRuntime,
   SystemRuntimeConfig,
   SystemRuntimeConfigInput,
+  SystemObservabilitySummary,
   SystemUiAutonomousModeApplyResult,
   SystemUiPreferences,
   SystemUiPreferencesInput,
@@ -67,6 +68,10 @@ export const systemApi = {
     return request<Record<string, unknown>>('/system/readiness');
   },
 
+  async getObservabilitySummary() {
+    return request<SystemObservabilitySummary>('/observability/summary');
+  },
+
   async validateRuntime() {
     return request<{ ok: boolean; message: string }>('/system/runtime/validate', {
       method: 'POST',
@@ -74,7 +79,9 @@ export const systemApi = {
   },
 
   async getRouteHealth() {
-    return request<RuntimeRouteHealthSnapshot>('/system/stage-model-policy/routes/health');
+    // Keep the method name for compatibility with existing callers.
+    // Backend exposes design policy health at /system/design-model-policy/health.
+    return request<DesignModelPolicyHealthSnapshot>('/system/design-model-policy/health');
   },
 
   async compareDebateAndLog(payload: DebateCompareLogInput) {

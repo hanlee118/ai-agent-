@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -691,7 +693,7 @@ export function createRoleSetsRouter() {
     sendSuccess(res, config);
   }));
 
-  router.post("/", asyncRoute(async (req, res) => {
+  router.post("/", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as RoleSetMutationBody;
     const industryCode = normalizeIndustryCode(payload.industryCode);
     const industryName = normalizeString(payload.industryName);
@@ -760,7 +762,7 @@ export function createRoleSetsRouter() {
     sendSuccess(res, config, 201);
   }));
 
-  router.patch("/:industryCode", asyncRoute(async (req, res) => {
+  router.patch("/:industryCode", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const industryCode = normalizeIndustryCode(req.params.industryCode);
     if (!industryCode) {
       sendError(res, 400, "VALIDATION_ERROR", "industryCode is required");

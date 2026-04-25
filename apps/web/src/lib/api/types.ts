@@ -353,6 +353,41 @@ export interface SystemUiAutonomousModeApplyResult {
   agentIds: string[];
 }
 
+export interface SystemObservabilitySummary {
+  generatedAt: string;
+  runtime: {
+    mode?: string;
+    requestedMode?: string;
+    configured?: boolean;
+    lastValidationStatus?: string;
+  };
+  readiness: {
+    warningCount: number;
+    warnings: string[];
+  };
+  data: {
+    projectCount: number;
+    executionCount: number;
+    auditCount: number;
+  };
+  localAgentMonitor: {
+    scannedAt?: string;
+    tools: Array<{
+      id: string;
+      name: string;
+      available: boolean;
+      activeSessions: number;
+      recentSessions: number;
+    }>;
+    totals: {
+      totalTools: number;
+      availableTools: number;
+      activeSessions: number;
+      totalSessions: number;
+    };
+  };
+}
+
 export interface RuntimeRouteHealthItem {
   route: string;
   source: string;
@@ -370,6 +405,18 @@ export interface RuntimeRouteHealthSnapshot {
   generatedAt: string;
   routeCount: number;
   routes: RuntimeRouteHealthItem[];
+}
+
+export interface DesignModelPolicyHealthSnapshot {
+  ok: boolean;
+  timestamp: string;
+  summary?: {
+    status?: 'healthy' | 'degraded' | 'failed' | string;
+    issueCount?: number;
+    healthyFallbackCount?: number;
+    nextAvailableFallback?: string | null;
+  };
+  issues?: string[];
 }
 
 export interface DebateCompareLogInput {

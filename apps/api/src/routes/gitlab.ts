@@ -1,4 +1,6 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import { createHash } from "node:crypto";
 import { prisma } from "../db.js";
 import type { StageType } from "@occ/shared";
@@ -1484,7 +1486,7 @@ export async function publishTaskIssueNote(input: {
 export function createGitLabRouter() {
   const router = express.Router();
 
-  router.post("/harness/projects/:occProjectId/sync", asyncRoute(async (req, res) => {
+  router.post("/harness/projects/:occProjectId/sync", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!ensureGitLabConfig(res)) {
       return;
     }
@@ -1547,7 +1549,7 @@ export function createGitLabRouter() {
     sendSuccess(res, gitlab.payload);
   }));
 
-  router.post("/projects/:projectId/issues", asyncRoute(async (req, res) => {
+  router.post("/projects/:projectId/issues", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!ensureGitLabConfig(res)) {
       return;
     }
@@ -1635,7 +1637,7 @@ export function createGitLabRouter() {
     sendSuccess(res, gitlab.payload);
   }));
 
-  router.put("/projects/:projectId/issues/:iid", asyncRoute(async (req, res) => {
+  router.put("/projects/:projectId/issues/:iid", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!ensureGitLabConfig(res)) {
       return;
     }
@@ -1695,7 +1697,7 @@ export function createGitLabRouter() {
     sendSuccess(res, gitlab.payload);
   }));
 
-  router.post("/projects/:projectId/issues/:iid/notes", asyncRoute(async (req, res) => {
+  router.post("/projects/:projectId/issues/:iid/notes", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!ensureGitLabConfig(res)) {
       return;
     }
@@ -1728,7 +1730,7 @@ export function createGitLabRouter() {
     sendSuccess(res, gitlab.payload);
   }));
 
-  router.post("/webhook", asyncRoute(async (req, res) => {
+  router.post("/webhook", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (GITLAB_WEBHOOK_SECRET) {
       const token = String(req.headers["x-gitlab-token"] || "").trim();
       if (!token || token !== GITLAB_WEBHOOK_SECRET) {

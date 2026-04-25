@@ -9,8 +9,8 @@ CREATE TABLE IF NOT EXISTS "KnowledgeOperationLog" (
     "summary" TEXT NOT NULL,
     "payload" JSONB NOT NULL,
     "canRollback" BOOLEAN NOT NULL DEFAULT false,
-    "rolledBackAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "rolledBackAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- CreateIndex

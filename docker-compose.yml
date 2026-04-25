@@ -1,0 +1,61 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: occ
+      POSTGRES_PASSWORD: occ
+      POSTGRES_DB: occ
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - occ-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U occ -d occ"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      WEB_URL: http://localhost:3000
+      ALLOWED_ORIGINS: http://localhost:3000
+      DATABASE_URL: postgresql://occ:occ@db:5432/occ?schema=public
+    ports:
+      - "8787:10000"
+    volumes:
+      - occ_uploads:/app/uploads
+      - occ_secrets:/app/.occ-secret
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - occ-network
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    ports:
+      - "3000:80"
+    environment:
+      VITE_API_BASE_URL: http://localhost:8787
+    depends_on:
+      - api
+    networks:
+      - occ-network
+
+volumes:
+  postgres_data:
+  occ_uploads:
+  occ_secrets:
+
+networks:
+  occ-network:
+    driver: bridge

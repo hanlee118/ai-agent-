@@ -27,15 +27,25 @@ async function verifyRuntime() {
   const runtime = await getRuntimeStatus();
   const health = await getSystemHealth();
   const readiness = await getSystemReadiness();
+  const databaseUrl = String(process.env.DATABASE_URL ?? "").trim().toLowerCase();
+  const isPostgres = databaseUrl.startsWith("postgresql://") || databaseUrl.startsWith("postgres://");
+  const isSqlite = databaseUrl.startsWith("file:");
   const skipOpenClawChecks = ["1", "true", "yes", "on"].includes(
     String(process.env.CI_SKIP_OPENCLAW_CHECKS ?? process.env.CI ?? "").trim().toLowerCase()
   );
 
   assert.equal(typeof runtime.mode, "string", "runtime mode should be readable");
   assert.equal(Array.isArray(health.services), true, "system health should expose services");
-  assert.equal(readiness.database.exists, true, "database file should exist");
-  assert.ok(readiness.database.path, "database path should be present");
-  assert.equal(existsSync(readiness.database.path), true, "database path should resolve on disk");
+  if (isSqlite) {
+    assert.equal(readiness.database.exists, true, "sqlite database file should exist");
+    assert.ok(readiness.database.path, "sqlite database path should be present");
+    assert.equal(existsSync(readiness.database.path), true, "sqlite database path should resolve on disk");
+  } else if (isPostgres) {
+    assert.equal(typeof readiness.database.url, "string", "postgres database url should be present");
+    assert.ok(readiness.database.url.length > 0, "postgres database url should not be empty");
+  } else {
+    assert.fail(`unsupported DATABASE_URL protocol for verify-local: ${process.env.DATABASE_URL ?? "<empty>"}`);
+  }
   if (!skipOpenClawChecks) {
     assert.equal(readiness.openclaw.configExists, true, "openclaw config should exist");
     assert.equal(readiness.openclaw.workspaceExists, true, "openclaw workspace should exist");

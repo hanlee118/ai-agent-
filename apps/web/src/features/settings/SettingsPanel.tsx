@@ -259,8 +259,8 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
     () => [
       {
         id: 'settings-context',
-        label: '产品上下文',
-        description: '长期记忆与需求边界',
+        label: '平台执行规范',
+        description: '平台原则与长期记忆',
         icon: BookText,
       },
       {
@@ -356,7 +356,7 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
             </div>
             <h1 className="mt-5 text-4xl font-semibold tracking-tight text-white">设置中心</h1>
             <p className="mt-3 max-w-3xl text-sm leading-7 text-slate-300">
-              把产品上下文、执行协议、运行模型和工作区治理收敛到同一张控制台里。现在的布局更偏向“配置系统”
+              把平台执行规范、执行协议、运行模型和工作区治理收敛到同一张控制台里。现在的布局更偏向“配置系统”
               而不是“堆叠表单”，这样后续继续扩项时不会越长越乱。
             </p>
             <div className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">

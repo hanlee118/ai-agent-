@@ -63,4 +63,11 @@ export const productContextApi = {
       method: 'DELETE',
     });
   },
+
+  async deleteHistoryBatch(historyIds: string[]) {
+    return request<{ removedCount: number; removedHistoryIds: string[] }>('/product-context/history', {
+      method: 'DELETE',
+      body: JSON.stringify({ historyIds }),
+    });
+  },
 };

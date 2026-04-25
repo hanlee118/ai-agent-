@@ -10,8 +10,23 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      DATABASE_URL: file:./prisma/dev.db
+      DATABASE_URL: postgresql://occ:occ@127.0.0.1:5432/occ?schema=public
+      TEST_DATABASE_URL: postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: occ
+          POSTGRES_PASSWORD: occ
+          POSTGRES_DB: occ
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U occ -d occ"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -40,25 +55,6 @@ jobs:
 
       - name: DB migration status preflight
         run: pnpm --filter @occ/api db:migrate:status
-
-      - name: Prepare route-test seed DB (ephemeral CI DB)
-        run: pnpm --filter @occ/api exec prisma db push --accept-data-loss --skip-generate
-
-      - name: Normalize route-test seed DB path
-        run: |
-          mkdir -p apps/api/prisma
-          if [ ! -f apps/api/prisma/dev.db ] && [ -f apps/api/prisma/prisma/dev.db ]; then
-            cp apps/api/prisma/prisma/dev.db apps/api/prisma/dev.db
-          fi
-          if [ ! -f apps/api/prisma/dev.db ] && [ -f prisma/dev.db ]; then
-            cp prisma/dev.db apps/api/prisma/dev.db
-          fi
-          if [ ! -f apps/api/prisma/dev.db ]; then
-            echo "missing apps/api/prisma/dev.db" >&2
-            ls -la apps/api/prisma >&2 || true
-            ls -la prisma >&2 || true
-            exit 1
-          fi
 
       - name: Build shared runtime package
         run: pnpm --filter @occ/shared build
@@ -90,3 +86,12 @@ jobs:
 
       - name: Smoke test runtime
         run: CI_SKIP_OPENCLAW_CHECKS=true pnpm test:smoke
+
+      - name: Optional single-project strict audit
+        if: ${{ env.PROJECT_ID != '' }}
+        env:
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          AUDIT_STRICT: "true"
+          AUDIT_REQUIRE_HERMES: "true"
+          AUDIT_REQUIRE_NON_SCRIPTED: "true"
+        run: pnpm audit:single-project:strict
