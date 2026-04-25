@@ -91,28 +91,6 @@ before(async () => {
       "  \"steps\" TEXT NOT NULL,",
       "  \"updatedAt\" DATETIME NOT NULL",
       ");",
-      "PRAGMA foreign_keys = OFF;",
-      "DELETE FROM \"AuthSession\";",
-      "DELETE FROM \"ProjectExecution\";",
-      "DELETE FROM \"TimelineEvent\";",
-      "DELETE FROM \"Deliverable\";",
-      "DELETE FROM \"Stage\";",
-      "DELETE FROM \"Task\";",
-      "DELETE FROM \"Project\";",
-      "DELETE FROM \"AuditLog\";",
-      "UPDATE \"SystemConfig\"",
-      "SET \"adminPasswordHash\" = '',",
-      "    \"adminPasswordSalt\" = '',",
-      "    \"adminPasswordUpdatedAt\" = NULL,",
-      "    \"provider\" = 'scripted',",
-      "    \"apiBaseUrl\" = '',",
-      "    \"modelName\" = '',",
-      "    \"configSource\" = 'default',",
-      "    \"lastValidatedAt\" = NULL,",
-      "    \"lastValidationStatus\" = 'unknown',",
-      "    \"lastValidationError\" = NULL,",
-      "    \"updatedAt\" = CURRENT_TIMESTAMP;",
-      "PRAGMA foreign_keys = ON;",
       "SQL"
     ].join("\n"),
     {
@@ -120,6 +98,66 @@ before(async () => {
       stdio: "pipe"
     }
   );
+
+  // Compatibility: sqlite seed snapshots can lag behind latest schema; best-effort cleanup only.
+  const resetTables = [
+    "AuthSession",
+    "ProjectExecution",
+    "TimelineEvent",
+    "Deliverable",
+    "Stage",
+    "Task",
+    "Project",
+    "AuditLog"
+  ];
+
+  execSync(`sqlite3 ${JSON.stringify(dbPath)} "PRAGMA foreign_keys = OFF;"`, {
+    cwd: apiRoot,
+    stdio: "pipe"
+  });
+
+  for (const tableName of resetTables) {
+    try {
+      execSync(`sqlite3 ${JSON.stringify(dbPath)} "DELETE FROM \\"${tableName}\\";"`, {
+        cwd: apiRoot,
+        stdio: "pipe"
+      });
+    } catch {
+      // Ignore missing table errors to keep fixture setup compatible across schema snapshots.
+    }
+  }
+
+  try {
+    execSync(
+      [
+        `sqlite3 ${JSON.stringify(dbPath)} <<'SQL'`,
+        "UPDATE \"SystemConfig\"",
+        "SET \"adminPasswordHash\" = '',",
+        "    \"adminPasswordSalt\" = '',",
+        "    \"adminPasswordUpdatedAt\" = NULL,",
+        "    \"provider\" = 'scripted',",
+        "    \"apiBaseUrl\" = '',",
+        "    \"modelName\" = '',",
+        "    \"configSource\" = 'default',",
+        "    \"lastValidatedAt\" = NULL,",
+        "    \"lastValidationStatus\" = 'unknown',",
+        "    \"lastValidationError\" = NULL,",
+        "    \"updatedAt\" = CURRENT_TIMESTAMP;",
+        "SQL"
+      ].join("\n"),
+      {
+        cwd: apiRoot,
+        stdio: "pipe"
+      }
+    );
+  } catch {
+    // Ignore missing SystemConfig on older snapshots.
+  }
+
+  execSync(`sqlite3 ${JSON.stringify(dbPath)} "PRAGMA foreign_keys = ON;"`, {
+    cwd: apiRoot,
+    stdio: "pipe"
+  });
 
   for (const migrationPath of migrationPaths) {
     try {
