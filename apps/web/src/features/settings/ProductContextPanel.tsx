@@ -11,10 +11,6 @@ type Draft = {
   productName: string;
   background: string;
   mission: string;
-  executionEngines: string;
-  executionPriority: string;
-  gitlabGovernance: string;
-  hermesUpgradeLoop: string;
   goals: string;
   principles: string;
   constraints: string;
@@ -46,10 +42,6 @@ const EMPTY_DRAFT: Draft = {
   productName: '',
   background: '',
   mission: '',
-  executionEngines: '',
-  executionPriority: '',
-  gitlabGovernance: '',
-  hermesUpgradeLoop: '',
   goals: '',
   principles: '',
   constraints: '',
@@ -116,10 +108,6 @@ export default function ProductContextPanel({ addToast }: Props) {
         productName: context.productName,
         background: context.background,
         mission: context.mission,
-        executionEngines: toMultiline(context.executionEngines || []),
-        executionPriority: toMultiline(context.executionPriority || []),
-        gitlabGovernance: toMultiline(context.gitlabGovernance || []),
-        hermesUpgradeLoop: toMultiline(context.hermesUpgradeLoop || []),
         goals: toMultiline(context.goals),
         principles: toMultiline(context.principles),
         constraints: toMultiline(context.constraints),
@@ -185,10 +173,6 @@ export default function ProductContextPanel({ addToast }: Props) {
         productName: draft.productName.trim(),
         background: draft.background.trim(),
         mission: draft.mission.trim(),
-        executionEngines: toLines(draft.executionEngines),
-        executionPriority: toLines(draft.executionPriority),
-        gitlabGovernance: toLines(draft.gitlabGovernance),
-        hermesUpgradeLoop: toLines(draft.hermesUpgradeLoop),
         goals: toLines(draft.goals),
         principles: toLines(draft.principles),
         constraints: toLines(draft.constraints),
@@ -313,10 +297,6 @@ export default function ProductContextPanel({ addToast }: Props) {
     draft.productName,
     draft.background,
     draft.mission,
-    draft.executionEngines,
-    draft.executionPriority,
-    draft.gitlabGovernance,
-    draft.hermesUpgradeLoop,
     draft.goals,
     draft.principles,
     draft.constraints,
@@ -328,15 +308,7 @@ export default function ProductContextPanel({ addToast }: Props) {
     const goals = toLines(draft.goals);
     const principles = toLines(draft.principles);
     const constraints = toLines(draft.constraints);
-    const executionEngines = toLines(draft.executionEngines);
-    const executionPriority = toLines(draft.executionPriority);
-    const gitlabGovernance = toLines(draft.gitlabGovernance);
-    const hermesUpgradeLoop = toLines(draft.hermesUpgradeLoop);
     return {
-      executionEngines,
-      executionPriority,
-      gitlabGovernance,
-      hermesUpgradeLoop,
       goals,
       principles,
       constraints,
@@ -366,7 +338,7 @@ export default function ProductContextPanel({ addToast }: Props) {
           <div className="grid min-w-[220px] grid-cols-2 gap-3 rounded-[22px] border border-white/10 bg-slate-950/30 p-3">
             <div>
               <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">已填字段</p>
-              <p className="mt-1 text-lg font-semibold text-white">{filledSections}/12</p>
+              <p className="mt-1 text-lg font-semibold text-white">{filledSections}/8</p>
             </div>
             <div>
               <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">回填历史</p>
@@ -412,18 +384,6 @@ export default function ProductContextPanel({ addToast }: Props) {
                 <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Policy</p>
                 <h3 className="mt-1 text-base font-semibold text-white">目标、原则与约束摘要</h3>
                 <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
-                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
-                    <p className="text-slate-500">执行引擎</p>
-                    <p className="mt-1 text-slate-100">{summary.executionEngines.length}</p>
-                  </div>
-                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
-                    <p className="text-slate-500">调用优先级</p>
-                    <p className="mt-1 text-slate-100">{summary.executionPriority.length}</p>
-                  </div>
-                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
-                    <p className="text-slate-500">GitLab 治理</p>
-                    <p className="mt-1 text-slate-100">{summary.gitlabGovernance.length}</p>
-                  </div>
                   <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
                     <p className="text-slate-500">目标</p>
                     <p className="mt-1 text-slate-100">{summary.goals.length}</p>
@@ -531,63 +491,6 @@ export default function ProductContextPanel({ addToast }: Props) {
                     onChange={(event) => setDraft((prev) => ({ ...prev, mission: event.target.value }))}
                     className={`${textClassName} resize-none`}
                     placeholder="一句话描述平台长期使命。"
-                    disabled={loading}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className={cardClassName}>
-              <div className="mb-4 flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Engine Governance</p>
-                  <h3 className="mt-1 text-base font-semibold text-white">引擎策略与升级闭环</h3>
-                </div>
-                <p className="text-xs text-slate-400">明确 OpenClaw / Hermes 分工、调用优先级与 Hermes 自我升级路径。</p>
-              </div>
-
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <div className="space-y-2">
-                  <label className={labelClassName}>执行引擎分工（每行一个）</label>
-                  <textarea
-                    rows={4}
-                    value={draft.executionEngines}
-                    onChange={(event) => setDraft((prev) => ({ ...prev, executionEngines: event.target.value }))}
-                    className={`${textClassName} resize-none`}
-                    placeholder="例如：&#10;OpenClaw: 主执行引擎（项目推进/交付）&#10;Hermes: 设计与Agent自我升级增强"
-                    disabled={loading}
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className={labelClassName}>调用优先级（每行一个）</label>
-                  <textarea
-                    rows={4}
-                    value={draft.executionPriority}
-                    onChange={(event) => setDraft((prev) => ({ ...prev, executionPriority: event.target.value }))}
-                    className={`${textClassName} resize-none`}
-                    placeholder="例如：&#10;工具优先&#10;技能次之&#10;最佳模型兜底"
-                    disabled={loading}
-                  />
-                </div>
-                <div className="space-y-2 md:col-span-2">
-                  <label className={labelClassName}>GitLab 治理规则（每行一个）</label>
-                  <textarea
-                    rows={3}
-                    value={draft.gitlabGovernance}
-                    onChange={(event) => setDraft((prev) => ({ ...prev, gitlabGovernance: event.target.value }))}
-                    className={`${textClassName} resize-none`}
-                    placeholder="例如：&#10;所有代码变更绑定 Issue/MR&#10;主分支合并必须通过 Pipeline&#10;发布需可追溯到提交与审批记录"
-                    disabled={loading}
-                  />
-                </div>
-                <div className="space-y-2 md:col-span-2">
-                  <label className={labelClassName}>Hermes 自我升级闭环（每行一个）</label>
-                  <textarea
-                    rows={4}
-                    value={draft.hermesUpgradeLoop}
-                    onChange={(event) => setDraft((prev) => ({ ...prev, hermesUpgradeLoop: event.target.value }))}
-                    className={`${textClassName} resize-none`}
-                    placeholder="例如：&#10;执行结果采集&#10;质量评估&#10;技能更新/策略修订&#10;审批发布与下次生效"
                     disabled={loading}
                   />
                 </div>
