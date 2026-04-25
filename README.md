@@ -163,6 +163,24 @@ pnpm verify:local
 pnpm verify:smoke
 ```
 
+单项目严格真验收（推荐固定一个项目 ID 反复验证）：
+
+```bash
+PROJECT_ID=OCC-20260424-001 pnpm audit:single-project:strict
+```
+
+单项目全量验收（健康检查 + 严格审计）：
+
+```bash
+PROJECT_ID=OCC-20260424-001 pnpm verify:single-project:full
+```
+
+可选参数：
+
+- `AUDIT_REQUIRE_HERMES=false`：临时关闭 Hermes 必须参与门禁
+- `AUDIT_REQUIRE_NON_SCRIPTED=false`：临时关闭 scripted-like=0 门禁
+- `AUDIT_OUT=/abs/path/report.json`：自定义审计报告输出路径
+
 GitLab webhook 检查与自愈：
 
 ```bash

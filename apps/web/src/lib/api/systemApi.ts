@@ -2,7 +2,7 @@ import { request } from './core';
 import type {
   DebateCompareLogInput,
   DebateCompareLogResult,
-  RuntimeRouteHealthSnapshot,
+  DesignModelPolicyHealthSnapshot,
   SystemExecutionProtocolInput,
   SystemExecutionProtocolSnapshot,
   SystemHealth,
@@ -74,7 +74,9 @@ export const systemApi = {
   },
 
   async getRouteHealth() {
-    return request<RuntimeRouteHealthSnapshot>('/system/stage-model-policy/routes/health');
+    // Keep the method name for compatibility with existing callers.
+    // Backend exposes design policy health at /system/design-model-policy/health.
+    return request<DesignModelPolicyHealthSnapshot>('/system/design-model-policy/health');
   },
 
   async compareDebateAndLog(payload: DebateCompareLogInput) {

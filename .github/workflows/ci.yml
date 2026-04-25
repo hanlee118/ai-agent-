@@ -90,3 +90,12 @@ jobs:
 
       - name: Smoke test runtime
         run: CI_SKIP_OPENCLAW_CHECKS=true pnpm test:smoke
+
+      - name: Optional single-project strict audit
+        if: ${{ env.PROJECT_ID != '' }}
+        env:
+          PROJECT_ID: ${{ env.PROJECT_ID }}
+          AUDIT_STRICT: "true"
+          AUDIT_REQUIRE_HERMES: "true"
+          AUDIT_REQUIRE_NON_SCRIPTED: "true"
+        run: pnpm audit:single-project:strict

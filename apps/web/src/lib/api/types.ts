@@ -372,6 +372,18 @@ export interface RuntimeRouteHealthSnapshot {
   routes: RuntimeRouteHealthItem[];
 }
 
+export interface DesignModelPolicyHealthSnapshot {
+  ok: boolean;
+  timestamp: string;
+  summary?: {
+    status?: 'healthy' | 'degraded' | 'failed' | string;
+    issueCount?: number;
+    healthyFallbackCount?: number;
+    nextAvailableFallback?: string | null;
+  };
+  issues?: string[];
+}
+
 export interface DebateCompareLogInput {
   baselineIssueId: string;
   compareIssueId: string;
