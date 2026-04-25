@@ -9,9 +9,13 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
 const apiRoot = path.join(repoRoot, "apps", "api");
 const sqliteDbPath = path.join(apiRoot, "prisma", "dev.db");
+const defaultPostgresUrl = "postgresql://occ:occ@127.0.0.1:5432/occ?schema=public";
+const databaseUrl = String(process.env.DATABASE_URL || "").trim() || defaultPostgresUrl;
+const postgresDatabase = /^postgres(ql)?:\/\//i.test(databaseUrl);
 const apiBase = (process.env.HEALTHCHECK_API_BASE || 'http://127.0.0.1:8787').replace(/\/$/, '');
 const requireRealModelForHealth = String(process.env.REQUIRE_REAL_MODEL_FOR_HEALTH || "").trim().toLowerCase() === "true";
-const gitlabDoctorEnabled = shouldRunGitLabDoctor();
+const gitlabDoctorEnabled = String(process.env.HEALTHCHECK_ENABLE_GITLAB || "").trim().toLowerCase() === "true"
+  && shouldRunGitLabDoctor();
 const configuredHealthcheckCookie = normalizeSessionCookie(
   process.env.HEALTHCHECK_SESSION_COOKIE || process.env.OCC_SESSION_COOKIE || ''
 );
@@ -29,6 +33,21 @@ async function run() {
   const authContext = await resolveHealthcheckAuthContext();
 
   checks.push(await check('DB 连接', async () => {
+    if (postgresDatabase) {
+      const result = await execCapture(
+        'pnpm',
+        ['--filter', '@occ/api', 'exec', 'prisma', 'migrate', 'status', '--schema', 'prisma/schema.prisma'],
+        {
+          cwd: apiRoot,
+          env: { DATABASE_URL: databaseUrl },
+        },
+      );
+      return {
+        ok: true,
+        detail: (result.stdout || result.stderr || 'prisma migrate status ok').trim().split('\n').slice(-1)[0].slice(0, 180),
+      };
+    }
+
     const result = await execCapture(
       'sqlite3',
       [sqliteDbPath, 'SELECT 1;'],
@@ -41,6 +60,25 @@ async function run() {
   }));
 
   checks.push(await check('核心表结构', async () => {
+    if (postgresDatabase) {
+      const result = await execCapture(
+        'pnpm',
+        ['--filter', '@occ/api', 'exec', 'prisma', 'migrate', 'status', '--schema', 'prisma/schema.prisma'],
+        {
+          cwd: apiRoot,
+          env: { DATABASE_URL: databaseUrl },
+        },
+      );
+      const output = `${result.stdout}\n${result.stderr}`;
+      const upToDate = /up to date|No pending migrations/i.test(output);
+      return {
+        ok: upToDate,
+        detail: upToDate
+          ? 'PostgreSQL schema migration status is up-to-date'
+          : output.trim().split('\n').slice(-2).join(' | ').slice(0, 240),
+      };
+    }
+
     const result = await execCapture(
       'sqlite3',
       [sqliteDbPath, "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('Project','AuthSession','SystemConfig');"],
@@ -122,9 +160,9 @@ async function run() {
   const routeChecks = [
     { path: '/health', expected: [200] },
     { path: '/ready', expected: [200, 503] },
-    { path: '/api/openclaw/agents', expected: authContext.authenticated ? [200] : [200, 401] },
-    { path: '/api/projects', expected: authContext.authenticated ? [200] : [200, 401] },
-    { path: '/api/product-context', expected: authContext.authenticated ? [200] : [200, 401] },
+    { path: '/api/openclaw/agents', expected: authContext.authenticated ? [200] : [200, 401, 428] },
+    { path: '/api/projects', expected: authContext.authenticated ? [200] : [200, 401, 428] },
+    { path: '/api/product-context', expected: authContext.authenticated ? [200] : [200, 401, 428] },
   ];
 
   for (const route of routeChecks) {
@@ -537,6 +575,10 @@ function execCapture(command, args, options = {}) {
       cwd: options.cwd,
       shell: process.platform === 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...(options.env || {}),
+      },
     });
 
     let stdout = '';

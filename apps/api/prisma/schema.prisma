@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -100,9 +100,13 @@ model SystemConfig {
 model AuthSession {
   id          String   @id @default(cuid())
   tokenHash   String   @unique
+  userId      String?
   expiresAt   DateTime
   lastUsedAt  DateTime @default(now())
   createdAt   DateTime @default(now())
+  user        UserProfile? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, createdAt])
 }
 
 model AuditLog {
@@ -203,11 +207,44 @@ model Project {
   timeline            TimelineEvent[]
   executions          ProjectExecution[]
   workflows           Workflow[]
+  projectMembers      ProjectMember[]
   outgoingRelayRelations StageRelayRelation[] @relation("RelaySourceProject")
   incomingRelayRelations StageRelayRelation[] @relation("RelayTargetProject")
 
   @@index([projectType, createdAt])
   @@index([parentProjectId])
+}
+
+model UserProfile {
+  id             String          @id @default(cuid())
+  email          String          @unique
+  name           String
+  role           String          @default("viewer")
+  passwordHash   String          @default("")
+  passwordSalt   String          @default("")
+  passwordUpdatedAt DateTime?
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  authSessions   AuthSession[]
+  projectMembers ProjectMember[]
+
+  @@index([role, isActive])
+}
+
+model ProjectMember {
+  id        String      @id @default(cuid())
+  projectId String
+  userId    String
+  role      String      @default("viewer")
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  project   Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      UserProfile @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, userId])
+  @@index([userId, role])
+  @@index([projectId, role])
 }
 
 model Stage {

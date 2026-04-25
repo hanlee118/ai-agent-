@@ -1,4 +1,6 @@
 import { Prisma } from "@prisma/client";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import express from "express";
 import { prisma } from "../db.js";
 import {
@@ -339,7 +341,7 @@ export function createAgentsRouter() {
     sendSuccess(res, list);
   }));
 
-  router.post("/", asyncRoute(async (req, res) => {
+  router.post("/", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as CreateAgentBody;
     const name = String(payload.name ?? "").trim();
     const role = String(payload.role ?? "").trim();
@@ -473,7 +475,7 @@ export function createAgentsRouter() {
     });
   }));
 
-  router.patch("/:id/soul", asyncRoute(async (req, res) => {
+  router.patch("/:id/soul", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.id ?? "").trim();
     const payload = (req.body ?? {}) as UpdateSoulBody;
     const content = String(payload.content ?? "").trim();
@@ -517,7 +519,7 @@ export function createAgentsRouter() {
     });
   }));
 
-  router.patch("/:id/sop", asyncRoute(async (req, res) => {
+  router.patch("/:id/sop", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.id ?? "").trim();
     const payload = (req.body ?? {}) as UpdateSopBody;
 
@@ -551,7 +553,7 @@ export function createAgentsRouter() {
     });
   }));
 
-  router.patch("/:id/model", asyncRoute(async (req, res) => {
+  router.patch("/:id/model", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const agentId = String(req.params.id ?? "").trim();
     const payload = (req.body ?? {}) as SwitchModelBody;
     const modelId = String(payload.modelId ?? "").trim();

@@ -1,8 +1,6 @@
-FROM node:20-bookworm-slim
+FROM node:20-alpine
 
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends sqlite3 ca-certificates \
-  && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache bash sqlite curl ca-certificates
 
 RUN corepack enable
 
@@ -17,9 +15,15 @@ RUN pnpm install --no-frozen-lockfile
 
 COPY . .
 
-RUN pnpm --filter @occ/api db:generate \
-  && pnpm build
+RUN pnpm --filter @occ/shared build \
+  && pnpm --filter @occ/api db:generate \
+  && pnpm --filter @occ/api build
+
+VOLUME ["/app/prisma", "/app/.occ-secret", "/app/uploads"]
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:10000/api/health || exit 1
 
 EXPOSE 10000
 
-CMD ["./scripts/start-render.sh"]
+CMD ["sh", "-c", "pnpm --filter @occ/api exec prisma migrate deploy && ./scripts/start-render.sh"]

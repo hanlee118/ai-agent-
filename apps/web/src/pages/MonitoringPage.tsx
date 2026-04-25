@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Activity, Terminal, Zap } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { agents, models, projects, sessions } from '../lib/runtimeCollections';
 import { Badge } from './impl/GovernanceShared';
+import { systemApi, type SystemObservabilitySummary } from '../lib/api';
 
 type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -11,6 +12,27 @@ type Props = {
 
 export default function MonitoringPage({ addToast }: Props) {
   const [activeFilter, setActiveFilter] = useState('all');
+  const [observability, setObservability] = useState<SystemObservabilitySummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSummary = async () => {
+      try {
+        const summary = await systemApi.getObservabilitySummary();
+        if (!cancelled) {
+          setObservability(summary);
+        }
+      } catch {
+        if (!cancelled) {
+          setObservability(null);
+        }
+      }
+    };
+    void loadSummary();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const filteredSessions = useMemo(() => {
     if (activeFilter === 'all') return sessions;
@@ -80,6 +102,41 @@ export default function MonitoringPage({ addToast }: Props) {
           </div>
           <h3 className="text-3xl font-bold text-white">{stats.activeCount}</h3>
           <p className="text-xs text-slate-500">当前正在运行的 Agent</p>
+        </div>
+      </div>
+
+      <div className="bg-surface-soft border border-border-subtle rounded-2xl p-5 space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-sm font-semibold text-white">平台可观测性摘要</h2>
+          <span className="text-[11px] text-slate-500">
+            {observability?.generatedAt ? `更新于 ${new Date(observability.generatedAt).toLocaleString('zh-CN')}` : '暂无数据'}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+          <div className="rounded-xl border border-border-subtle bg-white/5 p-3">
+            <p className="text-slate-500">项目数</p>
+            <p className="mt-1 text-white font-semibold">{observability?.data.projectCount ?? '-'}</p>
+          </div>
+          <div className="rounded-xl border border-border-subtle bg-white/5 p-3">
+            <p className="text-slate-500">执行记录</p>
+            <p className="mt-1 text-white font-semibold">{observability?.data.executionCount ?? '-'}</p>
+          </div>
+          <div className="rounded-xl border border-border-subtle bg-white/5 p-3">
+            <p className="text-slate-500">审计日志</p>
+            <p className="mt-1 text-white font-semibold">{observability?.data.auditCount ?? '-'}</p>
+          </div>
+          <div className="rounded-xl border border-border-subtle bg-white/5 p-3">
+            <p className="text-slate-500">可用工具</p>
+            <p className="mt-1 text-white font-semibold">
+              {observability ? `${observability.localAgentMonitor.totals.availableTools}/${observability.localAgentMonitor.totals.totalTools}` : '-'}
+            </p>
+          </div>
+          <div className="rounded-xl border border-border-subtle bg-white/5 p-3">
+            <p className="text-slate-500">就绪告警</p>
+            <p className={cn('mt-1 font-semibold', (observability?.readiness.warningCount || 0) > 0 ? 'text-warning' : 'text-emerald-300')}>
+              {observability?.readiness.warningCount ?? '-'}
+            </p>
+          </div>
         </div>
       </div>
 

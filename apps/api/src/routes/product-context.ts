@@ -1,6 +1,14 @@
+/**
+ * Agent 治理规范接口
+ * 此模块为平台级单例，定义所有 Agent 的底层执行规则。
+ * 项目差异化需求请勿通过此接口修改。
+ * 详见 docs/AGENT-GOVERNANCE.md
+ */
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import express from "express";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
-import { getProductContext, removeRequirementBackfill, updateProductContext } from "../system/v1-method-store.js";
+import { getProductContext, removeRequirementBackfill, removeRequirementBackfills, updateProductContext } from "../system/v1-method-store.js";
 
 interface UpdateContextBody {
   productName?: unknown;
@@ -11,6 +19,10 @@ interface UpdateContextBody {
   constraints?: unknown;
   forbiddenKeywords?: unknown;
   requiredKeywords?: unknown;
+}
+
+interface DeleteHistoryBatchBody {
+  historyIds?: unknown;
 }
 
 function normalizeStringArray(input: unknown) {
@@ -29,7 +41,7 @@ export function createProductContextRouter() {
     sendSuccess(res, await getProductContext());
   }));
 
-  router.put("/", asyncRoute(async (req, res) => {
+  router.put("/", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as UpdateContextBody;
     const productName = String(payload.productName ?? "").trim();
 
@@ -66,6 +78,21 @@ export function createProductContextRouter() {
     }
 
     sendSuccess(res, { removed: true, historyId: result.historyId ?? historyId });
+  }));
+
+  router.delete("/history", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as DeleteHistoryBatchBody;
+    const historyIds = Array.isArray(payload.historyIds)
+      ? payload.historyIds.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+
+    if (historyIds.length === 0) {
+      sendError(res, 400, "VALIDATION_ERROR", "historyIds is required");
+      return;
+    }
+
+    const result = await removeRequirementBackfills(historyIds);
+    sendSuccess(res, result);
   }));
 
   return router;

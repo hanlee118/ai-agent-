@@ -5,7 +5,7 @@ export const authApi = {
     return request<{
       setupComplete: boolean;
       authenticated: boolean;
-      user?: { id: string; name: string; email: string };
+      user?: { id: string; name: string; email: string; role: string };
     }>('/auth/status');
   },
 

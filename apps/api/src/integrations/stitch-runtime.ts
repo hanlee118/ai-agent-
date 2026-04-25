@@ -13,8 +13,6 @@ let stitchTransportLogFilterInstalled = false;
 let stitchTransportOriginalConsoleError: typeof console.error | null = null;
 let stitchFetchPatchLock: Promise<void> = Promise.resolve();
 
-type UndiciModule = typeof import("undici");
-
 export type StitchDesignArtifact = {
   provider: "google-stitch-mcp";
   generatedAt: string;
@@ -221,7 +219,8 @@ async function createStitchDispatcher(plan: StitchProxyPlan) {
     return null;
   }
 
-  const undici: UndiciModule = await import("undici");
+  const undiciModuleId = "undici";
+  const undici = await import(undiciModuleId) as any;
   if (plan.mode === "http") {
     return new undici.ProxyAgent({
       uri: plan.proxyUrl,

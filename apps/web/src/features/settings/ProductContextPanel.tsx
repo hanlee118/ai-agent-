@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
-import { BookText } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, BookText, ClipboardList, PencilLine } from 'lucide-react';
 import { ApiRequestError, productContextApi } from '../../lib/api';
 import { cn } from '../../lib/utils';
 
@@ -16,6 +16,26 @@ type Draft = {
   constraints: string;
   forbiddenKeywords: string;
   requiredKeywords: string;
+};
+
+type ContextView = 'overview' | 'edit' | 'history';
+
+type HistoryItem = {
+  id: string;
+  title: string;
+  status: 'planned' | 'in_progress' | 'done';
+  validationStatus: 'pending' | 'matched' | 'mismatch';
+  validationNote?: string;
+  implementationSummary?: string;
+  requirementContract?: {
+    objective: string;
+    inScope: string[];
+    outOfScope: string[];
+    acceptanceCriteria: string[];
+    artifacts: string[];
+  };
+  createdAt: string;
+  completedAt?: string;
 };
 
 const EMPTY_DRAFT: Draft = {
@@ -40,28 +60,42 @@ function toMultiline(value: string[]) {
   return value.join('\n');
 }
 
+function fromUrlView(): ContextView {
+  if (typeof window === 'undefined') {
+    return 'overview';
+  }
+  const url = new URL(window.location.href);
+  const value = url.searchParams.get('context_view');
+  if (value === 'edit' || value === 'history' || value === 'overview') {
+    return value;
+  }
+  return 'overview';
+}
+
+function syncUrlView(view: ContextView) {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  const url = new URL(window.location.href);
+  if (view === 'overview') {
+    url.searchParams.delete('context_view');
+  } else {
+    url.searchParams.set('context_view', view);
+  }
+  const nextPath = `${url.pathname}${url.search}${url.hash}`;
+  window.history.pushState(window.history.state, '', nextPath);
+}
+
 export default function ProductContextPanel({ addToast }: Props) {
   const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+  const [view, setView] = useState<ContextView>(() => fromUrlView());
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
-  const [history, setHistory] = useState<Array<{
-    id: string;
-    title: string;
-    status: 'planned' | 'in_progress' | 'done';
-    validationStatus: 'pending' | 'matched' | 'mismatch';
-    validationNote?: string;
-    implementationSummary?: string;
-    requirementContract?: {
-      objective: string;
-      inScope: string[];
-      outOfScope: string[];
-      acceptanceCriteria: string[];
-      artifacts: string[];
-    };
-    createdAt: string;
-    completedAt?: string;
-  }>>([]);
+  const [deletingBatch, setDeletingBatch] = useState(false);
+  const [showNonReusable, setShowNonReusable] = useState(false);
+  const [selectedHistoryIds, setSelectedHistoryIds] = useState<string[]>([]);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
 
   const loadContext = useCallback(async (signal?: { cancelled: boolean }) => {
     setLoading(true);
@@ -95,7 +129,7 @@ export default function ProductContextPanel({ addToast }: Props) {
       );
     } catch (error) {
       if (!signal?.cancelled) {
-        addToast(`加载产品说明文档失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+        addToast(`加载平台执行规范失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
       }
     } finally {
       if (!signal?.cancelled) {
@@ -105,19 +139,31 @@ export default function ProductContextPanel({ addToast }: Props) {
   }, [addToast]);
 
   useEffect(() => {
-    let cancelled = false;
     const signal = { cancelled: false };
-
     void loadContext(signal);
     return () => {
-      cancelled = true;
-      signal.cancelled = cancelled;
+      signal.cancelled = true;
     };
   }, [loadContext]);
 
+  useEffect(() => {
+    const onPopState = () => setView(fromUrlView());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  useEffect(() => {
+    setSelectedHistoryIds([]);
+  }, [showNonReusable, view]);
+
+  useEffect(() => {
+    const valid = new Set(history.map((item) => item.id));
+    setSelectedHistoryIds((prev) => prev.filter((id) => valid.has(id)));
+  }, [history]);
+
   const handleSave = async () => {
     if (!draft.productName.trim()) {
-      addToast('请先填写产品名称', 'error');
+      addToast('请先填写平台名称', 'error');
       return;
     }
 
@@ -133,9 +179,11 @@ export default function ProductContextPanel({ addToast }: Props) {
         forbiddenKeywords: toLines(draft.forbiddenKeywords),
         requiredKeywords: toLines(draft.requiredKeywords),
       });
-      addToast('产品说明文档已保存', 'success');
+      addToast('平台执行规范已保存', 'success');
+      setView('overview');
+      syncUrlView('overview');
     } catch (error) {
-      addToast(`保存产品说明文档失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+      addToast(`保存平台执行规范失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
     } finally {
       setSaving(false);
     }
@@ -154,10 +202,12 @@ export default function ProductContextPanel({ addToast }: Props) {
     try {
       await productContextApi.deleteHistory(historyId);
       setHistory((prev) => prev.filter((item) => item.id !== historyId));
+      setSelectedHistoryIds((prev) => prev.filter((id) => id !== historyId));
       addToast('长期记忆已删除', 'success');
     } catch (error) {
       if (error instanceof ApiRequestError && error.status === 404) {
         setHistory((prev) => prev.filter((item) => item.id !== historyId));
+        setSelectedHistoryIds((prev) => prev.filter((id) => id !== historyId));
         addToast('长期记忆不存在，已从列表移除', 'info');
         return;
       }
@@ -167,11 +217,82 @@ export default function ProductContextPanel({ addToast }: Props) {
     }
   };
 
+  const toggleHistorySelect = (historyId: string) => {
+    setSelectedHistoryIds((prev) => (
+      prev.includes(historyId) ? prev.filter((id) => id !== historyId) : [...prev, historyId]
+    ));
+  };
+
+  const goToView = (next: ContextView) => {
+    setView(next);
+    syncUrlView(next);
+  };
+
   const textClassName =
     'w-full rounded-2xl border border-white/10 bg-slate-950/55 px-4 py-3 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-cyan-400/40';
   const labelClassName = 'text-[11px] font-bold uppercase tracking-[0.22em] text-slate-500';
   const cardClassName = 'rounded-[24px] border border-white/10 bg-white/[0.03] p-5';
-  const historyCount = history.length;
+
+  const reusableHistory = history.filter((item) => item.status === 'done' && item.validationStatus === 'matched');
+  const nonReusableHistory = history.filter((item) => !(item.status === 'done' && item.validationStatus === 'matched'));
+  const historyCount = reusableHistory.length;
+  const visibleHistory = showNonReusable ? nonReusableHistory : reusableHistory;
+  const selectedCount = selectedHistoryIds.length;
+
+  const handleSelectAllVisible = () => {
+    setSelectedHistoryIds(visibleHistory.map((item) => item.id));
+  };
+
+  const clearSelection = () => {
+    setSelectedHistoryIds([]);
+  };
+
+  const handleDeleteSelected = async () => {
+    if (selectedHistoryIds.length === 0) {
+      addToast('请先选择要删除的记录', 'info');
+      return;
+    }
+    const confirmed = window.confirm(`确认批量删除 ${selectedHistoryIds.length} 条长期记忆吗？`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingBatch(true);
+    try {
+      const result = await productContextApi.deleteHistoryBatch(selectedHistoryIds);
+      const removedIds = new Set(result.removedHistoryIds || []);
+      setHistory((prev) => prev.filter((item) => !removedIds.has(item.id)));
+      setSelectedHistoryIds([]);
+      addToast(`已删除 ${result.removedCount} 条长期记忆`, 'success');
+    } catch (error) {
+      // Fallback for old backend versions that do not expose DELETE /product-context/history yet.
+      try {
+        let removedCount = 0;
+        for (const historyId of selectedHistoryIds) {
+          try {
+            await productContextApi.deleteHistory(historyId);
+            removedCount += 1;
+          } catch (singleError) {
+            if (!(singleError instanceof ApiRequestError && singleError.status === 404)) {
+              throw singleError;
+            }
+          }
+        }
+        if (removedCount > 0) {
+          const removedSet = new Set(selectedHistoryIds);
+          setHistory((prev) => prev.filter((item) => !removedSet.has(item.id)));
+          setSelectedHistoryIds([]);
+          addToast(`批量接口不可用，已降级逐条删除 ${removedCount} 条`, 'info');
+          return;
+        }
+      } catch {
+        // keep original error below
+      }
+      addToast(`批量删除失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
+    } finally {
+      setDeletingBatch(false);
+    }
+  };
   const filledSections = [
     draft.productName,
     draft.background,
@@ -183,6 +304,19 @@ export default function ProductContextPanel({ addToast }: Props) {
     draft.requiredKeywords,
   ].filter((item) => item.trim()).length;
 
+  const summary = useMemo(() => {
+    const goals = toLines(draft.goals);
+    const principles = toLines(draft.principles);
+    const constraints = toLines(draft.constraints);
+    return {
+      goals,
+      principles,
+      constraints,
+      forbiddenKeywords: toLines(draft.forbiddenKeywords),
+      requiredKeywords: toLines(draft.requiredKeywords),
+    };
+  }, [draft]);
+
   return (
     <section className="overflow-hidden rounded-[28px] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.05),rgba(15,23,42,0.9))] shadow-[0_24px_80px_rgba(2,6,23,0.3)]">
       <div className="border-b border-white/10 bg-white/[0.04] px-6 py-5">
@@ -193,227 +327,394 @@ export default function ProductContextPanel({ addToast }: Props) {
             </div>
             <div>
               <div className="inline-flex items-center rounded-full border border-cyan-300/20 bg-cyan-400/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-100">
-                Product Context
+                Platform Policy
               </div>
-              <h2 className="mt-3 text-xl font-semibold text-white">产品说明文档与长期记忆</h2>
+              <h2 className="mt-3 text-xl font-semibold text-white">平台执行规范与长期记忆</h2>
               <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-400">
-                把产品背景、使命、边界和长期记忆沉淀在同一块。后续需求对齐、协议门禁和回填记录都会围绕这里继续长出来。
+                默认只展示摘要，避免在设置页堆叠大表单。点击进入独立页面后再编辑规范，或查看完整回填历史列表。
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
-            <div className="grid min-w-[220px] grid-cols-2 gap-3 rounded-[22px] border border-white/10 bg-slate-950/30 p-3">
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">已填字段</p>
-                <p className="mt-1 text-lg font-semibold text-white">{filledSections}/8</p>
-              </div>
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">回填历史</p>
-                <p className="mt-1 text-lg font-semibold text-cyan-100">{historyCount}</p>
-              </div>
+          <div className="grid min-w-[220px] grid-cols-2 gap-3 rounded-[22px] border border-white/10 bg-slate-950/30 p-3">
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">已填字段</p>
+              <p className="mt-1 text-lg font-semibold text-white">{filledSections}/8</p>
             </div>
-            <button
-              onClick={() => void handleSave()}
-              disabled={loading || saving}
-              className="rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
-            >
-              {saving ? '保存中...' : '保存文档'}
-            </button>
+            <div>
+              <p className="text-[11px] uppercase tracking-[0.18em] text-slate-500">回填历史</p>
+              <p className="mt-1 text-lg font-semibold text-cyan-100">{historyCount}</p>
+              <p className="mt-0.5 text-[10px] text-slate-500">可复用 / 共 {history.length}</p>
+            </div>
           </div>
         </div>
       </div>
 
       <div className="space-y-6 p-6">
-        <div className={cardClassName}>
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Foundation</p>
-              <h3 className="mt-1 text-base font-semibold text-white">产品定位</h3>
-            </div>
-            <p className="text-xs text-slate-400">先定义产品是谁、为什么存在，再继续往目标和约束展开。</p>
+        {view !== 'overview' ? (
+          <div className="flex items-center justify-between gap-3 rounded-2xl border border-white/10 bg-slate-950/25 px-4 py-3">
+            <button
+              type="button"
+              onClick={() => goToView('overview')}
+              className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-white/[0.08]"
+            >
+              <ArrowLeft size={14} />
+              返回摘要
+            </button>
+            <p className="text-xs text-slate-400">
+              {view === 'edit' ? '规范编辑页面' : '回填历史页面'}
+            </p>
           </div>
+        ) : null}
 
-          <div className="space-y-4">
-            <div className="space-y-2">
-              <label className={labelClassName}>产品名称</label>
-              <input
-                type="text"
-                value={draft.productName}
-                onChange={(event) => setDraft((prev) => ({ ...prev, productName: event.target.value }))}
-                className={textClassName}
-                placeholder="例如：Aegis OS"
-                disabled={loading}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className={labelClassName}>产品背景</label>
-              <textarea
-                rows={3}
-                value={draft.background}
-                onChange={(event) => setDraft((prev) => ({ ...prev, background: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="描述当前产品所处阶段、目标用户和业务上下文。"
-                disabled={loading}
-              />
-            </div>
-
-            <div className="space-y-2">
-              <label className={labelClassName}>使命</label>
-              <textarea
-                rows={2}
-                value={draft.mission}
-                onChange={(event) => setDraft((prev) => ({ ...prev, mission: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="一句话描述产品长期使命。"
-                disabled={loading}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className={cardClassName}>
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Policy</p>
-              <h3 className="mt-1 text-base font-semibold text-white">目标、原则与约束</h3>
-            </div>
-            <p className="text-xs text-slate-400">把“必须坚持什么”和“绝不能越线什么”放在一层，后续扩展也不容易乱。</p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <label className={labelClassName}>目标（每行一个）</label>
-              <textarea
-                rows={4}
-                value={draft.goals}
-                onChange={(event) => setDraft((prev) => ({ ...prev, goals: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="例如：&#10;提升需求落地效率&#10;降低跨团队沟通成本"
-                disabled={loading}
-              />
-            </div>
-            <div className="space-y-2">
-              <label className={labelClassName}>原则（每行一个）</label>
-              <textarea
-                rows={4}
-                value={draft.principles}
-                onChange={(event) => setDraft((prev) => ({ ...prev, principles: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="例如：&#10;文档驱动研发&#10;先确认再执行"
-                disabled={loading}
-              />
-            </div>
-            <div className="space-y-2">
-              <label className={labelClassName}>约束（每行一个）</label>
-              <textarea
-                rows={3}
-                value={draft.constraints}
-                onChange={(event) => setDraft((prev) => ({ ...prev, constraints: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="例如：必须本地部署"
-                disabled={loading}
-              />
-            </div>
-            <div className="space-y-2">
-              <label className={labelClassName}>禁用关键词</label>
-              <textarea
-                rows={3}
-                value={draft.forbiddenKeywords}
-                onChange={(event) => setDraft((prev) => ({ ...prev, forbiddenKeywords: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="例如：绕过审计"
-                disabled={loading}
-              />
-            </div>
-            <div className="space-y-2 md:col-span-2">
-              <label className={labelClassName}>必含关键词</label>
-              <textarea
-                rows={3}
-                value={draft.requiredKeywords}
-                onChange={(event) => setDraft((prev) => ({ ...prev, requiredKeywords: event.target.value }))}
-                className={`${textClassName} resize-none`}
-                placeholder="例如：验收标准"
-                disabled={loading}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className={cardClassName}>
-          <div className="mb-4 flex items-center justify-between gap-4">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">History</p>
-              <h3 className="mt-1 text-base font-semibold text-white">需求回填历史</h3>
-            </div>
-            <p className="text-xs text-slate-400">只保留最近最有价值的上下文，避免历史模板把当前项目带偏。</p>
-          </div>
-
-          <div className="space-y-3">
-            {history.length > 0 ? (
-              history.slice(0, 5).map((item) => (
-                <div key={item.id} className="rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-xs">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="font-medium text-slate-100">{item.title}</p>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        <span className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
-                          {item.status}
-                        </span>
-                        <span
-                          className={cn(
-                            'rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em]',
-                            item.validationStatus === 'matched'
-                              ? 'border-emerald-400/30 text-emerald-200'
-                              : item.validationStatus === 'mismatch'
-                                ? 'border-rose-400/30 text-rose-200'
-                                : 'border-amber-400/30 text-amber-200',
-                          )}
-                        >
-                          {item.validationStatus}
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => void handleDeleteHistory(item.id)}
-                      disabled={deletingHistoryId === item.id}
-                      className="rounded-xl border border-rose-400/30 px-3 py-1.5 text-[10px] font-semibold text-rose-200 transition hover:bg-rose-400/10 disabled:opacity-50"
-                    >
-                      {deletingHistoryId === item.id ? '删除中...' : '删除'}
-                    </button>
-                  </div>
-                  <p className="mt-3 text-slate-500">
-                    创建于 {new Date(item.createdAt).toLocaleString('zh-CN')}
-                    {item.completedAt ? ` · 完成于 ${new Date(item.completedAt).toLocaleString('zh-CN')}` : ''}
-                  </p>
-                  {item.validationNote ? <p className="mt-2 leading-relaxed text-slate-400">说明: {item.validationNote}</p> : null}
-                  {item.implementationSummary ? (
-                    <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
-                      <summary className="cursor-pointer text-slate-300">查看实施总结</summary>
-                      <pre className="mt-3 whitespace-pre-wrap text-[11px] leading-6 text-slate-500">{item.implementationSummary}</pre>
-                    </details>
-                  ) : null}
-                  {item.requirementContract ? (
-                    <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
-                      <summary className="cursor-pointer text-slate-300">查看需求确认单</summary>
-                      <div className="mt-3 space-y-1 text-[11px] leading-6 text-slate-500">
-                        <p>目标: {item.requirementContract.objective}</p>
-                        <p>In Scope: {(item.requirementContract.inScope || []).join('；') || '暂无'}</p>
-                        <p>Out of Scope: {(item.requirementContract.outOfScope || []).join('；') || '暂无'}</p>
-                        <p>验收: {(item.requirementContract.acceptanceCriteria || []).join('；') || '暂无'}</p>
-                        <p>产出: {(item.requirementContract.artifacts || []).join('、') || '暂无'}</p>
-                      </div>
-                    </details>
-                  ) : null}
-                </div>
-              ))
-            ) : (
-              <div className="rounded-2xl border border-dashed border-white/10 bg-slate-950/20 px-4 py-6 text-sm text-slate-500">
-                暂无回填记录
+        {view === 'overview' ? (
+          <>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className={cardClassName}>
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Foundation</p>
+                <h3 className="mt-1 text-base font-semibold text-white">平台定位摘要</h3>
+                <p className="mt-3 text-xs text-slate-500">平台名称</p>
+                <p className="mt-1 text-sm text-slate-100">{draft.productName || '未填写'}</p>
+                <p className="mt-3 text-xs text-slate-500">使命</p>
+                <p className="mt-1 text-sm leading-6 text-slate-300">{draft.mission || '未填写'}</p>
+                <p className="mt-3 text-xs text-slate-500">背景</p>
+                <p className="mt-1 line-clamp-3 text-sm leading-6 text-slate-400">{draft.background || '未填写'}</p>
               </div>
-            )}
+
+              <div className={cardClassName}>
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Policy</p>
+                <h3 className="mt-1 text-base font-semibold text-white">目标、原则与约束摘要</h3>
+                <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                    <p className="text-slate-500">目标</p>
+                    <p className="mt-1 text-slate-100">{summary.goals.length}</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                    <p className="text-slate-500">原则</p>
+                    <p className="mt-1 text-slate-100">{summary.principles.length}</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                    <p className="text-slate-500">约束</p>
+                    <p className="mt-1 text-slate-100">{summary.constraints.length}</p>
+                  </div>
+                  <div className="rounded-xl border border-white/10 bg-slate-950/30 p-3">
+                    <p className="text-slate-500">关键词规则</p>
+                    <p className="mt-1 text-slate-100">{summary.requiredKeywords.length + summary.forbiddenKeywords.length}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className={cardClassName}>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">History</p>
+                  <h3 className="mt-1 text-base font-semibold text-white">需求回填历史摘要（仅可复用）</h3>
+                  <p className="mt-2 text-xs text-slate-400">默认只统计完整验收可复用记录，避免半成品污染后续参考。</p>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-slate-950/35 px-3 py-2 text-sm text-cyan-100">
+                  可复用 {historyCount} 条
+                </div>
+              </div>
+              <div className="mt-3 space-y-2">
+                {reusableHistory.slice(0, 3).map((item) => (
+                  <div key={item.id} className="rounded-xl border border-white/10 bg-slate-950/25 px-3 py-2 text-xs text-slate-300">
+                    {item.title}
+                  </div>
+                ))}
+                {reusableHistory.length === 0 ? <p className="text-xs text-slate-500">暂无可复用回填记录</p> : null}
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => goToView('edit')}
+                disabled={loading}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
+              >
+                <PencilLine size={16} />
+                进入规范编辑页
+              </button>
+              <button
+                type="button"
+                onClick={() => goToView('history')}
+                className="inline-flex items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/[0.04] px-4 py-3 text-sm font-medium text-slate-200 transition hover:bg-white/[0.08]"
+              >
+                <ClipboardList size={16} />
+                查看回填历史列表
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {view === 'edit' ? (
+          <>
+            <div className={cardClassName}>
+              <div className="mb-4 flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Foundation</p>
+                  <h3 className="mt-1 text-base font-semibold text-white">平台定位</h3>
+                </div>
+                <p className="text-xs text-slate-400">定义平台是谁、为什么存在，再继续往目标和约束展开。</p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className={labelClassName}>平台名称</label>
+                  <input
+                    type="text"
+                    value={draft.productName}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, productName: event.target.value }))}
+                    className={textClassName}
+                    placeholder="例如：Aegis OS"
+                    disabled={loading}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className={labelClassName}>平台背景</label>
+                  <textarea
+                    rows={3}
+                    value={draft.background}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, background: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="描述平台当前阶段、目标用户和业务上下文。"
+                    disabled={loading}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <label className={labelClassName}>使命</label>
+                  <textarea
+                    rows={2}
+                    value={draft.mission}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, mission: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="一句话描述平台长期使命。"
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className={cardClassName}>
+              <div className="mb-4 flex items-center justify-between gap-4">
+                <div>
+                  <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">Policy</p>
+                  <h3 className="mt-1 text-base font-semibold text-white">目标、原则与约束</h3>
+                </div>
+                <p className="text-xs text-slate-400">把“必须坚持什么”和“绝不能越线什么”放在同一层进行管理。</p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className={labelClassName}>目标（每行一个）</label>
+                  <textarea
+                    rows={4}
+                    value={draft.goals}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, goals: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="例如：&#10;提升需求落地效率&#10;降低跨团队沟通成本"
+                    disabled={loading}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className={labelClassName}>原则（每行一个）</label>
+                  <textarea
+                    rows={4}
+                    value={draft.principles}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, principles: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="例如：&#10;文档驱动研发&#10;先确认再执行"
+                    disabled={loading}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className={labelClassName}>约束（每行一个）</label>
+                  <textarea
+                    rows={3}
+                    value={draft.constraints}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, constraints: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="例如：必须可审计"
+                    disabled={loading}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className={labelClassName}>禁用关键词</label>
+                  <textarea
+                    rows={3}
+                    value={draft.forbiddenKeywords}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, forbiddenKeywords: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="例如：绕过审计"
+                    disabled={loading}
+                  />
+                </div>
+                <div className="space-y-2 md:col-span-2">
+                  <label className={labelClassName}>必含关键词</label>
+                  <textarea
+                    rows={3}
+                    value={draft.requiredKeywords}
+                    onChange={(event) => setDraft((prev) => ({ ...prev, requiredKeywords: event.target.value }))}
+                    className={`${textClassName} resize-none`}
+                    placeholder="例如：验收标准"
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                onClick={() => void handleSave()}
+                disabled={loading || saving}
+                className="rounded-2xl bg-cyan-300 px-4 py-3 text-sm font-bold text-slate-950 transition hover:bg-cyan-200 disabled:opacity-50"
+              >
+                {saving ? '保存中...' : '保存规范'}
+              </button>
+            </div>
+          </>
+        ) : null}
+
+        {view === 'history' ? (
+          <div className={cardClassName}>
+            <div className="mb-4 flex items-center justify-between gap-4">
+              <div>
+                <p className="text-[11px] uppercase tracking-[0.22em] text-slate-500">History</p>
+                <h3 className="mt-1 text-base font-semibold text-white">需求回填历史列表</h3>
+              </div>
+              <p className="text-xs text-slate-400">默认展示可复用记录（完成+匹配），支持多选批量删除。</p>
+            </div>
+
+            <div className="mb-4 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowNonReusable(false)}
+                className={cn(
+                  'rounded-xl border px-3 py-1.5 text-xs font-medium transition',
+                  !showNonReusable
+                    ? 'border-cyan-300/40 bg-cyan-400/10 text-cyan-100'
+                    : 'border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/[0.08]',
+                )}
+              >
+                可复用记录 ({reusableHistory.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowNonReusable(true)}
+                className={cn(
+                  'rounded-xl border px-3 py-1.5 text-xs font-medium transition',
+                  showNonReusable
+                    ? 'border-amber-300/40 bg-amber-400/10 text-amber-100'
+                    : 'border-white/10 bg-white/[0.04] text-slate-300 hover:bg-white/[0.08]',
+                )}
+              >
+                未完成/不匹配 ({nonReusableHistory.length})
+              </button>
+            </div>
+
+            <div className="mb-4 flex flex-wrap items-center gap-2 rounded-2xl border border-white/10 bg-slate-950/25 p-3">
+              <button
+                type="button"
+                onClick={handleSelectAllVisible}
+                disabled={visibleHistory.length === 0}
+                className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.08] disabled:opacity-50"
+              >
+                全选当前列表
+              </button>
+              <button
+                type="button"
+                onClick={clearSelection}
+                disabled={selectedCount === 0}
+                className="rounded-xl border border-white/10 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 transition hover:bg-white/[0.08] disabled:opacity-50"
+              >
+                清空选择
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteSelected()}
+                disabled={selectedCount === 0 || deletingBatch}
+                className="rounded-xl border border-rose-400/35 bg-rose-400/10 px-3 py-1.5 text-xs font-semibold text-rose-200 transition hover:bg-rose-400/20 disabled:opacity-50"
+              >
+                {deletingBatch ? '批量删除中...' : `批量删除 (${selectedCount})`}
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {visibleHistory.length > 0 ? (
+                visibleHistory.map((item) => (
+                  <div key={item.id} className="rounded-2xl border border-white/10 bg-slate-950/35 p-4 text-xs">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={selectedHistoryIds.includes(item.id)}
+                            onChange={() => toggleHistorySelect(item.id)}
+                            className="mt-0.5 h-4 w-4 rounded border-white/20 bg-slate-900 text-cyan-300 focus:ring-cyan-400/50"
+                          />
+                          <p className="font-medium text-slate-100">{item.title}</p>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          <span className="rounded-full border border-white/10 px-2.5 py-1 text-[10px] uppercase tracking-[0.16em] text-slate-300">
+                            {item.status}
+                          </span>
+                          <span
+                            className={cn(
+                              'rounded-full border px-2.5 py-1 text-[10px] uppercase tracking-[0.16em]',
+                              item.validationStatus === 'matched'
+                                ? 'border-emerald-400/30 text-emerald-200'
+                                : item.validationStatus === 'mismatch'
+                                  ? 'border-rose-400/30 text-rose-200'
+                                  : 'border-amber-400/30 text-amber-200',
+                            )}
+                          >
+                            {item.validationStatus}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => void handleDeleteHistory(item.id)}
+                        disabled={deletingHistoryId === item.id || deletingBatch}
+                        className="rounded-xl border border-rose-400/30 px-3 py-1.5 text-[10px] font-semibold text-rose-200 transition hover:bg-rose-400/10 disabled:opacity-50"
+                      >
+                        {deletingHistoryId === item.id ? '删除中...' : '删除'}
+                      </button>
+                    </div>
+                    <p className="mt-3 text-slate-500">
+                      创建于 {new Date(item.createdAt).toLocaleString('zh-CN')}
+                      {item.completedAt ? ` · 完成于 ${new Date(item.completedAt).toLocaleString('zh-CN')}` : ''}
+                    </p>
+                    {item.validationNote ? <p className="mt-2 leading-relaxed text-slate-400">说明: {item.validationNote}</p> : null}
+                    {item.implementationSummary ? (
+                      <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                        <summary className="cursor-pointer text-slate-300">查看实施总结</summary>
+                        <pre className="mt-3 whitespace-pre-wrap text-[11px] leading-6 text-slate-500">{item.implementationSummary}</pre>
+                      </details>
+                    ) : null}
+                    {item.requirementContract ? (
+                      <details className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+                        <summary className="cursor-pointer text-slate-300">查看需求确认单</summary>
+                        <div className="mt-3 space-y-1 text-[11px] leading-6 text-slate-500">
+                          <p>目标: {item.requirementContract.objective}</p>
+                          <p>In Scope: {(item.requirementContract.inScope || []).join('；') || '暂无'}</p>
+                          <p>Out of Scope: {(item.requirementContract.outOfScope || []).join('；') || '暂无'}</p>
+                          <p>验收: {(item.requirementContract.acceptanceCriteria || []).join('；') || '暂无'}</p>
+                          <p>产出: {(item.requirementContract.artifacts || []).join('、') || '暂无'}</p>
+                        </div>
+                      </details>
+                    ) : null}
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-2xl border border-dashed border-white/10 bg-slate-950/20 px-4 py-6 text-sm text-slate-500">
+                  {showNonReusable ? '暂无未完成/不匹配记录' : '暂无可复用回填记录'}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        ) : null}
       </div>
     </section>
   );

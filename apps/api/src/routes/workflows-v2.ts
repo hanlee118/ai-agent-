@@ -1,4 +1,6 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import { prisma } from "../db.js";
 import {
   addStageInputArtifact,
@@ -376,7 +378,7 @@ export function createWorkflowsV2Router() {
     });
   }));
 
-  router.post("/templates", asyncRoute(async (req, res) => {
+  router.post("/templates", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
@@ -432,7 +434,7 @@ export function createWorkflowsV2Router() {
     sendSuccess(res, { templates });
   }));
 
-  router.post("/projects/:projectId/init", asyncRoute(async (req, res) => {
+  router.post("/projects/:projectId/init", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
@@ -486,7 +488,7 @@ export function createWorkflowsV2Router() {
     }, 201);
   }));
 
-  router.post("/:workflowId/start", asyncRoute(async (req, res) => {
+  router.post("/:workflowId/start", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
@@ -501,7 +503,7 @@ export function createWorkflowsV2Router() {
     sendSuccess(res, { message: "Workflow started" });
   }));
 
-  router.post("/stages/:stageId/output", asyncRoute(async (req, res) => {
+  router.post("/stages/:stageId/output", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
@@ -528,7 +530,7 @@ export function createWorkflowsV2Router() {
     sendSuccess(res, { stageId: stage.id, artifactCount: Array.isArray(stage.outputArtifacts) ? stage.outputArtifacts.length : 0 });
   }));
 
-  router.post("/stages/:stageId/input", asyncRoute(async (req, res) => {
+  router.post("/stages/:stageId/input", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
@@ -555,7 +557,7 @@ export function createWorkflowsV2Router() {
     sendSuccess(res, { stageId: stage.id, artifactCount: Array.isArray(stage.inputArtifacts) ? stage.inputArtifacts.length : 0 });
   }));
 
-  router.post("/stages/:stageId/transition", asyncRoute(async (req, res) => {
+  router.post("/stages/:stageId/transition", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const status = await getWorkflowV2SchemaStatus();
     if (!status.ready) {
       sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);

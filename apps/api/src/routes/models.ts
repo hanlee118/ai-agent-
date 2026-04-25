@@ -1,4 +1,6 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import { prisma } from "../db.js";
 import {
   asyncRoute,
@@ -273,7 +275,7 @@ export function createModelsRouter() {
     sendSuccess(res, models.map(toModelView));
   }));
 
-  router.post("/", asyncRoute(async (req, res) => {
+  router.post("/", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as CreateModelBody;
     const name = String(payload.name ?? "").trim();
     const provider = String(payload.provider ?? "").trim();
@@ -306,7 +308,7 @@ export function createModelsRouter() {
     sendSuccess(res, toModelView(created), 201);
   }));
 
-  router.post("/discover", asyncRoute(async (req, res) => {
+  router.post("/discover", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as DiscoverModelsBody;
     const systemConfig = await ensureSystemConfig();
     const runtimeApiKey = await decryptSecret(systemConfig.apiKey);
@@ -413,7 +415,7 @@ export function createModelsRouter() {
     sendSuccess(res, toModelView(model));
   }));
 
-  router.patch("/:id", asyncRoute(async (req, res) => {
+  router.patch("/:id", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const id = String(req.params.id ?? "").trim();
     const payload = (req.body ?? {}) as UpdateModelBody;
 
@@ -709,7 +711,7 @@ export function createModelsRouter() {
     });
   }));
 
-  router.post("/:id/health-check", asyncRoute(async (req, res) => {
+  router.post("/:id/health-check", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const id = String(req.params.id ?? "").trim();
     const model = await prisma.model.findUnique({ where: { id } });
 
@@ -765,7 +767,7 @@ export function createModelsRouter() {
     });
   }));
 
-  router.post("/:id/set-default", asyncRoute(async (req, res) => {
+  router.post("/:id/set-default", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const id = String(req.params.id ?? "").trim();
     const model = await prisma.model.findUnique({ where: { id } });
 
