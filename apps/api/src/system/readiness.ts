@@ -14,6 +14,7 @@ export async function getSystemReadiness(): Promise<SystemReadiness> {
   const workspace = await getOpenClawWorkspace();
   const databaseUrl = String(process.env.DATABASE_URL ?? "");
   const databasePath = resolveSqlitePath(databaseUrl);
+  const isPostgres = isPostgresDatabaseUrl(databaseUrl);
 
   const [managedAgentCount, memoryEntryCount, usageLogCount] = await Promise.all([
     prisma.managedAgentConfig.count(),
@@ -23,7 +24,7 @@ export async function getSystemReadiness(): Promise<SystemReadiness> {
   const configuredAgentCount = await readConfiguredAgentCount();
   const warnings: string[] = [];
 
-  if (!databasePath || !existsSync(databasePath)) {
+  if (!isPostgres && (!databasePath || !existsSync(databasePath))) {
     warnings.push("SQLite database file is missing or DATABASE_URL is not pointing to a local file.");
   }
 
@@ -73,6 +74,11 @@ function resolveSqlitePath(databaseUrl: string) {
   }
 
   return databaseUrl.slice("file:".length);
+}
+
+function isPostgresDatabaseUrl(databaseUrl: string) {
+  const normalized = databaseUrl.trim().toLowerCase();
+  return normalized.startsWith("postgresql://") || normalized.startsWith("postgres://");
 }
 
 async function readConfiguredAgentCount() {

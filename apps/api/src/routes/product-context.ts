@@ -1,3 +1,11 @@
+/**
+ * Agent 治理规范接口
+ * 此模块为平台级单例，定义所有 Agent 的底层执行规则。
+ * 项目差异化需求请勿通过此接口修改。
+ * 详见 docs/AGENT-GOVERNANCE.md
+ */
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import express from "express";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { getProductContext, removeRequirementBackfill, removeRequirementBackfills, updateProductContext } from "../system/v1-method-store.js";
@@ -33,7 +41,7 @@ export function createProductContextRouter() {
     sendSuccess(res, await getProductContext());
   }));
 
-  router.put("/", asyncRoute(async (req, res) => {
+  router.put("/", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as UpdateContextBody;
     const productName = String(payload.productName ?? "").trim();
 

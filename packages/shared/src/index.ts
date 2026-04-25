@@ -287,6 +287,12 @@ export interface ProjectSummary {
   currentRole: RoleType;
   summary: string;
   openTaskCount: number;
+  permissions?: {
+    projectRole: "owner" | "editor" | "viewer" | null;
+    canApprove: boolean;
+    canDelete: boolean;
+    canEdit: boolean;
+  };
 }
 
 export interface ProjectDetail extends ProjectSummary {
@@ -439,6 +445,12 @@ export interface ExecutionProtocolSnapshot {
 export interface AuthStatus {
   setupComplete: boolean;
   authenticated: boolean;
+  user?: {
+    id: string;
+    email: string;
+    name: string;
+    role: string;
+  };
 }
 
 export interface AuthSetupInput {
@@ -446,6 +458,7 @@ export interface AuthSetupInput {
 }
 
 export interface AuthLoginInput {
+  email?: string;
   password: string;
 }
 

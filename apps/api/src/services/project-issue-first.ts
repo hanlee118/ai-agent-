@@ -61,7 +61,12 @@ export async function ensureProjectIssueFirst(input: {
       ok: false,
       enforced: true,
       code: "LOCAL_ISSUE_REQUIRED",
-      message: "当前项目未绑定需求 Issue。请先通过 New Project Issue 流程确认需求后再推进。"
+      message:
+        "当前项目未绑定需求 Issue，无法直接创建。\n\n"
+        + "解决方案：\n"
+        + "1. 先通过「New Project Issue」流程提交并确认需求\n"
+        + "2. 或使用已有 Issue ID 关联当前项目\n\n"
+        + "如需关闭此检查，管理员可设置 PROJECT_ISSUE_FIRST_LOCAL_ENFORCED=false"
     } as const;
   }
 

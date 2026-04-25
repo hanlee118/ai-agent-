@@ -38,6 +38,18 @@ import {
   inspectOpenClawModelRouting
 } from "../openclaw/workspace.js";
 import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
+import { prisma } from "../db.js";
+import { validateBody } from "../validation/middleware.js";
+import {
+  ContextHygieneCleanupSchema,
+  ExecutionProtocolUpdateSchema,
+  ModelRoutingSelfHealSchema,
+  MutationOptionalSchema,
+  MutationPassthroughSchema,
+  RuntimeConfigUpdateSchema,
+  UiAutonomousModeApplySchema,
+  UiPreferencesUpdateSchema
+} from "../validation/schemas.js";
 
 interface CreateSystemRouterOptions {
   asyncRoute: (
@@ -89,6 +101,47 @@ function parseRoleType(input: unknown): RoleType | undefined {
   return ROLE_TYPES.includes(normalized as RoleType) ? (normalized as RoleType) : undefined;
 }
 
+export async function getObservabilitySummarySnapshot() {
+  const [runtime, readiness, monitor, projectCount, executionCount, auditCount] = await Promise.all([
+    getRuntimeStatus(),
+    getSystemReadiness(),
+    getCachedLocalAgentMonitorOverview(),
+    prisma.project.count(),
+    prisma.projectExecution.count(),
+    prisma.auditLog.count()
+  ]);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    runtime: {
+      mode: runtime.mode,
+      requestedMode: runtime.requestedMode,
+      configured: runtime.configured,
+      lastValidationStatus: runtime.lastValidationStatus
+    },
+    readiness: {
+      warningCount: readiness.warnings.length,
+      warnings: readiness.warnings
+    },
+    data: {
+      projectCount,
+      executionCount,
+      auditCount
+    },
+    localAgentMonitor: {
+      scannedAt: monitor.scannedAt,
+      tools: monitor.tools.map((tool) => ({
+        id: tool.tool,
+        name: tool.label,
+        available: tool.available,
+        activeSessions: tool.activeCount,
+        recentSessions: tool.sessionCount
+      })),
+      totals: monitor.totals
+    }
+  };
+}
+
 export function createSystemRouter(options: CreateSystemRouterOptions) {
   const router = express.Router();
   const { asyncRoute, safeAudit, sendEvent } = options;
@@ -105,7 +158,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await getRuntimeSettings());
   }));
 
-  router.put("/runtime/config", asyncRoute(async (req, res) => {
+  router.put("/runtime/config", validateBody(RuntimeConfigUpdateSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as Partial<RuntimeSettingsInput>;
     const provider = String(payload.provider ?? "").trim();
     if (provider !== "scripted" && provider !== "openai-compatible") {
@@ -132,7 +185,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(updated);
   }));
 
-  router.post("/runtime/validate", asyncRoute(async (_req, res) => {
+  router.post("/runtime/validate", validateBody(MutationOptionalSchema), asyncRoute(async (_req, res) => {
     const result = await validateRuntimeSettings();
     res.status(result.ok ? 200 : 422).json(result);
   }));
@@ -141,7 +194,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await getExecutionProtocolSnapshot());
   }));
 
-  router.put("/execution-protocol", asyncRoute(async (req, res) => {
+  router.put("/execution-protocol", validateBody(ExecutionProtocolUpdateSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as {
       requireSkillEvidence?: unknown;
       requireCollaborationHandoff?: unknown;
@@ -170,7 +223,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await getUiPreferences());
   }));
 
-  router.put("/ui-preferences", asyncRoute(async (req, res) => {
+  router.put("/ui-preferences", validateBody(UiPreferencesUpdateSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as {
       language?: unknown;
       workspacePath?: unknown;
@@ -201,7 +254,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(updated);
   }));
 
-  router.post("/ui-preferences/apply-autonomous-mode", asyncRoute(async (req, res) => {
+  router.post("/ui-preferences/apply-autonomous-mode", validateBody(UiAutonomousModeApplySchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as { autonomousMode?: unknown; scope?: unknown };
     const autonomousMode = payload.autonomousMode === undefined
       ? (await getUiPreferences()).autonomousMode
@@ -236,7 +289,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await inspectOpenClawModelRouting({ repair: false }));
   }));
 
-  router.post("/model-routing/self-heal", asyncRoute(async (req, res) => {
+  router.post("/model-routing/self-heal", validateBody(ModelRoutingSelfHealSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as { apply?: unknown };
     const apply = payload.apply === undefined ? true : Boolean(payload.apply);
     const result = await inspectOpenClawModelRouting({ repair: apply });
@@ -263,11 +316,15 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await getSystemReadiness());
   }));
 
+  router.get("/observability/summary", asyncRoute(async (_req, res) => {
+    res.json(await getObservabilitySummarySnapshot());
+  }));
+
   router.get("/context-hygiene", asyncRoute(async (_req, res) => {
     res.json(await getContextHygieneReport());
   }));
 
-  router.post("/context-hygiene/cleanup", asyncRoute(async (req, res) => {
+  router.post("/context-hygiene/cleanup", validateBody(ContextHygieneCleanupSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as { apply?: unknown; maxDelete?: unknown };
     const apply = payload.apply === undefined ? true : Boolean(payload.apply);
     const maxDeleteRaw = Number(payload.maxDelete ?? 200);
@@ -311,7 +368,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await listPromptTemplates({ channel, locale, projectId }));
   }));
 
-  router.post("/prompt-templates", asyncRoute(async (req, res) => {
+  router.post("/prompt-templates", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = (req.body ?? {}) as Partial<PromptTemplateUpsertInput>;
     const channel = String(payload.channel ?? "").trim() as PromptTemplateChannel;
     const scope = String(payload.scope ?? "").trim();
@@ -346,7 +403,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.status(201).json(created);
   }));
 
-  router.post("/prompt-templates/:templateId/use", asyncRoute(async (req, res) => {
+  router.post("/prompt-templates/:templateId/use", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const templateId = String(req.params.templateId ?? "").trim();
     if (!templateId) {
       res.status(400).json({ message: "templateId is required" });
@@ -360,7 +417,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.status(result.ok ? 200 : 503).json(result);
   }));
 
-  router.post("/design-model-policy/repair", asyncRoute(async (req, res) => {
+  router.post("/design-model-policy/repair", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const result = await repairDesignModelPolicy();
     await safeAudit(req, res, {
       actorType: "admin",
@@ -376,7 +433,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(getStageModelPolicy());
   }));
 
-  router.post("/stage-model-policy/preview", asyncRoute(async (req, res) => {
+  router.post("/stage-model-policy/preview", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = req.body as { stageType?: unknown; role?: unknown };
     const result = await previewStageModelPlan({
       stageType: parseStageType(payload?.stageType),
@@ -393,7 +450,7 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     res.json(await getStageModelUsage({ lookbackHours }));
   }));
 
-  router.post("/stage-model-policy/debate/compare-log", asyncRoute(async (req, res) => {
+  router.post("/stage-model-policy/debate/compare-log", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const payload = req.body as {
       baselineIssueId?: unknown;
       compareIssueId?: unknown;

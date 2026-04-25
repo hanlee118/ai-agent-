@@ -18,9 +18,9 @@ CREATE TABLE IF NOT EXISTS "KnowledgeItem" (
     "filePath" TEXT,
     "fileType" TEXT,
     "accessCount" INTEGER NOT NULL DEFAULT 0,
-    "lastAccessedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "lastAccessedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 -- CreateTable
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS "KnowledgeRelation" (
     "targetId" TEXT NOT NULL,
     "relationType" TEXT NOT NULL,
     "strength" REAL NOT NULL DEFAULT 1,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "KnowledgeRelation_sourceId_fkey" FOREIGN KEY ("sourceId") REFERENCES "KnowledgeItem" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "KnowledgeRelation_targetId_fkey" FOREIGN KEY ("targetId") REFERENCES "KnowledgeItem" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS "AgentKnowledgePreference" (
     "knowledgeId" TEXT NOT NULL,
     "preferenceScore" REAL NOT NULL DEFAULT 0,
     "context" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "AgentKnowledgePreference_knowledgeId_fkey" FOREIGN KEY ("knowledgeId") REFERENCES "KnowledgeItem" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -60,8 +60,8 @@ CREATE TABLE IF NOT EXISTS "WorkflowTemplate" (
     "integrationConfig" JSONB,
     "defaultTimeout" INTEGER,
     "allowParallel" BOOLEAN NOT NULL DEFAULT false,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 -- CreateTable
@@ -73,8 +73,8 @@ CREATE TABLE IF NOT EXISTS "Workflow" (
     "stageGraph" JSONB NOT NULL,
     "status" TEXT NOT NULL DEFAULT 'draft',
     "currentStageIds" JSONB NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "Workflow_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "Workflow_templateId_fkey" FOREIGN KEY ("templateId") REFERENCES "WorkflowTemplate" ("id") ON DELETE RESTRICT ON UPDATE CASCADE
 );
@@ -89,13 +89,13 @@ CREATE TABLE IF NOT EXISTS "WorkflowStage" (
     "assignedAgents" JSONB NOT NULL,
     "inputArtifacts" JSONB NOT NULL,
     "outputArtifacts" JSONB NOT NULL,
-    "startedAt" DATETIME,
-    "completedAt" DATETIME,
-    "deadline" DATETIME,
+    "startedAt" TIMESTAMP(3),
+    "completedAt" TIMESTAMP(3),
+    "deadline" TIMESTAMP(3),
     "gateResults" JSONB,
     "contextMemoryIds" JSONB NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "WorkflowStage_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -109,7 +109,7 @@ CREATE TABLE IF NOT EXISTS "WorkflowTransition" (
     "triggeredBy" TEXT NOT NULL,
     "reason" TEXT,
     "metadata" JSONB,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "WorkflowTransition_workflowId_fkey" FOREIGN KEY ("workflowId") REFERENCES "Workflow" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 

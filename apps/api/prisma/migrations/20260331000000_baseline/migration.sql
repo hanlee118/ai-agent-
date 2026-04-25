@@ -8,8 +8,8 @@ CREATE TABLE IF NOT EXISTS "AgentProfile" (
     "styles" JSONB NOT NULL,
     "skills" JSONB NOT NULL,
     "recentHighlights" JSONB NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS "Project" (
@@ -30,10 +30,10 @@ CREATE TABLE IF NOT EXISTS "Project" (
     "summary" TEXT NOT NULL,
     "liveTitle" TEXT NOT NULL,
     "liveBody" TEXT NOT NULL,
-    "liveStartedAt" DATETIME NOT NULL,
+    "liveStartedAt" TIMESTAMP(3) NOT NULL,
     "liveProvider" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS "Stage" (
@@ -45,10 +45,10 @@ CREATE TABLE IF NOT EXISTS "Stage" (
     "status" TEXT NOT NULL,
     "progress" INTEGER NOT NULL,
     "sortOrder" INTEGER NOT NULL,
-    "startedAt" DATETIME,
-    "endedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "startedAt" TIMESTAMP(3),
+    "endedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "Stage_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -62,15 +62,15 @@ CREATE TABLE IF NOT EXISTS "Deliverable" (
     "version" INTEGER NOT NULL,
     "status" TEXT NOT NULL,
     "createdBy" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "Deliverable_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS "TimelineEvent" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "projectId" TEXT NOT NULL,
-    "timestamp" DATETIME NOT NULL,
+    "timestamp" TIMESTAMP(3) NOT NULL,
     "agentId" TEXT,
     "type" TEXT NOT NULL,
     "title" TEXT NOT NULL,
@@ -94,8 +94,8 @@ CREATE TABLE IF NOT EXISTS "Task" (
     "status" TEXT NOT NULL,
     "priority" TEXT NOT NULL,
     "sortOrder" INTEGER NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "Task_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -105,9 +105,9 @@ CREATE INDEX IF NOT EXISTS "Task_assignee_status_idx" ON "Task"("assignee", "sta
 CREATE TABLE IF NOT EXISTS "AuthSession" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "tokenHash" TEXT NOT NULL,
-    "expiresAt" DATETIME NOT NULL,
-    "lastUsedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "expiresAt" TIMESTAMP(3) NOT NULL,
+    "lastUsedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS "AuthSession_tokenHash_key" ON "AuthSession"("tokenHash");
@@ -120,13 +120,13 @@ CREATE TABLE IF NOT EXISTS "SystemConfig" (
     "modelName" TEXT NOT NULL DEFAULT '',
     "adminPasswordHash" TEXT NOT NULL DEFAULT '',
     "adminPasswordSalt" TEXT NOT NULL DEFAULT '',
-    "adminPasswordUpdatedAt" DATETIME,
+    "adminPasswordUpdatedAt" TIMESTAMP(3),
     "configSource" TEXT NOT NULL DEFAULT 'default',
-    "lastValidatedAt" DATETIME,
+    "lastValidatedAt" TIMESTAMP(3),
     "lastValidationStatus" TEXT NOT NULL DEFAULT 'unknown',
     "lastValidationError" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS "AuditLog" (
@@ -140,7 +140,7 @@ CREATE TABLE IF NOT EXISTS "AuditLog" (
     "detail" TEXT,
     "requestId" TEXT,
     "ipAddress" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS "AuditLog_createdAt_idx" ON "AuditLog"("createdAt");
@@ -156,14 +156,14 @@ CREATE TABLE IF NOT EXISTS "NotificationState" (
     "detail" TEXT NOT NULL,
     "actionLabel" TEXT NOT NULL,
     "to" TEXT NOT NULL,
-    "eventAt" DATETIME,
+    "eventAt" TIMESTAMP(3),
     "isRead" BOOLEAN NOT NULL DEFAULT false,
     "assignedTo" TEXT,
     "confirmedBy" TEXT,
     "workflowStatus" TEXT NOT NULL DEFAULT 'open',
-    "lastSeenAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "lastSeenAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS "NotificationState_sourceKey_key" ON "NotificationState"("sourceKey");
@@ -180,9 +180,9 @@ CREATE TABLE IF NOT EXISTS "PromptTemplate" (
     "projectId" TEXT,
     "ownerLabel" TEXT,
     "usageCount" INTEGER NOT NULL DEFAULT 0,
-    "lastUsedAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "lastUsedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS "PromptTemplate_channel_locale_updatedAt_idx" ON "PromptTemplate"("channel", "locale", "updatedAt");
@@ -203,8 +203,8 @@ CREATE TABLE IF NOT EXISTS "ManagedAgentConfig" (
     "maxCompletionTokens" INTEGER,
     "maxDailyTokens" INTEGER,
     "memoryEnabled" BOOLEAN NOT NULL DEFAULT true,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     "allowedAgentIds" JSONB,
     "intro" TEXT,
     "responsibility" TEXT,
@@ -221,9 +221,9 @@ CREATE TABLE IF NOT EXISTS "AgentMemoryEntry" (
     "importance" INTEGER NOT NULL DEFAULT 50,
     "tags" JSONB NOT NULL,
     "source" TEXT,
-    "lastAccessedAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL,
+    "lastAccessedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
     CONSTRAINT "AgentMemoryEntry_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "ManagedAgentConfig" ("agentId") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -239,7 +239,7 @@ CREATE TABLE IF NOT EXISTS "AgentUsageLog" (
     "totalTokens" INTEGER NOT NULL DEFAULT 0,
     "status" TEXT NOT NULL,
     "commandType" TEXT NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "AgentUsageLog_agentId_fkey" FOREIGN KEY ("agentId") REFERENCES "ManagedAgentConfig" ("agentId") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
@@ -256,14 +256,14 @@ CREATE TABLE IF NOT EXISTS "Model" (
     "totalTokens" INTEGER NOT NULL DEFAULT 0,
     "dailyTokens" INTEGER NOT NULL DEFAULT 0,
     "tokenLimit" INTEGER NOT NULL DEFAULT 1000000,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS "ModelLog" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "modelId" TEXT NOT NULL,
-    "timestamp" DATETIME NOT NULL,
+    "timestamp" TIMESTAMP(3) NOT NULL,
     "type" TEXT NOT NULL,
     "content" TEXT NOT NULL,
     "label" TEXT,
@@ -275,13 +275,13 @@ CREATE INDEX IF NOT EXISTS "ModelLog_modelId_timestamp_idx" ON "ModelLog"("model
 CREATE TABLE IF NOT EXISTS "AgentSoul" (
     "agentId" TEXT NOT NULL PRIMARY KEY,
     "content" TEXT NOT NULL,
-    "updatedAt" DATETIME NOT NULL
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS "AgentSop" (
     "agentId" TEXT NOT NULL PRIMARY KEY,
     "steps" TEXT NOT NULL,
-    "updatedAt" DATETIME NOT NULL
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 -- 新增性能优化索引

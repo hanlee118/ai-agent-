@@ -164,6 +164,32 @@ export default function App() {
   );
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
+  const [currentUser, setCurrentUser] = useState<{ id: string; email: string; name: string; role: string } | null>(null);
+  void currentUser;
+
+  const loadCurrentUser = useCallback(async () => {
+    try {
+      const userRes = await fetch('/api/users/me', { credentials: 'include' });
+      if (!userRes.ok) {
+        setCurrentUser(null);
+        return;
+      }
+      const userData = await userRes.json() as { data?: { id?: string; email?: string; name?: string; role?: string } };
+      const user = userData?.data;
+      if (user?.id && user?.email && user?.name && user?.role) {
+        setCurrentUser({
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+        });
+        return;
+      }
+      setCurrentUser(null);
+    } catch {
+      setCurrentUser(null);
+    }
+  }, []);
 
   useEffect(() => {
     if (AUTH_BYPASS_IN_DEV) {
@@ -190,6 +216,20 @@ export default function App() {
         const authenticated = Boolean(status.authenticated);
         setIsInitialized(setupComplete);
         setIsLoggedIn(authenticated);
+        if (authenticated) {
+          if (status.user?.id && status.user?.email && status.user?.name && status.user?.role) {
+            setCurrentUser({
+              id: status.user.id,
+              email: status.user.email,
+              name: status.user.name,
+              role: status.user.role,
+            });
+          } else {
+            await loadCurrentUser();
+          }
+        } else {
+          setCurrentUser(null);
+        }
         persistAuthState(setupComplete, authenticated);
         setError('');
       } catch (err) {
@@ -215,7 +255,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadCurrentUser]);
 
   const handleLogin = async () => {
     if (!password.trim()) {
@@ -229,6 +269,11 @@ export default function App() {
       const authenticated = Boolean(status.authenticated);
       setIsInitialized(setupComplete);
       setIsLoggedIn(authenticated);
+      if (authenticated) {
+        await loadCurrentUser();
+      } else {
+        setCurrentUser(null);
+      }
       persistAuthState(setupComplete, authenticated);
       setError('');
       setPassword('');
@@ -251,6 +296,11 @@ export default function App() {
       const authenticated = Boolean(status.authenticated);
       setIsInitialized(setupComplete);
       setIsLoggedIn(authenticated);
+      if (authenticated) {
+        await loadCurrentUser();
+      } else {
+        setCurrentUser(null);
+      }
       persistAuthState(setupComplete, authenticated);
       setPassword('');
       setError('');
@@ -273,6 +323,7 @@ export default function App() {
       // ignore logout API failures and clear local state anyway
     } finally {
       setIsLoggedIn(false);
+      setCurrentUser(null);
       setPassword('');
       clearAuthStateCache();
       addToast("已安全退出系统", "info");

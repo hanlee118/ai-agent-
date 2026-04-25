@@ -1,4 +1,6 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import { importHermesSkill, listSkillsForHermes } from "../workflow-v2/hermes-skill-service.js";
 import { getSkillsV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import { asRecord, normalizeText } from "../workflow-v2/types.js";
@@ -66,7 +68,7 @@ export function createSkillsV2Router() {
     });
   }));
 
-  router.post("/import/hermes", asyncRoute(async (req, res) => {
+  router.post("/import/hermes", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     if (!(await ensureSchemaReady(res))) {
       return;
     }

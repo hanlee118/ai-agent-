@@ -5549,21 +5549,26 @@ const ProjectRoom = ({
                 </div>
 
                 {detail?.pendingApproval ? (
-                  <div className="flex gap-3">
+                  <div className="space-y-2">
+                    {detail.permissions?.canApprove === false ? (
+                      <p className="text-xs text-warning">当前账号没有该项目的验收审批权限（需项目负责人/编辑或管理员）。</p>
+                    ) : null}
+                    <div className="flex gap-3">
                     <button
                       onClick={() => void handleApproveStage()}
-                      disabled={isReviewingStage}
+                      disabled={isReviewingStage || detail.permissions?.canApprove === false}
                       className="px-4 py-2 bg-primary text-slate-950 hover:bg-primary/90 rounded-lg text-sm font-semibold disabled:opacity-60"
                     >
                       {stageReviewAction === 'approve' ? '通过中...' : isReviewingStage ? '处理中...' : '通过当前阶段验收'}
                     </button>
                     <button
                       onClick={() => void handleRejectStage()}
-                      disabled={isReviewingStage}
+                      disabled={isReviewingStage || detail.permissions?.canApprove === false}
                       className="px-4 py-2 bg-danger text-white hover:bg-danger/90 rounded-lg text-sm font-semibold disabled:opacity-60"
                     >
                       {stageReviewAction === 'reject' ? '驳回中...' : '驳回并返工'}
                     </button>
+                    </div>
                   </div>
                 ) : null}
               </div>

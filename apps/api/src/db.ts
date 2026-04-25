@@ -3,9 +3,24 @@ import { fileURLToPath } from "node:url";
 
 const schemaRootUrl = new URL("../prisma/", import.meta.url);
 const defaultDatabasePath = fileURLToPath(new URL("./dev.db", schemaRootUrl));
+const defaultPostgresUrl = "postgresql://occ:occ@127.0.0.1:5432/occ?schema=public";
+const defaultTestPostgresUrl = "postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test";
 type PrismaClientInstance = InstanceType<typeof PrismaClient>;
 
-process.env.DATABASE_URL = normalizeDatabaseUrl(process.env.DATABASE_URL) || `file:${defaultDatabasePath}`;
+const normalizedDatabaseUrl = normalizeDatabaseUrl(process.env.DATABASE_URL);
+const allowSqliteUrlInTests = process.env.NODE_ENV === "test"
+  && String(process.env.ALLOW_SQLITE_URL_IN_TESTS ?? "false").trim().toLowerCase() === "true";
+const resolvedDatabaseUrl =
+  normalizedDatabaseUrl
+  && (!normalizedDatabaseUrl.startsWith("file:") || allowSqliteUrlInTests)
+    ? normalizedDatabaseUrl
+    : "";
+process.env.DATABASE_URL = resolvedDatabaseUrl
+  || (
+    process.env.NODE_ENV === "test"
+      ? (String(process.env.TEST_DATABASE_URL ?? "").trim() || defaultTestPostgresUrl)
+      : defaultPostgresUrl
+  );
 process.env.MODEL_PROVIDER ||= "scripted";
 
 declare global {
@@ -16,7 +31,7 @@ declare global {
 export const prisma =
   globalThis.__occPrisma__ ??
   new PrismaClient({
-    log: process.env.NODE_ENV === "development" ? ["warn", "error"] : ["error"]
+    log: process.env.NODE_ENV === "development" ? ["query", "error"] : ["error"]
   });
 
 if (process.env.NODE_ENV !== "production") {

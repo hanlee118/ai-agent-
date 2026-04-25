@@ -9,6 +9,7 @@ import type {
   SystemRuntime,
   SystemRuntimeConfig,
   SystemRuntimeConfigInput,
+  SystemObservabilitySummary,
   SystemUiAutonomousModeApplyResult,
   SystemUiPreferences,
   SystemUiPreferencesInput,
@@ -65,6 +66,10 @@ export const systemApi = {
 
   async getReadiness() {
     return request<Record<string, unknown>>('/system/readiness');
+  },
+
+  async getObservabilitySummary() {
+    return request<SystemObservabilitySummary>('/observability/summary');
   },
 
   async validateRuntime() {

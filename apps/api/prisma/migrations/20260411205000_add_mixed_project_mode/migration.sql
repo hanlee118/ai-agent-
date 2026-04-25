@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS "ProjectInput" (
     "validationStatus" TEXT NOT NULL DEFAULT 'pending',
     "validationErrors" JSONB,
     "inputSource" TEXT NOT NULL DEFAULT 'manual',
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "ProjectInput_projectId_fkey" FOREIGN KEY ("projectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "ProjectInput_referenceDeliverableId_fkey" FOREIGN KEY ("referenceDeliverableId") REFERENCES "Deliverable" ("id") ON DELETE SET NULL ON UPDATE CASCADE
 );
@@ -39,8 +39,8 @@ CREATE TABLE IF NOT EXISTS "StageRelayRelation" (
     "relayType" TEXT NOT NULL DEFAULT 'full',
     "transformationConfig" JSONB,
     "syncStatus" TEXT NOT NULL DEFAULT 'active',
-    "lastSyncAt" DATETIME,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "lastSyncAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT "StageRelayRelation_sourceProjectId_fkey" FOREIGN KEY ("sourceProjectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
     CONSTRAINT "StageRelayRelation_sourceStageId_fkey" FOREIGN KEY ("sourceStageId") REFERENCES "Stage" ("id") ON DELETE SET NULL ON UPDATE CASCADE,
     CONSTRAINT "StageRelayRelation_targetProjectId_fkey" FOREIGN KEY ("targetProjectId") REFERENCES "Project" ("id") ON DELETE CASCADE ON UPDATE CASCADE,

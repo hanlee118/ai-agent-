@@ -1,4 +1,6 @@
 import express from "express";
+import { MutationPassthroughSchema } from "../validation/schemas.js";
+import { validateBody } from "../validation/middleware.js";
 import type { NotificationInboxUpdateInput } from "@occ/shared";
 import { listNotificationInbox, updateNotificationInboxState } from "../system/notifications.js";
 
@@ -30,7 +32,7 @@ export function createNotificationsRouter(options: CreateNotificationsRouterOpti
     res.json(await listNotificationInbox(locale));
   }));
 
-  router.patch("/notifications/:sourceKey", asyncRoute(async (req, res) => {
+  router.patch("/notifications/:sourceKey", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
     const sourceKey = String(req.params.sourceKey ?? "").trim();
     if (!sourceKey) {
       res.status(400).json({ message: "sourceKey is required" });

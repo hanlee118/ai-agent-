@@ -1,4 +1,11 @@
+/**
+ * ⚠️ V1 维护模式
+ * 此文件仅接受 bug 修复，不接受新功能。
+ * 新功能请在 workflows-v2.ts 或 workflow-v2/ 目录下实现。
+ * 详见 docs/ARCHITECTURE-EVOLUTION.md
+ */
 import express from "express";
+import type { Response } from "express";
 import type {
   InterventionInput,
   ProjectMessageInput,
@@ -44,6 +51,7 @@ import {
   saveProjectPostCreatePrepDraft
 } from "../system/post-create-prep.js";
 import { prisma } from "../db.js";
+import { getProjectRole, isPermissionAllowed, type ProjectRole } from "../security/rbac.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { generateOfficialSiteArtifact } from "../utils/official-site.js";
 import {
@@ -58,6 +66,23 @@ import {
   importRelayInputs,
   listProjectInputs
 } from "../workflow-v2/project-modes.js";
+import { validateBody } from "../validation/middleware.js";
+import {
+  MutationOptionalSchema,
+  MutationPassthroughSchema,
+  ProjectAutomationUpdateSchema,
+  ProjectCleanupRequestSchema,
+  ProjectCreateSchema,
+  ProjectInterveneSchema,
+  ProjectMessageSchema,
+  ProjectParseRequestSchema,
+  ProjectPostCreatePrepConfirmSchema,
+  ProjectPostCreatePrepSchema,
+  ProjectPreviewRequestSchema,
+  ProjectRejectSchema,
+  ProjectStageSubmitSchema,
+  TaskStatusUpdateSchema
+} from "../validation/schemas.js";
 
 const PROJECT_DIRECT_CREATE_ENABLED = String(process.env.PROJECT_DIRECT_CREATE_ENABLED ?? "false").trim().toLowerCase() === "true";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
@@ -77,6 +102,19 @@ const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
 const PROJECT_PREP_GITLAB_BASE_URL = String(process.env.GITLAB_BASE_URL || "https://gitlab.com")
   .trim()
   .replace(/\/+$/, "");
+type CurrentUserLike = {
+  id: string;
+  role: string;
+  name?: string;
+  email?: string;
+};
+type ProjectPermissionSnapshot = {
+  projectRole: ProjectRole | null;
+  canApprove: boolean;
+  canDelete: boolean;
+  canEdit: boolean;
+};
+const LEGACY_DEV_AUTH_BYPASS = process.env.NODE_ENV !== "production";
 
 type PostCreatePrepDraftLike = {
   discussion?: string;
@@ -171,6 +209,56 @@ function truncatePrepNoteBlock(value: unknown, maxLength = 1800) {
     return normalized;
   }
   return `${normalized.slice(0, Math.max(200, maxLength)).trim()}\n\n...（内容过长，已截断）`;
+}
+
+function getCurrentUserFromLocals(res: Response): CurrentUserLike | null {
+  const raw = res.locals?.currentUser as Partial<CurrentUserLike> | undefined;
+  const id = String(raw?.id || "").trim();
+  const role = String(raw?.role || "").trim().toLowerCase();
+  if (!id || !role) {
+    return null;
+  }
+  return {
+    id,
+    role,
+    name: typeof raw?.name === "string" ? raw.name : undefined,
+    email: typeof raw?.email === "string" ? raw.email : undefined
+  };
+}
+
+function sendForbidden(res: Response, message = "当前账号没有执行该操作的权限") {
+  res.status(403).json({
+    success: false,
+    error: {
+      code: "FORBIDDEN",
+      message
+    }
+  });
+}
+
+async function buildProjectPermissions(projectId: string, user: CurrentUserLike): Promise<ProjectPermissionSnapshot> {
+  const projectRole = await getProjectRole({
+    projectId,
+    userId: user.id
+  });
+  return {
+    projectRole,
+    canApprove: isPermissionAllowed({
+      userRole: user.role,
+      projectRole,
+      permission: "approve"
+    }),
+    canDelete: isPermissionAllowed({
+      userRole: user.role,
+      projectRole,
+      permission: "delete"
+    }),
+    canEdit: isPermissionAllowed({
+      userRole: user.role,
+      projectRole,
+      permission: "edit"
+    })
+  };
 }
 
 function buildPostCreatePrepIssueNoteBody(input: {
@@ -1919,7 +2007,7 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
   } = options;
 
   const router = express.Router();
-router.post("/api/projects/parse", asyncRoute(async (req, res) => {
+router.post("/api/projects/parse", validateBody(ProjectParseRequestSchema), asyncRoute(async (req, res) => {
   if (!PROJECT_PARSE_LEGACY_ENABLED) {
     res.status(410).json({
       success: false,
@@ -1951,7 +2039,7 @@ router.post("/api/projects/parse", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/preview", asyncRoute(async (req, res) => {
+router.post("/api/projects/preview", validateBody(ProjectPreviewRequestSchema), asyncRoute(async (req, res) => {
   const description = String(req.body?.description ?? "").trim();
 
   if (!description) {
@@ -1963,7 +2051,58 @@ router.post("/api/projects/preview", asyncRoute(async (req, res) => {
 }));
 
 router.get("/api/projects", asyncRoute(async (_req, res) => {
-  res.json(await listProjects());
+  const projects = await listProjects();
+  const currentUser = getCurrentUserFromLocals(res);
+  if (!currentUser) {
+    res.json(projects);
+    return;
+  }
+
+  const projectIds = projects.map((item) => item.id);
+  const projectRoleMap = new Map<string, ProjectRole | null>();
+  if (currentUser.role !== "admin" && projectIds.length > 0) {
+    const members = await prisma.projectMember.findMany({
+      where: {
+        userId: currentUser.id,
+        projectId: { in: projectIds }
+      },
+      select: {
+        projectId: true,
+        role: true
+      }
+    });
+    for (const member of members) {
+      const role = String(member.role || "").trim().toLowerCase();
+      if (role === "owner" || role === "editor" || role === "viewer") {
+        projectRoleMap.set(member.projectId, role);
+      }
+    }
+  }
+
+  res.json(projects.map((project) => {
+    const projectRole = currentUser.role === "admin" ? "owner" : (projectRoleMap.get(project.id) || null);
+    return {
+      ...project,
+      permissions: {
+        projectRole,
+        canApprove: isPermissionAllowed({
+          userRole: currentUser.role,
+          projectRole,
+          permission: "approve"
+        }),
+        canDelete: isPermissionAllowed({
+          userRole: currentUser.role,
+          projectRole,
+          permission: "delete"
+        }),
+        canEdit: isPermissionAllowed({
+          userRole: currentUser.role,
+          projectRole,
+          permission: "edit"
+        })
+      }
+    };
+  }));
 }));
 
 type ProjectCleanupCandidate = {
@@ -2054,7 +2193,7 @@ router.get("/api/projects/cleanup/candidates", asyncRoute(async (_req, res) => {
   });
 }));
 
-router.post("/api/projects/cleanup", asyncRoute(async (req, res) => {
+router.post("/api/projects/cleanup", validateBody(ProjectCleanupRequestSchema), asyncRoute(async (req, res) => {
   const idsInput = Array.isArray(req.body?.ids) ? (req.body.ids as unknown[]) : [];
   const mode = String(req.body?.mode || "recommended");
   const dryRun = Boolean(req.body?.dryRun);
@@ -2135,7 +2274,7 @@ router.get("/api/projects/automation", asyncRoute(async (_req, res) => {
   });
 }));
 
-router.put("/api/projects/automation", asyncRoute(async (req, res) => {
+router.put("/api/projects/automation", validateBody(ProjectAutomationUpdateSchema), asyncRoute(async (req, res) => {
   const enabled = req.body?.enabled;
   const autoApproveWhenReady = req.body?.autoApproveWhenReady;
   const intervalMsInput = Number(req.body?.intervalMs ?? projectAutomationState.intervalMs);
@@ -2178,7 +2317,7 @@ router.put("/api/projects/automation", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
+router.post("/api/projects/automation/run", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const wasRunning = projectAutomationState.running;
   void runProjectAutomationTick({ force: true });
 
@@ -2203,7 +2342,7 @@ router.post("/api/projects/automation/run", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects", asyncRoute(async (req, res) => {
+router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async (req, res) => {
   if (!PROJECT_DIRECT_CREATE_ENABLED) {
     res.status(409).json({
       success: false,
@@ -2245,6 +2384,25 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
     (await getRuntimeStatus()).mode
   );
   clearProjectAdvanceCancelled(project.id);
+  const currentUser = getCurrentUserFromLocals(res);
+  if (currentUser) {
+    await prisma.projectMember.upsert({
+      where: {
+        projectId_userId: {
+          projectId: project.id,
+          userId: currentUser.id
+        }
+      },
+      update: {
+        role: "owner"
+      },
+      create: {
+        projectId: project.id,
+        userId: currentUser.id,
+        role: "owner"
+      }
+    });
+  }
 
   await safeAudit(req, res, {
     actorType: "admin",
@@ -2275,7 +2433,7 @@ router.post("/api/projects", asyncRoute(async (req, res) => {
   res.status(201).json(project);
 }));
 
-router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
 
   const hasAdvanceLock = projectAdvanceLocks.has(projectId);
@@ -2491,7 +2649,7 @@ router.post("/api/projects/:id/advance", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/reconcile-deliverables", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/reconcile-deliverables", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await reconcileProjectDeliverablesNow(projectId);
   if (!project) {
@@ -2552,7 +2710,7 @@ router.get("/api/projects/:id/lifecycle-quality-audit", asyncRoute(async (req, r
   res.json(audit);
 }));
 
-router.post("/api/projects/:id/quality-gate/repair-issues", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/quality-gate/repair-issues", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id || "").trim();
   if (!projectId) {
     res.status(400).json({
@@ -2606,7 +2764,7 @@ router.post("/api/projects/:id/quality-gate/repair-issues", asyncRoute(async (re
   });
 }));
 
-router.post("/api/projects/quality-gate/repair-issues", asyncRoute(async (req, res) => {
+router.post("/api/projects/quality-gate/repair-issues", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
   const dryRun = Boolean(req.body?.dryRun);
   const projectPath = String(req.body?.projectPath || "").trim() || undefined;
   const includeHistorical = req.body?.includeHistorical !== false;
@@ -2717,7 +2875,7 @@ router.get("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/inputs", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -2741,7 +2899,7 @@ router.post("/api/projects/:id/inputs", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/relay/import", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/relay/import", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
   const targetProjectId = String(req.params.id);
   const targetProject = await findProject(targetProjectId);
   if (!targetProject) {
@@ -2795,6 +2953,22 @@ router.get("/api/projects/:id", asyncRoute(async (req, res) => {
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
   const postCreatePrep = await resolveProjectPostCreatePrepState(project);
+  const currentUser = getCurrentUserFromLocals(res);
+  const permissions = currentUser
+    ? await buildProjectPermissions(projectId, currentUser)
+    : LEGACY_DEV_AUTH_BYPASS
+      ? {
+          projectRole: "owner",
+          canApprove: true,
+          canDelete: true,
+          canEdit: true
+        }
+      : {
+          projectRole: null,
+          canApprove: false,
+          canDelete: false,
+          canEdit: false
+        };
   if (postCreatePrep.required && !postCreatePrep.completed) {
     requiredActions.unshift(buildPostCreatePrepRequiredAction({
       missingItems: postCreatePrep.missingItems
@@ -2802,6 +2976,7 @@ router.get("/api/projects/:id", asyncRoute(async (req, res) => {
   }
   res.json({
     ...project,
+    permissions,
     requiredActions,
     postCreatePrep
   });
@@ -2829,7 +3004,7 @@ router.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/post-create-prep", validateBody(ProjectPostCreatePrepSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -2969,7 +3144,7 @@ router.post("/api/projects/:id/post-create-prep", asyncRoute(async (req, res) =>
   });
 }));
 
-router.post("/api/projects/:id/post-create-prep/draft", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/post-create-prep/draft", validateBody(ProjectPostCreatePrepSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -3005,7 +3180,7 @@ router.post("/api/projects/:id/post-create-prep/draft", asyncRoute(async (req, r
   });
 }));
 
-router.post("/api/projects/:id/post-create-prep/confirm", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/post-create-prep/confirm", validateBody(ProjectPostCreatePrepConfirmSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -3096,7 +3271,7 @@ router.get("/api/projects/:id/acceptance-report.md", asyncRoute(async (req, res)
   res.send(markdown);
 }));
 
-router.post("/api/projects/:id/acceptance-report/archive", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/acceptance-report/archive", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
 
@@ -3185,7 +3360,7 @@ router.get("/api/projects/:id/final-artifacts", asyncRoute(async (req, res) => {
   });
 }));
 
-router.post("/api/projects/:id/final-artifacts/generate", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/final-artifacts/generate", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await findProject(projectId);
   if (!project) {
@@ -3377,8 +3552,22 @@ router.get("/api/tasks", asyncRoute(async (req, res) => {
   }));
 }));
 
-router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
+const handleApproveProject = asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  const currentUser = getCurrentUserFromLocals(res);
+  if (!currentUser) {
+    if (!LEGACY_DEV_AUTH_BYPASS) {
+      res.status(401).json({ message: "authentication required" });
+      return;
+    }
+  }
+  if (currentUser) {
+    const permissions = await buildProjectPermissions(projectId, currentUser);
+    if (!permissions.canApprove) {
+      sendForbidden(res, "仅项目负责人/编辑或管理员可以审批阶段");
+      return;
+    }
+  }
   const current = await findProject(projectId);
   if (!current) {
     res.status(404).json({ message: "Project not found" });
@@ -3557,10 +3746,28 @@ router.post("/api/projects/:id/approve", asyncRoute(async (req, res) => {
   });
   void ensureManualAdvanceJob(project.id);
   res.json(project);
-}));
+});
 
-router.post("/api/projects/:id/reject", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/approve", validateBody(MutationOptionalSchema), handleApproveProject);
+// Backward-compatible alias for clients using PUT semantics.
+router.put("/api/projects/:id/approve", validateBody(MutationOptionalSchema), handleApproveProject);
+
+router.post("/api/projects/:id/reject", validateBody(ProjectRejectSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  const currentUser = getCurrentUserFromLocals(res);
+  if (!currentUser) {
+    if (!LEGACY_DEV_AUTH_BYPASS) {
+      res.status(401).json({ message: "authentication required" });
+      return;
+    }
+  }
+  if (currentUser) {
+    const permissions = await buildProjectPermissions(projectId, currentUser);
+    if (!permissions.canApprove) {
+      sendForbidden(res, "仅项目负责人/编辑或管理员可以驳回阶段");
+      return;
+    }
+  }
   const current = await findProject(projectId);
   if (!current) {
     res.status(404).json({ message: "Project not found" });
@@ -3615,7 +3822,7 @@ router.post("/api/projects/:id/reject", asyncRoute(async (req, res) => {
   res.json(project);
 }));
 
-router.post("/api/projects/:id/intervene", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/intervene", validateBody(ProjectInterveneSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as InterventionInput;
   const command = String(payload?.command ?? "").trim();
@@ -3649,7 +3856,7 @@ router.post("/api/projects/:id/intervene", asyncRoute(async (req, res) => {
   res.json(project);
 }));
 
-router.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/resume", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await resumeProject(projectId);
 
@@ -3675,7 +3882,7 @@ router.post("/api/projects/:id/resume", asyncRoute(async (req, res) => {
   res.json(project);
 }));
 
-router.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/close", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await closeProject(projectId);
 
@@ -3703,6 +3910,20 @@ router.post("/api/projects/:id/close", asyncRoute(async (req, res) => {
 
 router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
+  const currentUser = getCurrentUserFromLocals(res);
+  if (!currentUser) {
+    if (!LEGACY_DEV_AUTH_BYPASS) {
+      res.status(401).json({ message: "authentication required" });
+      return;
+    }
+  }
+  if (currentUser) {
+    const permissions = await buildProjectPermissions(projectId, currentUser);
+    if (!permissions.canDelete) {
+      sendForbidden(res, "仅项目负责人或管理员可以删除项目");
+      return;
+    }
+  }
   markProjectAdvanceCancelled(projectId);
   const deleted = await deleteProject(projectId);
 
@@ -3728,7 +3949,7 @@ router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   res.json({ success: true, id: projectId });
 }));
 
-router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/stages/submit", validateBody(ProjectStageSubmitSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as StageSubmissionInput;
   const content = String(payload?.content ?? "").trim();
@@ -3811,7 +4032,7 @@ router.post("/api/projects/:id/stages/submit", asyncRoute(async (req, res) => {
   res.json(project);
 }));
 
-router.post("/api/projects/:id/messages", asyncRoute(async (req, res) => {
+router.post("/api/projects/:id/messages", validateBody(ProjectMessageSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as ProjectMessageInput;
   const message = String(payload?.message ?? "").trim();
@@ -3840,7 +4061,7 @@ router.post("/api/projects/:id/messages", asyncRoute(async (req, res) => {
   res.json(project);
 }));
 
-router.patch("/api/tasks/:taskId", asyncRoute(async (req, res) => {
+router.patch("/api/tasks/:taskId", validateBody(TaskStatusUpdateSchema), asyncRoute(async (req, res) => {
   const taskId = String(req.params.taskId);
   const payload = req.body as TaskUpdateInput;
   const status = payload?.status;

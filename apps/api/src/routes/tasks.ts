@@ -1,6 +1,17 @@
 import express from "express";
 import type { CoordinationMode } from "@occ/shared";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
+import { validateBody } from "../validation/middleware.js";
+import {
+  DelegationCompleteSchema,
+  DelegationExpireSchema,
+  DelegationReasonSchema,
+  MutationOptionalSchema,
+  TaskAssignSchema,
+  TaskCoordinationModeSchema,
+  TaskDelegationCreateSchema,
+  TaskReviewerSchema
+} from "../validation/schemas.js";
 import {
   assignOwner,
   getTaskById,
@@ -54,9 +65,9 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     });
   }
 
-  router.post("/api/tasks/:taskId/assign", asyncRoute(async (req, res) => {
+  router.post("/api/tasks/:taskId/assign", validateBody(TaskAssignSchema), asyncRoute(async (req, res) => {
     const taskId = String(req.params.taskId || "").trim();
-    const ownerAgentId = String((req.body as Record<string, unknown>)?.ownerAgentId ?? "").trim();
+    const ownerAgentId = String((req.body as { ownerAgentId: string })?.ownerAgentId ?? "").trim();
     if (!taskId || !ownerAgentId) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId and ownerAgentId are required");
       return;
@@ -74,9 +85,9 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, task);
   }));
 
-  router.post("/api/tasks/:taskId/reviewer", asyncRoute(async (req, res) => {
+  router.post("/api/tasks/:taskId/reviewer", validateBody(TaskReviewerSchema), asyncRoute(async (req, res) => {
     const taskId = String(req.params.taskId || "").trim();
-    const reviewerAgentIdRaw = (req.body as Record<string, unknown>)?.reviewAgentId;
+    const reviewerAgentIdRaw = (req.body as { reviewAgentId?: string })?.reviewAgentId;
     const reviewerAgentId = typeof reviewerAgentIdRaw === "string" ? reviewerAgentIdRaw.trim() : "";
     if (!taskId) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId is required");
@@ -97,9 +108,9 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, task);
   }));
 
-  router.post("/api/tasks/:taskId/coordination-mode", asyncRoute(async (req, res) => {
+  router.post("/api/tasks/:taskId/coordination-mode", validateBody(TaskCoordinationModeSchema), asyncRoute(async (req, res) => {
     const taskId = String(req.params.taskId || "").trim();
-    const coordinationMode = String((req.body as Record<string, unknown>)?.coordinationMode ?? "").trim() as CoordinationMode;
+    const coordinationMode = String((req.body as { coordinationMode: string })?.coordinationMode ?? "").trim() as CoordinationMode;
     if (!taskId || !coordinationMode) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId and coordinationMode are required");
       return;
@@ -107,14 +118,14 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
 
     const task = await setCoordinationMode(taskId, coordinationMode);
     const taskPolicies = await updateTaskPolicies(taskId, {
-      delegationPolicy: typeof (req.body as Record<string, unknown>)?.delegationPolicy === "string"
-        ? String((req.body as Record<string, unknown>).delegationPolicy) as any
+      delegationPolicy: typeof (req.body as { delegationPolicy?: unknown })?.delegationPolicy === "string"
+        ? String((req.body as { delegationPolicy?: string }).delegationPolicy) as any
         : undefined,
-      syncPolicy: typeof (req.body as Record<string, unknown>)?.syncPolicy === "string"
-        ? String((req.body as Record<string, unknown>).syncPolicy) as any
+      syncPolicy: typeof (req.body as { syncPolicy?: unknown })?.syncPolicy === "string"
+        ? String((req.body as { syncPolicy?: string }).syncPolicy) as any
         : undefined,
-      contextScope: typeof (req.body as Record<string, unknown>)?.contextScope === "string"
-        ? String((req.body as Record<string, unknown>).contextScope) as any
+      contextScope: typeof (req.body as { contextScope?: unknown })?.contextScope === "string"
+        ? String((req.body as { contextScope?: string }).contextScope) as any
         : undefined
     }).catch(() => task);
     await safeAudit(req, res, {
@@ -160,7 +171,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     });
   }));
 
-  router.post("/api/tasks/:taskId/delegations", asyncRoute(async (req, res) => {
+  router.post("/api/tasks/:taskId/delegations", validateBody(TaskDelegationCreateSchema), asyncRoute(async (req, res) => {
     const taskId = String(req.params.taskId || "").trim();
     const body = (req.body || {}) as Record<string, unknown>;
     const requestedByAgentId = String(body.requestedByAgentId ?? "").trim();
@@ -204,7 +215,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation, 201);
   }));
 
-  router.post("/api/delegations/:delegationId/dispatch", asyncRoute(async (req, res) => {
+  router.post("/api/delegations/:delegationId/dispatch", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
     const delegationId = String(req.params.delegationId || "").trim();
     if (!delegationId) {
       sendError(res, 400, "VALIDATION_ERROR", "delegationId is required");
@@ -232,9 +243,9 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation);
   }));
 
-  router.post("/api/delegations/:delegationId/complete", asyncRoute(async (req, res) => {
+  router.post("/api/delegations/:delegationId/complete", validateBody(DelegationCompleteSchema), asyncRoute(async (req, res) => {
     const delegationId = String(req.params.delegationId || "").trim();
-    const outputSummary = String((req.body as Record<string, unknown>)?.outputSummary ?? "").trim();
+    const outputSummary = String((req.body as { outputSummary: string })?.outputSummary ?? "").trim();
     if (!delegationId || !outputSummary) {
       sendError(res, 400, "VALIDATION_ERROR", "delegationId and outputSummary are required");
       return;
@@ -255,9 +266,9 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation);
   }));
 
-  router.post("/api/delegations/:delegationId/fail", asyncRoute(async (req, res) => {
+  router.post("/api/delegations/:delegationId/fail", validateBody(DelegationReasonSchema), asyncRoute(async (req, res) => {
     const delegationId = String(req.params.delegationId || "").trim();
-    const reason = String((req.body as Record<string, unknown>)?.reason ?? "").trim();
+    const reason = String((req.body as { reason: string })?.reason ?? "").trim();
     if (!delegationId || !reason) {
       sendError(res, 400, "VALIDATION_ERROR", "delegationId and reason are required");
       return;
@@ -275,14 +286,14 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation);
   }));
 
-  router.post("/api/delegations/:delegationId/expire", asyncRoute(async (req, res) => {
+  router.post("/api/delegations/:delegationId/expire", validateBody(DelegationExpireSchema), asyncRoute(async (req, res) => {
     const delegationId = String(req.params.delegationId || "").trim();
     if (!delegationId) {
       sendError(res, 400, "VALIDATION_ERROR", "delegationId is required");
       return;
     }
-    const reason = typeof (req.body as Record<string, unknown>)?.reason === "string"
-      ? String((req.body as Record<string, unknown>).reason).trim()
+    const reason = typeof (req.body as { reason?: unknown })?.reason === "string"
+      ? String((req.body as { reason?: string }).reason).trim()
       : "";
     const delegation = await expireDelegation(delegationId, reason || "delegation expired");
     await safeAudit(req, res, {
@@ -297,9 +308,9 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation);
   }));
 
-  router.post("/api/delegations/:delegationId/cancel", asyncRoute(async (req, res) => {
+  router.post("/api/delegations/:delegationId/cancel", validateBody(DelegationReasonSchema), asyncRoute(async (req, res) => {
     const delegationId = String(req.params.delegationId || "").trim();
-    const reason = String((req.body as Record<string, unknown>)?.reason ?? "").trim();
+    const reason = String((req.body as { reason: string })?.reason ?? "").trim();
     if (!delegationId || !reason) {
       sendError(res, 400, "VALIDATION_ERROR", "delegationId and reason are required");
       return;
@@ -317,7 +328,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation);
   }));
 
-  router.post("/api/delegations/:delegationId/retry", asyncRoute(async (req, res) => {
+  router.post("/api/delegations/:delegationId/retry", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
     const delegationId = String(req.params.delegationId || "").trim();
     if (!delegationId) {
       sendError(res, 400, "VALIDATION_ERROR", "delegationId is required");
@@ -335,7 +346,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, delegation);
   }));
 
-  router.post("/api/tasks/:taskId/sync/gitlab", asyncRoute(async (req, res) => {
+  router.post("/api/tasks/:taskId/sync/gitlab", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
     const taskId = String(req.params.taskId || "").trim();
     if (!taskId) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId is required");
@@ -345,7 +356,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
     sendSuccess(res, result);
   }));
 
-  router.post("/api/tasks/:taskId/ready-for-review", asyncRoute(async (req, res) => {
+  router.post("/api/tasks/:taskId/ready-for-review", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
     const taskId = String(req.params.taskId || "").trim();
     if (!taskId) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId is required");
