@@ -1,6 +1,6 @@
 import express from "express";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
-import { getProductContext, removeRequirementBackfill, updateProductContext } from "../system/v1-method-store.js";
+import { getProductContext, removeRequirementBackfill, removeRequirementBackfills, updateProductContext } from "../system/v1-method-store.js";
 
 interface UpdateContextBody {
   productName?: unknown;
@@ -11,6 +11,10 @@ interface UpdateContextBody {
   constraints?: unknown;
   forbiddenKeywords?: unknown;
   requiredKeywords?: unknown;
+}
+
+interface DeleteHistoryBatchBody {
+  historyIds?: unknown;
 }
 
 function normalizeStringArray(input: unknown) {
@@ -66,6 +70,21 @@ export function createProductContextRouter() {
     }
 
     sendSuccess(res, { removed: true, historyId: result.historyId ?? historyId });
+  }));
+
+  router.delete("/history", asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as DeleteHistoryBatchBody;
+    const historyIds = Array.isArray(payload.historyIds)
+      ? payload.historyIds.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+
+    if (historyIds.length === 0) {
+      sendError(res, 400, "VALIDATION_ERROR", "historyIds is required");
+      return;
+    }
+
+    const result = await removeRequirementBackfills(historyIds);
+    sendSuccess(res, result);
   }));
 
   return router;

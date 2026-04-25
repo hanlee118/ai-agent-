@@ -439,6 +439,55 @@ export async function removeRequirementBackfill(historyId: string) {
   } as const;
 }
 
+export async function removeRequirementBackfills(historyIds: string[]) {
+  const normalized = Array.from(
+    new Set(
+      (Array.isArray(historyIds) ? historyIds : [])
+        .map((item) => String(item ?? "").trim())
+        .filter(Boolean)
+    )
+  );
+
+  if (normalized.length === 0) {
+    return { removedCount: 0, removedHistoryIds: [] as string[] } as const;
+  }
+
+  const store = await loadStoreOrDefault();
+  const context = store.productContext;
+  const currentHistory = context.requirementHistory ?? [];
+  const matchedIds = new Set<string>();
+
+  for (const identifier of normalized) {
+    const target = currentHistory.find((item) =>
+      item.id === identifier || item.issueId === identifier || item.projectId === identifier
+    );
+    if (target) {
+      matchedIds.add(target.id);
+    }
+  }
+
+  if (matchedIds.size === 0) {
+    return { removedCount: 0, removedHistoryIds: [] as string[] } as const;
+  }
+
+  const nextHistory = currentHistory.filter((item) => !matchedIds.has(item.id));
+  const nextContext: ProductContext = {
+    ...context,
+    requirementHistory: nextHistory,
+    updatedAt: nowIso()
+  };
+
+  await saveStore({
+    ...store,
+    productContext: nextContext
+  });
+
+  return {
+    removedCount: matchedIds.size,
+    removedHistoryIds: Array.from(matchedIds)
+  } as const;
+}
+
 export async function listIssues(status?: IssueStatus) {
   const store = await loadStoreOrDefault();
   const data = status ? store.issues.filter((item) => item.status === status) : store.issues;
