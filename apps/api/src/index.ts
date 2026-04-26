@@ -73,6 +73,7 @@ import { listAuditLogs, writeAuditLog } from "./system/audit-log.js";
 import { listNotificationInbox, updateNotificationInboxState } from "./system/notifications.js";
 import { createPromptTemplate, listPromptTemplates, markPromptTemplateUsed } from "./system/prompt-templates.js";
 import { getSystemReadiness } from "./system/readiness.js";
+import { getRuntimeStoreHealth } from "./system/runtime-store-health.js";
 import {
   getDesignModelPolicyHealth,
   repairDesignModelPolicy
@@ -4447,19 +4448,29 @@ app.post("/api/auth/logout", asyncRoute(async (req, res) => {
 }));
 
 app.get("/health", asyncRoute(async (_req, res) => {
+  const runtimeStore = getRuntimeStoreHealth();
+  const systemHealth = await getSystemHealth();
+  const databaseHealthy = systemHealth.services.find((service) => service.name === "database")?.status === "healthy";
   res.json({
-    ok: true,
+    ok: databaseHealthy,
     service: "occ-api",
     runtime: await getRuntimeStatus(),
+    runtimeStore,
+    services: systemHealth.services,
     timestamp: new Date().toISOString()
   });
 }));
 
 app.get("/api/health", asyncRoute(async (_req, res) => {
+  const runtimeStore = getRuntimeStoreHealth();
+  const systemHealth = await getSystemHealth();
+  const databaseHealthy = systemHealth.services.find((service) => service.name === "database")?.status === "healthy";
   res.json({
-    ok: true,
+    ok: databaseHealthy,
     service: "occ-api",
     runtime: await getRuntimeStatus(),
+    runtimeStore,
+    services: systemHealth.services,
     timestamp: new Date().toISOString()
   });
 }));

@@ -26,10 +26,11 @@ services:
       HOST: 0.0.0.0
       WEB_URL: http://localhost:3000
       ALLOWED_ORIGINS: http://localhost:3000
-      DATABASE_URL: postgresql://occ:occ@db:5432/occ?schema=public
+      DATABASE_URL: postgresql://occ:occ@db:5432/occ?schema=public&connection_limit=20&pool_timeout=30
     ports:
       - "8787:10000"
     volumes:
+      - ./.runtime:/app/.runtime
       - occ_uploads:/app/uploads
       - occ_secrets:/app/.occ-secret
     depends_on:

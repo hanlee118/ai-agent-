@@ -878,6 +878,10 @@ export default function App() {
                     selectedProjectId={selectedProjectId}
                     addToast={addToast}
                     sendCommand={sendAgentMessage}
+                    onOpenConfig={(id: string) => {
+                      setSelectedAgentId(id);
+                      setIsAgentConfigOpen(true);
+                    }}
                   />
                 )}
                 {activeTab === 'project-room' && (

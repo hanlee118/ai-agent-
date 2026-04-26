@@ -455,11 +455,109 @@ describe("Error Matrix: auth + projects", () => {
         .post(`/api/projects/${projectId}/post-create-prep/confirm`)
         .send({
           notes: "测试确认通过",
-          discussion: "已补充讨论结论",
-          analysis: "已补充分析草案",
-          rawRequirements: "# rawRequirements\n\n已补充",
-          prd: "# prd\n\n已补充",
-          debateSummary: "# debateSummary\n\n已补充"
+          discussion: [
+            "### 共识",
+            "- MVP 范围先覆盖项目创建、预备确认、阶段推进主链路。",
+            "",
+            "### 分歧与处理",
+            "- 是否立即扩展多项目并发，结论为先保证单项目可闭环。",
+            "",
+            "### 角色决策建议",
+            "- PM: 冻结阶段验收标准；DEV: 优先修复预备确认阻塞。",
+            "",
+            "### 决策锚点",
+            "- 以“预备阶段可确认通过且交付物完整”作为通过门槛。"
+          ].join("\n"),
+          analysis: [
+            "### 核心场景",
+            "- 新建项目后进入预备阶段，支持回填、反馈、复议、确认通过。",
+            "",
+            "### In Scope",
+            "- 预备阶段结构化讨论与回填完整性校验。",
+            "",
+            "### Out of Scope",
+            "- 本轮不扩展跨项目批量管理。",
+            "",
+            "### 验收标准",
+            "- 缺失项清零后允许确认通过并进入后续阶段。"
+          ].join("\n"),
+          rawRequirements: [
+            "# rawRequirements",
+            "",
+            "## 原始需求输入",
+            "用户要求预备阶段真实多Agent协作、可追踪、可确认通过。",
+            "",
+            "## 用户诉求提炼",
+            "- 增加反馈入口",
+            "- 输出结构化讨论与回填",
+            "",
+            "## 输入边界说明",
+            "- 仅处理预备阶段流程与交付物门禁。"
+          ].join("\n"),
+          prd: [
+            "# prd",
+            "",
+            "## 结构化需求草案",
+            "围绕预备阶段可用性与可观测性进行流程改造。",
+            "",
+            "## 需求确认单",
+            "- 目标: 预备阶段一次通过",
+            "- In Scope: 讨论结构化、回填规范化、确认门禁",
+            "- Out of Scope: 非预备阶段页面重构",
+            "- 验收: 确认后 completed=true",
+            "- 产出: rawRequirements/prd/debateSummary/prepDiscussionTrace"
+          ].join("\n"),
+          debateSummary: [
+            "# debateSummary",
+            "",
+            "### 共识",
+            "- 预备阶段必须提供真实协作证据并允许用户反馈驱动再讨论。",
+            "",
+            "### 分歧与处理",
+            "- 对模型门禁采用可配置策略，避免流程被环境卡死。",
+            "",
+            "### 角色决策建议",
+            "- PM 负责确认门槛，ANALYST 负责回填标准化。",
+            "",
+            "### 决策锚点",
+            "- 缺失项为 0 才允许通过。"
+          ].join("\n"),
+          discussionTrace: [
+            "# prepDiscussionTrace",
+            "",
+            "- generatedAt: 2026-04-26T00:00:00.000Z",
+            "- triggeredBy: projects_route_manual_trigger_with_draft",
+            "- phase: pre_stage_multi_agent_debate",
+            "- debateMode: model",
+            "",
+            "## 讨论回合记录",
+            "### 1. 项目经理 (ROLE_PM)",
+            "- 关注: 阶段门禁与交付物完整性",
+            "- 风险: 通过条件不清导致反复返工",
+            "- 建议: 明确缺失项判定",
+            "- 模式: model",
+            "",
+            "### 2. 需求分析师 (ROLE_ANALYST)",
+            "- 关注: 需求结构化与可追踪",
+            "- 风险: 回填内容格式混乱",
+            "- 建议: 增加标准化模板",
+            "- 模式: model",
+            "",
+            "### 3. 产品经理 (ROLE_PRODUCT)",
+            "- 关注: 用户确认体验",
+            "- 风险: 缺少反馈再修订入口",
+            "- 建议: 增加反馈字段并支持二次触发",
+            "- 模式: model"
+          ].join("\n"),
+          feedback: [
+            "# prepUserFeedback",
+            "",
+            "## 最新用户反馈",
+            "- 需要在预备阶段加入反馈驱动再修订闭环，并可追踪到讨论日志。",
+            "",
+            "## 期望修订点",
+            "- 回填内容必须与讨论结论一致，不允许模板占位。"
+          ].join("\n")
         });
       assert.equal(confirmRes.status, 200);
       assert.equal(Boolean(confirmRes.body?.data?.postCreatePrep?.completed), true);
@@ -486,8 +584,9 @@ describe("Error Matrix: auth + projects", () => {
           .find((item: { name?: string }) => String(item?.name || "") === "prepDiscussionTrace")
           ?.content || ""
       );
-      assert.match(prepTrace, /gitlabPublishRequired:/);
-      assert.match(prepTrace, /gitlabPublishStatus:/);
+      assert.match(prepTrace, /# prepDiscussionTrace/i);
+      assert.match(prepTrace, /## 讨论回合记录/);
+      assert.match(prepTrace, /ROLE_PM|ROLE_ANALYST|ROLE_PRODUCT/);
       assert.ok(
         Array.isArray(afterDetail.body?.requiredActions)
           && !afterDetail.body.requiredActions.some((item: { action?: string }) => item.action === "run_post_create_prep")
@@ -522,7 +621,18 @@ describe("Error Matrix: auth + projects", () => {
 
       const confirmRes = await request(fullApp)
         .post(`/api/projects/${projectId}/post-create-prep/confirm`)
-        .send({ notes: "二次确认通过" });
+        .send({
+          notes: "二次确认通过",
+          feedback: [
+            "# prepUserFeedback",
+            "",
+            "## 最新用户反馈",
+            "- 当前讨论结论可用，允许进入正式执行。",
+            "",
+            "## 期望修订点",
+            "- 后续阶段继续保持真实执行与可追踪证据。"
+          ].join("\n")
+        });
       assert.equal(confirmRes.status, 200);
       assert.equal(Boolean(confirmRes.body?.data?.postCreatePrep?.completed), true);
     });

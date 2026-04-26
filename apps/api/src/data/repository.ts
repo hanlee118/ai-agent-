@@ -108,6 +108,7 @@ import {
   importRelayInputs,
   type ProjectInputCreatePayload
 } from "../workflow-v2/project-modes.js";
+import { getRuntimeStoreHealth } from "../system/runtime-store-health.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -3090,12 +3091,18 @@ async function reconcileProjectStateWithWorkflowIfNeeded(projectId: string) {
               ? "completed"
               : "pending"
           );
+      const nextStartedAt =
+        nextStatus === "pending"
+          ? null
+          : isCurrent
+            ? ((stage.status === "active" && stage.startedAt) ? stage.startedAt : now)
+            : (stage.startedAt ?? now);
       await tx.stage.update({
         where: { id: stage.id },
         data: {
           status: nextStatus,
           progress: nextStatus === "completed" ? 100 : (isCurrent ? Math.max(stage.progress ?? 0, 18) : 0),
-          startedAt: isCurrent ? (stage.startedAt ?? now) : stage.startedAt,
+          startedAt: nextStartedAt,
           endedAt: nextStatus === "completed" ? (stage.endedAt ?? now) : null
         }
       });
@@ -6158,13 +6165,20 @@ async function alignLegacyStagesWithCurrentStage(projectId: string) {
           ? "active"
           : (stageIndex >= 0 && currentIndex >= 0 && stageIndex < currentIndex ? "completed" : "pending");
       const nextProgress = nextStatus === "completed" ? 100 : (isCurrent ? Math.max(Number(stage.progress || 0), 18) : 0);
+      const now = new Date();
+      const nextStartedAt =
+        nextStatus === "pending"
+          ? null
+          : isCurrent
+            ? ((stage.status === "active" && stage.startedAt) ? stage.startedAt : now)
+            : (stage.startedAt || now);
       await tx.stage.update({
         where: { id: stage.id },
         data: {
           status: nextStatus,
           progress: nextProgress,
-          startedAt: isCurrent ? (stage.startedAt || new Date()) : stage.startedAt,
-          endedAt: nextStatus === "completed" ? (stage.endedAt || new Date()) : null
+          startedAt: nextStartedAt,
+          endedAt: nextStatus === "completed" ? (stage.endedAt || now) : null
         }
       });
     }
@@ -6539,19 +6553,20 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
     });
 
     if (isFinalStage) {
-      await tx.stage.updateMany({
-        where: {
-          projectId: id,
-          status: {
-            not: "completed"
-          }
-        },
-        data: {
-          status: "completed",
-          progress: 100,
-          endedAt: new Date()
-        }
+      const stages = await tx.stage.findMany({
+        where: { projectId: id }
       });
+      const finalizedAt = new Date();
+      for (const stage of stages) {
+        await tx.stage.update({
+          where: { id: stage.id },
+          data: {
+            status: "completed",
+            progress: 100,
+            endedAt: stage.endedAt ?? finalizedAt
+          }
+        });
+      }
       await tx.task.updateMany({
         where: {
           projectId: id,
@@ -6985,17 +7000,23 @@ export async function closeProject(id: string): Promise<ProjectDetail | undefine
       }
     });
 
-    await tx.stage.updateMany({
-      where: {
-        projectId: id,
-        status: { in: ["pending", "active", "blocked", "rejected"] }
-      },
-      data: {
-        status: "completed",
-        progress: 100,
-        endedAt: new Date()
-      }
+    const stages = await tx.stage.findMany({
+      where: { projectId: id }
     });
+    const closedAt = new Date();
+    for (const stage of stages) {
+      if (!["pending", "active", "blocked", "rejected"].includes(stage.status)) {
+        continue;
+      }
+      await tx.stage.update({
+        where: { id: stage.id },
+        data: {
+          status: "completed",
+          progress: 100,
+          endedAt: stage.endedAt ?? closedAt
+        }
+      });
+    }
 
     await tx.project.update({
       where: { id },
@@ -7114,6 +7135,7 @@ export async function submitCurrentStage(
       const nextProgress = Math.max(18, Math.min(92, Number(currentStageRecord?.progress || 18)));
 
       await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+        const deliverableOwner = resolveDeliverableOwner(currentStageType, deliverableName, currentRole);
         await tx.deliverable.create({
           data: {
             projectId: id,
@@ -7123,7 +7145,7 @@ export async function submitCurrentStage(
             content: draftContent,
             version: nextVersion,
             status: "draft",
-            createdBy: currentRole,
+            createdBy: deliverableOwner,
             updatedAt: now
           }
         });
@@ -7181,6 +7203,7 @@ export async function submitCurrentStage(
     : Math.max(18, Math.min(92, Number(currentStageRecord?.progress || 18)));
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const deliverableOwner = resolveDeliverableOwner(currentStageType, deliverableName, currentRole);
     await tx.deliverable.create({
       data: {
         projectId: id,
@@ -7190,7 +7213,7 @@ export async function submitCurrentStage(
         content: submittedContent,
         version: nextVersion,
         status: "submitted",
-        createdBy: currentRole,
+        createdBy: deliverableOwner,
         updatedAt: new Date()
       }
     });
@@ -7975,7 +7998,7 @@ export async function getSystemHealth(): Promise<SystemHealth> {
   let stages: Array<{ status: string }> = [];
   let agents: Array<{ workload: number }> = [];
   let databaseStatus: SystemHealth["services"][number]["status"] = "healthy";
-  let databaseDetail = "Prisma 与 SQLite 已连通";
+  let databaseDetail = "Prisma 与 PostgreSQL 已连通";
 
   try {
     [projects, tasks, stages, agents] = await Promise.all([
@@ -7988,6 +8011,15 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     databaseStatus = "degraded";
     databaseDetail = error instanceof Error ? error.message : "数据库检查失败";
   }
+
+  const runtimeStore = getRuntimeStoreHealth();
+  if (!runtimeStore.rootExists) {
+    databaseStatus = "degraded";
+  }
+  const runtimeStoreDetail = runtimeStore.rootExists
+    ? `runtime-store=${runtimeStore.summary.existing}/${runtimeStore.summary.total}（缺失: ${runtimeStore.summary.missing.join(", ") || "无"}）`
+    : `runtime-store=missing-root (${runtimeStore.rootPath})`;
+  databaseDetail = `${databaseDetail}; ${runtimeStoreDetail}`;
 
   const activeProjects = projects.filter((project) => project.status === "active").length;
   const pendingApprovals = projects.filter((project) => project.pendingApproval).length;
