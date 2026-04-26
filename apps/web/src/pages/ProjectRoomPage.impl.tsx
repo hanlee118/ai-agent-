@@ -58,6 +58,7 @@ type ProjectDetailResponse = ProjectDetail & {
       prd: string;
       debateSummary: string;
       discussionTrace: string;
+      feedback: string;
       confirmed: boolean;
       confirmedBy?: string;
       confirmedAt?: string;
@@ -1073,6 +1074,7 @@ const ProjectRoom = ({
   const [prepDraftPrd, setPrepDraftPrd] = useState('');
   const [prepDraftDebateSummary, setPrepDraftDebateSummary] = useState('');
   const [prepDraftDiscussionTrace, setPrepDraftDiscussionTrace] = useState('');
+  const [prepDraftFeedback, setPrepDraftFeedback] = useState('');
   const [prepConfirmNotes, setPrepConfirmNotes] = useState('');
   const [isSavingPrepDraft, setIsSavingPrepDraft] = useState(false);
   const [isConfirmingPrepDraft, setIsConfirmingPrepDraft] = useState(false);
@@ -2060,12 +2062,14 @@ const ProjectRoom = ({
     setPrepDraftPrd(String(draft?.prd || ''));
     setPrepDraftDebateSummary(String(draft?.debateSummary || ''));
     setPrepDraftDiscussionTrace(String(draft?.discussionTrace || ''));
+    setPrepDraftFeedback(String(draft?.feedback || ''));
     setPrepConfirmNotes(String(draft?.confirmationNotes || ''));
   }, [
     postCreatePrep?.draft?.analysis,
     postCreatePrep?.draft?.debateSummary,
     postCreatePrep?.draft?.discussion,
     postCreatePrep?.draft?.discussionTrace,
+    postCreatePrep?.draft?.feedback,
     postCreatePrep?.draft?.prd,
     postCreatePrep?.draft?.rawRequirements,
     postCreatePrep?.draft?.confirmationNotes,
@@ -3779,6 +3783,7 @@ const ProjectRoom = ({
             prd: prepDraftPrd,
             debateSummary: prepDraftDebateSummary,
             discussionTrace: prepDraftDiscussionTrace,
+            feedback: prepDraftFeedback,
           }
           : undefined,
       );
@@ -3816,6 +3821,7 @@ const ProjectRoom = ({
     prepDraftDebateSummary,
     prepDraftDiscussion,
     prepDraftDiscussionTrace,
+    prepDraftFeedback,
     prepDraftPrd,
     prepDraftRawRequirements,
     refreshProjectView,
@@ -3897,6 +3903,7 @@ const ProjectRoom = ({
         prd: prepDraftPrd,
         debateSummary: prepDraftDebateSummary,
         discussionTrace: prepDraftDiscussionTrace,
+        feedback: prepDraftFeedback,
       });
       await refreshProjectView();
       addToast('预备草案已保存', 'success');
@@ -3925,6 +3932,7 @@ const ProjectRoom = ({
         prd: prepDraftPrd,
         debateSummary: prepDraftDebateSummary,
         discussionTrace: prepDraftDiscussionTrace,
+        feedback: prepDraftFeedback,
         notes: prepConfirmNotes,
       });
       await refreshProjectView();
@@ -3951,6 +3959,8 @@ const ProjectRoom = ({
     prepDraftRawRequirements,
     prepDraftPrd,
     prepDraftDebateSummary,
+    prepDraftDiscussionTrace,
+    prepDraftFeedback,
   ].every((item) => String(item || '').trim().length > 0);
   const prepDiscussionView = useMemo(
     () => parsePrepDiscussionView(prepDraftDiscussion),
@@ -4009,11 +4019,13 @@ const ProjectRoom = ({
     prepDraftPrd,
     prepDraftDebateSummary,
   ].every((item) => String(item || '').trim().length > 0);
+  const prepFeedbackReady = String(prepDraftFeedback || '').trim().length > 0;
   const prepConfirmed = Boolean(postCreatePrep?.draft?.confirmed);
   const prepStepCards = [
     { id: 'discussion', label: '多Agent讨论', done: prepDiscussionReady },
     { id: 'analysis', label: '需求理解草案', done: prepAnalysisReady },
     { id: 'backfill', label: '核心输入回填', done: prepBackfillReady },
+    { id: 'feedback', label: '用户反馈修订', done: prepFeedbackReady },
     { id: 'confirm', label: '用户确认放行', done: prepConfirmed },
   ];
   const prepCompletedCount = prepStepCards.filter((step) => step.done).length;
@@ -4025,6 +4037,7 @@ const ProjectRoom = ({
     ['prd', prepDraftPrd, postCreatePrep?.draft?.prd],
     ['debateSummary', prepDraftDebateSummary, postCreatePrep?.draft?.debateSummary],
     ['discussionTrace', prepDraftDiscussionTrace, postCreatePrep?.draft?.discussionTrace],
+    ['feedback', prepDraftFeedback, postCreatePrep?.draft?.feedback],
     ['confirmationNotes', prepConfirmNotes, postCreatePrep?.draft?.confirmationNotes],
   ].some(([, localValue, remoteValue]) => String(localValue || '').trim() !== String(remoteValue || '').trim());
 
@@ -4381,6 +4394,15 @@ const ProjectRoom = ({
                         className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
                       />
                     </div>
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-slate-400">用户反馈（用于再次触发 Agent 修订）</p>
+                      <textarea
+                        value={prepDraftFeedback}
+                        onChange={(event) => setPrepDraftFeedback(event.target.value)}
+                        placeholder="请写明你希望 Agent 修改/补充的点，例如：补全目标边界、调整排期、收敛风险..."
+                        className="min-h-20 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
+                      />
+                    </div>
                   </div>
                 </div>
 
@@ -4425,7 +4447,7 @@ const ProjectRoom = ({
                     <button
                       type="button"
                       onClick={() => void handleConfirmPostCreatePrep()}
-                      disabled={isConfirmingPrepDraft || !canConfirmPostCreatePrep}
+                      disabled={isConfirmingPrepDraft || !canConfirmPostCreatePrep || prepDiscussionTraceView.items.length < 3}
                       className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg bg-emerald-400 px-4 py-2 text-xs font-semibold text-slate-950 hover:bg-emerald-300 disabled:opacity-60"
                     >
                       {isConfirmingPrepDraft ? '确认中...' : '确认通过并进入正式详情'}
@@ -4438,6 +4460,9 @@ const ProjectRoom = ({
                       刷新状态
                     </button>
                   </div>
+                  {prepDiscussionTraceView.items.length < 3 ? (
+                    <p className="text-[11px] text-warning">当前讨论日志角色回合不足（至少 3 个角色），请先触发“进行讨论”或“提交补充并继续讨论”。</p>
+                  ) : null}
                 </div>
               </div>
             </div>

@@ -1,9 +1,26 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Agent, Model } from '../../types';
 import { agentsApi, openclawAgentsApi } from '../../lib/api';
+import type { AgentRoleTemplate } from '../../lib/api/agentsApi';
 import { resolveOpenClawAgentBinding } from '../../lib/agent-identity';
 
 const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
+const normalizeRoleToken = (value: string | null | undefined) => String(value || '').trim().toUpperCase();
+
+function resolveRoleTemplate(
+  templates: AgentRoleTemplate[],
+  roleHints: Array<string | null | undefined>,
+) {
+  const wanted = new Set(
+    roleHints
+      .map((item) => normalizeRoleToken(item))
+      .filter((item) => item.startsWith('ROLE_')),
+  );
+  if (wanted.size === 0) {
+    return null;
+  }
+  return templates.find((item) => wanted.has(normalizeRoleToken(item.roleId))) || null;
+}
 
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
 type ConfigSource = 'openclaw' | 'managed';
@@ -116,6 +133,7 @@ export function useAgentConfig({
       setIsLoadingDetail(true);
       let managedFallbackId = String(fallbackAgent.id || '').trim();
       try {
+        const templates = await agentsApi.listTemplates().catch(() => [] as AgentRoleTemplate[]);
         try {
           const list = await openclawAgentsApi.list();
           const binding = resolveOpenClawAgentBinding({
@@ -134,6 +152,11 @@ export function useAgentConfig({
             }
             const detailSoul = String(detail.soul?.content ?? '').trim();
             const detailSop = parseSopText(String(detail.sop?.content ?? ''));
+            const roleTemplate = resolveRoleTemplate(templates, [
+              binding.linkedRoleId,
+              detail.title,
+              fallbackAgent.role,
+            ]);
             const detailModelId = String(
               detail.commander?.selectedModel
               || detail.model
@@ -148,10 +171,16 @@ export function useAgentConfig({
             setAgentRole(detail.title || fallbackAgent.role);
             setSelectedModelId(resolveModelOptionId(detailModelId));
             setLoadedModelRoute(resolveModelRoute(detailModelId));
-            setSoulInput(detailSoul);
-            setLoadedSoul(detailSoul);
-            setSopInput(detailSop.join('\n'));
-            setLoadedSop(detailSop);
+            const fallbackSoul = detailSoul || String(roleTemplate?.soul || '').trim();
+            const fallbackSop = detailSop.length > 0
+              ? detailSop
+              : (Array.isArray(roleTemplate?.sop)
+                  ? roleTemplate.sop.map((step) => String(step || '').trim()).filter(Boolean)
+                  : []);
+            setSoulInput(fallbackSoul);
+            setLoadedSoul(fallbackSoul);
+            setSopInput(fallbackSop.join('\n'));
+            setLoadedSop(fallbackSop);
             return;
           }
         } catch {
@@ -161,23 +190,61 @@ export function useAgentConfig({
         const managedAgentId = /^ROLE_/i.test(String(managedFallbackId || '').trim())
           ? String(managedFallbackId).trim()
           : String(fallbackAgent.id || '').trim();
-        const detail = await agentsApi.get(managedAgentId);
-        if (!active) {
-          return;
-        }
-        const detailSoul = detail.soul?.trim?.() || '';
-        const detailSop = Array.isArray(detail.sop) ? detail.sop.map((step) => String(step).trim()).filter(Boolean) : [];
+        const managedCandidates = Array.from(new Set([
+          managedAgentId,
+          /^ROLE_/i.test(String(managedFallbackId || '').trim()) ? String(managedFallbackId).trim() : '',
+          /^ROLE_/i.test(String(fallbackAgent.role || '').trim()) ? String(fallbackAgent.role || '').trim() : '',
+          /^ROLE_/i.test(String(fallbackAgent.id || '').trim())
+            ? String(fallbackAgent.id || '').trim()
+            : String(resolveOpenClawAgentBinding({
+              agentId: fallbackAgent.id,
+              agentName: fallbackAgent.name,
+              agentRole: fallbackAgent.role,
+              list: [],
+            }).linkedRoleId || '').trim(),
+        ].filter(Boolean)));
 
-        setConfigSource('managed');
-        setResolvedOpenClawAgentId('');
-        setAgentName(detail.name || fallbackAgent.name);
-        setAgentRole(detail.role || fallbackAgent.role);
-        setSelectedModelId(resolveModelOptionId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || ''));
-        setLoadedModelRoute(resolveModelRoute(detail.currentModelId || fallbackAgent.currentModelId || ''));
-        setSoulInput(detailSoul);
-        setLoadedSoul(detailSoul);
-        setSopInput(detailSop.join('\n'));
-        setLoadedSop(detailSop);
+        let managedLoaded = false;
+        for (const candidateId of managedCandidates) {
+          try {
+            const detail = await agentsApi.get(candidateId);
+            if (!active) {
+              return;
+            }
+            const detailSoul = detail.soul?.trim?.() || '';
+            const detailSop = Array.isArray(detail.sop) ? detail.sop.map((step) => String(step).trim()).filter(Boolean) : [];
+            const roleTemplate = resolveRoleTemplate(templates, [
+              detail.role,
+              fallbackAgent.role,
+              candidateId,
+            ]);
+
+            setConfigSource('managed');
+            setResolvedOpenClawAgentId('');
+            setAgentName(detail.name || fallbackAgent.name);
+            setAgentRole(detail.role || fallbackAgent.role);
+            setSelectedModelId(resolveModelOptionId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || ''));
+            setLoadedModelRoute(resolveModelRoute(detail.currentModelId || fallbackAgent.currentModelId || ''));
+            const fallbackSoul = detailSoul || String(roleTemplate?.soul || '').trim();
+            const fallbackSop = detailSop.length > 0
+              ? detailSop
+              : (Array.isArray(roleTemplate?.sop)
+                  ? roleTemplate.sop.map((step) => String(step || '').trim()).filter(Boolean)
+                  : []);
+            setSoulInput(fallbackSoul);
+            setLoadedSoul(fallbackSoul);
+            setSopInput(fallbackSop.join('\n'));
+            setLoadedSop(fallbackSop);
+            managedLoaded = true;
+            break;
+          } catch {
+            continue;
+          }
+        }
+
+        if (!managedLoaded) {
+          throw new Error('managed agent detail not found');
+        }
       } catch (error) {
         addToast(`加载 Agent 配置失败: ${error instanceof Error ? error.message : '未知错误'}`, 'error');
       } finally {

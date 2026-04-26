@@ -6,7 +6,7 @@ export const MutationOptionalSchema = z.object({}).passthrough().optional().tran
 export const ProjectCreateSchema = z.object({
   name: z.string().trim().min(1, "项目名称不能为空").max(200).optional(),
   description: z.string({ error: "description is required" }).trim().min(1, "description is required").max(5000),
-  projectType: z.enum(["complete", "relay"]).default("complete"),
+  projectType: z.enum(["complete", "standalone", "relay"]).default("complete"),
   parentProjectId: z.string().trim().min(1).optional(),
   relaySourceStageId: z.string().trim().min(1).optional(),
   projectInputs: z.array(z.unknown()).optional(),
@@ -52,7 +52,8 @@ export const ProjectPostCreatePrepSchema = z.object({
   rawRequirements: z.string().optional(),
   prd: z.string().optional(),
   debateSummary: z.string().optional(),
-  discussionTrace: z.string().optional()
+  discussionTrace: z.string().optional(),
+  feedback: z.string().optional()
 });
 
 export const ProjectPostCreatePrepConfirmSchema = ProjectPostCreatePrepSchema.extend({

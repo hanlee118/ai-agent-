@@ -155,6 +155,7 @@ type PostCreatePrepDraftLike = {
   prd?: string;
   debateSummary?: string;
   discussionTrace?: string;
+  feedback?: string;
 };
 
 function parsePostCreatePrepDraft(body: unknown): PostCreatePrepDraftLike | undefined {
@@ -168,7 +169,8 @@ function parsePostCreatePrepDraft(body: unknown): PostCreatePrepDraftLike | unde
     rawRequirements: typeof record.rawRequirements === "string" ? record.rawRequirements : undefined,
     prd: typeof record.prd === "string" ? record.prd : undefined,
     debateSummary: typeof record.debateSummary === "string" ? record.debateSummary : undefined,
-    discussionTrace: typeof record.discussionTrace === "string" ? record.discussionTrace : undefined
+    discussionTrace: typeof record.discussionTrace === "string" ? record.discussionTrace : undefined,
+    feedback: typeof record.feedback === "string" ? record.feedback : undefined
   };
 }
 
@@ -182,7 +184,8 @@ function hasPostCreatePrepDraftValue(draft: PostCreatePrepDraftLike | undefined)
     draft.rawRequirements,
     draft.prd,
     draft.debateSummary,
-    draft.discussionTrace
+    draft.discussionTrace,
+    draft.feedback
   ].some((item) => typeof item === "string");
 }
 
@@ -334,6 +337,23 @@ function normalizeProjectType(input: unknown) {
     return normalized as "standalone" | "relay";
   }
   return "complete" as const;
+}
+
+function isProjectModeTemplateCompatible(input: {
+  projectType: "complete" | "standalone" | "relay";
+  workflowTemplateKey: unknown;
+}) {
+  const normalizedTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
+  const templateKey = normalizedTemplateKey || "standard_software_development";
+  if (input.projectType === "complete") {
+    return templateKey === "standard_software_development" || templateKey === "none";
+  }
+  return templateKey === "none"
+    || templateKey === "requirements_design"
+    || templateKey === "visual_design"
+    || templateKey === "tech_design"
+    || templateKey === "code_dev"
+    || templateKey === "qa_acceptance";
 }
 
 function normalizeProjectInputs(input: unknown) {
@@ -2400,6 +2420,13 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
     res.status(400).json({ message: "parentProjectId is required when projectType=relay" });
     return;
   }
+  if (!isProjectModeTemplateCompatible({ projectType, workflowTemplateKey: req.body?.workflowTemplateKey })) {
+    const message = projectType === "complete"
+      ? "workflowTemplateKey must be standard_software_development or none when projectType=complete"
+      : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance/none for standalone or relay projectType";
+    res.status(400).json({ message });
+    return;
+  }
 
   const project = await createProject(
     {
@@ -2452,12 +2479,25 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
     message: error instanceof Error ? error.message : String(error)
   }));
   if (issueFirst.ok) {
-    void startProjectWarmupAfterCreate(project).catch((error) => {
-      console.warn(
-        `[project] async warmup after create failed for ${project.id}:`,
-        error instanceof Error ? error.message : String(error)
-      );
-    });
+    const prepState = await resolveProjectPostCreatePrepState(project as ProjectRecord);
+    if (prepState.required && !prepState.completed) {
+      void runProjectPostCreatePrep({
+        projectId: project.id,
+        triggeredBy: "project_created_auto_prep"
+      }).catch((error) => {
+        console.warn(
+          `[project] async post-create-prep failed for ${project.id}:`,
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+    } else {
+      void startProjectWarmupAfterCreate(project).catch((error) => {
+        console.warn(
+          `[project] async warmup after create failed for ${project.id}:`,
+          error instanceof Error ? error.message : String(error)
+        );
+      });
+    }
   } else {
     console.warn(`[ProjectIssueFirst] project create gated for ${project.id}: ${issueFirst.code} ${issueFirst.message}`);
   }
@@ -2670,6 +2710,17 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
   }
 
   ensureManualAdvanceJob(projectId);
+  if (!projectAdvanceJobs.has(projectId) && !projectAdvanceLocks.has(projectId)) {
+    resetProjectAdvancePollHint(projectId);
+    res.status(503).json({
+      success: false,
+      error: {
+        code: "PROJECT_ADVANCE_UNAVAILABLE",
+        message: "当前环境未成功启动自动推进任务，请检查 PROJECT_MANUAL_ADVANCE_ENABLED 与服务日志。"
+      }
+    });
+    return;
+  }
   const pollAfterMs = nextProjectAdvancePollAfterMs(projectId);
   res.status(409).json({
     success: false,
@@ -3197,7 +3248,8 @@ router.post("/api/projects/:id/post-create-prep", validateBody(ProjectPostCreate
 
   let postCreatePrep = await runProjectPostCreatePrep({
     projectId,
-    triggeredBy
+    triggeredBy,
+    feedback: draft?.feedback
   });
   const issueFirstData = issueFirst.ok && "data" in issueFirst ? issueFirst.data : undefined;
   const gitLabProjectPath = normalizePrepTraceMetaValue(issueFirstData?.projectPath);
@@ -3276,6 +3328,13 @@ router.post("/api/projects/:id/post-create-prep", validateBody(ProjectPostCreate
     requiredActions.unshift(buildPostCreatePrepRequiredAction({
       missingItems: postCreatePrep.missingItems
     }));
+  } else if (postCreatePrep.required && postCreatePrep.completed) {
+    void startProjectWarmupAfterCreate(refreshed).catch((error) => {
+      console.warn(
+        `[project] warmup after prep confirm failed for ${projectId}:`,
+        error instanceof Error ? error.message : String(error)
+      );
+    });
   }
 
   await safeAudit(req, res, {
