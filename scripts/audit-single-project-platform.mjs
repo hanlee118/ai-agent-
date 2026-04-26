@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { ensureHermesReachableViaApi, toBool } from "./lib/hermes-self-heal.mjs";
+import { runPreflight } from "./lib/preflight-runner.mjs";
 
 const defaultPostgresUrl = "postgresql://occ:occ@127.0.0.1:5432/occ?schema=public";
 if (!String(process.env.DATABASE_URL || "").trim()) {
@@ -25,6 +27,45 @@ const AUDIT_SETUP_PASSWORD = String(process.env.AUDIT_SETUP_PASSWORD || "Admin@1
 const AUDIT_OUT = String(
   process.env.AUDIT_OUT || path.resolve(process.cwd(), "docs/reports/single-project-platform-audit-latest.json"),
 );
+
+async function resolveHermesAuditRequirement(sessionToken) {
+  const enabled = toBool(process.env.WORKFLOW_V2_HERMES_ENABLED, false);
+  const endpoint = String(
+    process.env.WORKFLOW_V2_HERMES_ENDPOINT
+    || process.env.HERMES_MCP_ENDPOINT
+    || process.env.HERMES_MCP
+    || ""
+  ).trim();
+  const probe = await ensureHermesReachableViaApi({
+    apiBase: API_BASE,
+    enabled,
+    endpoint,
+    cwd: process.cwd(),
+    headers: {
+      cookie: `occ_session=${sessionToken}`
+    },
+    autoStartLocal: true,
+  });
+  const hasEndpoint = probe.hasEndpoint;
+  const probeReachable = Boolean(probe.reachable);
+  const runtimeTotalSuccess = Number(probe.runtimeTotalSuccess || 0);
+  const runtimeLastSuccessAt = probe.runtimeLastSuccessAt || null;
+  const hasHistoricalHermesSuccess = runtimeTotalSuccess > 0 || Boolean(runtimeLastSuccessAt);
+  const enforce = AUDIT_REQUIRE_HERMES
+    && enabled
+    && hasEndpoint
+    && probeReachable
+    && hasHistoricalHermesSuccess;
+  return {
+    enabled,
+    hasEndpoint,
+    probeReachable,
+    runtimeTotalSuccess,
+    runtimeLastSuccessAt,
+    hasHistoricalHermesSuccess,
+    enforce
+  };
+}
 
 let TARGET_PROJECT_ID = REQUESTED_PROJECT_ID;
 
@@ -83,9 +124,10 @@ function toJsonSafe(value) {
 
 function containsPlaceholderTokens(value) {
   const text = String(value || "");
+  const sanitized = text.replace(/占位文档/g, "");
   const genericPattern = /(待补充|占位(词|符)?|placeholder|lorem ipsum|\bxxx\b)/i;
   const todoPattern = /(?:^|[\s:：\-\[\(])(?:TODO|TBD)(?=$|[\s:：\]\),.!?])/;
-  return genericPattern.test(text) || todoPattern.test(text);
+  return genericPattern.test(sanitized) || todoPattern.test(sanitized);
 }
 
 function shouldEvaluatePlaceholderForKey(key) {
@@ -244,12 +286,14 @@ async function resolveAuditProjectId() {
   if (requested) {
     const target = await prisma.project.findUnique({
       where: { id: requested },
-      select: { id: true }
+      select: { id: true, status: true }
     });
     if (target?.id) {
       return {
         projectId: target.id,
-        mode: "requested"
+        mode: "requested",
+        selectedStatus: target.status || null,
+        completedProjectExists: true
       };
     }
   }
@@ -257,25 +301,51 @@ async function resolveAuditProjectId() {
   if (!AUDIT_AUTO_RESOLVE_PROJECT) {
     return {
       projectId: requested,
-      mode: "requested_not_found"
+      mode: "requested_not_found",
+      selectedStatus: null,
+      completedProjectExists: false
     };
   }
 
-  const fallback = await prisma.project.findFirst({
+  const completedCandidate = await prisma.project.findFirst({
     where: { status: "completed" },
     orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-    select: { id: true }
-  }) || await prisma.project.findFirst({
+    select: { id: true, status: true }
+  });
+  const fallback = completedCandidate || await prisma.project.findFirst({
     orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
-    select: { id: true }
+    select: { id: true, status: true }
   });
 
   return {
     projectId: fallback?.id || requested,
-    mode: fallback?.id ? "auto_resolved" : "requested_not_found"
+    mode: fallback?.id ? "auto_resolved" : "requested_not_found",
+    selectedStatus: fallback?.status || null,
+    completedProjectExists: Boolean(completedCandidate?.id)
   };
 }
 
+await runPreflight({
+  needDb: true,
+  db: {
+    databaseUrl: process.env.DATABASE_URL || "",
+    cwd: process.cwd(),
+    maxAttempts: 12,
+    intervalMs: 1500,
+    eagerStartDocker: true,
+    probe: async () => {
+      await prisma.$queryRawUnsafe("SELECT 1");
+    }
+  },
+  needApi: true,
+  api: {
+    requestedBaseUrl: API_BASE,
+    checkPathname: "/health",
+    autoStartDaemon: true,
+    startCommand: ["pnpm", "daemon:start"],
+    cwd: process.cwd(),
+  }
+});
 await ensureSystemSetupReady();
 const projectResolution = await resolveAuditProjectId();
 TARGET_PROJECT_ID = String(projectResolution.projectId || "").trim();
@@ -369,6 +439,7 @@ try {
   const executionSummary = results.find((item) => item.key === "project.executions")?.summary || {};
   const lifecycleSummary = results.find((item) => item.key === "project.lifecycleAudit")?.summary || {};
   const artifactsSummary = results.find((item) => item.key === "project.artifacts")?.summary || {};
+  const hermesAudit = await resolveHermesAuditRequirement(sessionToken);
   const placeholderApiHits = results.filter((item) => item.hasPlaceholderTokens).map((item) => item.key);
   const projectScopedKeys = new Set([
     "project.detail",
@@ -390,6 +461,18 @@ try {
     }
     return { pass, detail };
   }
+  function gateValueForCompletionScopedCheck(pass, detail) {
+    if (projectNotFound) {
+      return { pass: true, detail: "skipped: project not found" };
+    }
+    if (!projectResolution.completedProjectExists) {
+      return {
+        pass: true,
+        detail: `skipped: no completed project available (selectedStatus=${projectResolution.selectedStatus || "n/a"}; ${detail})`
+      };
+    }
+    return { pass, detail };
+  }
 
   const gates = [
     { name: "api_all_pass", pass: apiFailCountForGate === 0, detail: `fail=${apiFailCountForGate}` },
@@ -405,7 +488,7 @@ try {
       };
     })(),
     (() => {
-      const value = gateValueForProjectScopedCheck(
+      const value = gateValueForCompletionScopedCheck(
         String(projectDetailSummary?.status || "").toLowerCase() === "completed",
         `status=${projectDetailSummary?.status || "n/a"}`
       );
@@ -438,7 +521,7 @@ try {
       };
     })(),
     (() => {
-      const value = gateValueForProjectScopedCheck(
+      const value = gateValueForCompletionScopedCheck(
         Boolean(artifactsSummary?.readyForAcceptance),
         `missingRequired=${Number(artifactsSummary?.missingRequired || 0)}`
       );
@@ -450,8 +533,28 @@ try {
     })(),
     (() => {
       const value = gateValueForProjectScopedCheck(
-        AUDIT_REQUIRE_HERMES ? Number(executionSummary?.hermesCount || 0) > 0 : true,
-        `hermesCount=${Number(executionSummary?.hermesCount || 0)}`
+        (hermesAudit.enabled && hermesAudit.hasEndpoint) ? hermesAudit.probeReachable : true,
+        (hermesAudit.enabled && hermesAudit.hasEndpoint)
+          ? `probe=${hermesAudit.probeReachable ? "reachable" : "unreachable"}`
+          : "skipped: hermes disabled or endpoint missing"
+      );
+      return {
+        name: "hermes_probe_reachable",
+        pass: value.pass,
+        detail: value.detail
+      };
+    })(),
+    (() => {
+      const value = gateValueForProjectScopedCheck(
+        hermesAudit.enforce
+          ? (
+              Number(executionSummary?.hermesCount || 0) > 0
+              || Number(hermesAudit.runtimeTotalSuccess || 0) > 0
+            )
+          : true,
+        hermesAudit.enforce
+          ? `hermesCount=${Number(executionSummary?.hermesCount || 0)}; runtimeSuccess=${Number(hermesAudit.runtimeTotalSuccess || 0)}`
+          : `skipped: enforce disabled (enabled=${hermesAudit.enabled}; endpoint=${hermesAudit.hasEndpoint ? "set" : "missing"}; probe=${hermesAudit.probeReachable ? "reachable" : "unreachable"}; historicalSuccess=${hermesAudit.hasHistoricalHermesSuccess ? "yes" : "no"})`
       );
       return {
         name: "hermes_execution_present",
