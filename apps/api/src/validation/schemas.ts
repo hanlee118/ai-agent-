@@ -114,6 +114,20 @@ export const TaskDelegationCreateSchema = z.object({
   maxRetries: z.coerce.number().int().min(0).optional()
 });
 
+export const ClarificationCreateSchema = z.object({
+  requestedByAgentId: z.string().trim().min(1, "requestedByAgentId is required"),
+  question: z.string().trim().min(1, "question is required"),
+  targetAgentId: z.string().trim().optional(),
+  targetRole: z.string().trim().optional(),
+  deliverableId: z.string().trim().optional(),
+  timeoutSec: z.coerce.number().int().positive().optional()
+});
+
+export const ClarificationReplySchema = z.object({
+  respondedByAgentId: z.string().trim().min(1, "respondedByAgentId is required"),
+  response: z.string().trim().min(1, "response is required")
+});
+
 export const DelegationCompleteSchema = z.object({
   outputSummary: z.string().trim().min(1, "outputSummary is required"),
   outputPayloadJson: z.unknown().optional(),

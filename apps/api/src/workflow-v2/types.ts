@@ -39,6 +39,15 @@ export type StageGraph = {
   edges: WorkflowEdge[];
 };
 
+export type WorkflowStageTask = {
+  title: string;
+  description?: string;
+  assignedRole?: RoleType | string;
+  dependsOn?: string[];
+};
+
+export type WorkflowTemplateStageTasks = Partial<Record<"INIT" | "ANALYSIS" | "DESIGN" | "DEV" | "ACCEPT", WorkflowStageTask[]>>;
+
 export type AgentSelectionResult = {
   agentId: string;
   role: RoleType | "CUSTOM";

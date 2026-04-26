@@ -25,6 +25,7 @@ import {
   asRecordArray,
   asStringArray,
   normalizeText,
+  type WorkflowTemplateStageTasks,
   type AcceptanceCriterion,
   type ExecutorConfig,
   type IntegrationConfig,
@@ -91,7 +92,7 @@ function parseIntegrationConfig(value: unknown): IntegrationConfig {
 }
 
 function defaultGraphForTemplate(templateKey: string): StageGraph {
-  if (templateKey === "standard_software_development") {
+  if (templateKey === "standard_software_development" || templateKey === "full") {
     return {
       nodes: [
         { id: "req", templateKey: "requirements_design" },
@@ -107,6 +108,28 @@ function defaultGraphForTemplate(templateKey: string): StageGraph {
         { from: "tech", to: "dev" },
         { from: "dev", to: "qa" }
       ]
+    };
+  }
+  if (templateKey === "lean") {
+    return {
+      nodes: [
+        { id: "req", templateKey: "requirements_design" },
+        { id: "dev", templateKey: "code_dev" },
+        { id: "qa", templateKey: "qa_acceptance" }
+      ],
+      edges: [
+        { from: "req", to: "dev" },
+        { from: "dev", to: "qa" }
+      ]
+    };
+  }
+  if (templateKey === "maintenance") {
+    return {
+      nodes: [
+        { id: "dev", templateKey: "code_dev" },
+        { id: "qa", templateKey: "qa_acceptance" }
+      ],
+      edges: [{ from: "dev", to: "qa" }]
     };
   }
   return {
@@ -1631,6 +1654,7 @@ export async function upsertWorkflowTemplate(input: {
   outputContract?: Record<string, unknown>;
   acceptanceCriteria?: AcceptanceCriterion[];
   integrationConfig?: IntegrationConfig;
+  stageTasks?: WorkflowTemplateStageTasks;
   defaultTimeout?: number | null;
   allowParallel?: boolean;
 }) {
@@ -1655,6 +1679,7 @@ export async function upsertWorkflowTemplate(input: {
       outputContract: toJson(input.outputContract ?? {}),
       acceptanceCriteria: toJson(input.acceptanceCriteria ?? []),
       integrationConfig: toJson(input.integrationConfig ?? {}),
+      stageTasks: toJson(input.stageTasks ?? {}),
       defaultTimeout: input.defaultTimeout ?? null,
       allowParallel: Boolean(input.allowParallel)
     },
@@ -1671,6 +1696,7 @@ export async function upsertWorkflowTemplate(input: {
       outputContract: toJson(input.outputContract ?? {}),
       acceptanceCriteria: toJson(input.acceptanceCriteria ?? []),
       integrationConfig: toJson(input.integrationConfig ?? {}),
+      stageTasks: toJson(input.stageTasks ?? {}),
       defaultTimeout: input.defaultTimeout ?? null,
       allowParallel: Boolean(input.allowParallel)
     }

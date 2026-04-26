@@ -8,7 +8,7 @@ export type SyncPolicy = "db_only" | "db_plus_gitlab" | "full_mirror";
 export type ContextScope = "local" | "stage" | "project" | "cross_project";
 export type TaskParticipantRole = "owner" | "supporter" | "reviewer" | "observer";
 export type TaskDependencyType = "blocks" | "soft_depends" | "relates_to";
-export type TaskDelegationMode = "research" | "coding" | "validation" | "summarization" | "review";
+export type TaskDelegationMode = "research" | "coding" | "validation" | "summarization" | "review" | "clarification";
 export type TaskDelegationStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "expired";
 export type TaskBlockedReasonCode =
   | "dependency_blocked"
@@ -180,6 +180,11 @@ export interface TaskDelegation {
   completedAt?: string;
   expiredAt?: string;
   failureReason?: string;
+  clarificationDeliverableId?: string;
+  clarificationTargetRole?: RoleType | string;
+  clarificationResponse?: string;
+  clarificationRespondedBy?: string;
+  clarificationRespondedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -191,6 +196,9 @@ export interface TaskDelegationSummary {
   targetAgentId?: string;
   outputSummary?: string;
   failureReason?: string;
+  clarificationDeliverableId?: string;
+  clarificationTargetRole?: RoleType | string;
+  clarificationRespondedAt?: string;
   retryCount: number;
   maxRetries: number;
   startedAt?: string;

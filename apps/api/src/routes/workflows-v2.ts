@@ -31,6 +31,7 @@ type CreateTemplateBody = {
   outputContract?: unknown;
   acceptanceCriteria?: unknown;
   integrationConfig?: unknown;
+  stageTasks?: unknown;
   defaultTimeout?: unknown;
   allowParallel?: unknown;
 };
@@ -456,6 +457,7 @@ export function createWorkflowsV2Router() {
         config: asRecord(item.config) ?? {}
       })),
       integrationConfig: asRecord(payload.integrationConfig) as Record<string, unknown> | undefined,
+      stageTasks: asRecord(payload.stageTasks) as Record<string, unknown> | undefined,
       defaultTimeout: payload.defaultTimeout === undefined ? null : Number(payload.defaultTimeout),
       allowParallel: Boolean(payload.allowParallel)
     });

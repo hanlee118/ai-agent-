@@ -24,7 +24,7 @@ import {
   type TimelineEvent
 } from "@occ/shared";
 import type { OpenClawAgentAttemptTrace } from "@occ/shared";
-import { prisma } from "../db.js";
+import { prisma, withPrismaReadRetry } from "../db.js";
 import {
   buildTaskCollaboration,
   hasBlockingDependencies
@@ -109,6 +109,7 @@ import {
   type ProjectInputCreatePayload
 } from "../workflow-v2/project-modes.js";
 import { getRuntimeStoreHealth } from "../system/runtime-store-health.js";
+import { ensureBuiltinPromptTemplates, getBuiltinPromptTemplateByKey } from "../system/prompt-templates.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -299,6 +300,9 @@ function normalizeProjectInputNameToken(value: string) {
 
 const TEMPLATE_DEFAULT_INPUT_FIELDS: Record<string, string> = {
   standard_software_development: "rawRequirements",
+  full: "rawRequirements",
+  lean: "rawRequirements",
+  maintenance: "techSpec",
   requirements_design: "rawRequirements",
   visual_design: "prd",
   tech_design: "prd",
@@ -388,6 +392,9 @@ function mergeProjectInputPayloads(
 
 const LEGACY_STAGE_FLOW_BY_TEMPLATE: Record<string, StageType[]> = {
   standard_software_development: ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"],
+  full: ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"],
+  lean: ["INIT", "ANALYSIS", "DEV", "ACCEPT"],
+  maintenance: ["DEV", "ACCEPT"],
   // 单阶段模板不再强制注入 INIT，避免 issue-first 后再次出现“伪立项”阶段。
   requirements_design: ["ANALYSIS"],
   visual_design: ["DESIGN"],
@@ -395,6 +402,185 @@ const LEGACY_STAGE_FLOW_BY_TEMPLATE: Record<string, StageType[]> = {
   code_dev: ["DEV"],
   qa_acceptance: ["ACCEPT"]
 };
+
+type TemplateStageTaskSeed = {
+  title: string;
+  description: string;
+  assignee: RoleType;
+  dependsOn: string[];
+};
+
+type TemplateStageTaskDependencies = {
+  stageType: StageType;
+  taskTitle: string;
+  dependsOnTitle: string;
+};
+
+function normalizeStageTypeToken(input: unknown): StageType | null {
+  const normalized = String(input || "").trim().toUpperCase();
+  if (normalized === "INIT" || normalized === "ANALYSIS" || normalized === "DESIGN" || normalized === "DEV" || normalized === "ACCEPT") {
+    return normalized as StageType;
+  }
+  return null;
+}
+
+function normalizeRoleToken(input: unknown, stageType: StageType): RoleType {
+  const normalized = String(input || "").trim().toUpperCase();
+  const allowed: RoleType[] = [
+    "ROLE_PM",
+    "ROLE_PRODUCT",
+    "ROLE_ANALYST",
+    "ROLE_DESIGN",
+    "ROLE_ARCH",
+    "ROLE_DEV",
+    "ROLE_QA",
+    "ROLE_ASSISTANT"
+  ];
+  if (allowed.includes(normalized as RoleType)) {
+    return normalized as RoleType;
+  }
+  return stageAssignees[stageType] || "ROLE_PM";
+}
+
+function parseTemplateStageTasks(
+  value: unknown
+): Partial<Record<StageType, TemplateStageTaskSeed[]>> {
+  const root = asRecord(value);
+  if (!root) {
+    return {};
+  }
+  const result: Partial<Record<StageType, TemplateStageTaskSeed[]>> = {};
+  for (const [rawStage, rawTasks] of Object.entries(root)) {
+    const stageType = normalizeStageTypeToken(rawStage);
+    if (!stageType || !Array.isArray(rawTasks)) {
+      continue;
+    }
+    const parsedTasks = rawTasks
+      .map((task) => asRecord(task))
+      .filter((task): task is Record<string, unknown> => Boolean(task))
+      .map((task) => {
+        const title = String(task.title || "").trim();
+        if (!title) {
+          return null;
+        }
+        return {
+          title,
+          description: String(task.description || "").trim() || `${STAGE_LABELS[stageType]}阶段标准任务：${title}`,
+          assignee: normalizeRoleToken(task.assignedRole, stageType),
+          dependsOn: readStringList(task.dependsOn)
+        };
+      })
+      .filter((task): task is TemplateStageTaskSeed => Boolean(task));
+    if (parsedTasks.length > 0) {
+      result[stageType] = parsedTasks;
+    }
+  }
+  return result;
+}
+
+async function getTemplateStageTasksByKey(workflowTemplateKey: string) {
+  const normalizedTemplateKey = String(workflowTemplateKey || "").trim().toLowerCase();
+  if (!normalizedTemplateKey || normalizedTemplateKey === "none") {
+    return {} as Partial<Record<StageType, TemplateStageTaskSeed[]>>;
+  }
+  const template = await prisma.workflowTemplate.findUnique({
+    where: { key: normalizedTemplateKey },
+    select: { stageTasks: true }
+  });
+  return parseTemplateStageTasks(template?.stageTasks);
+}
+
+function buildProjectTasksFromTemplateStageTasks(input: {
+  projectId: string;
+  stageFlow: StageType[];
+  currentStage: StageType;
+  pendingApproval: boolean;
+  stageTasks: Partial<Record<StageType, TemplateStageTaskSeed[]>>;
+  nowIso: string;
+}) {
+  const tasks: Task[] = [];
+  const dependencies: TemplateStageTaskDependencies[] = [];
+  const stageIndexMap = new Map<StageType, number>(input.stageFlow.map((stage, index) => [stage, index]));
+  const currentStageIndex = stageIndexMap.get(input.currentStage) ?? 0;
+
+  for (const stageType of input.stageFlow) {
+    const templates = input.stageTasks[stageType] || [];
+    const stageIndex = stageIndexMap.get(stageType) ?? 0;
+    templates.forEach((template, taskIndex) => {
+      let status: Task["status"] = "todo";
+      if (stageIndex < currentStageIndex) {
+        status = "done";
+      } else if (stageType === input.currentStage) {
+        status = input.pendingApproval ? "done" : taskIndex === 0 ? "in_progress" : "todo";
+      }
+      tasks.push({
+        id: randomUUID(),
+        projectId: input.projectId,
+        stageType,
+        title: template.title,
+        description: template.description,
+        assignee: template.assignee,
+        status,
+        priority: stageType === input.currentStage && taskIndex === 0 ? "high" : "normal",
+        updatedAt: input.nowIso
+      });
+      template.dependsOn.forEach((dependsOnTitle) => {
+        dependencies.push({
+          stageType,
+          taskTitle: template.title,
+          dependsOnTitle
+        });
+      });
+    });
+  }
+  return { tasks, dependencies };
+}
+
+async function applyTemplateTaskDependencies(
+  projectId: string,
+  dependencies: TemplateStageTaskDependencies[]
+) {
+  if (!Array.isArray(dependencies) || dependencies.length === 0) {
+    return;
+  }
+  const projectTasks = await prisma.task.findMany({
+    where: { projectId },
+    select: { id: true, stageType: true, title: true }
+  });
+  const taskMap = new Map<string, string>();
+  for (const task of projectTasks) {
+    const key = `${String(task.stageType || "").toUpperCase()}::${String(task.title || "").trim().toLowerCase()}`;
+    if (key.endsWith("::")) {
+      continue;
+    }
+    taskMap.set(key, task.id);
+  }
+
+  const rows = dependencies
+    .map((item) => {
+      const stageToken = String(item.stageType || "").toUpperCase();
+      const taskId = taskMap.get(`${stageToken}::${String(item.taskTitle || "").trim().toLowerCase()}`);
+      const dependsOnTaskId = taskMap.get(`${stageToken}::${String(item.dependsOnTitle || "").trim().toLowerCase()}`);
+      if (!taskId || !dependsOnTaskId || taskId === dependsOnTaskId) {
+        return null;
+      }
+      return {
+        projectId,
+        taskId,
+        dependsOnTaskId,
+        type: "blocks"
+      };
+    })
+    .filter((item): item is { projectId: string; taskId: string; dependsOnTaskId: string; type: string } => Boolean(item));
+
+  if (rows.length === 0) {
+    return;
+  }
+  await prisma.taskDependency.createMany({
+    data: rows,
+    skipDuplicates: true
+  });
+}
 
 function resolveLegacyStageFlow(input: {
   projectType: ProjectExecutionMode;
@@ -445,6 +631,86 @@ function normalizeTemplateGateIssueForDraft(issue: string) {
     .replace(/待补充|占位(词|符)?|TODO|TBD|lorem ipsum|\bxxx\b/gi, "未完成文本标记")
     .replace(/模板骨架占位语句/gi, "模板骨架未完成语句")
     .trim();
+}
+
+const STAGE_SELF_CHECK_PROMPT_KEY_BY_STAGE: Partial<Record<StageType, string>> = {
+  ANALYSIS: "requirement-analysis",
+  DESIGN: "design-review",
+  DEV: "tech-design",
+  ACCEPT: "test-report"
+};
+
+function buildStageSelfCheckChecklist(stageType: StageType) {
+  if (stageType === "ANALYSIS") {
+    return ["需求摘要", "用户故事", "优先级", "风险", "验收标准"];
+  }
+  if (stageType === "DESIGN") {
+    return ["功能点覆盖", "交互路径", "视觉一致性", "边界情况", "无障碍"];
+  }
+  if (stageType === "DEV") {
+    return ["技术选型", "架构", "接口", "部署", "性能"];
+  }
+  if (stageType === "ACCEPT") {
+    return ["测试范围", "用例统计", "缺陷", "回归", "上线建议"];
+  }
+  return [];
+}
+
+function renderStageSelfCheckReport(input: {
+  stageType: StageType;
+  promptTitle: string;
+  promptKey: string;
+  content: string;
+}) {
+  const content = String(input.content || "");
+  const lower = content.toLowerCase();
+  const checks = buildStageSelfCheckChecklist(input.stageType).map((item) => {
+    const hit = lower.includes(item.toLowerCase());
+    return {
+      name: item,
+      passed: hit
+    };
+  });
+  const passed = checks.filter((item) => item.passed).length;
+  const score = checks.length > 0 ? Math.round((passed / checks.length) * 100) : 100;
+  const lines = [
+    "## 自检报告",
+    `- 检查模板: ${input.promptTitle} (${input.promptKey})`,
+    "- 检查方式: 结构化关键词门禁（自动）",
+    `- 覆盖率: ${passed}/${checks.length || 1}（${score}%）`,
+    "",
+    "### 检查项结果",
+    ...(checks.length > 0
+      ? checks.map((item) => `- [${item.passed ? "x" : " "}] ${item.name}`)
+      : ["- [x] 当前阶段无额外检查项"]),
+    "",
+    "### 自检结论",
+    score >= 60
+      ? "- 自检通过：可提交审批。"
+      : "- 自检未充分：建议补充后再提交审批。"
+  ];
+  return lines.join("\n");
+}
+
+async function buildStageSubmissionContentWithSelfCheck(input: {
+  stageType: StageType;
+  content: string;
+}) {
+  const promptKey = STAGE_SELF_CHECK_PROMPT_KEY_BY_STAGE[input.stageType];
+  if (!promptKey) {
+    return input.content;
+  }
+  const template = await getBuiltinPromptTemplateByKey(promptKey);
+  if (!template) {
+    return input.content;
+  }
+  const report = renderStageSelfCheckReport({
+    stageType: input.stageType,
+    promptTitle: template.title,
+    promptKey,
+    content: input.content
+  });
+  return `${input.content}\n\n${report}`;
 }
 
 function stripCodeBlocksForTemplatePlaceholderGate(content: string) {
@@ -2831,6 +3097,12 @@ async function ensureWorkflowV2TemplatesIfReady() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[seed] workflow-v2 template auto-seed skipped: ${message}`);
+  }
+  try {
+    await ensureBuiltinPromptTemplates();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[seed] builtin prompt template seed skipped: ${message}`);
   }
 }
 
@@ -5710,8 +5982,17 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
   return true;
 }
 
-export async function listProjects(): Promise<ProjectSummary[]> {
-  const projects = await prisma.project.findMany({
+export async function listProjects(options?: {
+  limit?: number;
+  offset?: number;
+}): Promise<ProjectSummary[]> {
+  const limit = Number.isFinite(Number(options?.limit))
+    ? Math.max(1, Math.min(100, Math.floor(Number(options?.limit))))
+    : undefined;
+  const offset = Number.isFinite(Number(options?.offset))
+    ? Math.max(0, Math.floor(Number(options?.offset)))
+    : 0;
+  const projects = await withPrismaReadRetry("findMany", () => prisma.project.findMany({
     include: {
       tasks: {
         select: {
@@ -5719,12 +6000,13 @@ export async function listProjects(): Promise<ProjectSummary[]> {
         }
       }
     },
-    orderBy: { updatedAt: "desc" }
-  });
+    orderBy: { updatedAt: "desc" },
+    ...(limit ? { take: limit, skip: offset } : {})
+  }));
   const workflowOverrides = new Map<string, WorkflowLegacyStateSnapshot>();
   const projectIds = projects.map((project) => project.id);
   if (projectIds.length > 0) {
-    const workflows = await prisma.workflow.findMany({
+    const workflows = await withPrismaReadRetry("findMany", () => prisma.workflow.findMany({
       where: {
         projectId: { in: projectIds },
         status: "active"
@@ -5745,7 +6027,7 @@ export async function listProjects(): Promise<ProjectSummary[]> {
           }
         }
       }
-    });
+    }));
     for (const workflow of workflows) {
       if (workflowOverrides.has(workflow.projectId)) {
         continue;
@@ -5919,6 +6201,16 @@ export async function createProject(
   const now = new Date();
   const nowIso = now.toISOString();
   const nextStageInFlow = stageFlow[1];
+  const templateStageTasks = await getTemplateStageTasksByKey(workflowTemplateKey);
+  const templateStageTaskSeed = buildProjectTasksFromTemplateStageTasks({
+    projectId: id,
+    stageFlow,
+    currentStage,
+    pendingApproval: false,
+    stageTasks: templateStageTasks,
+    nowIso
+  });
+  const templateTaskDependencies = templateStageTaskSeed.dependencies;
 
   project.team = effectiveTeam.length > 0 ? effectiveTeam : project.team;
 
@@ -5950,26 +6242,30 @@ export async function createProject(
     };
   });
 
-  const stageTaskOrder = new Map<string, number>();
-  project.tasks = project.tasks
-    .filter((task) => stageFlow.includes(task.stageType))
-    .map((task) => {
-    const index = stageTaskOrder.get(task.stageType) ?? 0;
-    stageTaskOrder.set(task.stageType, index + 1);
+  if (templateStageTaskSeed.tasks.length > 0) {
+    project.tasks = templateStageTaskSeed.tasks;
+  } else {
+    const stageTaskOrder = new Map<string, number>();
+    project.tasks = project.tasks
+      .filter((task) => stageFlow.includes(task.stageType))
+      .map((task) => {
+      const index = stageTaskOrder.get(task.stageType) ?? 0;
+      stageTaskOrder.set(task.stageType, index + 1);
 
-    let status = task.status;
-    if (task.stageType === currentStage) {
-      status = index === 0 ? "in_progress" : "todo";
-    } else {
-      status = "todo";
-    }
+      let status = task.status;
+      if (task.stageType === currentStage) {
+        status = index === 0 ? "in_progress" : "todo";
+      } else {
+        status = "todo";
+      }
 
-    return {
-      ...task,
-      status,
-      updatedAt: nowIso
-    };
-    });
+      return {
+        ...task,
+        status,
+        updatedAt: nowIso
+      };
+      });
+  }
   project.currentStage = currentStage;
   project.currentRole = currentRole;
   project.progress = 4;
@@ -6033,6 +6329,7 @@ export async function createProject(
 
   await persistProjectWithRetry(project);
   const persistedProjectId = project.id;
+  await applyTemplateTaskDependencies(persistedProjectId, templateTaskDependencies);
   if (projectType === "relay" && parentProjectId) {
     await importRelayInputs({
       targetProjectId: persistedProjectId,
@@ -7109,9 +7406,13 @@ export async function submitCurrentStage(
       }
     }
   }
-  const submittedContent = normalizedDesignReview
+  const baseSubmittedContent = normalizedDesignReview
     ? `${normalizedDesignContent}\n\n${renderDesignReviewCard(normalizedDesignReview)}`
     : normalizedDesignContent;
+  const submittedContent = await buildStageSubmissionContentWithSelfCheck({
+    stageType: currentStageType,
+    content: baseSubmittedContent
+  });
   const templateGate = validateDeliverableTemplateGate({
     stageType: currentStageType,
     deliverableName,
@@ -7809,7 +8110,7 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
 }
 
 export async function listProjectTasks(projectId?: string): Promise<Task[]> {
-  const tasks = await prisma.task.findMany({
+  const tasks = await withPrismaReadRetry("findMany", () => prisma.task.findMany({
     where: projectId ? { projectId } : undefined,
     orderBy: [{ updatedAt: "desc" }],
     include: {
@@ -7840,13 +8141,13 @@ export async function listProjectTasks(projectId?: string): Promise<Task[]> {
         take: 1
       }
     }
-  });
+  }));
 
   return tasks.map((task) => toTask(task, { projectPendingApproval: task.project.pendingApproval }));
 }
 
 export async function listTasks(): Promise<TaskBoardItem[]> {
-  const tasks = await prisma.task.findMany({
+  const tasks = await withPrismaReadRetry("findMany", () => prisma.task.findMany({
     include: {
       project: {
         select: {
@@ -7879,7 +8180,7 @@ export async function listTasks(): Promise<TaskBoardItem[]> {
         take: 1
       }
     }
-  });
+  }));
 
   return tasks.map(toTaskBoardItem).sort(compareTaskBoardItems);
 }
@@ -7993,20 +8294,50 @@ export async function updateTaskStatus(taskId: string, status: TaskStatus): Prom
 }
 
 export async function getSystemHealth(): Promise<SystemHealth> {
-  let projects: Array<{ status: string; pendingApproval: boolean }> = [];
-  let tasks: Array<{ status: string }> = [];
-  let stages: Array<{ status: string }> = [];
-  let agents: Array<{ workload: number }> = [];
+  let totalProjects = 0;
+  let activeProjects = 0;
+  let pendingApprovals = 0;
+  let activeTasks = 0;
+  let blockedTasks = 0;
+  let rejectedStages = 0;
+  let averageAgentWorkload = 0;
   let databaseStatus: SystemHealth["services"][number]["status"] = "healthy";
   let databaseDetail = "Prisma 与 PostgreSQL 已连通";
 
   try {
-    [projects, tasks, stages, agents] = await Promise.all([
-      prisma.project.findMany({ select: { status: true, pendingApproval: true } }),
-      prisma.task.findMany({ select: { status: true } }),
-      prisma.stage.findMany({ select: { status: true } }),
-      prisma.agentProfile.findMany({ select: { workload: true } })
+    const [
+      projectTotalCount,
+      projectActiveCount,
+      projectPendingApprovalCount,
+      taskActiveCount,
+      taskBlockedCount,
+      stageRejectedCount,
+      workloadAgg
+    ] = await Promise.all([
+      withPrismaReadRetry("count", () => prisma.project.count()),
+      withPrismaReadRetry("count", () => prisma.project.count({ where: { status: "active" } })),
+      withPrismaReadRetry("count", () => prisma.project.count({ where: { pendingApproval: true } })),
+      withPrismaReadRetry("count", () => prisma.task.count({
+        where: {
+          status: {
+            in: ["todo", "in_progress"]
+          }
+        }
+      })),
+      withPrismaReadRetry("count", () => prisma.task.count({ where: { status: "blocked" } })),
+      withPrismaReadRetry("count", () => prisma.stage.count({ where: { status: "rejected" } })),
+      withPrismaReadRetry("aggregate", () => prisma.agentProfile.aggregate({
+        _avg: { workload: true }
+      }))
     ]);
+
+    totalProjects = projectTotalCount;
+    activeProjects = projectActiveCount;
+    pendingApprovals = projectPendingApprovalCount;
+    activeTasks = taskActiveCount;
+    blockedTasks = taskBlockedCount;
+    rejectedStages = stageRejectedCount;
+    averageAgentWorkload = Math.round(Number(workloadAgg._avg.workload ?? 0));
   } catch (error) {
     databaseStatus = "degraded";
     databaseDetail = error instanceof Error ? error.message : "数据库检查失败";
@@ -8021,19 +8352,11 @@ export async function getSystemHealth(): Promise<SystemHealth> {
     : `runtime-store=missing-root (${runtimeStore.rootPath})`;
   databaseDetail = `${databaseDetail}; ${runtimeStoreDetail}`;
 
-  const activeProjects = projects.filter((project) => project.status === "active").length;
-  const pendingApprovals = projects.filter((project) => project.pendingApproval).length;
-  const activeTasks = tasks.filter((task) => task.status === "todo" || task.status === "in_progress").length;
-  const blockedTasks = tasks.filter((task) => task.status === "blocked").length;
-  const rejectedStages = stages.filter((stage) => stage.status === "rejected").length;
-  const averageAgentWorkload = agents.length
-    ? Math.round(agents.reduce((sum, agent) => sum + agent.workload, 0) / agents.length)
-    : 0;
   const runtime = await getRuntimeStatus();
   const runtimeHealth = resolveRuntimeServiceHealth(runtime);
 
   return {
-    totalProjects: projects.length,
+    totalProjects,
     activeProjects,
     pendingApprovals,
     activeTasks,

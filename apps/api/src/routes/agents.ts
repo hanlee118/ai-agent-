@@ -395,7 +395,12 @@ async function getAgentDetail(agentId: string) {
 export function createAgentsRouter() {
   const router = express.Router();
 
-  router.get("/", asyncRoute(async (_req, res) => {
+  router.get("/", asyncRoute(async (req, res) => {
+    const pageRaw = Number(req.query.page ?? 1);
+    const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+    const offset = (page - 1) * pageSize;
     const [profiles, configs, tasks, memoryEntries, usageLogs, models] = await prisma.$transaction([
       prisma.agentProfile.findMany(),
       prisma.managedAgentConfig.findMany(),
@@ -509,7 +514,10 @@ export function createAgentsRouter() {
       }
     }
 
-    sendSuccess(res, list);
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Page-Size", String(pageSize));
+    res.setHeader("X-Total-Count", String(list.length));
+    sendSuccess(res, list.slice(offset, offset + pageSize));
   }));
 
   router.get("/templates", asyncRoute(async (_req, res) => {

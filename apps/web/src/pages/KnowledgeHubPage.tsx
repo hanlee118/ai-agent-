@@ -50,6 +50,7 @@ const SCOPE_OPTIONS: Array<{ label: string; value: KnowledgeScope | 'all' }> = [
   { label: 'Agent', value: 'agent' },
   { label: '模板', value: 'template' },
 ];
+const KNOWLEDGE_PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
 
 const CSV_JOIN = (values: string[] | undefined) => (values || []).join(', ');
 
@@ -244,6 +245,8 @@ export default function KnowledgeHubPage({ addToast }: Props) {
 
   const [items, setItems] = useState<KnowledgeListItem[]>([]);
   const [listTotal, setListTotal] = useState(0);
+  const [listPage, setListPage] = useState(1);
+  const [listPageSize, setListPageSize] = useState<(typeof KNOWLEDGE_PAGE_SIZE_OPTIONS)[number]>(20);
   const [loadingList, setLoadingList] = useState(false);
   const [knowledgeStatus, setKnowledgeStatus] = useState<KnowledgeStatus | null>(null);
   const [loadingKnowledgeStatus, setLoadingKnowledgeStatus] = useState(false);
@@ -320,7 +323,8 @@ export default function KnowledgeHubPage({ addToast }: Props) {
         agentId: agentIdFilter.trim() || undefined,
         stageContext: stageContextFilter.trim() || undefined,
         query: query.trim() || undefined,
-        limit: 100,
+        page: listPage,
+        pageSize: listPageSize,
       });
       const nextItems = result.items || [];
       setListTotal(Number(result.total || 0));
@@ -356,7 +360,11 @@ export default function KnowledgeHubPage({ addToast }: Props) {
     } finally {
       setLoadingList(false);
     }
-  }, [addToast, agentIdFilter, deepLinkState, projectIdFilter, query, scopeFilter, selectedId, stageContextFilter]);
+  }, [addToast, agentIdFilter, deepLinkState, listPage, listPageSize, projectIdFilter, query, scopeFilter, selectedId, stageContextFilter]);
+
+  useEffect(() => {
+    setListPage(1);
+  }, [scopeFilter, projectIdFilter, agentIdFilter, stageContextFilter, query]);
 
   useEffect(() => {
     void listKnowledge();
@@ -682,6 +690,14 @@ export default function KnowledgeHubPage({ addToast }: Props) {
     const selectedDuplicateGroups = selectedDuplicateCanonicalIds.length;
     return { scopedCount, selectedCount, duplicateGroups, normalizeSuggestions, selectedDuplicateGroups };
   }, [curationPreview, listTotal, selectedBulkIds.length, selectedDuplicateCanonicalIds.length]);
+  const totalPages = Math.max(1, Math.ceil(listTotal / listPageSize));
+  const safePage = Math.min(listPage, totalPages);
+
+  useEffect(() => {
+    if (listPage > totalPages) {
+      setListPage(totalPages);
+    }
+  }, [listPage, totalPages]);
 
   return (
     <div className="p-8 max-w-7xl mx-auto space-y-6">
@@ -886,7 +902,42 @@ export default function KnowledgeHubPage({ addToast }: Props) {
           <div className="rounded-2xl border border-border-subtle bg-surface-soft overflow-hidden">
             <div className="px-5 py-4 border-b border-border-subtle flex items-center justify-between">
               <h2 className="text-base font-semibold text-white">知识条目列表</h2>
-              <span className="text-xs text-slate-400">当前显示 {visibleItems.length} / 总计 {summaryStats.scopedCount}</span>
+              <span className="text-xs text-slate-400">当前页 {visibleItems.length} 条 / 总计 {summaryStats.scopedCount}</span>
+            </div>
+            <div className="px-5 py-3 border-b border-border-subtle flex flex-wrap items-center gap-2 text-xs text-slate-300">
+              <span>第 {safePage} / {totalPages} 页</span>
+              <button
+                type="button"
+                disabled={loadingList || safePage <= 1}
+                onClick={() => setListPage((prev) => Math.max(1, prev - 1))}
+                className="px-2 py-1 rounded border border-border-subtle bg-white/5 hover:bg-white/10 disabled:opacity-40"
+              >
+                上一页
+              </button>
+              <button
+                type="button"
+                disabled={loadingList || safePage >= totalPages}
+                onClick={() => setListPage((prev) => Math.min(totalPages, prev + 1))}
+                className="px-2 py-1 rounded border border-border-subtle bg-white/5 hover:bg-white/10 disabled:opacity-40"
+              >
+                下一页
+              </button>
+              <label className="inline-flex items-center gap-2">
+                每页
+                <select
+                  value={listPageSize}
+                  onChange={(event) => {
+                    const nextSize = Number(event.target.value) as (typeof KNOWLEDGE_PAGE_SIZE_OPTIONS)[number];
+                    setListPageSize(nextSize);
+                    setListPage(1);
+                  }}
+                  className="bg-surface-muted border border-border-subtle rounded-md px-2 py-1 text-xs text-slate-200"
+                >
+                  {KNOWLEDGE_PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={`knowledge-page-size-${size}`} value={size}>{size}</option>
+                  ))}
+                </select>
+              </label>
             </div>
             <div className="max-h-[420px] overflow-auto">
               <table className="w-full text-sm">

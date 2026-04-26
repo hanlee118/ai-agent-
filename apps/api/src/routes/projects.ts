@@ -346,7 +346,11 @@ function isProjectModeTemplateCompatible(input: {
   const normalizedTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
   const templateKey = normalizedTemplateKey || "standard_software_development";
   if (input.projectType === "complete") {
-    return templateKey === "standard_software_development" || templateKey === "none";
+    return templateKey === "standard_software_development"
+      || templateKey === "full"
+      || templateKey === "lean"
+      || templateKey === "maintenance"
+      || templateKey === "none";
   }
   return templateKey === "none"
     || templateKey === "requirements_design"
@@ -2102,8 +2106,17 @@ router.post("/api/projects/preview", validateBody(ProjectPreviewRequestSchema), 
   res.json(previewRequirement(description));
 }));
 
-router.get("/api/projects", asyncRoute(async (_req, res) => {
-  const projects = await listProjects();
+router.get("/api/projects", asyncRoute(async (req, res) => {
+  const pageRaw = Number(req.query.page ?? 1);
+  const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+  const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+  const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+  const offset = (page - 1) * pageSize;
+  const projects = await listProjects({ limit: pageSize, offset });
+  const total = await prisma.project.count();
+  res.setHeader("X-Page", String(page));
+  res.setHeader("X-Page-Size", String(pageSize));
+  res.setHeader("X-Total-Count", String(total));
   const currentUser = getCurrentUserFromLocals(res);
   if (!currentUser) {
     res.json(projects);
@@ -3737,10 +3750,15 @@ router.get("/api/tasks", asyncRoute(async (req, res) => {
   const projectId = typeof req.query.projectId === "string" ? req.query.projectId.trim() : "";
   const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
   const assignee = typeof req.query.assignee === "string" ? req.query.assignee.trim() : "";
+  const pageRaw = Number(req.query.page ?? 1);
+  const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+  const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+  const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+  const offset = (page - 1) * pageSize;
 
   if (projectId) {
     const scopedTasks = await listProjectTasks(projectId);
-    res.json(scopedTasks.filter((task) => {
+    const filtered = scopedTasks.filter((task) => {
       if (status && task.status !== status) {
         return false;
       }
@@ -3748,12 +3766,16 @@ router.get("/api/tasks", asyncRoute(async (req, res) => {
         return false;
       }
       return true;
-    }));
+    });
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Page-Size", String(pageSize));
+    res.setHeader("X-Total-Count", String(filtered.length));
+    res.json(filtered.slice(offset, offset + pageSize));
     return;
   }
 
   const tasks = await listTasks();
-  res.json(tasks.filter((task) => {
+  const filtered = tasks.filter((task) => {
     if (status && task.status !== status) {
       return false;
     }
@@ -3761,7 +3783,11 @@ router.get("/api/tasks", asyncRoute(async (req, res) => {
       return false;
     }
     return true;
-  }));
+  });
+  res.setHeader("X-Page", String(page));
+  res.setHeader("X-Page-Size", String(pageSize));
+  res.setHeader("X-Total-Count", String(filtered.length));
+  res.json(filtered.slice(offset, offset + pageSize));
 }));
 
 const handleApproveProject = asyncRoute(async (req, res) => {

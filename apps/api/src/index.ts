@@ -1,4 +1,5 @@
 import express from "express";
+import compression from "compression";
 import swaggerUi from "swagger-ui-express";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
@@ -4300,6 +4301,7 @@ function renderAcceptanceReportMarkdown(report: ProjectAcceptanceReport) {
 }
 
 configureSecurityMiddleware(app);
+app.use(compression());
 app.use(requestLogger);
 app.use(validateJsonMutationBody());
 
