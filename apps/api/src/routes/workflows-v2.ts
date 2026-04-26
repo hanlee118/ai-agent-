@@ -99,6 +99,37 @@ function parseBoolean(value: unknown, fallback: boolean) {
   return fallback;
 }
 
+async function findWorkflowForOverview(projectId: string) {
+  const activeWorkflow = await prisma.workflow.findFirst({
+    where: {
+      projectId,
+      status: "active"
+    },
+    include: {
+      stages: true,
+      template: true
+    },
+    orderBy: {
+      createdAt: "desc"
+    }
+  });
+  if (activeWorkflow) {
+    return activeWorkflow;
+  }
+  return prisma.workflow.findFirst({
+    where: {
+      projectId
+    },
+    include: {
+      stages: true,
+      template: true
+    },
+    orderBy: {
+      createdAt: "desc"
+    }
+  });
+}
+
 function summarizeStageArtifacts(outputArtifacts: unknown[]) {
   const sourceCounts = {
     hermes: 0,
@@ -634,16 +665,10 @@ export function createWorkflowsV2Router() {
       sendError(res, 400, "VALIDATION_ERROR", "projectId is required");
       return;
     }
-    let workflow: Awaited<ReturnType<typeof getActiveWorkflow>>;
-    try {
-      workflow = await getActiveWorkflow(projectId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/no active workflow/i.test(message)) {
-        sendError(res, 404, "NOT_FOUND", message);
-        return;
-      }
-      throw error;
+    const workflow = await findWorkflowForOverview(projectId);
+    if (!workflow) {
+      sendError(res, 404, "NOT_FOUND", `No workflow found for project ${projectId}`);
+      return;
     }
     const assignedAgentIds = Array.from(new Set(
       workflow.stages.flatMap((stage) => asStringList(stage.assignedAgents))

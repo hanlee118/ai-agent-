@@ -115,23 +115,23 @@ const DESIGN_REVIEW_MARKER = "## 设计审查卡";
 const MIN_DELIVERABLE_CONTENT_LENGTH = 180;
 const STAGE_OBJECTIVES: Record<StageType, string> = {
   INIT: "确认项目目标、边界与团队分工，建立执行基线。",
-  ANALYSIS: "由需求分析师完成需求分析文档，并由项目经理完成排期方案与里程碑基线。",
-  DESIGN: "由产品角色输出 PRD，再由设计角色输出视觉与交互交付物。",
+  ANALYSIS: "由需求分析师完成需求分析文档，并由项目经理完成排期方案与里程碑基线，再由产品角色形成可执行 PRD。",
+  DESIGN: "基于已确认 PRD，由设计角色输出视觉与交互交付物，并通过设计审查门禁。",
   DEV: "先产出研发技术方案与关键选型，再把设计与任务拆解落地为可运行实现，并完成联调验证。",
   ACCEPT: "完成验收验证、结果总结与文档回填，形成可持续迭代闭环。"
 };
 
 const STAGE_NEXT_INPUT: Record<StageType, string> = {
   INIT: "将项目章程与角色分工交给分析阶段继续细化。",
-  ANALYSIS: "把需求分析文档与项目排期方案交给设计阶段，先由产品输出 PRD。",
-  DESIGN: "把 PRD、设计审查卡与视觉定稿单页交给开发阶段，先完成技术方案与选型再进入实现。",
+  ANALYSIS: "把需求分析文档、项目排期方案与产品需求文档(PRD)交给视觉设计阶段。",
+  DESIGN: "把设计审查卡与视觉定稿单页交给开发阶段，先完成技术方案与选型再进入实现。",
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
-  ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["产品需求文档(PRD).md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
+  ANALYSIS: ["需求分析文档.md", "项目排期方案.md", "产品需求文档(PRD).md"],
+  DESIGN: ["设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };

@@ -1062,7 +1062,7 @@ export interface TaskUpdateInput {
 export const STAGE_LABELS: Record<StageType, string> = {
   INIT: "项目立项",
   ANALYSIS: "需求分析",
-  DESIGN: "需求设计/视觉设计",
+  DESIGN: "视觉设计",
   DEV: "代码开发",
   ACCEPT: "测试验收"
 };

@@ -217,7 +217,7 @@ const PROJECT_ADVANCE_CANCEL_TTL_MS = Math.max(
 
 const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
-  ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
+  ANALYSIS: ["需求分析文档.md", "项目排期方案.md", "产品需求文档(PRD).md"],
   DESIGN: ["设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
