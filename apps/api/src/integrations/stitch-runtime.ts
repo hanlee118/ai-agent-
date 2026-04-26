@@ -321,6 +321,7 @@ type StitchClientContext = {
   baseUrl: string;
   timeoutMs: number;
   proxyPlan: StitchProxyPlan;
+  proxyAttempts: StitchProxyPlan[];
 };
 
 type StitchRuntimeConfig = {
@@ -486,11 +487,25 @@ async function createStitchClientContext(input: {
 }): Promise<StitchClientContext> {
   const proxyEnv = readSystemProxyEnv();
   const proxyPlan = resolveStitchProxyPlan(proxyEnv);
+  const proxyStrategy = String(process.env.STITCH_PROXY_STRATEGY ?? "auto").trim().toLowerCase();
+  const directPlan: StitchProxyPlan = {
+    mode: "none",
+    env: proxyEnv
+  };
+  const proxyAttempts: StitchProxyPlan[] =
+    proxyStrategy === "direct_only"
+      ? [directPlan]
+      : proxyStrategy === "proxy_only"
+        ? [proxyPlan]
+        : proxyPlan.mode === "none"
+          ? [proxyPlan]
+          : [proxyPlan, directPlan];
   return {
     apiKey: input.apiKey,
     baseUrl: input.baseUrl,
     timeoutMs: input.timeoutMs,
-    proxyPlan
+    proxyPlan,
+    proxyAttempts
   };
 }
 
@@ -557,36 +572,109 @@ async function callStitchTool<T>(
 
   return withMutedStitchTransportConsoleError(async () => {
     const maxAttempts = resolveStitchToolMaxAttempts();
+    let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const dispatcher = await createStitchDispatcher(context.proxyPlan);
-      const client = new StitchToolClient({
-        apiKey: context.apiKey,
-        baseUrl: context.baseUrl,
-        timeout: context.timeoutMs
-      });
+      let shouldDelayRetry = false;
+      for (let planIndex = 0; planIndex < context.proxyAttempts.length; planIndex += 1) {
+        const plan = context.proxyAttempts[planIndex] ?? context.proxyPlan;
+        const hasFallbackPlan = planIndex < context.proxyAttempts.length - 1;
+        const dispatcher = await createStitchDispatcher(plan);
+        const client = new StitchToolClient({
+          apiKey: context.apiKey,
+          baseUrl: context.baseUrl,
+          timeout: context.timeoutMs
+        });
 
-      try {
-        const result = await withPatchedFetch(dispatcher, context.baseUrl, () => client.callTool<T>(toolName, args));
-        clearStitchTransportCooldown();
-        return result;
-      } catch (error) {
-        const retryable = isRetryableTransportError(error);
-        const shouldRetry = retryable && attempt < maxAttempts;
-        if (!shouldRetry) {
-          if (retryable) {
-            noteStitchTransportFailure();
+        try {
+          const result = await withPatchedFetch(dispatcher, context.baseUrl, () => client.callTool<T>(toolName, args));
+          clearStitchTransportCooldown();
+          return result;
+        } catch (error) {
+          lastError = error;
+          const retryable = isRetryableTransportError(error);
+          if (retryable && hasFallbackPlan) {
+            continue;
           }
-          throw error;
+
+          const shouldRetry = retryable && attempt < maxAttempts;
+          if (!shouldRetry) {
+            if (retryable) {
+              noteStitchTransportFailure();
+            }
+            throw error;
+          }
+          shouldDelayRetry = true;
+          break;
+        } finally {
+          await client.close().catch(() => undefined);
+          await dispatcher?.close().catch(() => undefined);
         }
+      }
+      if (shouldDelayRetry) {
         await new Promise((resolve) => setTimeout(resolve, resolveStitchRetryDelayMs(attempt)));
-      } finally {
-        await client.close().catch(() => undefined);
-        await dispatcher?.close().catch(() => undefined);
       }
     }
 
+    if (lastError instanceof Error) {
+      throw lastError;
+    }
+    if (lastError) {
+      throw new Error(String(lastError));
+    }
     throw new Error("STITCH_CALL_UNREACHABLE");
   });
+}
+
+export async function probeStitchRuntimeConnection() {
+  const baseUrl = String(process.env.STITCH_BASE_URL ?? "").trim() || "https://stitch.googleapis.com/mcp";
+  const strategy = String(process.env.STITCH_PROXY_STRATEGY ?? "auto").trim().toLowerCase() || "auto";
+  const cooldownActive = isStitchTransportCooldownActive();
+  const apiKeyConfigured = Boolean(String(process.env.STITCH_API_KEY ?? "").trim());
+
+  if (!apiKeyConfigured) {
+    return {
+      ok: false,
+      reason: "missing_api_key",
+      apiKeyConfigured,
+      baseUrl,
+      strategy,
+      cooldownActive,
+      attemptedProxyModes: [] as string[]
+    };
+  }
+
+  const runtimeConfig = readStitchRuntimeConfig();
+  const context = await createStitchClientContext({
+    apiKey: runtimeConfig.apiKey,
+    baseUrl: runtimeConfig.baseUrl,
+    timeoutMs: Math.min(runtimeConfig.timeoutMs, 20_000)
+  });
+
+  try {
+    await callStitchTool<unknown>(context, "list_projects", {});
+    return {
+      ok: true,
+      reason: "reachable",
+      apiKeyConfigured,
+      baseUrl: runtimeConfig.baseUrl,
+      strategy,
+      cooldownActive: isStitchTransportCooldownActive(),
+      attemptedProxyModes: context.proxyAttempts.map((item) => item.mode)
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: "unreachable",
+      message: error instanceof Error ? error.message : String(error),
+      apiKeyConfigured,
+      baseUrl: runtimeConfig.baseUrl,
+      strategy,
+      cooldownActive: isStitchTransportCooldownActive(),
+      attemptedProxyModes: context.proxyAttempts.map((item) => item.mode)
+    };
+  } finally {
+    await closeStitchClientContext(context);
+  }
 }
 
 async function getScreenArtifact(

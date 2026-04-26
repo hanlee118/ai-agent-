@@ -15,6 +15,10 @@ import type {
   TaskUpdateInput
 } from "@occ/shared";
 import {
+  ROLE_LABELS,
+  STAGE_LABELS
+} from "@occ/shared";
+import {
   approveProject,
   archiveProjectAcceptanceReport,
   closeProject,
@@ -33,6 +37,7 @@ import {
   getProjectTemplateGatePrecheck,
   reconcileProjectDeliverablesNow,
   rejectProjectStage,
+  runProjectStageAgent,
   resumeProject,
   submitCurrentStage,
   startProjectWarmupAfterCreate,
@@ -50,6 +55,7 @@ import {
   runProjectPostCreatePrep,
   saveProjectPostCreatePrepDraft
 } from "../system/post-create-prep.js";
+import { getStageRealModelGateRoles } from "../system/project-stage-execution.js";
 import { prisma } from "../db.js";
 import { getProjectRole, isPermissionAllowed, type ProjectRole } from "../security/rbac.js";
 import { previewRequirement } from "../utils/project-parser.js";
@@ -94,11 +100,37 @@ const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
   DEV: "代码开发",
   ACCEPT: "测试验收"
 };
+const LIFECYCLE_AUDIT_STAGE_ORDER: Array<"INIT" | "ANALYSIS" | "DESIGN" | "DEV" | "ACCEPT"> = [
+  "INIT",
+  "ANALYSIS",
+  "DESIGN",
+  "DEV",
+  "ACCEPT"
+];
 const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
   "pnpm --filter @occ/api typecheck",
   "pnpm --filter @occ/web typecheck",
   "pnpm --filter @occ/web build"
 ];
+type LifecycleReplayJob = {
+  id: string;
+  projectId: string;
+  status: "running" | "completed";
+  startedAt: string;
+  completedAt: string | null;
+  attempted: Array<{ stageType: string; role: RoleType }>;
+  succeeded: Array<{ stageType: string; role: RoleType }>;
+  failed: Array<{ stageType: string; role: RoleType; reason: string }>;
+  latestAudit?: unknown;
+};
+const lifecycleReplayJobs = new Map<string, LifecycleReplayJob>();
+
+function sanitizeReplayReason(value: unknown) {
+  return String(value ?? "")
+    .replace(/[\u0000-\u001F\u007F]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 const PROJECT_PREP_GITLAB_BASE_URL = String(process.env.GITLAB_BASE_URL || "https://gitlab.com")
   .trim()
   .replace(/\/+$/, "");
@@ -2708,6 +2740,127 @@ router.get("/api/projects/:id/lifecycle-quality-audit", asyncRoute(async (req, r
     return;
   }
   res.json(audit);
+}));
+
+router.post("/api/projects/:id/lifecycle-quality-audit/replay", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id || "").trim();
+  if (!projectId) {
+    res.status(400).json({
+      success: false,
+      error: {
+        code: "VALIDATION_ERROR",
+        message: "project id is required"
+      }
+    });
+    return;
+  }
+
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: `Project not found: ${projectId}`
+      }
+    });
+    return;
+  }
+
+  const replayRoleTimeoutMs = Math.max(30_000, Number(req.body?.roleTimeoutMs ?? 120_000));
+  const jobId = `replay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const job: LifecycleReplayJob = {
+    id: jobId,
+    projectId: project.id,
+    status: "running",
+    startedAt: new Date().toISOString(),
+    completedAt: null,
+    attempted: [],
+    succeeded: [],
+    failed: []
+  };
+  lifecycleReplayJobs.set(jobId, job);
+
+  void (async () => {
+    for (const stageType of LIFECYCLE_AUDIT_STAGE_ORDER) {
+      const roles = getStageRealModelGateRoles(stageType);
+      for (const role of roles) {
+        job.attempted.push({ stageType, role });
+        try {
+          await Promise.race([
+            runProjectStageAgent({
+              projectId: project.id,
+              projectName: project.name,
+              projectDescription: project.description,
+              parsedIntent: project.parsedIntent,
+              stageType,
+              role,
+              action: "project.lifecycle_audit.replay_real_execution",
+              summary: `质量门禁回放：请以${ROLE_LABELS[role]}身份补充${STAGE_LABELS[stageType]}阶段真实执行证据。`,
+              metadata: {
+                replay: "lifecycle-quality-audit",
+                stageType,
+                role,
+                strictRealModel: true
+              }
+            }),
+            new Promise<never>((_, reject) => {
+              setTimeout(() => reject(new Error(`replay_timeout_${replayRoleTimeoutMs}ms`)), replayRoleTimeoutMs);
+            })
+          ]);
+          job.succeeded.push({ stageType, role });
+        } catch (error) {
+          job.failed.push({
+            stageType,
+            role,
+            reason: sanitizeReplayReason(error instanceof Error ? error.message : String(error))
+          });
+        }
+      }
+    }
+    job.latestAudit = await getProjectLifecycleQualityAudit(project.id);
+    job.status = "completed";
+    job.completedAt = new Date().toISOString();
+  })().catch((error) => {
+    job.failed.push({
+      stageType: "INIT",
+      role: "ROLE_PM",
+      reason: sanitizeReplayReason(error instanceof Error ? error.message : String(error))
+    });
+    job.status = "completed";
+    job.completedAt = new Date().toISOString();
+  });
+
+  res.status(202).json({
+    success: true,
+    data: {
+      projectId: project.id,
+      jobId,
+      status: "running",
+      roleTimeoutMs: replayRoleTimeoutMs
+    }
+  });
+}));
+
+router.get("/api/projects/:id/lifecycle-quality-audit/replay/:jobId", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id || "").trim();
+  const jobId = String(req.params.jobId || "").trim();
+  const job = lifecycleReplayJobs.get(jobId);
+  if (!projectId || !jobId || !job || job.projectId !== projectId) {
+    res.status(404).json({
+      success: false,
+      error: {
+        code: "NOT_FOUND",
+        message: "replay job not found"
+      }
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    data: job
+  });
 }));
 
 router.post("/api/projects/:id/quality-gate/repair-issues", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {

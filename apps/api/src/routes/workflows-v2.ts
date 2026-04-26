@@ -370,7 +370,15 @@ export function createWorkflowsV2Router() {
   router.get("/hermes/status", asyncRoute(async (req, res) => {
     const includeProbe = parseBoolean(req.query.probe, true);
     const runtime = getHermesMcpRuntimeStatus();
-    const probe = includeProbe ? await probeHermesMcpEndpoint() : null;
+    const probe = includeProbe
+      ? await probeHermesMcpEndpoint()
+      : {
+        state: "skipped" as const,
+        reachable: null,
+        statusCode: null,
+        latencyMs: 0,
+        message: "probe_skipped"
+      };
     sendSuccess(res, {
       checkedAt: new Date().toISOString(),
       runtime,
