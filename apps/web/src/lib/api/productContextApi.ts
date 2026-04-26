@@ -5,6 +5,10 @@ export interface ProductContext {
   productName: string;
   background: string;
   mission: string;
+  executionEngines: string[];
+  executionPriority: string[];
+  gitlabGovernance: string[];
+  hermesUpgradeLoop: string[];
   goals: string[];
   principles: string[];
   constraints: string[];
@@ -46,6 +50,10 @@ export const productContextApi = {
     productName: string;
     background: string;
     mission: string;
+    executionEngines?: string[];
+    executionPriority?: string[];
+    gitlabGovernance?: string[];
+    hermesUpgradeLoop?: string[];
     goals: string[];
     principles: string[];
     constraints: string[];

@@ -80,7 +80,7 @@ export default function DeployAgentModal({
     selectedProjectId,
     setSelectedProjectId,
     isDeploying,
-    uniqueRoles,
+    templateOptions,
     deployAgent,
   } = useDeployAgent({
     isOpen,
@@ -106,10 +106,15 @@ export default function DeployAgentModal({
 
           {!isCustom ? (
             <div className="grid grid-cols-2 gap-3">
-              {uniqueRoles.length > 0 ? uniqueRoles.map((template) => (
+              {templateOptions.length > 0 ? templateOptions.map((template) => (
                 <button
                   key={template.id}
-                  onClick={() => setSelectedTemplate(template.id)}
+                  onClick={() => {
+                    setSelectedTemplate(template.id);
+                    if (!agentName.trim()) {
+                      setAgentName(template.suggestedAgentName);
+                    }
+                  }}
                   className={cn(
                     'p-4 border rounded-2xl text-left transition-all',
                     selectedTemplate === template.id ? 'bg-primary/10 border-primary' : 'bg-white/5 border-border-subtle hover:bg-white/10',

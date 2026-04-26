@@ -98,11 +98,12 @@ export type WorkflowHermesRuntimeStatus = {
     totalFailures: number;
   };
   probe: {
-    reachable: boolean;
+    state: 'disabled' | 'endpoint_missing' | 'skipped' | 'reachable' | 'unreachable';
+    reachable: boolean | null;
     statusCode: number | null;
     latencyMs: number;
     message: string;
-  } | null;
+  };
 };
 
 export const workflowsApi = {

@@ -18,6 +18,7 @@ import { useRuntimeConfig } from '../runtime-config/useRuntimeConfig';
 import ProductContextPanel from './ProductContextPanel';
 import ExecutionProtocolPanel from './ExecutionProtocolPanel';
 import { useExecutionProtocol } from './useExecutionProtocol';
+import HermesUpgradePanel from './HermesUpgradePanel';
 
 type SettingsPanelProps = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -270,6 +271,12 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
         icon: Workflow,
       },
       {
+        id: 'settings-hermes-upgrade',
+        label: 'Hermes 升级',
+        description: '自我升级闭环状态',
+        icon: Sparkles,
+      },
+      {
         id: 'settings-runtime',
         label: '运行模型',
         description: '模型与运行时校验',
@@ -457,6 +464,10 @@ export default function SettingsPanel({ addToast, onRuntimeUpdated }: SettingsPa
               onBlockDegradedWritesChange={executionProtocol.setBlockDegradedWrites}
               onReload={() => void executionProtocol.loadExecutionProtocol()}
             />
+          </div>
+
+          <div id="settings-hermes-upgrade">
+            <HermesUpgradePanel addToast={addToast} />
           </div>
 
           <div id="settings-runtime">

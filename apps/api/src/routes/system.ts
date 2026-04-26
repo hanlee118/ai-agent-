@@ -34,6 +34,14 @@ import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/d
 import { getIssue } from "../system/v1-method-store.js";
 import { getCachedLocalAgentMonitorOverview, subscribeLocalAgentMonitor } from "../system/local-agent-monitor.js";
 import {
+  applyHermesUpgradeSuggestion,
+  dismissHermesUpgradeSuggestion,
+  evaluateHermesUpgradeNow,
+  getHermesUpgradeState,
+  updateHermesUpgradeConfig
+} from "../system/hermes-upgrade.js";
+import { probeStitchRuntimeConnection } from "../integrations/stitch-runtime.js";
+import {
   applyOpenClawAutonomousModePreference,
   inspectOpenClawModelRouting
 } from "../openclaw/workspace.js";
@@ -152,6 +160,10 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
 
   router.get("/runtime", asyncRoute(async (_req, res) => {
     res.json(await getRuntimeStatus());
+  }));
+
+  router.get("/stitch/runtime-check", asyncRoute(async (_req, res) => {
+    res.json(await probeStitchRuntimeConnection());
   }));
 
   router.get("/runtime/config", asyncRoute(async (_req, res) => {
@@ -549,6 +561,72 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
       unsubscribe();
       res.end();
     });
+  }));
+
+  router.get("/hermes-upgrade", asyncRoute(async (_req, res) => {
+    res.json(await getHermesUpgradeState());
+  }));
+
+  router.put("/hermes-upgrade/config", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+    const payload = (req.body ?? {}) as {
+      enabled?: unknown;
+      autoApply?: unknown;
+      minKnowledgeSyncForSuggestion?: unknown;
+      minSkillImportForSuggestion?: unknown;
+    };
+    const updated = await updateHermesUpgradeConfig({
+      enabled: payload.enabled === undefined ? undefined : Boolean(payload.enabled),
+      autoApply: payload.autoApply === undefined ? undefined : Boolean(payload.autoApply),
+      minKnowledgeSyncForSuggestion: payload.minKnowledgeSyncForSuggestion === undefined
+        ? undefined
+        : Number(payload.minKnowledgeSyncForSuggestion),
+      minSkillImportForSuggestion: payload.minSkillImportForSuggestion === undefined
+        ? undefined
+        : Number(payload.minSkillImportForSuggestion)
+    });
+
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "system.hermes_upgrade_config_updated",
+      resourceType: "system",
+      summary: "已更新 Hermes 自我升级闭环配置",
+      detail: JSON.stringify(updated.config)
+    });
+    res.json(updated);
+  }));
+
+  router.post("/hermes-upgrade/evaluate", validateBody(MutationPassthroughSchema), asyncRoute(async (_req, res) => {
+    const state = await evaluateHermesUpgradeNow();
+    res.json(state);
+  }));
+
+  router.post("/hermes-upgrade/suggestions/:id/apply", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+    const suggestionId = String(req.params.id ?? "").trim();
+    if (!suggestionId) {
+      res.status(400).json({ message: "suggestion id is required" });
+      return;
+    }
+    const result = await applyHermesUpgradeSuggestion(suggestionId);
+    if (!result.found) {
+      res.status(404).json({ message: "suggestion not found" });
+      return;
+    }
+    res.json(result.state);
+  }));
+
+  router.post("/hermes-upgrade/suggestions/:id/dismiss", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+    const suggestionId = String(req.params.id ?? "").trim();
+    if (!suggestionId) {
+      res.status(400).json({ message: "suggestion id is required" });
+      return;
+    }
+    const result = await dismissHermesUpgradeSuggestion(suggestionId);
+    if (!result.found) {
+      res.status(404).json({ message: "suggestion not found" });
+      return;
+    }
+    res.json(result.state);
   }));
 
   return router;

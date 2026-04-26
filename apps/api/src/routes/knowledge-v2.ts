@@ -27,6 +27,7 @@ import { prisma } from "../db.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { asStringArray, normalizeText, type KnowledgeScope } from "../workflow-v2/types.js";
 import { validateHermesApiKey } from "./hermes-auth.js";
+import { recordHermesUpgradeSignal } from "../system/hermes-upgrade.js";
 import { validateBody } from "../validation/middleware.js";
 import { KnowledgeCreateSchema } from "../validation/schemas.js";
 
@@ -716,6 +717,11 @@ export function createKnowledgeV2Router() {
         limit: 120
       });
     }
+    void recordHermesUpgradeSignal({
+      type: "knowledge_sync",
+      projectId,
+      note: `knowledge:${item.id}`
+    });
     sendSuccess(res, { id: item.id }, 201);
   }));
 

@@ -174,6 +174,11 @@ pnpm verify:local
 pnpm verify:smoke
 ```
 
+预检体系文档：
+
+- `scripts/lib/README-preflight.md`
+- 说明了 DB/API/Hermes 自愈模块、`preflight-runner` 用法、环境变量和排障建议。
+
 单项目严格真验收（推荐固定一个项目 ID 反复验证）：
 
 ```bash
@@ -185,6 +190,26 @@ PROJECT_ID=OCC-20260424-001 pnpm audit:single-project:strict
 ```bash
 PROJECT_ID=OCC-20260424-001 pnpm verify:single-project:full
 ```
+
+闭环验收（项目创建/提交/驳回/重提/审批/OpenClaw 集成）：
+
+```bash
+# 默认（等同 fast 模式）
+pnpm verify:closure
+
+# 快速模式：优先验证主链路可用性与回归稳定性（推荐日常）
+pnpm verify:closure:fast
+
+# 全量模式：开启重型检查，做发布前深度验收（耗时更长）
+pnpm verify:closure:full
+```
+
+闭环模式相关环境变量：
+
+- `CLOSURE_FAST_PROJECT_FLOW_SCRIPTED=true|false`：是否在项目流阶段临时切换 `scripted` 加速验证
+- `CLOSURE_ENABLE_OPTIONAL_HEAVY_CHECKS=true|false`：是否启用高耗时的可选重型检查（如创建后预备强检查）
+- `OPTIONAL_PROJECT_REQUEST_TIMEOUT_MS=12000`：项目流可降级接口超时
+- `OPTIONAL_OPENCLAW_REQUEST_TIMEOUT_MS=10000`：OpenClaw 可降级接口超时
 
 可选参数：
 

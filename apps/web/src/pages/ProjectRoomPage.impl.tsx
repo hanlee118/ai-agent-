@@ -5251,15 +5251,31 @@ const ProjectRoom = ({
                 <div className="flex flex-wrap items-center gap-2">
                   {workflowHermesStatus ? (
                     <>
-                      <Badge
-                        variant={
-                          workflowHermesStatus.runtime.enabled
-                            ? (workflowHermesStatus.probe?.reachable ? 'primary' : 'warning')
-                            : 'default'
-                        }
-                      >
-                        Hermes {workflowHermesStatus.runtime.enabled ? '启用' : '关闭'} · {workflowHermesStatus.probe?.reachable ? '在线' : '不可达'}
-                      </Badge>
+                      {(() => {
+                        const probeState = workflowHermesStatus.probe?.state;
+                        const enabled = workflowHermesStatus.runtime.enabled;
+                        const variant = !enabled
+                          ? 'default'
+                          : probeState === 'reachable'
+                            ? 'primary'
+                            : probeState === 'endpoint_missing'
+                              ? 'default'
+                              : 'warning';
+                        const healthLabel = !enabled
+                          ? '未启用'
+                          : probeState === 'reachable'
+                            ? '在线'
+                            : probeState === 'endpoint_missing'
+                              ? '未配置端点'
+                              : probeState === 'skipped'
+                                ? '未探测'
+                                : '不可达';
+                        return (
+                          <Badge variant={variant}>
+                            Hermes {enabled ? '启用' : '关闭'} · {healthLabel}
+                          </Badge>
+                        );
+                      })()}
                       <Badge variant="default">Probe HTTP {workflowHermesStatus.probe?.statusCode ?? '-'}</Badge>
                       <Badge variant="default">Probe 延迟 {workflowHermesStatus.probe?.latencyMs ?? '-'}ms</Badge>
                       <Badge variant="default">

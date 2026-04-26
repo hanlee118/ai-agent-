@@ -1,8 +1,10 @@
-import { Blocks, BrainCircuit, Settings, UserPlus, Workflow } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Blocks, BrainCircuit, LayoutList, Settings, UserPlus, Workflow } from 'lucide-react';
 import { motion } from 'motion/react';
 import { cn } from '../lib/utils';
 import { agents, models } from '../lib/runtimeCollections';
 import { Badge } from './impl/GovernanceShared';
+import AgentRoleTemplatesPanel from '../features/settings/AgentRoleTemplatesPanel';
 
 type Props = {
   onSelectAgent: (id: string) => void;
@@ -21,6 +23,37 @@ export default function AgentsPage({
   onOpenRoleSets,
   onOpenConfig,
 }: Props) {
+  const [view, setView] = useState<'roster' | 'templates'>(() => {
+    if (typeof window === 'undefined') {
+      return 'roster';
+    }
+    const search = new URLSearchParams(window.location.search);
+    return search.get('agents_view') === 'templates' ? 'templates' : 'roster';
+  });
+
+  useEffect(() => {
+    const onPopState = () => {
+      const search = new URLSearchParams(window.location.search);
+      setView(search.get('agents_view') === 'templates' ? 'templates' : 'roster');
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const switchView = (next: 'roster' | 'templates') => {
+    setView(next);
+    if (typeof window === 'undefined') {
+      return;
+    }
+    const url = new URL(window.location.href);
+    if (next === 'roster') {
+      url.searchParams.delete('agents_view');
+    } else {
+      url.searchParams.set('agents_view', 'templates');
+    }
+    window.history.pushState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  };
+
   const resolveEngineMeta = (engine: string | undefined) => {
     const normalized = String(engine || 'managed').trim().toLowerCase();
     if (normalized === 'hermes') {
@@ -64,95 +97,129 @@ export default function AgentsPage({
       <header className="flex justify-between items-end">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-white">Agent 名册</h1>
-          <p className="text-slate-400 mt-1">监控和管理您的数字员工能力。</p>
+          <p className="text-slate-400 mt-1">
+            {view === 'roster' ? '监控和管理您的数字员工能力。' : '平台级角色模板库，支持列表查看和详情编辑。'}
+          </p>
         </div>
-        <div className="flex gap-3">
-          <button onClick={onOpenRoleSets} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
-            <Blocks size={16} />
-            行业角色集
-          </button>
-          <button onClick={onOpenTopology} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
-            <Workflow size={16} />
-            团队图谱
-          </button>
-          <button onClick={onOpenDeploy} className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2">
-            <UserPlus size={16} />
-            部署 Agent
-          </button>
+        <div className="flex gap-3 flex-wrap justify-end">
+          <div className="inline-flex rounded-xl border border-border-subtle bg-white/5 p-1">
+            <button
+              type="button"
+              onClick={() => switchView('roster')}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition',
+                view === 'roster' ? 'bg-primary text-surface' : 'text-slate-300 hover:text-white hover:bg-white/10',
+              )}
+            >
+              <LayoutList size={15} />
+              Agent 名册
+            </button>
+            <button
+              type="button"
+              onClick={() => switchView('templates')}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition',
+                view === 'templates' ? 'bg-primary text-surface' : 'text-slate-300 hover:text-white hover:bg-white/10',
+              )}
+            >
+              <BrainCircuit size={15} />
+              角色模板管理
+            </button>
+          </div>
+          {view === 'roster' ? (
+            <>
+              <button onClick={onOpenRoleSets} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
+                <Blocks size={16} />
+                行业角色集
+              </button>
+              <button onClick={onOpenTopology} className="px-4 py-2 bg-white/5 border border-border-subtle rounded-lg text-sm font-medium hover:bg-white/10 transition-colors flex items-center gap-2">
+                <Workflow size={16} />
+                团队图谱
+              </button>
+              <button onClick={onOpenDeploy} className="px-4 py-2 bg-primary text-surface hover:bg-primary/90 rounded-lg text-sm font-semibold transition-colors flex items-center gap-2">
+                <UserPlus size={16} />
+                部署 Agent
+              </button>
+            </>
+          ) : null}
         </div>
       </header>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-        {agents.map((agent) => {
-          const engineMeta = resolveEngineMeta(agent.integrationEngine);
-          return (
-            <div
-              key={agent.id}
-              className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-6 hover:border-white/20 transition-all group cursor-pointer"
-              onClick={() => onSelectAgent(agent.id)}
-            >
-            <div className="flex justify-between items-start">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center text-accent border border-accent/20 group-hover:scale-110 transition-transform">
-                  <BrainCircuit size={24} />
-                </div>
-                <div>
-                  <h4 className="font-bold text-white group-hover:text-primary transition-colors">{agent.name}</h4>
-                  <p className="text-xs text-slate-500">{agent.role}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <Badge variant={engineMeta.variant}>{engineMeta.label}</Badge>
-                <Badge variant={agent.status === 'Thinking' ? 'accent' : agent.status === 'Executing' ? 'primary' : 'default'}>{agent.status}</Badge>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
-                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">模型</p>
-                <p className="text-xs text-white mt-1 font-medium">{resolveModelLabel(agent.currentModelId || agent.model || '')}</p>
-              </div>
-              <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
-                <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">已用 Token</p>
-                <p className="text-xs text-white mt-1 font-medium">{((agent.tokensUsed || 0) / 1000).toFixed(1)}k</p>
-              </div>
-            </div>
-
-            <div className="space-y-2">
-              <div className="flex justify-between text-[10px]">
-                <span className="text-slate-500 font-bold uppercase tracking-wider">当前负载</span>
-                <span className="text-white font-bold">{agent.load}%</span>
-              </div>
-              <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
-                <motion.div initial={{ width: 0 }} animate={{ width: `${agent.load}%` }} className={cn('h-full rounded-full', (agent.load || 0) > 80 ? 'bg-danger' : 'bg-primary')} />
-              </div>
-            </div>
-
-            <div className="flex gap-2 pt-2">
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onSelectAgent(agent.id);
-                  addToast(`正在连接到 ${agent.name} 的控制终端...`, 'info');
-                }}
-                className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold text-slate-300 hover:bg-white/10 hover:text-white transition-all"
+      {view === 'templates' ? (
+        <AgentRoleTemplatesPanel addToast={addToast} />
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+          {agents.map((agent) => {
+            const engineMeta = resolveEngineMeta(agent.integrationEngine);
+            return (
+              <div
+                key={agent.id}
+                className="bg-surface-soft border border-border-subtle rounded-2xl p-6 space-y-6 hover:border-white/20 transition-all group cursor-pointer"
+                onClick={() => onSelectAgent(agent.id)}
               >
-                命令
-              </button>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenConfig(agent.id);
-                }}
-                className="p-2.5 bg-white/5 border border-border-subtle rounded-xl text-slate-500 hover:text-white hover:bg-white/10 transition-all"
-              >
-                <Settings size={18} />
-              </button>
-            </div>
-            </div>
-          );
-        })}
-      </div>
+              <div className="flex justify-between items-start">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center text-accent border border-accent/20 group-hover:scale-110 transition-transform">
+                    <BrainCircuit size={24} />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-white group-hover:text-primary transition-colors">{agent.name}</h4>
+                    <p className="text-xs text-slate-500">{agent.role}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <Badge variant={engineMeta.variant}>{engineMeta.label}</Badge>
+                  <Badge variant={agent.status === 'Thinking' ? 'accent' : agent.status === 'Executing' ? 'primary' : 'default'}>{agent.status}</Badge>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
+                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">模型</p>
+                  <p className="text-xs text-white mt-1 font-medium">{resolveModelLabel(agent.currentModelId || agent.model || '')}</p>
+                </div>
+                <div className="p-3 bg-white/5 rounded-xl border border-border-subtle">
+                  <p className="text-[10px] text-slate-500 font-bold uppercase tracking-wider">已用 Token</p>
+                  <p className="text-xs text-white mt-1 font-medium">{((agent.tokensUsed || 0) / 1000).toFixed(1)}k</p>
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-slate-500 font-bold uppercase tracking-wider">当前负载</span>
+                  <span className="text-white font-bold">{agent.load}%</span>
+                </div>
+                <div className="h-1.5 w-full bg-white/5 rounded-full overflow-hidden">
+                  <motion.div initial={{ width: 0 }} animate={{ width: `${agent.load}%` }} className={cn('h-full rounded-full', (agent.load || 0) > 80 ? 'bg-danger' : 'bg-primary')} />
+                </div>
+              </div>
+
+              <div className="flex gap-2 pt-2">
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onSelectAgent(agent.id);
+                    addToast(`正在连接到 ${agent.name} 的控制终端...`, 'info');
+                  }}
+                  className="flex-1 py-2.5 bg-white/5 border border-border-subtle rounded-xl text-xs font-bold text-slate-300 hover:bg-white/10 hover:text-white transition-all"
+                >
+                  命令
+                </button>
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenConfig(agent.id);
+                  }}
+                  className="p-2.5 bg-white/5 border border-border-subtle rounded-xl text-slate-500 hover:text-white hover:bg-white/10 transition-all"
+                >
+                  <Settings size={18} />
+                </button>
+              </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

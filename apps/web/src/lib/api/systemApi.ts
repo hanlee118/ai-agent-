@@ -5,6 +5,7 @@ import type {
   DesignModelPolicyHealthSnapshot,
   SystemExecutionProtocolInput,
   SystemExecutionProtocolSnapshot,
+  HermesUpgradeState,
   SystemHealth,
   SystemRuntime,
   SystemRuntimeConfig,
@@ -88,6 +89,43 @@ export const systemApi = {
     return request<DebateCompareLogResult>('/system/stage-model-policy/debate/compare-log', {
       method: 'POST',
       body: JSON.stringify(payload),
+    });
+  },
+
+  async getHermesUpgradeState() {
+    return request<HermesUpgradeState>('/system/hermes-upgrade');
+  },
+
+  async updateHermesUpgradeConfig(data: {
+    enabled?: boolean;
+    autoApply?: boolean;
+    minKnowledgeSyncForSuggestion?: number;
+    minSkillImportForSuggestion?: number;
+  }) {
+    return request<HermesUpgradeState>('/system/hermes-upgrade/config', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    });
+  },
+
+  async evaluateHermesUpgradeNow() {
+    return request<HermesUpgradeState>('/system/hermes-upgrade/evaluate', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async applyHermesSuggestion(id: string) {
+    return request<HermesUpgradeState>(`/system/hermes-upgrade/suggestions/${encodeURIComponent(id)}/apply`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async dismissHermesSuggestion(id: string) {
+    return request<HermesUpgradeState>(`/system/hermes-upgrade/suggestions/${encodeURIComponent(id)}/dismiss`, {
+      method: 'POST',
+      body: JSON.stringify({}),
     });
   },
 };

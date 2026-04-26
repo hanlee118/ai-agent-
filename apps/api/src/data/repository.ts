@@ -114,26 +114,47 @@ const DESIGN_REVIEW_MARKER = "## 设计审查卡";
 const MIN_DELIVERABLE_CONTENT_LENGTH = 180;
 const STAGE_OBJECTIVES: Record<StageType, string> = {
   INIT: "确认项目目标、边界与团队分工，建立执行基线。",
-  ANALYSIS: "把输入需求转成结构化需求确认单、约束与风险清单。",
-  DESIGN: "输出可执行设计方案，明确信息架构、视觉方向与交互规则。",
+  ANALYSIS: "由需求分析师完成需求分析文档，并由项目经理完成排期方案与里程碑基线。",
+  DESIGN: "由产品角色输出 PRD，再由设计角色输出视觉与交互交付物。",
   DEV: "先产出研发技术方案与关键选型，再把设计与任务拆解落地为可运行实现，并完成联调验证。",
   ACCEPT: "完成验收验证、结果总结与文档回填，形成可持续迭代闭环。"
 };
 
 const STAGE_NEXT_INPUT: Record<StageType, string> = {
   INIT: "将项目章程与角色分工交给分析阶段继续细化。",
-  ANALYSIS: "把需求确认单、排期和风险清单交给设计阶段产出方案。",
-  DESIGN: "把设计审查卡与视觉定稿单页交给开发阶段，先完成技术方案与选型再进入实现。",
+  ANALYSIS: "把需求分析文档与项目排期方案交给设计阶段，先由产品输出 PRD。",
+  DESIGN: "把 PRD、设计审查卡与视觉定稿单页交给开发阶段，先完成技术方案与选型再进入实现。",
   DEV: "把实现结果、测试证据和发布说明交给验收阶段评审。",
   ACCEPT: "把验收结论和回填结果同步到产品说明文档，作为下轮需求输入。"
 };
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md"],
-  DESIGN: ["设计审查卡.md", "视觉定稿单页.preview.html.md"],
+  DESIGN: ["产品需求文档(PRD).md", "设计审查卡.md", "视觉定稿单页.preview.html.md"],
   DEV: ["技术方案与选型.md", "实现结果说明.md", "运行地址与部署说明.md"],
   ACCEPT: ["测试报告.md", "产品说明文档回填.md"]
 };
+const DELIVERABLE_OWNER_HINTS: Array<{ pattern: RegExp; owner: RoleType }> = [
+  { pattern: /章程|charter/i, owner: "ROLE_PM" },
+  { pattern: /需求分析|analysis/i, owner: "ROLE_ANALYST" },
+  { pattern: /排期|里程碑|schedule|roadmap/i, owner: "ROLE_PM" },
+  { pattern: /产品需求文档|prd/i, owner: "ROLE_PRODUCT" },
+  { pattern: /设计审查|visual|视觉|mockup|preview|stitch/i, owner: "ROLE_DESIGN" },
+  { pattern: /技术方案|architecture|实施方案|api|契约/i, owner: "ROLE_ARCH" },
+  { pattern: /实现结果|运行地址|部署|runtime|delivery/i, owner: "ROLE_DEV" },
+  { pattern: /测试|qa|验收/i, owner: "ROLE_QA" },
+  { pattern: /回填|backfill|长期记忆/i, owner: "ROLE_QA" }
+];
+
+function resolveDeliverableOwner(stageType: StageType, deliverableName: string, fallback: RoleType): RoleType {
+  const name = String(deliverableName || "");
+  for (const hint of DELIVERABLE_OWNER_HINTS) {
+    if (hint.pattern.test(name)) {
+      return hint.owner;
+    }
+  }
+  return stageAssignees[stageType] || fallback;
+}
 const PM_STAGE_GATE_ENABLED = String(process.env.PM_STAGE_GATE_ENABLED ?? "true").trim().toLowerCase() !== "false";
 const PM_STAGE_GATE_MIN_SUCCESS = Math.max(1, Number(process.env.PM_STAGE_GATE_MIN_SUCCESS ?? 1));
 const PM_STAGE_GATE_ALL_STAGES = String(process.env.PM_STAGE_GATE_ALL_STAGES ?? "false").trim().toLowerCase() === "true";
@@ -1710,6 +1731,9 @@ function detectDeliverableTemplateKindFromTitle(
     return resolveDeliverableTemplate("项目排期方案.md", stageType).kind;
   }
   if (/需求分析|prd|需求文档|requirement/.test(normalized)) {
+    if (/prd|产品需求/.test(normalized)) {
+      return resolveDeliverableTemplate("产品需求文档(PRD).md", stageType).kind;
+    }
     return resolveDeliverableTemplate("需求分析文档.md", stageType).kind;
   }
   if (/ppt|汇报|路演|演示文稿|slides/.test(normalized)) {
@@ -1891,6 +1915,12 @@ function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: S
 
     if (matched.status !== "submitted" && matched.status !== "approved") {
       errors.push(`${matched.name} 状态为 ${matched.status}，未达到可审批状态`);
+      continue;
+    }
+
+    const expectedOwner = resolveDeliverableOwner(stageType, expectedName, stageAssignees[stageType] || "ROLE_PM");
+    if (matched.createdBy !== expectedOwner) {
+      errors.push(`${matched.name} 角色归属不符合阶段 SOP（期望 ${ROLE_LABELS[expectedOwner]}，实际 ${ROLE_LABELS[matched.createdBy] || matched.createdBy}）`);
       continue;
     }
 
@@ -2591,13 +2621,13 @@ function evaluateRequirementAlignment(
   const expectedArtifacts = (
     input.artifacts.length > 0
       ? input.artifacts
-      : ["需求分析文档", "项目排期", "设计审查卡", "视觉定稿单页", "技术方案与选型", "实现结果说明", "运行地址与部署说明", "测试报告"]
+      : ["需求分析文档", "项目排期", "产品需求文档(PRD)", "设计审查卡", "视觉定稿单页", "技术方案与选型", "实现结果说明", "运行地址与部署说明", "测试报告"]
   )
     .map((label) => {
       const pattern = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, ""), "i");
       const fallback =
         /需求分析|prd|analysis/i.test(label.toLowerCase())
-          ? /需求分析|分析文档|prd|analysis/i
+          ? /需求分析|分析文档|prd|产品需求|analysis/i
           : /设计审查|review/i.test(label.toLowerCase())
             ? /设计审查|design review|审查卡/i
             : /视觉|preview|html/i.test(label.toLowerCase())
@@ -2725,7 +2755,7 @@ function enrichProjectWithRequirementContract(project: ProjectDetail, contract?:
         content: `${deliverable.content}\n\n## 需求确认单约束\n- ${contract.objective}`
       };
     }
-    if (deliverable.name.includes("产品方案草案") || deliverable.name.toLowerCase().includes("word")) {
+    if (deliverable.name.includes("产品需求文档(PRD)") || deliverable.name.includes("产品方案草案") || deliverable.name.toLowerCase().includes("word")) {
       return {
         ...deliverable,
         content: `${deliverable.content}${contractBlock}`
@@ -4470,6 +4500,12 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
   const bootstrapAction = input.action.startsWith("project.create.bootstrap");
   const approvalWarmupAction = input.action.startsWith("project.approve.next-stage");
   const roleModelGateApprovalAction = input.action.startsWith("project.approve.role-model-gate");
+  const strictRealModelForThisRun = Boolean(
+    input.metadata
+    && typeof input.metadata === "object"
+    && !Array.isArray(input.metadata)
+    && (input.metadata as Record<string, unknown>).strictRealModel === true
+  );
   const autoSubmissionAction = automationAction || manualAdvanceAction || bootstrapAction;
   const relaxedGateAction = autoSubmissionAction || approvalWarmupAction || roleModelGateApprovalAction;
   const configuredAutoSubmissionBudgetMs = Number(
@@ -4998,6 +5034,7 @@ export async function runProjectStageAgent(input: StageAgentExecutionInput) {
       const allowAutoStageScriptedWrite =
         provider === "scripted"
         && relaxedGateAction
+        && !strictRealModelForThisRun
         && !shouldEnforceAutoStageRealModelGate(input.stageType);
       const blockDegradedWrite = executionProtocol.blockDegradedWrites && degraded && !allowAutoStageScriptedWrite;
       if ((!allowAutoStageScriptedWrite && provider === "scripted") || blockDegradedWrite) {
@@ -5614,7 +5651,7 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
         content: "",
         version: maxVersion + 1,
         status: stageStatus,
-        createdBy: stage.assignee,
+        createdBy: resolveDeliverableOwner(stageType, expectedName, stage.assignee as RoleType),
         createdAt: now,
         updatedAt: now
       };
@@ -7634,6 +7671,11 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
         matched.status === "submitted" || matched.status === "approved"
           ? []
           : [`交付物状态为 ${matched.status}，未达到可审批状态`];
+      const expectedOwner = resolveDeliverableOwner(stageType, expectedName, stageAssignees[stageType] || "ROLE_PM");
+      const ownerIssues =
+        matched.createdBy === expectedOwner
+          ? []
+          : [`交付物归属角色为 ${ROLE_LABELS[matched.createdBy] || matched.createdBy}，与 SOP 期望 ${ROLE_LABELS[expectedOwner]} 不一致`];
       const gate = validateDeliverableTemplateGate({
         stageType,
         deliverableName: matched.name,
@@ -7642,13 +7684,15 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
         projectDescription: project.description,
         keywords: project.parsedIntent.keywords
       });
-      const issues = [...statusIssues, ...gate.issues];
+      const issues = [...statusIssues, ...ownerIssues, ...gate.issues];
       return {
         expectedName,
         pass: issues.length === 0,
         status: matched.status,
         matchedName: matched.name,
         matchedVersion: matched.version || 1,
+        expectedOwner,
+        matchedOwner: matched.createdBy,
         issues,
         gate: {
           templateKind: gate.template.kind,

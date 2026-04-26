@@ -353,6 +353,36 @@ export interface SystemUiAutonomousModeApplyResult {
   agentIds: string[];
 }
 
+export interface HermesUpgradeSuggestion {
+  id: string;
+  title: string;
+  detail: string;
+  source: 'knowledge_sync' | 'skill_import';
+  status: 'pending' | 'applied' | 'dismissed';
+  createdAt: string;
+  appliedAt?: string;
+  dismissedAt?: string;
+}
+
+export interface HermesUpgradeState {
+  config: {
+    enabled: boolean;
+    autoApply: boolean;
+    minKnowledgeSyncForSuggestion: number;
+    minSkillImportForSuggestion: number;
+  };
+  counters: {
+    knowledgeSyncEvents: number;
+    skillImportEvents: number;
+  };
+  lastEventAt?: string;
+  lastEvaluatedAt?: string;
+  lastAppliedAt?: string;
+  pendingSuggestions: HermesUpgradeSuggestion[];
+  history: HermesUpgradeSuggestion[];
+  updatedAt: string;
+}
+
 export interface SystemObservabilitySummary {
   generatedAt: string;
   runtime: {

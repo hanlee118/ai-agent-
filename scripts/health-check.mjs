@@ -3,6 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { ensureDatabaseReady as ensureDatabaseReadyWithSelfHeal } from './lib/db-self-heal.mjs';
+import { ensureHermesReachableViaApi } from './lib/hermes-self-heal.mjs';
+import { runPreflight } from './lib/preflight-runner.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,7 +15,8 @@ const sqliteDbPath = path.join(apiRoot, "prisma", "dev.db");
 const defaultPostgresUrl = "postgresql://occ:occ@127.0.0.1:5432/occ?schema=public";
 const databaseUrl = String(process.env.DATABASE_URL || "").trim() || defaultPostgresUrl;
 const postgresDatabase = /^postgres(ql)?:\/\//i.test(databaseUrl);
-const apiBase = (process.env.HEALTHCHECK_API_BASE || 'http://127.0.0.1:8787').replace(/\/$/, '');
+let apiBase = (process.env.HEALTHCHECK_API_BASE || 'http://127.0.0.1:8787').replace(/\/$/, '');
+const healthcheckAutoStartApi = String(process.env.HEALTHCHECK_AUTO_START_API || "true").trim().toLowerCase() !== "false";
 const requireRealModelForHealth = String(process.env.REQUIRE_REAL_MODEL_FOR_HEALTH || "").trim().toLowerCase() === "true";
 const gitlabDoctorEnabled = String(process.env.HEALTHCHECK_ENABLE_GITLAB || "").trim().toLowerCase() === "true"
   && shouldRunGitLabDoctor();
@@ -22,26 +26,49 @@ const configuredHealthcheckCookie = normalizeSessionCookie(
 const configuredHealthcheckAdminPassword = String(
   process.env.HEALTHCHECK_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD || ''
 ).trim();
+const requireHermesForHealth = String(process.env.REQUIRE_HERMES_FOR_HEALTH || "").trim().toLowerCase() === "true";
 
 const reportsDir = path.join(repoRoot, 'docs', 'reports');
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const reportPath = path.join(reportsDir, `system-health-check-${stamp}.json`);
 const latestPath = path.join(reportsDir, 'system-health-check-latest.json');
+const WAIT = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+let postgresMigrateStatusCache = null;
 
 async function run() {
+  const preflight = await runPreflight({
+    needDb: postgresDatabase,
+    db: {
+      databaseUrl,
+      cwd: repoRoot,
+      serviceName: "db",
+      maxAttempts: 8,
+      intervalMs: 1000,
+      eagerStartDocker: true,
+    },
+    needApi: true,
+    api: {
+      requestedBaseUrl: apiBase,
+      checkPathname: "/health",
+      autoStartDaemon: healthcheckAutoStartApi,
+      startCommand: ["pnpm", "daemon:start"],
+      cwd: repoRoot,
+    }
+  });
+  const apiReady = preflight.api || { ok: false, detail: "missing_preflight_api_result", apiBaseUrl: "" };
+  if (!apiReady.ok) {
+    throw new Error(`API 不可达（${apiReady.detail}）`);
+  }
+  if (apiReady.apiBaseUrl) {
+    apiBase = apiReady.apiBaseUrl;
+  }
+
   const checks = [];
   const authContext = await resolveHealthcheckAuthContext();
 
   checks.push(await check('DB 连接', async () => {
     if (postgresDatabase) {
-      const result = await execCapture(
-        'pnpm',
-        ['--filter', '@occ/api', 'exec', 'prisma', 'migrate', 'status', '--schema', 'prisma/schema.prisma'],
-        {
-          cwd: apiRoot,
-          env: { DATABASE_URL: databaseUrl },
-        },
-      );
+      const result = await getPostgresMigrateStatus();
       return {
         ok: true,
         detail: (result.stdout || result.stderr || 'prisma migrate status ok').trim().split('\n').slice(-1)[0].slice(0, 180),
@@ -61,14 +88,7 @@ async function run() {
 
   checks.push(await check('核心表结构', async () => {
     if (postgresDatabase) {
-      const result = await execCapture(
-        'pnpm',
-        ['--filter', '@occ/api', 'exec', 'prisma', 'migrate', 'status', '--schema', 'prisma/schema.prisma'],
-        {
-          cwd: apiRoot,
-          env: { DATABASE_URL: databaseUrl },
-        },
-      );
+      const result = await getPostgresMigrateStatus();
       const output = `${result.stdout}\n${result.stderr}`;
       const upToDate = /up to date|No pending migrations/i.test(output);
       return {
@@ -138,6 +158,62 @@ async function run() {
       detail: realModelReady
         ? "real-model ready"
         : `non-blocking: mode=${mode}, requestedMode=${requestedMode}, configured=${configured}, validation=${lastValidationStatus}`,
+    };
+  }));
+
+  checks.push(await check('Hermes MCP 连通性', async () => {
+    if (!authContext.authenticated) {
+      return {
+        ok: true,
+        detail: 'non-blocking: 未注入管理员会话，跳过 Hermes probe（可先设置 HEALTHCHECK_SESSION_COOKIE）',
+      };
+    }
+    const runtimeResponse = await fetch(`${apiBase}/api/system/runtime`, {
+      headers: buildAuthHeaders(authContext)
+    });
+    if (!runtimeResponse.ok) {
+      return { ok: false, detail: `读取 /api/system/runtime 失败: HTTP ${runtimeResponse.status}` };
+    }
+    const runtimePayload = unwrap(await runtimeResponse.json()) || {};
+    const enabled = Boolean(runtimePayload?.features?.workflowV2?.hermesEnabled);
+    const endpoint = String(
+      runtimePayload?.features?.workflowV2?.hermesEndpoint
+      || process.env.WORKFLOW_V2_HERMES_ENDPOINT
+      || process.env.HERMES_MCP_ENDPOINT
+      || ''
+    ).trim();
+    if (!enabled || !endpoint) {
+      return {
+        ok: true,
+        detail: `non-blocking: enabled=${enabled}, endpoint=${endpoint ? 'set' : 'missing'}`,
+      };
+    }
+    const probe = await ensureHermesReachableViaApi({
+      apiBase,
+      enabled,
+      endpoint,
+      cwd: repoRoot,
+      headers: buildAuthHeaders(authContext),
+      autoStartLocal: false,
+    });
+    const mode = requireHermesForHealth ? "blocking" : "non-blocking";
+    if (probe.probeStatus === 401 || probe.probeStatus === 403) {
+      return {
+        ok: true,
+        detail: `${mode}: probe auth required (HTTP ${probe.probeStatus})`,
+      };
+    }
+    if (probe.probeStatus === 0) {
+      return {
+        ok: false,
+        detail: "Hermes probe request failed",
+      };
+    }
+    return {
+      ok: requireHermesForHealth ? Boolean(probe.reachable) : true,
+      detail: probe.reachable
+        ? `${mode}: reachable`
+        : `${mode}: unreachable (hint: pnpm hermes:daemon:start)`,
     };
   }));
 
@@ -238,6 +314,69 @@ async function run() {
   if (failed > 0) {
     process.exitCode = 1;
   }
+}
+
+async function getPostgresMigrateStatus() {
+  if (postgresMigrateStatusCache) {
+    return postgresMigrateStatusCache;
+  }
+  const result = await runPostgresMigrateStatusWithRecovery();
+  postgresMigrateStatusCache = result;
+  return result;
+}
+
+async function runPostgresMigrateStatusWithRecovery() {
+  const args = ['--filter', '@occ/api', 'exec', 'prisma', 'migrate', 'status', '--schema', 'prisma/schema.prisma'];
+  const options = {
+    cwd: apiRoot,
+    env: { DATABASE_URL: databaseUrl },
+  };
+  let lastError = null;
+  const maxAttempts = 4;
+
+  await ensureDatabaseReadyWithSelfHeal({
+    databaseUrl,
+    cwd: repoRoot,
+    serviceName: "db",
+    maxAttempts: 8,
+    intervalMs: 1000,
+    eagerStartDocker: true,
+  });
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await execCapture('pnpm', args, options);
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      const dbConnectionError = isDatabaseConnectivityError(message);
+      if (dbConnectionError && attempt === 1) {
+        await ensureDbContainerRunning();
+      }
+      if (dbConnectionError && attempt < maxAttempts) {
+        await WAIT(700 * attempt);
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('postgres migrate status failed');
+}
+
+async function ensureDbContainerRunning() {
+  try {
+    await execCapture('docker-compose', ['up', '-d', 'db'], {
+      cwd: repoRoot,
+    });
+  } catch {
+    // keep best-effort; caller handles subsequent retry failures
+  }
+}
+
+function isDatabaseConnectivityError(message) {
+  const text = String(message || '');
+  return /Can't reach database server|connection refused|ECONNREFUSED|Schema engine error/i.test(text);
 }
 
 async function buildRealModelSelfCheck(authContext) {

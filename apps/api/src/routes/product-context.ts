@@ -14,6 +14,10 @@ interface UpdateContextBody {
   productName?: unknown;
   background?: unknown;
   mission?: unknown;
+  executionEngines?: unknown;
+  executionPriority?: unknown;
+  gitlabGovernance?: unknown;
+  hermesUpgradeLoop?: unknown;
   goals?: unknown;
   principles?: unknown;
   constraints?: unknown;
@@ -32,6 +36,13 @@ function normalizeStringArray(input: unknown) {
   return input
     .map((item) => String(item ?? "").trim())
     .filter(Boolean);
+}
+
+function normalizeOptionalStringArray(input: unknown) {
+  if (input === undefined) {
+    return undefined;
+  }
+  return normalizeStringArray(input);
 }
 
 export function createProductContextRouter() {
@@ -54,11 +65,15 @@ export function createProductContextRouter() {
       productName,
       background: String(payload.background ?? "").trim(),
       mission: String(payload.mission ?? "").trim(),
-      goals: normalizeStringArray(payload.goals),
-      principles: normalizeStringArray(payload.principles),
-      constraints: normalizeStringArray(payload.constraints),
-      forbiddenKeywords: normalizeStringArray(payload.forbiddenKeywords),
-      requiredKeywords: normalizeStringArray(payload.requiredKeywords)
+      executionEngines: normalizeOptionalStringArray(payload.executionEngines),
+      executionPriority: normalizeOptionalStringArray(payload.executionPriority),
+      gitlabGovernance: normalizeOptionalStringArray(payload.gitlabGovernance),
+      hermesUpgradeLoop: normalizeOptionalStringArray(payload.hermesUpgradeLoop),
+      goals: normalizeOptionalStringArray(payload.goals),
+      principles: normalizeOptionalStringArray(payload.principles),
+      constraints: normalizeOptionalStringArray(payload.constraints),
+      forbiddenKeywords: normalizeOptionalStringArray(payload.forbiddenKeywords),
+      requiredKeywords: normalizeOptionalStringArray(payload.requiredKeywords)
     });
 
     sendSuccess(res, updated);
