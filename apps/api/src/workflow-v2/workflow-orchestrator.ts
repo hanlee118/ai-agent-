@@ -234,11 +234,12 @@ function resolveStageType(templateKey: string): StageType {
   if (normalized.includes("tech") || normalized.includes("architecture")) {
     return "DEV";
   }
-  if (normalized.includes("visual") || normalized.includes("design") || normalized.includes("视觉")) {
-    return "DESIGN";
-  }
+  // requirements_design must be treated as ANALYSIS, not DESIGN.
   if (normalized.includes("requirement") || normalized.includes("analysis") || normalized.includes("需求")) {
     return "ANALYSIS";
+  }
+  if (normalized.includes("visual") || normalized.includes("design") || normalized.includes("视觉")) {
+    return "DESIGN";
   }
   return "INIT";
 }
