@@ -3,6 +3,8 @@ import type { CoordinationMode } from "@occ/shared";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 import { validateBody } from "../validation/middleware.js";
 import {
+  ClarificationCreateSchema,
+  ClarificationReplySchema,
   DelegationCompleteSchema,
   DelegationExpireSchema,
   DelegationReasonSchema,
@@ -25,11 +27,14 @@ import { buildTaskExecutionContext } from "../services/context-packing.js";
 import {
   cancelDelegation,
   completeDelegation,
+  createClarificationDelegation,
   createDelegation,
   dispatchDelegation,
+  expireTimedOutClarificationDelegations,
   expireDelegation,
   failDelegation,
   listTaskDelegations,
+  replyClarificationDelegation,
   retryDelegation
 } from "../services/task-delegation.js";
 import { ensureTaskIssue } from "../services/gitlab-sync-policy.js";
@@ -155,6 +160,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
       sendError(res, 400, "VALIDATION_ERROR", "taskId is required");
       return;
     }
+    await expireTimedOutClarificationDelegations().catch(() => undefined);
     const [task, delegations, participants] = await Promise.all([
       getTaskById(taskId),
       listTaskDelegations(taskId),
@@ -181,6 +187,7 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
       return;
     }
 
+    await expireTimedOutClarificationDelegations().catch(() => undefined);
     let delegation;
     try {
       delegation = await createDelegation(taskId, requestedByAgentId, {
@@ -211,6 +218,34 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
       resourceType: "task_delegation",
       resourceId: delegation.id,
       summary: `任务 ${taskId} 已创建 delegation ${delegation.id}`
+    });
+    sendSuccess(res, delegation, 201);
+  }));
+
+  router.post("/api/tasks/:taskId/delegations/clarification", validateBody(ClarificationCreateSchema), asyncRoute(async (req, res) => {
+    const taskId = String(req.params.taskId || "").trim();
+    const body = (req.body || {}) as Record<string, unknown>;
+    const requestedByAgentId = String(body.requestedByAgentId ?? "").trim();
+    const question = String(body.question ?? "").trim();
+    if (!taskId || !requestedByAgentId || !question) {
+      sendError(res, 400, "VALIDATION_ERROR", "taskId, requestedByAgentId and question are required");
+      return;
+    }
+    await expireTimedOutClarificationDelegations().catch(() => undefined);
+    const delegation = await createClarificationDelegation(taskId, requestedByAgentId, {
+      question,
+      targetAgentId: typeof body.targetAgentId === "string" ? body.targetAgentId : undefined,
+      targetRole: typeof body.targetRole === "string" ? body.targetRole : undefined,
+      deliverableId: typeof body.deliverableId === "string" ? body.deliverableId : undefined,
+      timeoutSec: typeof body.timeoutSec === "number" ? body.timeoutSec : undefined
+    });
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "task.delegation_clarification_created",
+      resourceType: "task_delegation",
+      resourceId: delegation.id,
+      summary: `任务 ${taskId} 已创建 clarification delegation ${delegation.id}`
     });
     sendSuccess(res, delegation, 201);
   }));
@@ -342,6 +377,31 @@ export function createTasksRouter(options: CreateTasksRouterOptions) {
       resourceType: "task_delegation",
       resourceId: delegation.id,
       summary: `delegation ${delegation.id} 已重新排队`
+    });
+    sendSuccess(res, delegation);
+  }));
+
+  router.post("/api/delegations/:delegationId/clarification/reply", validateBody(ClarificationReplySchema), asyncRoute(async (req, res) => {
+    const delegationId = String(req.params.delegationId || "").trim();
+    const body = (req.body || {}) as Record<string, unknown>;
+    const respondedByAgentId = String(body.respondedByAgentId ?? "").trim();
+    const response = String(body.response ?? "").trim();
+    if (!delegationId || !respondedByAgentId || !response) {
+      sendError(res, 400, "VALIDATION_ERROR", "delegationId, respondedByAgentId and response are required");
+      return;
+    }
+    await expireTimedOutClarificationDelegations().catch(() => undefined);
+    const delegation = await replyClarificationDelegation(delegationId, {
+      respondedByAgentId,
+      response
+    });
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "task.delegation_clarification_replied",
+      resourceType: "task_delegation",
+      resourceId: delegation.id,
+      summary: `clarification delegation ${delegation.id} 已回复`
     });
     sendSuccess(res, delegation);
   }));

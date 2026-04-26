@@ -23,6 +23,7 @@ type AutomationState = {
   lastError: string | null;
   lastSummary: string;
 };
+const PROJECT_PAGE_SIZE = 20;
 
 export default function ProjectsPage({ recentProjectId = null, onSelectProject, addToast, onOpenNewProject, onRefreshData }: Props) {
   const [statusFilter, setStatusFilter] = useState<'all' | 'Planning' | 'Development' | 'Testing' | 'Completed' | 'Blocked' | 'At Risk'>('all');
@@ -36,6 +37,7 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
   const [cleanupCandidates, setCleanupCandidates] = useState<ProjectCleanupCandidate[]>([]);
   const [selectedCleanupIds, setSelectedCleanupIds] = useState<string[]>([]);
   const [cleanupMode, setCleanupMode] = useState<'candidates' | 'all'>('candidates');
+  const [projectPage, setProjectPage] = useState(1);
 
   const formatRequiredActionsHint = (actions: ProjectRequiredAction[]) => {
     if (actions.length === 0) {
@@ -333,6 +335,22 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
     }
     return sorted.filter((project) => project.status === statusFilter);
   }, [statusFilter, projects]);
+  const projectTotalPages = Math.max(1, Math.ceil(filteredProjects.length / PROJECT_PAGE_SIZE));
+  const safeProjectPage = Math.min(projectPage, projectTotalPages);
+  const pagedProjects = useMemo(() => {
+    const offset = (safeProjectPage - 1) * PROJECT_PAGE_SIZE;
+    return filteredProjects.slice(offset, offset + PROJECT_PAGE_SIZE);
+  }, [filteredProjects, safeProjectPage]);
+
+  useEffect(() => {
+    setProjectPage(1);
+  }, [statusFilter]);
+
+  useEffect(() => {
+    if (projectPage > projectTotalPages) {
+      setProjectPage(projectTotalPages);
+    }
+  }, [projectPage, projectTotalPages]);
 
   const getActionState = (project: (typeof projects)[number]) => {
     const isBlocked = project.status === 'Blocked';
@@ -495,7 +513,7 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
               </tr>
             </thead>
             <tbody className="divide-y divide-border-subtle">
-              {filteredProjects.map((project) => (
+              {pagedProjects.map((project) => (
                 <tr
                   key={project.id}
                   className={cn(
@@ -599,13 +617,34 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
                   </td>
                 </tr>
               ))}
-              {filteredProjects.length === 0 && (
+              {pagedProjects.length === 0 && (
                 <tr>
                   <td colSpan={6} className="px-6 py-10 text-center text-slate-500 text-sm">当前筛选条件下暂无项目数据</td>
                 </tr>
               )}
             </tbody>
           </table>
+        </div>
+        <div className="px-6 py-3 border-t border-border-subtle flex items-center justify-between text-xs text-slate-400">
+          <span>第 {safeProjectPage} / {projectTotalPages} 页（每页 {PROJECT_PAGE_SIZE} 条，共 {filteredProjects.length} 条）</span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setProjectPage((prev) => Math.max(1, prev - 1))}
+              disabled={safeProjectPage <= 1}
+              className="px-2 py-1 rounded border border-border-subtle bg-white/5 hover:bg-white/10 disabled:opacity-40"
+            >
+              上一页
+            </button>
+            <button
+              type="button"
+              onClick={() => setProjectPage((prev) => Math.min(projectTotalPages, prev + 1))}
+              disabled={safeProjectPage >= projectTotalPages}
+              className="px-2 py-1 rounded border border-border-subtle bg-white/5 hover:bg-white/10 disabled:opacity-40"
+            >
+              下一页
+            </button>
+          </div>
         </div>
       </div>
 

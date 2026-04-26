@@ -154,6 +154,8 @@ export const knowledgeApi = {
     memoryType?: MemoryType;
     stageContext?: string;
     query?: string;
+    page?: number;
+    pageSize?: number;
     limit?: number;
     offset?: number;
   }) {
@@ -165,10 +167,12 @@ export const knowledgeApi = {
     if (params?.memoryType) query.set('memoryType', params.memoryType);
     if (params?.stageContext) query.set('stageContext', params.stageContext);
     if (params?.query) query.set('query', params.query);
+    if (typeof params?.page === 'number') query.set('page', String(params.page));
+    if (typeof params?.pageSize === 'number') query.set('pageSize', String(params.pageSize));
     if (typeof params?.limit === 'number') query.set('limit', String(params.limit));
     if (typeof params?.offset === 'number') query.set('offset', String(params.offset));
     const suffix = query.toString();
-    return request<{ total: number; items: KnowledgeListItem[] }>(
+    return request<{ total: number; page?: number; pageSize?: number; items: KnowledgeListItem[] }>(
       `/v1/knowledge${suffix ? `?${suffix}` : ''}`,
     );
   },

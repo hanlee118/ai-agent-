@@ -213,6 +213,7 @@ model Project {
 
   @@index([projectType, createdAt])
   @@index([parentProjectId])
+  @@index([status, pendingApproval, updatedAt])
 }
 
 model UserProfile {
@@ -266,6 +267,7 @@ model Stage {
 
   @@unique([projectId, type])
   @@index([projectId, sortOrder])
+  @@index([status, updatedAt])
 }
 
 model Deliverable {
@@ -330,6 +332,7 @@ model Task {
 
   @@index([projectId, stageType])
   @@index([assignee, status])
+  @@index([status, updatedAt])
   @@index([ownerAgentId, status])
   @@index([reviewAgentId, status])
   @@index([parentTaskId])
@@ -392,6 +395,11 @@ model TaskDelegation {
   completedAt       DateTime?
   expiredAt         DateTime?
   failureReason     String?
+  clarificationDeliverableId String?
+  clarificationTargetRole String?
+  clarificationResponse String?
+  clarificationRespondedBy String?
+  clarificationRespondedAt DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
   project           Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -620,6 +628,7 @@ model WorkflowTemplate {
   integrationConfig  Json?
   defaultTimeout     Int?
   allowParallel      Boolean    @default(false)
+  stageTasks         Json?
   createdAt          DateTime   @default(now())
   updatedAt          DateTime   @updatedAt
   workflows          Workflow[]

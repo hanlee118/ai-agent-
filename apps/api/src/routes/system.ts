@@ -46,7 +46,7 @@ import {
   inspectOpenClawModelRouting
 } from "../openclaw/workspace.js";
 import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
-import { prisma } from "../db.js";
+import { prisma, withPrismaReadRetry } from "../db.js";
 import { validateBody } from "../validation/middleware.js";
 import {
   ContextHygieneCleanupSchema,
@@ -109,14 +109,47 @@ function parseRoleType(input: unknown): RoleType | undefined {
   return ROLE_TYPES.includes(normalized as RoleType) ? (normalized as RoleType) : undefined;
 }
 
+function buildLocalMonitorFallback(): Awaited<ReturnType<typeof getCachedLocalAgentMonitorOverview>> {
+  const nowIso = new Date().toISOString();
+  return {
+    scannedAt: nowIso,
+    tools: [],
+    sessions: [],
+    totals: {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedInputTokens: 0,
+      totalTokens: 0,
+      knownCostUsd: 0,
+      estimatedCostUsd: 0,
+      pricingMode: "unavailable"
+    }
+  };
+}
+
+async function withTimeoutFallback<T>(task: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    const timeoutPromise = new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), timeoutMs);
+      timer.unref?.();
+    });
+    return await Promise.race([task, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export async function getObservabilitySummarySnapshot() {
   const [runtime, readiness, monitor, projectCount, executionCount, auditCount] = await Promise.all([
     getRuntimeStatus(),
     getSystemReadiness(),
-    getCachedLocalAgentMonitorOverview(),
-    prisma.project.count(),
-    prisma.projectExecution.count(),
-    prisma.auditLog.count()
+    withTimeoutFallback(getCachedLocalAgentMonitorOverview(), 1500, buildLocalMonitorFallback()),
+    withPrismaReadRetry("count", () => prisma.project.count()),
+    withPrismaReadRetry("count", () => prisma.projectExecution.count()),
+    withPrismaReadRetry("count", () => prisma.auditLog.count())
   ]);
 
   return {
@@ -362,9 +395,16 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
   }));
 
   router.get("/audit-logs", asyncRoute(async (req, res) => {
-    const limitRaw = Number(req.query.limit ?? 50);
-    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.round(limitRaw))) : 50;
-    res.json(await listAuditLogs(limit));
+    const pageRaw = Number(req.query.page ?? 1);
+    const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+    const offset = (page - 1) * pageSize;
+    const total = await withPrismaReadRetry("count", () => prisma.auditLog.count());
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Page-Size", String(pageSize));
+    res.setHeader("X-Total-Count", String(total));
+    res.json(await listAuditLogs(pageSize, offset));
   }));
 
   router.get("/prompt-templates", asyncRoute(async (req, res) => {

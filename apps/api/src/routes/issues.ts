@@ -150,7 +150,11 @@ function isProjectModeTemplateCompatible(input: {
   const normalizedTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
   const templateKey = normalizedTemplateKey || "standard_software_development";
   if (input.projectType === "complete") {
-    return templateKey === "standard_software_development" || templateKey === "none";
+    return templateKey === "standard_software_development"
+      || templateKey === "full"
+      || templateKey === "lean"
+      || templateKey === "maintenance"
+      || templateKey === "none";
   }
   return templateKey === "none"
     || templateKey === "requirements_design"

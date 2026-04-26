@@ -2,7 +2,11 @@ import express from "express";
 import { MutationPassthroughSchema } from "../validation/schemas.js";
 import { validateBody } from "../validation/middleware.js";
 import type { NotificationInboxUpdateInput } from "@occ/shared";
-import { listNotificationInbox, updateNotificationInboxState } from "../system/notifications.js";
+import {
+  getNotificationInboxCandidateTotal,
+  listNotificationInbox,
+  updateNotificationInboxState
+} from "../system/notifications.js";
 
 interface CreateNotificationsRouterOptions {
   asyncRoute: (
@@ -29,7 +33,15 @@ export function createNotificationsRouter(options: CreateNotificationsRouterOpti
 
   router.get("/notifications", asyncRoute(async (req, res) => {
     const locale = String(req.query.locale ?? "zh-CN").trim() === "en-US" ? "en-US" : "zh-CN";
-    res.json(await listNotificationInbox(locale));
+    const pageRaw = Number(req.query.page ?? 1);
+    const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+    const total = await getNotificationInboxCandidateTotal(locale);
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Page-Size", String(pageSize));
+    res.setHeader("X-Total-Count", String(total));
+    res.json(await listNotificationInbox(locale, { page, pageSize }));
   }));
 
   router.patch("/notifications/:sourceKey", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
