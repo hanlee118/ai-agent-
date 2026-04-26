@@ -17,7 +17,17 @@ export type OpenClawAgentDetail = {
   };
 };
 
+export type OpenClawAgentSummary = {
+  agentId: string;
+  name: string;
+  title?: string;
+};
+
 export const openclawAgentsApi = {
+  async list() {
+    return request<OpenClawAgentSummary[]>(`/openclaw/agents`);
+  },
+
   async get(agentId: string) {
     const safeId = encodeURIComponent(String(agentId || "").trim());
     return request<OpenClawAgentDetail>(`/openclaw/agents/${safeId}`);
@@ -75,4 +85,3 @@ export const openclawAgentsApi = {
     return request(`/openclaw/agents/${safeId}`, { method: "DELETE" });
   },
 };
-

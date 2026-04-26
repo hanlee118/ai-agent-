@@ -6,6 +6,7 @@ import { getSkillsV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import { asRecord, normalizeText } from "../workflow-v2/types.js";
 import { validateHermesApiKey } from "./hermes-auth.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
+import { recordHermesUpgradeSignal } from "../system/hermes-upgrade.js";
 
 type ImportHermesSkillBody = {
   hermesSkillId?: unknown;
@@ -87,6 +88,11 @@ export function createSkillsV2Router() {
       hermesSkillId: normalizeText(payload.hermesSkillId) || undefined,
       projectId: normalizeText(payload.projectId) || undefined,
       skillData
+    });
+    void recordHermesUpgradeSignal({
+      type: "skill_import",
+      projectId: normalizeText(payload.projectId) || undefined,
+      note: `skill:${imported.id}`
     });
 
     sendSuccess(res, { skill: imported }, 201);

@@ -1,0 +1,238 @@
+{
+  "generatedAt": "2026-04-26T04:33:11.047Z",
+  "totalAgents": 23,
+  "updatedSoul": 0,
+  "updatedSop": 0,
+  "report": [
+    {
+      "source": "openclaw",
+      "agentId": "main",
+      "name": "平头哥",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "rd_manager",
+      "name": "研发经理",
+      "roleId": "ROLE_DEV",
+      "roleLabel": "研发经理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "jeremy",
+      "name": "Jeremy",
+      "roleId": "ROLE_DESIGN",
+      "roleLabel": "视觉设计总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "qa_engineer",
+      "name": "qaengineer",
+      "roleId": "ROLE_QA",
+      "roleLabel": "测试工程师",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "product_director",
+      "name": "产品总监",
+      "roleId": "ROLE_PRODUCT",
+      "roleLabel": "产品总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "project_manager",
+      "name": "项目经理",
+      "roleId": "ROLE_PM",
+      "roleLabel": "项目经理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "requirements_analyst",
+      "name": "需求分析师",
+      "roleId": "ROLE_ANALYST",
+      "roleLabel": "需求分析师",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "rd_director",
+      "name": "研发总监",
+      "roleId": "ROLE_ARCH",
+      "roleLabel": "研发总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "hr_director",
+      "name": "hrdirector",
+      "roleId": "ROLE_HR",
+      "roleLabel": "HR总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "xx",
+      "name": "K线隐士",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "executive_assistant",
+      "name": "行政助理",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "closure_acceptance_1777156090057",
+      "name": "Closure Acceptance Bot",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "fashion_pr",
+      "name": "fashionpr",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "openclaw",
+      "agentId": "ops_memory_keeper",
+      "name": "Memory Keeper",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "assistant-aegis-assistant",
+      "name": "Aegis-Assistant",
+      "roleId": "ROLE_ASSISTANT",
+      "roleLabel": "总助理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "pm-atlas-pm",
+      "name": "Atlas-PM",
+      "roleId": "ROLE_PM",
+      "roleLabel": "项目经理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "analyst-insight-analyst",
+      "name": "Insight-Analyst",
+      "roleId": "ROLE_ANALYST",
+      "roleLabel": "需求分析师",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "product-pulse-product",
+      "name": "Pulse-Product",
+      "roleId": "ROLE_PRODUCT",
+      "roleLabel": "产品总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "design-nova-design",
+      "name": "Nova-Design",
+      "roleId": "ROLE_DESIGN",
+      "roleLabel": "视觉设计总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "arch-forge-architect",
+      "name": "Forge-Architect",
+      "roleId": "ROLE_ARCH",
+      "roleLabel": "研发总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "dev-bolt-engineer",
+      "name": "Bolt-Engineer",
+      "roleId": "ROLE_DEV",
+      "roleLabel": "研发经理",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "qa-shield-qa",
+      "name": "Shield-QA",
+      "roleId": "ROLE_QA",
+      "roleLabel": "测试工程师",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    },
+    {
+      "source": "managed_only",
+      "agentId": "hr-orbit-hr",
+      "name": "Orbit-HR",
+      "roleId": "ROLE_HR",
+      "roleLabel": "HR总监",
+      "soul": "kept",
+      "sop": "kept",
+      "reason": []
+    }
+  ]
+}

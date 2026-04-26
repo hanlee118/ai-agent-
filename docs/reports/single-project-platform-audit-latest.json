@@ -1,0 +1,446 @@
+{
+  "checkedAt": "2026-04-26T06:12:36.271Z",
+  "requestedProjectId": "OCC-20260424-001",
+  "projectId": "OCC-20260425-029",
+  "projectResolution": "auto_resolved",
+  "strictMode": true,
+  "projectNotFound": false,
+  "gates": [
+    {
+      "name": "api_all_pass",
+      "pass": true,
+      "detail": "fail=0"
+    },
+    {
+      "name": "project_id_match",
+      "pass": true,
+      "detail": "actual=OCC-20260425-029"
+    },
+    {
+      "name": "project_completed",
+      "pass": true,
+      "detail": "status=completed"
+    },
+    {
+      "name": "lifecycle_gate_pass",
+      "pass": true,
+      "detail": "blockingStages=0"
+    },
+    {
+      "name": "acceptance_gate_pass",
+      "pass": true,
+      "detail": "blockingStages=0"
+    },
+    {
+      "name": "final_artifacts_ready",
+      "pass": true,
+      "detail": "missingRequired=0"
+    },
+    {
+      "name": "hermes_probe_reachable",
+      "pass": true,
+      "detail": "probe=reachable"
+    },
+    {
+      "name": "hermes_execution_present",
+      "pass": true,
+      "detail": "hermesCount=0; runtimeSuccess=9"
+    },
+    {
+      "name": "scripted_like_zero",
+      "pass": true,
+      "detail": "scriptedLikeRecent=0; nonScriptedRecentSuccess=7; scriptedLikeTotal=0"
+    },
+    {
+      "name": "suspicious_deliverables_zero",
+      "pass": true,
+      "detail": "count=0"
+    },
+    {
+      "name": "placeholder_tokens_zero",
+      "pass": true,
+      "detail": "api=0,deliverables=0"
+    }
+  ],
+  "gateSummary": {
+    "pass": true,
+    "failed": [],
+    "total": 11
+  },
+  "totals": {
+    "total": 26,
+    "pass": 26,
+    "fail": 0
+  },
+  "byMenu": {
+    "概览(dashboard)": {
+      "total": 4,
+      "pass": 4,
+      "fail": 0
+    },
+    "项目组合(projects)": {
+      "total": 5,
+      "pass": 5,
+      "fail": 0
+    },
+    "Agent名册(agents)": {
+      "total": 1,
+      "pass": 1,
+      "fail": 0
+    },
+    "Agent指挥(agent-commander)": {
+      "total": 1,
+      "pass": 1,
+      "fail": 0
+    },
+    "模型中心(model-nexus)": {
+      "total": 2,
+      "pass": 2,
+      "fail": 0
+    },
+    "实时监控(monitoring)": {
+      "total": 1,
+      "pass": 1,
+      "fail": 0
+    },
+    "工作区(workspace)": {
+      "total": 1,
+      "pass": 1,
+      "fail": 0
+    },
+    "知识库(knowledge-hub)": {
+      "total": 4,
+      "pass": 4,
+      "fail": 0
+    },
+    "系统运行(system-health)": {
+      "total": 4,
+      "pass": 4,
+      "fail": 0
+    },
+    "审计追踪(audit)": {
+      "total": 1,
+      "pass": 1,
+      "fail": 0
+    },
+    "设置(settings)": {
+      "total": 2,
+      "pass": 2,
+      "fail": 0
+    }
+  },
+  "deliverableDiagnostics": {
+    "total": 15,
+    "placeholderTokenHits": [],
+    "suspiciousCountFromAcceptance": 0,
+    "mentionedProjectIds": [
+      "OCC-20260425-029"
+    ]
+  },
+  "results": [
+    {
+      "menu": "概览(dashboard)",
+      "key": "projects.list",
+      "path": "/api/projects",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 3,
+        "hasTargetProject": true
+      }
+    },
+    {
+      "menu": "概览(dashboard)",
+      "key": "tasks.list",
+      "path": "/api/tasks",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 48
+      }
+    },
+    {
+      "menu": "概览(dashboard)",
+      "key": "agents.list",
+      "path": "/api/agents",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 25
+      }
+    },
+    {
+      "menu": "概览(dashboard)",
+      "key": "workspace.overview",
+      "path": "/api/openclaw/workspace",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "rootPath": "/Users/dalongxia/.openclaw/workspace",
+        "projectCount": 11
+      }
+    },
+    {
+      "menu": "项目组合(projects)",
+      "key": "project.detail",
+      "path": "/api/projects/OCC-20260425-029",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "id": "OCC-20260425-029",
+        "status": "completed",
+        "currentStage": "ACCEPT",
+        "progress": 100,
+        "deliverables": 11
+      }
+    },
+    {
+      "menu": "项目组合(projects)",
+      "key": "project.executions",
+      "path": "/api/projects/OCC-20260425-029/executions?limit=50",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "total": 50,
+        "success": 46,
+        "failed": 4,
+        "hermesCount": 0,
+        "scriptedLike": 0,
+        "scriptedLikeRecent": 0,
+        "nonScriptedRecentSuccess": 7
+      }
+    },
+    {
+      "menu": "项目组合(projects)",
+      "key": "project.lifecycleAudit",
+      "path": "/api/projects/OCC-20260425-029/lifecycle-quality-audit",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "pass": true,
+        "blockingStageCount": 0,
+        "blockingStages": []
+      }
+    },
+    {
+      "menu": "项目组合(projects)",
+      "key": "project.acceptance",
+      "path": "/api/projects/OCC-20260425-029/acceptance-report",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "qualityGatePass": true,
+        "blockingStageCount": 0,
+        "suspiciousDeliverables": 0,
+        "executionTotal": 59
+      }
+    },
+    {
+      "menu": "项目组合(projects)",
+      "key": "project.artifacts",
+      "path": "/api/projects/OCC-20260425-029/final-artifacts",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "readyForAcceptance": true,
+        "artifacts": 6,
+        "missingRequired": 0
+      }
+    },
+    {
+      "menu": "Agent名册(agents)",
+      "key": "openclaw.agents",
+      "path": "/api/openclaw/agents",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 14
+      }
+    },
+    {
+      "menu": "Agent指挥(agent-commander)",
+      "key": "tasks.list.2",
+      "path": "/api/tasks",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 48
+      }
+    },
+    {
+      "menu": "模型中心(model-nexus)",
+      "key": "models.list",
+      "path": "/api/models",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 15
+      }
+    },
+    {
+      "menu": "模型中心(model-nexus)",
+      "key": "design.policy.health",
+      "path": "/api/system/design-model-policy/health",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "ok": true,
+        "status": null,
+        "issueCount": 0
+      }
+    },
+    {
+      "menu": "实时监控(monitoring)",
+      "key": "openclaw.projects",
+      "path": "/api/openclaw/projects",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 11
+      }
+    },
+    {
+      "menu": "工作区(workspace)",
+      "key": "openclaw.workspace",
+      "path": "/api/openclaw/workspace",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "rootPath": "/Users/dalongxia/.openclaw/workspace",
+        "projectCount": 11
+      }
+    },
+    {
+      "menu": "知识库(knowledge-hub)",
+      "key": "knowledge.status",
+      "path": "/api/v1/knowledge/status?projectId=OCC-20260425-029&forceRefresh=true",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "schemaReady": true,
+        "inventoryTotal": 13,
+        "rollbackableOps": 0
+      }
+    },
+    {
+      "menu": "知识库(knowledge-hub)",
+      "key": "knowledge.list",
+      "path": "/api/v1/knowledge?projectId=OCC-20260425-029&limit=20",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "total": 13,
+        "items": 13
+      }
+    },
+    {
+      "menu": "知识库(knowledge-hub)",
+      "key": "knowledge.forHermes",
+      "path": "/api/v1/knowledge/for-hermes?projectId=OCC-20260425-029&limit=20",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "items": 13
+      }
+    },
+    {
+      "menu": "知识库(knowledge-hub)",
+      "key": "skills.forHermes",
+      "path": "/api/v1/skills/for-hermes?projectId=OCC-20260425-029&limit=20",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "skills": 5
+      }
+    },
+    {
+      "menu": "系统运行(system-health)",
+      "key": "system.health",
+      "path": "/api/system/health",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "status": null,
+        "runtimeMode": "openai-compatible",
+        "runtimeModel": "Codex",
+        "pendingApprovals": 0
+      }
+    },
+    {
+      "menu": "系统运行(system-health)",
+      "key": "system.runtime",
+      "path": "/api/system/runtime",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {}
+    },
+    {
+      "menu": "系统运行(system-health)",
+      "key": "system.executionProtocol",
+      "path": "/api/system/execution-protocol",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {}
+    },
+    {
+      "menu": "系统运行(system-health)",
+      "key": "system.readiness",
+      "path": "/api/system/readiness",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {}
+    },
+    {
+      "menu": "审计追踪(audit)",
+      "key": "audit.logs",
+      "path": "/api/system/audit-logs?limit=50",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {
+        "count": 50
+      }
+    },
+    {
+      "menu": "设置(settings)",
+      "key": "system.runtime.config",
+      "path": "/api/system/runtime/config",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {}
+    },
+    {
+      "menu": "设置(settings)",
+      "key": "system.ui.preferences",
+      "path": "/api/system/ui-preferences",
+      "status": 200,
+      "ok": true,
+      "hasPlaceholderTokens": false,
+      "summary": {}
+    }
+  ]
+}

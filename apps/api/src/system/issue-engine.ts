@@ -1008,9 +1008,9 @@ export function buildIssueDiscussion(
 }
 
 const ISSUE_TEMPLATE_REQUIRED_ROLES: Record<IssueWorkflowTemplateKey, RoleType[]> = {
-  standard_software_development: ["ROLE_PM", "ROLE_ANALYST", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"],
-  requirements_design: ["ROLE_PM", "ROLE_ANALYST"],
-  visual_design: ["ROLE_ANALYST", "ROLE_DESIGN"],
+  standard_software_development: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN", "ROLE_ARCH", "ROLE_DEV", "ROLE_QA"],
+  requirements_design: ["ROLE_PM", "ROLE_ANALYST", "ROLE_PRODUCT"],
+  visual_design: ["ROLE_ANALYST", "ROLE_PRODUCT", "ROLE_DESIGN"],
   tech_design: ["ROLE_ANALYST", "ROLE_ARCH"],
   code_dev: ["ROLE_ANALYST", "ROLE_ARCH", "ROLE_DEV"],
   qa_acceptance: ["ROLE_ANALYST", "ROLE_QA"]
@@ -1031,6 +1031,13 @@ const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedAr
       description: "里程碑、负责人、依赖与风险缓冲的执行排期。",
       stageType: "ANALYSIS",
       ownerRoleId: "ROLE_PM"
+    },
+    {
+      id: "artifact-prd",
+      name: "产品需求文档(PRD)",
+      description: "由产品角色基于需求分析文档输出完整 PRD（用户旅程/功能清单/验收标准/非目标）。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_PRODUCT"
     },
     {
       id: "artifact-design-review",
@@ -1096,9 +1103,23 @@ const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedAr
       description: "当前阶段的里程碑、负责人与风险缓冲计划。",
       stageType: "ANALYSIS",
       ownerRoleId: "ROLE_PM"
+    },
+    {
+      id: "artifact-prd",
+      name: "产品需求文档(PRD)",
+      description: "由产品角色基于分析文档输出 PRD，定义功能、优先级、验收与非目标。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_PRODUCT"
     }
   ],
   visual_design: [
+    {
+      id: "artifact-prd",
+      name: "产品需求文档(PRD)",
+      description: "视觉设计前的产品约束基线，用于定义页面范围和信息优先级。",
+      stageType: "DESIGN",
+      ownerRoleId: "ROLE_PRODUCT"
+    },
     {
       id: "artifact-design-review",
       name: "设计审查卡",
@@ -1184,9 +1205,15 @@ const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
       output: "里程碑计划、负责人与交接条件"
     },
     {
+      roleId: "ROLE_PRODUCT",
+      title: "PRD 输出与需求设计",
+      input: "需求分析文档 + 项目排期",
+      output: "产品需求文档(PRD)、功能优先级与验收口径"
+    },
+    {
       roleId: "ROLE_DESIGN",
       title: "视觉与交互方案审查",
-      input: "需求确认单",
+      input: "产品需求文档(PRD)",
       output: "设计审查卡、视觉定稿单页"
     },
     {
@@ -1220,6 +1247,12 @@ const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
       title: "需求确认与阶段排期",
       input: "需求分析文档",
       output: "需求确认单、阶段排期与交接条件"
+    },
+    {
+      roleId: "ROLE_PRODUCT",
+      title: "产品需求文档输出",
+      input: "需求分析文档 + 需求确认单",
+      output: "产品需求文档(PRD)"
     }
   ],
   visual_design: [
@@ -1230,9 +1263,15 @@ const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
       output: "视觉阶段需求边界与验收口径"
     },
     {
+      roleId: "ROLE_PRODUCT",
+      title: "视觉阶段产品约束收敛",
+      input: "视觉阶段需求边界与验收口径",
+      output: "视觉阶段 PRD 约束与优先级"
+    },
+    {
       roleId: "ROLE_DESIGN",
       title: "视觉方向与信息架构",
-      input: "视觉阶段需求边界与验收口径",
+      input: "视觉阶段 PRD 约束与优先级",
       output: "视觉框架、信息层级与交互草案"
     },
     {

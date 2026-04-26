@@ -109,6 +109,23 @@ export async function ensureProjectIssueFirst(input: {
     projectPath: input.projectPath || ISSUE_FIRST_GITLAB_PROJECT
   });
   if (!ensured.ok) {
+    // GitLab 同步异常时，若本地 issue-first 已满足，则降级为本地门禁通过，
+    // 避免外部 GitLab 波动导致项目推进长期阻塞。
+    if (localIssueReady) {
+      return {
+        ok: true,
+        enforced: true,
+        data: {
+          projectId: input.projectId,
+          issueId: localIssue?.id,
+          source: "local_issue_store_fallback"
+        },
+        warning: {
+          code: ensured.code,
+          message: ensured.message
+        }
+      } as const;
+    }
     return {
       ok: false,
       enforced: true,

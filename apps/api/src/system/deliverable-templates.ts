@@ -96,6 +96,7 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
       "## 任务拆解与优先级"
     ],
     sectionBlueprint: [
+      "- 必须先引用需求分析文档并标注输入来源，禁止脱离分析阶段直接写 PRD。",
       "- 每个功能项给出价值、边界、非目标。",
       "- 验收标准应可被测试与回归验证。",
       "- 任务拆解应与角色协作链路一一对应。"
@@ -147,6 +148,20 @@ const TEMPLATE_LIBRARY: Record<DeliverableTemplateKind, DeliverableTemplate> = {
     authoringRules: [
       "优先给时间与依赖，不写空泛“尽快推进”。",
       "排期必须覆盖验收门禁。"
+    ],
+    standardsProfile: [
+      {
+        code: "ISO 21502:2020",
+        title: "Guidance on project management",
+        focus: "排期必须覆盖里程碑、职责、依赖与监督控制机制。",
+        source: "https://www.iso.org/standard/74947.html"
+      },
+      {
+        code: "PMI Practice Standard for Scheduling",
+        title: "Scheduling baseline and critical path",
+        focus: "里程碑、关键路径、浮动缓冲与基线变更规则需要可审计。",
+        source: "https://www.pmi.org/-/media/pmi/documents/public/pdf/certifications/practice-standard-scheduling.pdf"
+      }
     ]
   },
   presentation_ppt: {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Agent, Model } from '../../types';
 import { agentsApi, openclawAgentsApi } from '../../lib/api';
+import { resolveOpenClawAgentBinding } from '../../lib/agent-identity';
 
 const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
 
@@ -47,6 +48,7 @@ export function useAgentConfig({
   const [sopInput, setSopInput] = useState('');
   const [loadedSop, setLoadedSop] = useState<string[]>([]);
   const [configSource, setConfigSource] = useState<ConfigSource>('openclaw');
+  const [resolvedOpenClawAgentId, setResolvedOpenClawAgentId] = useState('');
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
@@ -101,6 +103,7 @@ export function useAgentConfig({
     setSopInput('');
     setLoadedSop([]);
     setConfigSource('openclaw');
+    setResolvedOpenClawAgentId('');
   }, [fallbackAgent.id, fallbackAgent.name, fallbackAgent.role, fallbackAgent.currentModelId, isOpen, models, resolveModelOptionId, resolveModelRoute]);
 
   useEffect(() => {
@@ -111,38 +114,54 @@ export function useAgentConfig({
     let active = true;
     const loadDetail = async () => {
       setIsLoadingDetail(true);
+      let managedFallbackId = String(fallbackAgent.id || '').trim();
       try {
         try {
-          const detail = await openclawAgentsApi.get(fallbackAgent.id);
-          if (!active) {
+          const list = await openclawAgentsApi.list();
+          const binding = resolveOpenClawAgentBinding({
+            agentId: fallbackAgent.id,
+            agentName: fallbackAgent.name,
+            agentRole: fallbackAgent.role,
+            list,
+          });
+          if (binding.linkedRoleId) {
+            managedFallbackId = String(binding.linkedRoleId).trim();
+          }
+          if (binding.openclawAgentId) {
+            const detail = await openclawAgentsApi.get(binding.openclawAgentId);
+            if (!active) {
+              return;
+            }
+            const detailSoul = String(detail.soul?.content ?? '').trim();
+            const detailSop = parseSopText(String(detail.sop?.content ?? ''));
+            const detailModelId = String(
+              detail.commander?.selectedModel
+              || detail.model
+              || fallbackAgent.currentModelId
+              || models[0]?.id
+              || '',
+            ).trim();
+
+            setConfigSource('openclaw');
+            setResolvedOpenClawAgentId(binding.openclawAgentId);
+            setAgentName(detail.name || fallbackAgent.name);
+            setAgentRole(detail.title || fallbackAgent.role);
+            setSelectedModelId(resolveModelOptionId(detailModelId));
+            setLoadedModelRoute(resolveModelRoute(detailModelId));
+            setSoulInput(detailSoul);
+            setLoadedSoul(detailSoul);
+            setSopInput(detailSop.join('\n'));
+            setLoadedSop(detailSop);
             return;
           }
-
-          const detailSoul = String(detail.soul?.content ?? '').trim();
-          const detailSop = parseSopText(String(detail.sop?.content ?? ''));
-          const detailModelId = String(
-            detail.commander?.selectedModel
-            || detail.model
-            || fallbackAgent.currentModelId
-            || models[0]?.id
-            || '',
-          ).trim();
-
-          setConfigSource('openclaw');
-          setAgentName(detail.name || fallbackAgent.name);
-          setAgentRole(detail.title || fallbackAgent.role);
-          setSelectedModelId(resolveModelOptionId(detailModelId));
-          setLoadedModelRoute(resolveModelRoute(detailModelId));
-          setSoulInput(detailSoul);
-          setLoadedSoul(detailSoul);
-          setSopInput(detailSop.join('\n'));
-          setLoadedSop(detailSop);
-          return;
         } catch {
           // fallback to managed /api/agents
         }
 
-        const detail = await agentsApi.get(fallbackAgent.id);
+        const managedAgentId = /^ROLE_/i.test(String(managedFallbackId || '').trim())
+          ? String(managedFallbackId).trim()
+          : String(fallbackAgent.id || '').trim();
+        const detail = await agentsApi.get(managedAgentId);
         if (!active) {
           return;
         }
@@ -150,6 +169,7 @@ export function useAgentConfig({
         const detailSop = Array.isArray(detail.sop) ? detail.sop.map((step) => String(step).trim()).filter(Boolean) : [];
 
         setConfigSource('managed');
+        setResolvedOpenClawAgentId('');
         setAgentName(detail.name || fallbackAgent.name);
         setAgentRole(detail.role || fallbackAgent.role);
         setSelectedModelId(resolveModelOptionId(detail.currentModelId || fallbackAgent.currentModelId || models[0]?.id || ''));
@@ -213,15 +233,16 @@ export function useAgentConfig({
     setIsSaving(true);
     try {
       if (configSource === 'openclaw') {
+        const targetAgentId = resolvedOpenClawAgentId || fallbackAgent.id;
         if (hasModelChange && selectedModelRoute) {
-          await openclawAgentsApi.updateSettings(fallbackAgent.id, { selectedModel: selectedModelRoute });
+          await openclawAgentsApi.updateSettings(targetAgentId, { selectedModel: selectedModelRoute });
         }
         if (hasSoulChange) {
           if (!nextSoul) {
             addToast('SOUL 内容不能为空', 'error');
             return false;
           }
-          await openclawAgentsApi.updateDocument(fallbackAgent.id, 'soul', nextSoul);
+          await openclawAgentsApi.updateDocument(targetAgentId, 'soul', nextSoul);
         }
         if (hasSopChange) {
           if (nextSop.length === 0) {
@@ -229,7 +250,7 @@ export function useAgentConfig({
             return false;
           }
           const sopContent = `# SOP\n\n${nextSop.map((step, index) => `${index + 1}. ${step}`).join('\n')}\n`;
-          await openclawAgentsApi.updateDocument(fallbackAgent.id, 'sop', sopContent);
+          await openclawAgentsApi.updateDocument(targetAgentId, 'sop', sopContent);
         }
       } else {
         if (hasModelChange && selectedModelId) {
@@ -271,6 +292,7 @@ export function useAgentConfig({
     configSource,
     models,
     resolveModelRoute,
+    resolvedOpenClawAgentId,
     addToast,
   ]);
 
@@ -289,7 +311,7 @@ export function useAgentConfig({
     setIsSaving(true);
     try {
       if (configSource === 'openclaw') {
-        await openclawAgentsApi.delete(fallbackAgent.id);
+        await openclawAgentsApi.delete(resolvedOpenClawAgentId || fallbackAgent.id);
       } else {
         await agentsApi.delete(fallbackAgent.id);
       }
@@ -306,7 +328,7 @@ export function useAgentConfig({
     } finally {
       setIsSaving(false);
     }
-  }, [fallbackAgent.id, configSource, addToast]);
+  }, [fallbackAgent.id, configSource, resolvedOpenClawAgentId, addToast]);
 
   return {
     fallbackAgent,

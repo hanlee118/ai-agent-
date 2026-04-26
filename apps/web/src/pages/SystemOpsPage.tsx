@@ -184,6 +184,11 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
     [agents],
   );
   const efficiencyScore = Math.max(0, 100 - avgLoad);
+  const hasSessionSignal = useMemo(
+    () => sessions.length > 0
+      || agents.some((agent) => (agent.sessionCount || 0) > 0 || Boolean(agent.lastActiveAt)),
+    [agents, sessions],
+  );
   const roleBindings = useMemo(
     () =>
       ROLE_BINDING_RULES.map((rule) => {
@@ -460,16 +465,30 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
             </h2>
             <div className="space-y-4">
               {[
-                { label: '环境变量', ok: true },
-                { label: 'OpenClaw 工作区', ok: projects.length > 0 },
-                { label: '数据库连接', ok: true },
-                { label: '模型服务', ok: models.length > 0 },
-                { label: 'Agent 连接', ok: agents.length > 0 },
-                { label: '会话同步', ok: sessions.length > 0 },
+                { label: '环境变量', state: 'ok' as const },
+                { label: 'OpenClaw 工作区', state: projects.length > 0 ? ('ok' as const) : ('fail' as const) },
+                { label: '数据库连接', state: 'ok' as const },
+                { label: '模型服务', state: models.length > 0 ? ('ok' as const) : ('fail' as const) },
+                { label: 'Agent 连接', state: agents.length > 0 ? ('ok' as const) : ('fail' as const) },
+                {
+                  label: '会话同步',
+                  state:
+                    agents.length === 0
+                      ? ('fail' as const)
+                      : hasSessionSignal
+                        ? ('ok' as const)
+                        : ('warn' as const),
+                },
               ].map((check, i) => (
                 <div key={i} className="flex items-center justify-between group">
                   <span className="text-xs text-slate-400 group-hover:text-slate-300 transition-colors">{check.label}</span>
-                  {check.ok ? <CheckCircle2 size={16} className="text-primary" /> : <AlertCircle size={16} className="text-danger" />}
+                  {check.state === 'ok' ? (
+                    <CheckCircle2 size={16} className="text-primary" />
+                  ) : check.state === 'warn' ? (
+                    <AlertCircle size={16} className="text-warning" />
+                  ) : (
+                    <AlertCircle size={16} className="text-danger" />
+                  )}
                 </div>
               ))}
             </div>

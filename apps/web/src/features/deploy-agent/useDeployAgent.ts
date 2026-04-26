@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { Agent, Model, Project } from '../../types';
-import { openclawAgentsApi } from '../../lib/api';
+import { agentsApi, openclawAgentsApi } from '../../lib/api';
+import {
+  DEPLOY_ROLE_TEMPLATES,
+  getDeployRoleTemplateById,
+  isKnownRoleTemplate,
+  type DeployRoleTemplate,
+} from './roleTemplates';
 
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
 
@@ -19,25 +25,36 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
   const [agentName, setAgentName] = useState('');
   const [selectedProjectId, setSelectedProjectId] = useState('');
   const [isDeploying, setIsDeploying] = useState(false);
+  const [remoteTemplates, setRemoteTemplates] = useState<DeployRoleTemplate[]>([]);
 
-  const uniqueRoles = useMemo(() => {
+  const dynamicRoleTemplates = useMemo(() => {
     const seen = new Set<string>();
-    const roles: Array<{ id: string; name: string; desc: string; role: string; modelId?: string }> = [];
+    const roles: DeployRoleTemplate[] = [];
     agents.forEach((agent) => {
-      const role = (agent.role || '').trim() || '通用 Agent';
-      if (!seen.has(role)) {
-        seen.add(role);
+      const roleRaw = (agent.role || '').trim();
+      const role = roleRaw || '自定义 Agent';
+      const roleUpper = role.toUpperCase();
+      if (!seen.has(roleUpper) && !isKnownRoleTemplate(roleUpper)) {
+        seen.add(roleUpper);
         roles.push({
-          id: `role:${role}`,
+          id: `dynamic:${role}`,
           name: role,
-          desc: `参考 ${agent.name} 的配置`,
-          role,
+          desc: `参考 ${agent.name} 的在线配置`,
+          roleId: role,
+          suggestedAgentName: `${role.replace(/\s+/g, '-') || 'Custom'}-Agent`,
+          soul: '',
+          sop: [],
           modelId: agent.currentModelId || '',
         });
       }
     });
-    return roles.slice(0, 6);
+    return roles.slice(0, 8);
   }, [agents]);
+
+  const templateOptions = useMemo(
+    () => [...(remoteTemplates.length > 0 ? remoteTemplates : DEPLOY_ROLE_TEMPLATES), ...dynamicRoleTemplates],
+    [dynamicRoleTemplates, remoteTemplates],
+  );
 
   const resolveModelRoute = useCallback((modelIdOrRoute: string) => {
     const normalized = String(modelIdOrRoute || '').trim();
@@ -71,16 +88,45 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     if (!isOpen) {
       return;
     }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const templates = await agentsApi.listTemplates();
+        if (cancelled) {
+          return;
+        }
+        const normalized = (Array.isArray(templates) ? templates : [])
+          .filter((item) => String(item.id || '').trim() && String(item.name || '').trim())
+          .map((item) => ({
+            ...item,
+            id: String(item.id || '').trim(),
+            name: String(item.name || '').trim(),
+            desc: String(item.desc || '').trim(),
+            suggestedAgentName: String(item.suggestedAgentName || '').trim(),
+            soul: String(item.soul || '').trim(),
+            sop: Array.isArray(item.sop) ? item.sop.map((step) => String(step || '').trim()).filter(Boolean) : [],
+            modelId: String(item.modelId || '').trim() || undefined,
+          }));
+        setRemoteTemplates(normalized.length > 0 ? normalized : DEPLOY_ROLE_TEMPLATES);
+      } catch {
+        if (!cancelled) {
+          setRemoteTemplates(DEPLOY_ROLE_TEMPLATES);
+        }
+      }
+    })();
     setSelectedProjectId(projects[0]?.id || '');
     setAgentName('');
-    setSelectedTemplate(null);
+    setSelectedTemplate(DEPLOY_ROLE_TEMPLATES[0]?.id || null);
     setIsCustom(false);
     setCustomTemplateRaw('');
+    return () => {
+      cancelled = true;
+    };
   }, [isOpen, projects]);
 
   const selectedTemplateConfig = useMemo(
-    () => uniqueRoles.find((item) => item.id === selectedTemplate),
-    [uniqueRoles, selectedTemplate],
+    () => templateOptions.find((item) => item.id === selectedTemplate) || getDeployRoleTemplateById(selectedTemplate),
+    [templateOptions, selectedTemplate],
   );
 
   const parseCustomTemplate = useCallback(() => {
@@ -97,12 +143,13 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     try {
       const parsed = JSON.parse(trimmed) as {
         role?: unknown;
+        roleId?: unknown;
         soul?: unknown;
         sop?: unknown;
         capabilities?: unknown;
         modelId?: unknown;
       };
-      const role = String(parsed.role ?? '').trim();
+      const role = String(parsed.roleId ?? parsed.role ?? '').trim();
       const soul = String(parsed.soul ?? '').trim();
       const modelId = String(parsed.modelId ?? '').trim();
       const rawSop = Array.isArray(parsed.sop) ? parsed.sop : Array.isArray(parsed.capabilities) ? parsed.capabilities : [];
@@ -145,14 +192,16 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
       return false;
     }
 
-    const role = selectedTemplateConfig?.role || parsedCustom.role || 'Custom Agent';
+    const role = selectedTemplateConfig?.roleId || parsedCustom.role || 'Custom Agent';
     const modelRoute = resolveModelRoute(
       selectedTemplateConfig?.modelId
       || parsedCustom.modelId
       || pickDefaultModelRoute(),
     ) || pickDefaultModelRoute();
-    const soul = parsedCustom.soul || undefined;
-    const sop = parsedCustom.sop.length > 0 ? parsedCustom.sop : undefined;
+    const soul = parsedCustom.soul || selectedTemplateConfig?.soul || undefined;
+    const sop = parsedCustom.sop.length > 0
+      ? parsedCustom.sop
+      : (selectedTemplateConfig?.sop.length ? selectedTemplateConfig.sop : undefined);
     const agentId = buildAgentId(safeName);
 
     setIsDeploying(true);
@@ -172,7 +221,7 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
         await onDeployed();
       }
 
-      addToast('Agent 部署成功，已加入团队', 'success');
+      addToast(`Agent 部署成功（${selectedTemplateConfig?.name || role}）`, 'success');
       if (selectedProjectId) {
         addToast('当前版本请在项目详情中手动关联 Agent', 'info');
       }
@@ -187,13 +236,14 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
   }, [
     agentName,
     parseCustomTemplate,
-    selectedTemplateConfig?.role,
+    selectedTemplateConfig?.roleId,
     selectedTemplateConfig?.modelId,
     resolveModelRoute,
     pickDefaultModelRoute,
     buildAgentId,
     addToast,
     selectedProjectId,
+    selectedTemplateConfig?.name,
   ]);
 
   return {
@@ -208,7 +258,7 @@ export function useDeployAgent({ isOpen, agents, projects, models, addToast }: U
     selectedProjectId,
     setSelectedProjectId,
     isDeploying,
-    uniqueRoles,
+    templateOptions,
     deployAgent,
   };
 }

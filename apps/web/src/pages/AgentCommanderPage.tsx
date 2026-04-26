@@ -21,6 +21,14 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import type { Agent, Task as RuntimeTask } from '../types';
 import { fetchOpenClawAgentDetail } from '../lib/adapters';
+import { agentsApi } from '../lib/api/agentsApi';
+import { openclawAgentsApi } from '../lib/api/openclawAgentsApi';
+import {
+  normalizeCompareValue,
+  OPENCLAW_AGENT_TO_ROLE_ID,
+  resolveOpenClawAgentBinding,
+  ROLE_TO_OPENCLAW_AGENT_ID,
+} from '../lib/agent-identity';
 import { agents, models, projects, sessions, tasks } from '../lib/runtimeCollections';
 import { TokenUsageTrendChart } from './impl/GovernanceShared';
 import { tasksApi, type Task, type TaskDelegationBundle } from '../lib/api';
@@ -78,23 +86,6 @@ const Badge = ({ children, variant = 'default' }: any) => {
 
 const DEFAULT_AGENT_TOKEN_LIMIT = 100000000;
 
-const ROLE_TO_OPENCLAW_AGENT_ID: Record<string, string> = {
-  ROLE_PM: 'project_manager',
-  ROLE_ANALYST: 'requirements_analyst',
-  ROLE_PRODUCT: 'product_director',
-  ROLE_DESIGN: 'jeremy',
-  ROLE_ARCH: 'rd_director',
-  ROLE_DEV: 'rd_manager',
-  ROLE_QA: 'qa_engineer',
-  ROLE_HR: 'hr_director',
-};
-
-const OPENCLAW_AGENT_TO_ROLE_ID: Record<string, string> = Object.fromEntries(
-  Object.entries(ROLE_TO_OPENCLAW_AGENT_ID).map(([roleId, agentId]) => [agentId, roleId]),
-);
-
-const normalizeCompareValue = (value: string | null | undefined) => String(value || '').trim().toLowerCase();
-
 const AgentCommander = ({
   agentId,
   selectedProjectId,
@@ -122,14 +113,20 @@ const AgentCommander = ({
     sessionCount: 0,
   };
   const activeAgent = agents.find((agent) => agent.id === agentId) || agents[0] || fallbackAgent;
-  const resolvedOpenClawAgentId = useMemo(
-    () => ROLE_TO_OPENCLAW_AGENT_ID[activeAgent.id] || ROLE_TO_OPENCLAW_AGENT_ID[activeAgent.role] || activeAgent.id,
-    [activeAgent.id, activeAgent.role],
-  );
-  const linkedRoleId = useMemo(
-    () => OPENCLAW_AGENT_TO_ROLE_ID[activeAgent.id] || OPENCLAW_AGENT_TO_ROLE_ID[resolvedOpenClawAgentId] || activeAgent.id,
-    [activeAgent.id, resolvedOpenClawAgentId],
-  );
+  const [resolvedOpenClawAgentId, setResolvedOpenClawAgentId] = useState<string>(() => {
+    const normalizedId = String(activeAgent.id || '').trim();
+    if (normalizedId && !/^ROLE_/i.test(normalizedId)) {
+      return normalizedId;
+    }
+    return ROLE_TO_OPENCLAW_AGENT_ID[normalizedId] || ROLE_TO_OPENCLAW_AGENT_ID[activeAgent.role] || normalizedId || activeAgent.id;
+  });
+  const [linkedRoleId, setLinkedRoleId] = useState<string>(() => {
+    const normalizedId = String(activeAgent.id || '').trim();
+    if (/^ROLE_/i.test(normalizedId)) {
+      return normalizedId;
+    }
+    return OPENCLAW_AGENT_TO_ROLE_ID[normalizedId] || normalizedId;
+  });
   const agentMatchKeys = useMemo(() => {
     const keys = new Set<string>();
     [
@@ -185,7 +182,24 @@ const AgentCommander = ({
 
       setIsLoadingAgentProfile(true);
       try {
-        const detail = await fetchOpenClawAgentDetail(resolvedOpenClawAgentId);
+        const openclawList = await openclawAgentsApi.list();
+        const binding = resolveOpenClawAgentBinding({
+          agentId: activeAgent.id,
+          agentName: activeAgent.name,
+          agentRole: activeAgent.role,
+          list: openclawList,
+        });
+        const fallbackId = String(activeAgent.id || '').trim();
+        const nextResolvedOpenClawAgentId = binding.openclawAgentId || resolvedOpenClawAgentId;
+        const nextLinkedRoleId = binding.linkedRoleId || fallbackId;
+        if (active) {
+          setResolvedOpenClawAgentId(nextResolvedOpenClawAgentId);
+          setLinkedRoleId(nextLinkedRoleId);
+        }
+        if (!nextResolvedOpenClawAgentId) {
+          throw new Error('openclaw agent id unresolved');
+        }
+        const detail = await fetchOpenClawAgentDetail(nextResolvedOpenClawAgentId);
         if (!active) {
           return;
         }
@@ -201,12 +215,27 @@ const AgentCommander = ({
         setAgentSopSteps(parseSopSteps(sopContent));
         setAgentMemoryTags(memoryTags);
       } catch {
-        if (!active) {
-          return;
+        try {
+          const managedAgentId = /^ROLE_/i.test(String(activeAgent.id || '').trim())
+            ? linkedRoleId || String(activeAgent.id || '').trim()
+            : String(activeAgent.id || '').trim();
+          const managed = await agentsApi.get(managedAgentId);
+          if (!active) {
+            return;
+          }
+          const managedSoul = String(managed.soul || '').trim();
+          const managedSop = Array.isArray(managed.sop) ? managed.sop.map((step) => String(step || '').trim()).filter(Boolean) : [];
+          setAgentSoul(managedSoul);
+          setAgentSopSteps(managedSop);
+          setAgentMemoryTags([]);
+        } catch {
+          if (!active) {
+            return;
+          }
+          setAgentSoul('');
+          setAgentSopSteps([]);
+          setAgentMemoryTags([]);
         }
-        setAgentSoul('');
-        setAgentSopSteps([]);
-        setAgentMemoryTags([]);
       } finally {
         if (active) {
           setIsLoadingAgentProfile(false);
@@ -219,7 +248,7 @@ const AgentCommander = ({
     return () => {
       active = false;
     };
-  }, [activeAgent.id, resolvedOpenClawAgentId]);
+  }, [activeAgent.id, activeAgent.name, activeAgent.role, linkedRoleId, resolvedOpenClawAgentId]);
 
   const isTaskRelevantToActiveAgent = useCallback((task: Task) => {
     const relevantValues = [

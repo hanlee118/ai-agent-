@@ -43,7 +43,7 @@ export type StageExecutionProtocolGateResult = {
 
 const STAGE_PROTOCOL_ROLE_MAP: Record<StageType, RoleType[]> = {
   INIT: ["ROLE_PM"],
-  ANALYSIS: ["ROLE_ANALYST", "ROLE_PRODUCT"],
+  ANALYSIS: ["ROLE_ANALYST", "ROLE_PM"],
   DESIGN: ["ROLE_PRODUCT", "ROLE_DESIGN"],
   DEV: ["ROLE_ARCH", "ROLE_DEV"],
   ACCEPT: ["ROLE_QA"]
@@ -62,9 +62,11 @@ const STAGE_CONTENT_RULES: Record<StageType, Array<{ key: string; label: string;
     { key: "boundary", label: "范围与边界", patterns: [/范围与边界|边界说明|边界[:：]/i] },
     { key: "constraints", label: "约束条件", patterns: [/约束条件|约束清单|关键约束|约束[:：]/i] },
     { key: "risks", label: "风险清单", patterns: [/风险清单|关键风险|风险[:：]/i] },
-    { key: "acceptance", label: "验收标准", patterns: [/验收标准|成功标准|acceptance/i] }
+    { key: "acceptance", label: "验收标准", patterns: [/验收标准|成功标准|acceptance/i] },
+    { key: "milestone", label: "项目排期与里程碑", patterns: [/项目排期|里程碑|关键路径|raci|owner/i] }
   ],
   DESIGN: [
+    { key: "prd_scope", label: "PRD 范围与功能清单", patterns: [/产品需求文档|prd|功能清单|非目标|mvp/i] },
     { key: "structure", label: "页面/模块结构方案", patterns: [/页面结构|模块结构|页面\/模块结构|信息结构/i] },
     { key: "interaction", label: "视觉与交互说明", patterns: [/视觉说明|视觉方向|交互说明|交互规则/i] },
     { key: "states", label: "关键状态说明", patterns: [/关键状态|异常状态|边界状态|empty|loading|error/i] },

@@ -141,24 +141,29 @@ test("issues preview should adapt artifacts and SOP by workflow template", async
   assert.equal(visualArtifacts.length >= 2, true);
   assert.equal(visualArtifacts.some((item) => item.id === "artifact-design-review"), true);
   assert.equal(visualArtifacts.some((item) => item.id === "artifact-visual-preview"), true);
-  assert.equal(visualArtifacts.every((item) => item.ownerRoleId === "ROLE_DESIGN"), true);
+  assert.equal(visualArtifacts.some((item) => item.ownerRoleId === "ROLE_PRODUCT"), true);
+  assert.equal(visualArtifacts.some((item) => item.ownerRoleId === "ROLE_DESIGN"), true);
   const visualWorkflowSteps = Array.isArray(visualRes.body.data.workflow?.steps)
     ? visualRes.body.data.workflow.steps as Array<{ roleId: string }>
     : [];
   assert.equal(visualWorkflowSteps.length >= 2, true);
   assert.equal(visualWorkflowSteps.some((step) => step.roleId === "ROLE_ANALYST"), true);
+  assert.equal(visualWorkflowSteps.some((step) => step.roleId === "ROLE_PRODUCT"), true);
   assert.equal(visualWorkflowSteps.some((step) => step.roleId === "ROLE_DESIGN"), true);
   assert.equal(
-    visualWorkflowSteps.every((step) => step.roleId === "ROLE_ANALYST" || step.roleId === "ROLE_DESIGN"),
+    visualWorkflowSteps.every((step) =>
+      step.roleId === "ROLE_ANALYST" || step.roleId === "ROLE_PRODUCT" || step.roleId === "ROLE_DESIGN"),
     true
   );
   const visualRecommendedRoles = Array.isArray(visualRes.body.data.recommendedRoleIds)
     ? visualRes.body.data.recommendedRoleIds as string[]
     : [];
   assert.equal(visualRecommendedRoles.includes("ROLE_ANALYST"), true);
+  assert.equal(visualRecommendedRoles.includes("ROLE_PRODUCT"), true);
   assert.equal(visualRecommendedRoles.includes("ROLE_DESIGN"), true);
   assert.equal(
-    visualRecommendedRoles.every((roleId) => roleId === "ROLE_ANALYST" || roleId === "ROLE_DESIGN"),
+    visualRecommendedRoles.every((roleId) =>
+      roleId === "ROLE_ANALYST" || roleId === "ROLE_PRODUCT" || roleId === "ROLE_DESIGN"),
     true
   );
 

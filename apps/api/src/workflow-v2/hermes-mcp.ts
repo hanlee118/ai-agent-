@@ -25,6 +25,14 @@ export type HermesMcpRuntimeStatus = {
   totalFailures: number;
 };
 
+export type HermesMcpProbeStatus = {
+  state: "disabled" | "endpoint_missing" | "skipped" | "reachable" | "unreachable";
+  reachable: boolean | null;
+  statusCode: number | null;
+  latencyMs: number;
+  message: string;
+};
+
 const hermesRuntimeState: HermesMcpRuntimeStatus = {
   enabled: false,
   endpoint: "",
@@ -146,14 +154,25 @@ export function getHermesMcpRuntimeStatus(): HermesMcpRuntimeStatus {
 }
 
 export async function probeHermesMcpEndpoint() {
+  if (!isHermesEnabled()) {
+    return {
+      state: "disabled",
+      reachable: null,
+      statusCode: null,
+      latencyMs: 0,
+      message: "hermes_disabled"
+    } satisfies HermesMcpProbeStatus;
+  }
+
   const endpoint = resolveHermesEndpoint();
   if (!endpoint) {
     return {
-      reachable: false,
+      state: "endpoint_missing",
+      reachable: null,
       statusCode: null,
       latencyMs: 0,
-      message: "endpoint is empty"
-    };
+      message: "endpoint_missing"
+    } satisfies HermesMcpProbeStatus;
   }
   const endpointUrl = new URL(endpoint);
   const healthUrl = `${endpointUrl.protocol}//${endpointUrl.host}/health`;
@@ -164,18 +183,20 @@ export async function probeHermesMcpEndpoint() {
     });
     const latencyMs = Math.max(0, Date.now() - startedAt);
     return {
+      state: response.ok ? "reachable" : "unreachable",
       reachable: response.ok,
       statusCode: response.status,
       latencyMs,
       message: response.ok ? "ok" : `http_${response.status}`
-    };
+    } satisfies HermesMcpProbeStatus;
   } catch (error) {
     return {
+      state: "unreachable",
       reachable: false,
       statusCode: null,
       latencyMs: Math.max(0, Date.now() - startedAt),
       message: error instanceof Error ? error.message : String(error)
-    };
+    } satisfies HermesMcpProbeStatus;
   }
 }
 

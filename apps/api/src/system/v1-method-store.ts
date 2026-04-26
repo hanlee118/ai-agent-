@@ -30,6 +30,10 @@ export interface ProductContext {
   productName: string;
   background: string;
   mission: string;
+  executionEngines: string[];
+  executionPriority: string[];
+  gitlabGovernance: string[];
+  hermesUpgradeLoop: string[];
   goals: string[];
   principles: string[];
   constraints: string[];
@@ -233,6 +237,10 @@ const DEFAULT_CONTEXT: ProductContext = {
   productName: "Aegis OS",
   background: "",
   mission: "",
+  executionEngines: [],
+  executionPriority: [],
+  gitlabGovernance: [],
+  hermesUpgradeLoop: [],
   goals: [],
   principles: [],
   constraints: [],
@@ -257,6 +265,10 @@ function normalizeStore(parsed: Partial<StoreSchema> | undefined): StoreSchema {
     productContext: {
       ...DEFAULT_CONTEXT,
       ...context,
+      executionEngines: normalizeStringArray((context as Partial<ProductContext>).executionEngines ?? []),
+      executionPriority: normalizeStringArray((context as Partial<ProductContext>).executionPriority ?? []),
+      gitlabGovernance: normalizeStringArray((context as Partial<ProductContext>).gitlabGovernance ?? []),
+      hermesUpgradeLoop: normalizeStringArray((context as Partial<ProductContext>).hermesUpgradeLoop ?? []),
       requirementHistory: Array.isArray((context as Partial<ProductContext>).requirementHistory)
         ? ((context as Partial<ProductContext>).requirementHistory as RequirementBackfillItem[]).map((item) => ({
             ...item,
@@ -346,6 +358,10 @@ export async function updateProductContext(input: Partial<ProductContext>) {
     productName: String(input.productName ?? previous.productName ?? "").trim(),
     background: String(input.background ?? previous.background ?? "").trim(),
     mission: String(input.mission ?? previous.mission ?? "").trim(),
+    executionEngines: normalizeStringArray(input.executionEngines ?? previous.executionEngines),
+    executionPriority: normalizeStringArray(input.executionPriority ?? previous.executionPriority),
+    gitlabGovernance: normalizeStringArray(input.gitlabGovernance ?? previous.gitlabGovernance),
+    hermesUpgradeLoop: normalizeStringArray(input.hermesUpgradeLoop ?? previous.hermesUpgradeLoop),
     goals: normalizeStringArray(input.goals ?? previous.goals),
     principles: normalizeStringArray(input.principles ?? previous.principles),
     constraints: normalizeStringArray(input.constraints ?? previous.constraints),

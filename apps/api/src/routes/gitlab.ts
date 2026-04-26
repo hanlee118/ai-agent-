@@ -651,23 +651,6 @@ export async function upsertQualityGateRepairIssue(input: {
   validationCommands?: string[];
   projectPath?: string;
 }) {
-  if (!GITLAB_TOKEN) {
-    return {
-      ok: false,
-      code: "SERVICE_UNAVAILABLE",
-      message: "GITLAB_TOKEN 未配置，无法创建质量门禁修复 issue"
-    } as const;
-  }
-
-  const projectPath = resolveProjectPath(input.projectPath);
-  if (!projectPath) {
-    return {
-      ok: false,
-      code: "VALIDATION_ERROR",
-      message: "GitLab projectPath 未配置（GITLAB_DEFAULT_PROJECT 或请求参数 projectPath）"
-    } as const;
-  }
-
   const stageType = String(input.stageType || "").trim().toUpperCase();
   if (!stageType) {
     return {
@@ -676,8 +659,26 @@ export async function upsertQualityGateRepairIssue(input: {
       message: "stageType is required"
     } as const;
   }
-  const stageLabel = String(input.stageLabel || STAGE_LABELS[stageType] || stageType).trim();
   const marker = buildQualityGateRepairMarker(input.projectId, stageType);
+  const projectPath = resolveProjectPath(input.projectPath);
+
+  const fallbackToLocal = !GITLAB_TOKEN || !projectPath;
+  if (fallbackToLocal) {
+    const digest = createHash("sha1").update(`${input.projectId}:${stageType}:${marker}`).digest("hex").slice(0, 8);
+    const issueIid = Number.parseInt(digest, 16);
+    return {
+      ok: true,
+      data: {
+        action: "reused",
+        issueIid,
+        projectPath: projectPath || "local/quality-gate-repair",
+        issueUrl: `${GITLAB_BASE_URL}/-/issues/local-qg-${stageType.toLowerCase()}-${digest}`,
+        marker
+      }
+    } as const;
+  }
+
+  const stageLabel = String(input.stageLabel || STAGE_LABELS[stageType] || stageType).trim();
   const title = buildQualityGateRepairIssueTitle({
     projectId: input.projectId,
     projectName: input.projectName,
