@@ -3160,7 +3160,7 @@ router.post("/api/projects/:id/relay/import", validateBody(MutationPassthroughSc
 
 router.get("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const project = await findProject(projectId);
+  const project = await findProject(projectId, { detailLevel: "api" });
 
   if (!project) {
     res.status(404).json({ message: "Project not found" });

@@ -46,13 +46,17 @@ export async function listNotificationInbox(
   const offset = (page - 1) * pageSize;
   const candidates = await getCachedLiveNotificationCandidates(locale);
   const candidateKeys = candidates.map((item) => item.sourceKey);
-  const states = await withPrismaReadRetry("findMany", () => prisma.notificationState.findMany({
-    where: {
-      sourceKey: {
-        in: candidateKeys
+  const states = await withTimeoutFallback(
+    withPrismaReadRetry("findMany", () => prisma.notificationState.findMany({
+      where: {
+        sourceKey: {
+          in: candidateKeys
+        }
       }
-    }
-  }));
+    })),
+    1200,
+    []
+  );
 
   const stateByKey = new Map(states.map((item) => [item.sourceKey, item]));
   void ensureNotificationStateBackfill(candidates, stateByKey);

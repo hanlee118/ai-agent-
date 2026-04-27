@@ -3886,7 +3886,11 @@ async function tryApproveProjectViaWorkflowV2(projectId: string) {
   return true;
 }
 
-async function loadProjectRecord(id: string) {
+async function loadProjectRecord(id: string, options?: { detailLevel?: ProjectDetailLevel }) {
+  const detailLevel = options?.detailLevel ?? "full";
+  const executionTake = detailLevel === "api" ? 40 : 240;
+  const timelineTake = detailLevel === "api" ? 80 : undefined;
+  const deliverableTake = detailLevel === "api" ? 120 : undefined;
   return prisma.project.findUnique({
     where: { id },
     include: {
@@ -3917,7 +3921,10 @@ async function loadProjectRecord(id: string) {
           }
         }
       },
-      deliverables: { orderBy: [{ updatedAt: "desc" }] },
+      deliverables: {
+        orderBy: [{ updatedAt: "desc" }],
+        ...(deliverableTake ? { take: deliverableTake } : {})
+      },
       projectInputs: {
         include: {
           referenceDeliverable: {
@@ -3936,9 +3943,12 @@ async function loadProjectRecord(id: string) {
       },
       executions: {
         orderBy: { updatedAt: "desc" },
-        take: 240
+        take: executionTake
       },
-      timeline: { orderBy: { timestamp: "desc" } }
+      timeline: {
+        orderBy: { timestamp: "desc" },
+        ...(timelineTake ? { take: timelineTake } : {})
+      }
     }
   });
 }
@@ -6091,9 +6101,14 @@ export async function findAgent(roleId: RoleType): Promise<AgentProfile | undefi
   return toAgentProfile(agent, activeTaskCount);
 }
 
-export async function findProject(id: string): Promise<ProjectDetail | undefined> {
+type ProjectDetailLevel = "full" | "api";
+
+export async function findProject(
+  id: string,
+  options?: { detailLevel?: ProjectDetailLevel }
+): Promise<ProjectDetail | undefined> {
   await reconcileProjectStateWithWorkflowIfNeeded(id);
-  const project = await loadProjectRecord(id);
+  const project = await loadProjectRecord(id, options);
   return project ? toProjectDetail(project) : undefined;
 }
 
