@@ -3,7 +3,7 @@ import compression from "compression";
 import swaggerUi from "swagger-ui-express";
 import { Prisma } from "@prisma/client";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { prisma } from "./db.js";
@@ -204,13 +204,32 @@ const projectAutomationState: {
   lastSummary: "尚未执行"
 };
 const projectManualAdvanceEnabled = resolveBooleanEnvDefaultTrueOutsideTest("PROJECT_MANUAL_ADVANCE_ENABLED");
+const PROJECT_STATE_SWEEP_ENABLED = resolveBooleanEnvDefaultTrueOutsideTest("PROJECT_STATE_SWEEP_ENABLED");
+const PROJECT_STATE_SWEEP_INTERVAL_MS = Math.max(
+  30_000,
+  Number(process.env.PROJECT_STATE_SWEEP_INTERVAL_MS ?? 90_000)
+);
 
 let projectAutomationTimer: ReturnType<typeof setInterval> | null = null;
 let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
+let projectStateSweepTimer: ReturnType<typeof setInterval> | null = null;
+let projectStateSweepRunning = false;
 const projectAdvanceLocks = new Set<string>();
 const projectAdvanceJobs = new Map<string, Promise<void>>();
 const projectAdvanceJobErrors = new Map<string, { message: string; at: string }>();
 const projectAdvanceCancelledAt = new Map<string, number>();
+type ProjectAdvanceRuntimeState = {
+  projectId: string;
+  status: "idle" | "queued" | "running" | "recovering" | "succeeded" | "failed" | "cancelled";
+  updatedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+  attempt?: number;
+  message?: string;
+  lastError?: string;
+  lastErrorAt?: string;
+};
+const projectAdvanceStates = new Map<string, ProjectAdvanceRuntimeState>();
 const PROJECT_ADVANCE_CANCEL_TTL_MS = Math.max(
   60_000,
   Number(process.env.PROJECT_ADVANCE_CANCEL_TTL_MS ?? 10 * 60 * 1000)
@@ -524,6 +543,14 @@ function pruneProjectAdvanceCancelledMarks() {
 function markProjectAdvanceCancelled(projectId: string) {
   pruneProjectAdvanceCancelledMarks();
   projectAdvanceCancelledAt.set(projectId, Date.now());
+  const now = new Date().toISOString();
+  projectAdvanceStates.set(projectId, {
+    projectId,
+    status: "cancelled",
+    updatedAt: now,
+    finishedAt: now,
+    message: "推进任务已取消"
+  });
 }
 
 function clearProjectAdvanceCancelled(projectId: string) {
@@ -578,9 +605,28 @@ async function appendProjectAdvanceTimelineEvent(input: {
 
 async function executeManualAdvanceCycle(projectId: string) {
   await withProjectLock(projectId, async () => {
+    const startedAt = new Date().toISOString();
+    projectAdvanceStates.set(projectId, {
+      projectId,
+      status: "running",
+      updatedAt: startedAt,
+      startedAt,
+      message: "正在推进阶段交付物"
+    });
     let lastError: unknown = null;
 
     for (let attempt = 1; attempt <= MANUAL_ADVANCE_MAX_ATTEMPTS; attempt += 1) {
+      projectAdvanceStates.set(projectId, {
+        ...(projectAdvanceStates.get(projectId) || {
+          projectId,
+          status: "running",
+          startedAt
+        }),
+        status: "running",
+        updatedAt: new Date().toISOString(),
+        attempt,
+        message: `推进执行中（第 ${attempt}/${MANUAL_ADVANCE_MAX_ATTEMPTS} 次）`
+      });
       if (!(await canContinueProjectAdvance(projectId))) {
         return;
       }
@@ -680,6 +726,17 @@ async function executeManualAdvanceCycle(projectId: string) {
 
         if (attempt < MANUAL_ADVANCE_MAX_ATTEMPTS) {
           const backoffMs = computeAdvanceBackoffMs(attempt, isRealModelGateError);
+          projectAdvanceStates.set(projectId, {
+            ...(projectAdvanceStates.get(projectId) || {
+              projectId,
+              status: "running",
+              startedAt
+            }),
+            status: "running",
+            updatedAt: new Date().toISOString(),
+            attempt,
+            message: `推进重试等待中（约 ${Math.round(backoffMs / 1000)}s）`
+          });
           await sleep(backoffMs);
           continue;
         }
@@ -699,29 +756,90 @@ function ensureManualAdvanceJob(projectId: string) {
   if (existing) {
     return existing;
   }
+  projectAdvanceStates.set(projectId, {
+    projectId,
+    status: "queued",
+    updatedAt: new Date().toISOString(),
+    message: "推进任务已入队"
+  });
 
   const job = (async () => {
     try {
       await executeManualAdvanceCycle(projectId);
       if (isProjectAdvanceCancelled(projectId)) {
         projectAdvanceJobErrors.delete(projectId);
+        const now = new Date().toISOString();
+        projectAdvanceStates.set(projectId, {
+          ...(projectAdvanceStates.get(projectId) || {
+            projectId,
+            status: "cancelled"
+          }),
+          status: "cancelled",
+          updatedAt: now,
+          finishedAt: now,
+          message: "推进任务已取消"
+        });
         return;
       }
       projectAdvanceJobErrors.delete(projectId);
+      const now = new Date().toISOString();
+      projectAdvanceStates.set(projectId, {
+        ...(projectAdvanceStates.get(projectId) || {
+          projectId,
+          status: "succeeded"
+        }),
+        status: "succeeded",
+        updatedAt: now,
+        finishedAt: now,
+        message: "推进任务执行完成"
+      });
     } catch (error) {
       if (isProjectAdvanceCancelled(projectId)) {
         projectAdvanceJobErrors.delete(projectId);
+        const now = new Date().toISOString();
+        projectAdvanceStates.set(projectId, {
+          ...(projectAdvanceStates.get(projectId) || {
+            projectId,
+            status: "cancelled"
+          }),
+          status: "cancelled",
+          updatedAt: now,
+          finishedAt: now,
+          message: "推进任务已取消"
+        });
         return;
       }
       const message = summarizeAdvanceError(error);
       // A transient lock race means another worker is already advancing this project.
       // Treat it as in-progress instead of persisting a failure signal.
       if (message === "PROJECT_ADVANCE_IN_PROGRESS") {
+        projectAdvanceStates.set(projectId, {
+          ...(projectAdvanceStates.get(projectId) || {
+            projectId,
+            status: "running"
+          }),
+          status: "running",
+          updatedAt: new Date().toISOString(),
+          message: "推进任务已在进行中"
+        });
         return;
       }
       projectAdvanceJobErrors.set(projectId, {
         message,
         at: new Date().toISOString()
+      });
+      const now = new Date().toISOString();
+      projectAdvanceStates.set(projectId, {
+        ...(projectAdvanceStates.get(projectId) || {
+          projectId,
+          status: "failed"
+        }),
+        status: "failed",
+        updatedAt: now,
+        finishedAt: now,
+        message: "推进任务执行失败",
+        lastError: message,
+        lastErrorAt: now
       });
       console.warn(`[project.advance] ${projectId} failed: ${message}`);
     }
@@ -1110,7 +1228,7 @@ function buildDeliverableSpecificSections(
       "",
       "## 运行地址清单",
       "- API 本地地址: http://127.0.0.1:8787",
-      "- Web 本地地址: http://127.0.0.1:4173",
+      "- Web 本地地址: http://127.0.0.1:3000",
       "",
       "## 环境变量清单（必填 / 可选）",
       "| 变量 | 示例值 | 说明 |",
@@ -2270,6 +2388,109 @@ function restartProjectAutomationTicker() {
   }, projectAutomationState.intervalMs);
 }
 
+async function runProjectStateConsistencySweep() {
+  if (!PROJECT_STATE_SWEEP_ENABLED || projectStateSweepRunning) {
+    return;
+  }
+  projectStateSweepRunning = true;
+  try {
+    const projects = await prisma.project.findMany({
+      where: { status: "active" },
+      orderBy: { updatedAt: "desc" },
+      take: 80,
+      select: {
+        id: true,
+        currentStage: true,
+        pendingApproval: true
+      }
+    });
+    for (const project of projects) {
+      const stageType = String(project.currentStage || "").trim();
+      if (!stageType) {
+        continue;
+      }
+      const tasks = await prisma.task.findMany({
+        where: {
+          projectId: project.id,
+          stageType
+        },
+        orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
+        select: {
+          id: true,
+          status: true
+        }
+      });
+      if (tasks.length === 0) {
+        continue;
+      }
+
+      if (project.pendingApproval) {
+        const toPending = tasks.filter((task) => task.status !== "pending_approval").map((task) => task.id);
+        if (toPending.length > 0) {
+          await prisma.task.updateMany({
+            where: { id: { in: toPending } },
+            data: { status: "pending_approval" }
+          });
+        }
+        continue;
+      }
+
+      const inProgress = tasks.filter((task) => task.status === "in_progress");
+      if (inProgress.length === 0) {
+        const candidate = tasks.find((task) => task.status === "todo")
+          || tasks.find((task) => task.status === "pending_approval");
+        if (candidate) {
+          await prisma.task.update({
+            where: { id: candidate.id },
+            data: { status: "in_progress" }
+          });
+          const toTodo = tasks
+            .filter((task) => task.id !== candidate.id && task.status === "pending_approval")
+            .map((task) => task.id);
+          if (toTodo.length > 0) {
+            await prisma.task.updateMany({
+              where: { id: { in: toTodo } },
+              data: { status: "todo" }
+            });
+          }
+        }
+      } else if (inProgress.length > 1) {
+        const keep = inProgress[0];
+        const extra = inProgress.slice(1).map((task) => task.id);
+        if (extra.length > 0) {
+          await prisma.task.updateMany({
+            where: { id: { in: extra } },
+            data: { status: "todo" }
+          });
+          await prisma.task.update({
+            where: { id: keep.id },
+            data: { status: "in_progress" }
+          });
+        }
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `[project.state-sweep] failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  } finally {
+    projectStateSweepRunning = false;
+  }
+}
+
+function restartProjectStateSweepTicker() {
+  if (projectStateSweepTimer) {
+    clearInterval(projectStateSweepTimer);
+    projectStateSweepTimer = null;
+  }
+  if (!PROJECT_STATE_SWEEP_ENABLED) {
+    return;
+  }
+  projectStateSweepTimer = setInterval(() => {
+    void runProjectStateConsistencySweep();
+  }, PROJECT_STATE_SWEEP_INTERVAL_MS);
+}
+
 type AcceptanceStageReport = {
   stageType: string;
   stageLabel: string;
@@ -2712,8 +2933,9 @@ async function runFinalArtifactsGenerationJob(jobId: string) {
       step: "汇总最终验收产物",
       message: "正在生成最终验收报告..."
     });
+    const runtimeDeliveryArtifactUrl = generateRuntimeDeliveryArtifact(project);
     const executions = await listProjectExecutions(job.projectId, 80);
-    const report = buildProjectFinalArtifactsReport(project, officialSite, executions);
+    const report = buildProjectFinalArtifactsReport(project, officialSite, executions, runtimeDeliveryArtifactUrl);
     const finishedAt = new Date().toISOString();
     update({
       status: "completed",
@@ -2811,7 +3033,20 @@ function pickRuntimeDeliveryAccessUrl(content: string) {
     return undefined;
   }
 
-  const scored = urls.map((url) => {
+  const artifactUrls = urls.filter((url) => {
+    if (isGeneratedHtmlUrl(url)) {
+      return true;
+    }
+    const normalized = String(url || "").toLowerCase();
+    return /\/generated\/.+\.html(?:[?#].*)?$/.test(normalized)
+      || /\/design-preview(?:[?#].*)?$/.test(normalized)
+      || /preview\.html(?:[?#].*)?$/.test(normalized);
+  });
+  if (artifactUrls.length === 0) {
+    return undefined;
+  }
+
+  const scored = artifactUrls.map((url) => {
     let score = 0;
     if (isGeneratedHtmlUrl(url)) {
       score += 120;
@@ -2840,7 +3075,9 @@ function pickRuntimeDeliveryAccessUrl(content: string) {
           }
         }
 
-        if (pathName === "/" || pathName.endsWith(".html")) {
+        if (pathName === "/") {
+          score -= 120;
+        } else if (pathName.endsWith(".html")) {
           score += 20;
         }
         if (pathName.startsWith("/generated/")) {
@@ -2955,6 +3192,8 @@ function resolveFinalArtifactLocalBaseUrl() {
   return "http://127.0.0.1:8787";
 }
 
+const CLOUDFLARE_TUNNEL_FRESH_WINDOW_MS = 30 * 60 * 1000;
+
 function resolveFinalArtifactPublicBaseUrl() {
   const envBase = String(process.env.FINAL_ARTIFACT_PUBLIC_BASE_URL || "").trim();
   if (envBase && /^https?:\/\//i.test(envBase)) {
@@ -2966,8 +3205,13 @@ function resolveFinalArtifactPublicBaseUrl() {
     }
   }
 
+  const now = Date.now();
   if (existsSync(cloudflaredTunnelLogPath)) {
     try {
+      const stat = statSync(cloudflaredTunnelLogPath);
+      if (now - (stat.mtimeMs || 0) > CLOUDFLARE_TUNNEL_FRESH_WINDOW_MS) {
+        return undefined;
+      }
       const logText = readFileSync(cloudflaredTunnelLogPath, "utf8");
       const matches = [...logText.matchAll(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/gi)].map((item) => item[0]);
       if (matches.length > 0) {
@@ -2988,6 +3232,9 @@ function resolveFinalArtifactPublicBaseUrl() {
         try {
           const stat = statSync(filePath);
           if (!stat.isFile()) {
+            continue;
+          }
+          if (now - (stat.mtimeMs || 0) > CLOUDFLARE_TUNNEL_FRESH_WINDOW_MS) {
             continue;
           }
           const logText = readFileSync(filePath, "utf8");
@@ -3017,23 +3264,32 @@ function resolveFinalArtifactPublicBaseUrl() {
   return undefined;
 }
 
-function buildArtifactAccessUrls(inputUrl?: string) {
+function buildArtifactAccessUrls(inputUrl?: string, options?: { runtimeDelivery?: boolean }) {
   const raw = String(inputUrl || "").trim();
   const pathName = normalizeGeneratedPublicPath(raw);
   const localBase = resolveFinalArtifactLocalBaseUrl();
   const publicBase = resolveFinalArtifactPublicBaseUrl();
+  const runtimeDelivery = Boolean(options?.runtimeDelivery);
+  const isArtifactPath = (pathname: string) => {
+    const normalized = String(pathname || "").trim().toLowerCase();
+    return normalized.startsWith("/generated/")
+      || normalized.endsWith(".html")
+      || /\/design-preview(?:[?#].*)?$/.test(normalized);
+  };
 
   const result: { localUrl?: string; publicUrl?: string } = {};
   if (/^https?:\/\//i.test(raw)) {
     try {
       const parsed = new URL(raw);
-      if (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "0.0.0.0") {
+      const localHost = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost" || parsed.hostname === "0.0.0.0";
+      const artifactPath = isArtifactPath(parsed.pathname);
+      if (localHost && artifactPath) {
         result.localUrl = parsed.toString();
         if (!result.publicUrl && publicBase) {
           const pathSuffix = `${parsed.pathname || "/"}${parsed.search || ""}${parsed.hash || ""}`;
           result.publicUrl = `${publicBase}${pathSuffix.startsWith("/") ? pathSuffix : `/${pathSuffix}`}`;
         }
-      } else {
+      } else if (artifactPath) {
         result.publicUrl = parsed.toString();
       }
     } catch {
@@ -3066,6 +3322,188 @@ function formatArtifactAccessExcerpt(baseExcerpt: string, accessUrls: { localUrl
     lines.push(`外网访问地址：${accessUrls.publicUrl}`);
   }
   return Array.from(new Set(lines)).join("\n");
+}
+
+function extractHtmlCodeBlock(content: string) {
+  const text = String(content || "");
+  const matched = text.match(/```html\s*([\s\S]*?)```/i);
+  return matched?.[1]?.trim() || "";
+}
+
+function isSkeletonHtml(content: string) {
+  const html = String(content || "").toLowerCase();
+  if (!html) {
+    return true;
+  }
+  const hasScript = /<script[\s>]/.test(html);
+  const hasStyle = /<style[\s>]/.test(html);
+  const hasRichSections = /(timeline|story|角色|战力|ranking|card|list|grid)/.test(html);
+  return html.length < 1200 || (!hasScript && !hasStyle) || !hasRichSections;
+}
+
+function resolveShowcaseTheme(input: { projectName: string; projectDescription?: string }) {
+  const text = `${String(input.projectName || "")}\n${String(input.projectDescription || "")}`.toLowerCase();
+  if (/全职猎人|hunter\s*x\s*hunter|hxh/.test(text)) {
+    return "hunter";
+  }
+  if (/蜡笔小新|crayon|shin-?chan|shinchan/.test(text)) {
+    return "shinchan";
+  }
+  return "generic";
+}
+
+function buildInteractiveShowcaseHtml(input: { projectName: string; projectDescription?: string }) {
+  const title = String(input.projectName || "动漫粉丝网站");
+  const theme = resolveShowcaseTheme(input);
+  const hunterTimeline = [
+    { arc: "猎人考试篇", point: "主角入场与能力觉醒" },
+    { arc: "天空竞技场篇", point: "念能力体系建立" },
+    { arc: "友克鑫篇", point: "旅团冲突升级" },
+    { arc: "贪婪之岛篇", point: "实战训练与战术成长" },
+    { arc: "嵌合蚁篇", point: "高强度生存战与价值抉择" }
+  ];
+  const hunterChars = [
+    { name: "小杰", camp: "主角团", skill: "强化系, 猜猜拳", power: 92, speed: 86, iq: 75 },
+    { name: "奇犽", camp: "主角团", skill: "变化系, 神速", power: 95, speed: 98, iq: 88 },
+    { name: "库洛洛", camp: "幻影旅团", skill: "特质系, 盗贼极意", power: 97, speed: 90, iq: 99 },
+    { name: "西索", camp: "幻影旅团", skill: "变化系, 伸缩自如的爱", power: 94, speed: 93, iq: 92 },
+    { name: "尼特罗", camp: "猎人协会", skill: "强化系, 百式观音", power: 99, speed: 96, iq: 97 }
+  ];
+  const shinTimeline = [
+    { arc: "爆发！温泉激烈大决战", point: "家庭与伙伴协作化解危机" },
+    { arc: "风起云涌！光荣烧肉之路", point: "高强度追逐与喜剧节奏拉满" },
+    { arc: "呼风唤雨！夕阳下的春日部男孩", point: "西部片风格与成长叙事融合" },
+    { arc: "呼风唤雨！会唱歌的屁股炸弹", point: "荒诞设定下的情感表达" },
+    { arc: "新次元！超能力大决战", point: "现代视觉风格与角色关系深化" }
+  ];
+  const shinChars = [
+    { name: "野原新之助", camp: "野原一家", skill: "即兴应变, 嘴炮与喜剧张力", power: 78, speed: 70, iq: 82 },
+    { name: "野原美伢", camp: "野原一家", skill: "家庭统筹, 危机执行力", power: 81, speed: 68, iq: 86 },
+    { name: "野原广志", camp: "野原一家", skill: "职场韧性, 临场判断", power: 79, speed: 66, iq: 85 },
+    { name: "风间彻", camp: "春日部防卫队", skill: "计划推进, 信息整合", power: 73, speed: 72, iq: 90 },
+    { name: "阿呆", camp: "春日部防卫队", skill: "稳定输出, 关键观察", power: 75, speed: 60, iq: 84 }
+  ];
+  const genericTimeline = [
+    { arc: "世界观建立", point: "明确主线目标与角色关系" },
+    { arc: "能力体系说明", point: "核心能力和规则可视化" },
+    { arc: "冲突升级", point: "对立阵营和关键事件推进" },
+    { arc: "阶段高潮", point: "主角关键选择与代价" },
+    { arc: "结局回收", point: "伏笔回收与价值总结" }
+  ];
+  const genericChars = [
+    { name: "主角", camp: "核心阵营", skill: "成长型能力", power: 88, speed: 80, iq: 82 },
+    { name: "同伴A", camp: "核心阵营", skill: "辅助控制", power: 76, speed: 83, iq: 85 },
+    { name: "对手A", camp: "对立阵营", skill: "爆发输出", power: 91, speed: 78, iq: 80 },
+    { name: "导师", camp: "中立", skill: "规则引导", power: 84, speed: 70, iq: 94 },
+    { name: "战略者", camp: "核心阵营", skill: "战术调度", power: 72, speed: 68, iq: 96 }
+  ];
+
+  const timeline = theme === "hunter" ? hunterTimeline : theme === "shinchan" ? shinTimeline : genericTimeline;
+  const chars = theme === "hunter" ? hunterChars : theme === "shinchan" ? shinChars : genericChars;
+  const campOptions = Array.from(new Set(chars.map((item) => item.camp)));
+  const subtitle = theme === "hunter"
+    ? "故事线、念能力、战斗力排行一体化展示"
+    : theme === "shinchan"
+      ? "剧场版故事线、角色亮点、观影价值一体化展示"
+      : "故事线、角色能力、战力排行一体化展示";
+
+  const jsonTimeline = JSON.stringify(timeline);
+  const jsonChars = JSON.stringify(chars);
+  const jsonCamps = JSON.stringify(campOptions);
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>${title} · 互动展示</title>
+  <style>
+    :root{--bg:#0f172a;--card:#111827;--soft:#1f2937;--text:#e5e7eb;--muted:#94a3b8;--accent:#22d3ee;--accent2:#f59e0b}
+    *{box-sizing:border-box} body{margin:0;background:radial-gradient(circle at 20% 0%,#1e293b 0%,#0b1022 60%);color:var(--text);font-family:"Noto Sans SC","PingFang SC",system-ui,sans-serif}
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}
+    .hero{padding:28px;border-radius:16px;background:linear-gradient(135deg,#0ea5e9,#1d4ed8);box-shadow:0 12px 28px rgba(2,6,23,.35)}
+    .hero h1{margin:0 0 8px;font-size:32px}.hero p{margin:0;color:#dbeafe}
+    .panel{margin-top:18px;padding:16px;border:1px solid #263244;border-radius:14px;background:rgba(17,24,39,.88)}
+    .controls{display:flex;gap:10px;flex-wrap:wrap}.controls input,.controls select{background:#0b1220;border:1px solid #334155;color:#e2e8f0;padding:10px 12px;border-radius:10px}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:14px}
+    .card{background:var(--card);border:1px solid #233147;border-radius:12px;padding:12px}
+    .badge{display:inline-block;padding:2px 8px;border-radius:999px;background:rgba(34,211,238,.15);color:#67e8f9;font-size:12px}
+    table{width:100%;border-collapse:collapse;margin-top:10px} th,td{padding:8px;border-bottom:1px solid #233147;text-align:left} th{color:var(--muted);cursor:pointer}
+    .muted{color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>${title}</h1>
+      <p>${subtitle}</p>
+    </section>
+
+    <section class="panel">
+      <h2>故事线时间轴</h2>
+      <div class="grid" id="timeline"></div>
+    </section>
+
+    <section class="panel">
+      <h2>核心角色能力</h2>
+      <div class="controls">
+        <input id="kw" placeholder="搜索角色或能力关键词" />
+        <select id="camp"><option value="">全部阵营</option></select>
+      </div>
+      <div class="grid" id="chars"></div>
+    </section>
+
+    <section class="panel">
+      <h2>战斗力排行榜 <span class="muted">（点击表头排序）</span></h2>
+      <table>
+        <thead><tr><th data-key="name">角色</th><th data-key="power">战力</th><th data-key="speed">速度</th><th data-key="iq">策略</th></tr></thead>
+        <tbody id="rank"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    const timelineData=${jsonTimeline};
+    const charData=${jsonChars};
+    const campOptions=${jsonCamps};
+    const timelineEl=document.getElementById("timeline"),charsEl=document.getElementById("chars"),rankEl=document.getElementById("rank");
+    const campSelect=document.getElementById("camp");
+    campSelect.innerHTML='<option value="">全部阵营</option>' + campOptions.map(v=>'<option>'+v+'</option>').join("");
+    timelineEl.innerHTML=timelineData.map(i=>'<article class="card"><span class="badge">'+i.arc+'</span><p>'+i.point+'</p></article>').join("");
+    function renderChars(){const kw=(document.getElementById("kw").value||"").toLowerCase();const camp=document.getElementById("camp").value;const rows=charData.filter(i=>(!camp||i.camp===camp)&&((i.name+i.skill).toLowerCase().includes(kw)));charsEl.innerHTML=rows.map(i=>'<article class="card"><h3>'+i.name+'</h3><p class="muted">'+i.camp+'</p><p>'+i.skill+'</p></article>').join("")||'<p class="muted">没有匹配项</p>'}
+    function renderRank(rows){rankEl.innerHTML=rows.map(i=>'<tr><td>'+i.name+'</td><td>'+i.power+'</td><td>'+i.speed+'</td><td>'+i.iq+'</td></tr>').join("")}
+    renderChars();renderRank([...charData].sort((a,b)=>b.power-a.power));
+    document.getElementById("kw").addEventListener("input",renderChars);document.getElementById("camp").addEventListener("change",renderChars);
+    document.querySelectorAll("th[data-key]").forEach(th=>th.addEventListener("click",()=>{const k=th.dataset.key;renderRank([...charData].sort((a,b)=>typeof a[k]==="number"?b[k]-a[k]:String(a[k]).localeCompare(String(b[k]),"zh")))}));
+  </script>
+</body>
+</html>`;
+}
+
+function generateRuntimeDeliveryArtifact(project: NonNullable<Awaited<ReturnType<typeof findProject>>>) {
+  const existingArtifactUrl = pickRuntimeDeliveryAccessUrlFromDeliverables(project.deliverables);
+  if (!existingArtifactUrl) {
+    throw new Error("RUNTIME_ARTIFACT_NOT_FOUND: 未在交付物中找到真实页面产物链接（/generated/*.html）");
+  }
+
+  const normalized = normalizeGeneratedPublicPath(existingArtifactUrl);
+  if (!normalized) {
+    throw new Error("RUNTIME_ARTIFACT_INVALID: 交付物中的页面链接不是有效的 generated HTML 地址");
+  }
+
+  const filePath = resolveGeneratedFilePathFromUrl(normalized);
+  if (filePath && !existsSync(filePath)) {
+    throw new Error(`RUNTIME_ARTIFACT_MISSING_FILE: 页面文件不存在 ${filePath}`);
+  }
+  return normalized;
+}
+
+function resolveExistingRuntimeDeliveryArtifactUrl(projectId: string) {
+  const relativePath = path.posix.join("runtime-delivery", projectId, "index.html");
+  const candidateFile = path.join(workspaceGeneratedPath, relativePath);
+  if (existsSync(candidateFile)) {
+    return `/${path.posix.join("generated", relativePath)}`;
+  }
+  return undefined;
 }
 
 function pickPrototypeLinkCandidate(
@@ -3447,7 +3885,8 @@ function buildProjectFinalArtifactsReport(
     kind: "design_preview" | "narrative_summary";
     sourceDeliverableName?: string;
   },
-  executions: Awaited<ReturnType<typeof listProjectExecutions>> = []
+  executions: Awaited<ReturnType<typeof listProjectExecutions>> = [],
+  runtimeDeliveryArtifactUrl?: string
 ): ProjectFinalArtifactsReport {
   const deliverables = [...project.deliverables]
     .sort((left, right) => {
@@ -3472,6 +3911,10 @@ function buildProjectFinalArtifactsReport(
     }
     return target;
   });
+
+  const runtimeDeliveryUrl =
+    runtimeDeliveryArtifactUrl
+    || resolveExistingRuntimeDeliveryArtifactUrl(project.id);
 
   const artifacts: FinalArtifactRecord[] = [];
   const missingRequired: string[] = [];
@@ -3499,10 +3942,12 @@ function buildProjectFinalArtifactsReport(
     }
 
     const runtimeAccessSource = target.key === "runtime_delivery"
-      ? pickRuntimeDeliveryAccessUrl(String(matched.content || "")) || pickRuntimeDeliveryAccessUrlFromDeliverables(deliverables)
+      ? pickRuntimeDeliveryAccessUrl(String(matched.content || ""))
+        || runtimeDeliveryUrl
+        || pickRuntimeDeliveryAccessUrlFromDeliverables(deliverables)
       : undefined;
     const runtimeAccessUrls: { localUrl?: string; publicUrl?: string } = target.key === "runtime_delivery"
-      ? buildArtifactAccessUrls(runtimeAccessSource)
+      ? buildArtifactAccessUrls(runtimeAccessSource, { runtimeDelivery: true })
       : {};
     const runtimeFilePath = runtimeAccessSource ? resolveGeneratedFilePathFromUrl(runtimeAccessSource) : undefined;
 
@@ -4637,6 +5082,7 @@ app.use(createProjectsRouter({
   projectAdvanceLocks,
   projectAdvanceJobs,
   projectAdvanceJobErrors,
+  projectAdvanceStates,
   markProjectAdvanceCancelled,
   clearProjectAdvanceCancelled,
   ensureManualAdvanceJob,
@@ -4711,6 +5157,8 @@ async function start() {
   await ensureSeedData((await getRuntimeStatus()).mode);
   ensureLocalAgentMonitorLive();
   restartProjectAutomationTicker();
+  restartProjectStateSweepTicker();
+  void runProjectStateConsistencySweep();
   if (projectAutomationState.enabled) {
     void runProjectAutomationTick();
   }

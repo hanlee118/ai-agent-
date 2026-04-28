@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 
+const globalSSERegistry = new Map<string, EventSource>();
+
 export interface UseSSEOptions {
   enabled?: boolean;
   withCredentials?: boolean;
@@ -20,7 +22,7 @@ export function useSSE(url: string, options: UseSSEOptions = {}) {
     withCredentials = true,
     events = [],
     maxRetries = 5,
-    retryIntervalMs = 2000,
+    retryIntervalMs = 3000,
     maxRetryIntervalMs = 30000,
     retryBackoffMultiplier = 1.8,
     retryJitterRatio = 0.2,
@@ -50,6 +52,10 @@ export function useSSE(url: string, options: UseSSEOptions = {}) {
 
     const teardown = () => {
       if (eventSourceRef.current) {
+        const registered = globalSSERegistry.get(url);
+        if (registered === eventSourceRef.current) {
+          globalSSERegistry.delete(url);
+        }
         eventSourceRef.current.close();
         eventSourceRef.current = null;
       }
@@ -62,8 +68,15 @@ export function useSSE(url: string, options: UseSSEOptions = {}) {
 
       teardown();
 
+      const existing = globalSSERegistry.get(url);
+      if (existing) {
+        existing.close();
+        globalSSERegistry.delete(url);
+      }
+
       const source = new EventSource(url, { withCredentials });
       eventSourceRef.current = source;
+      globalSSERegistry.set(url, source);
 
       const handleOpen = () => {
         retryCountRef.current = 0;

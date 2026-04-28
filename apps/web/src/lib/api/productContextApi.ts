@@ -42,8 +42,19 @@ export interface ProductContext {
 }
 
 export const productContextApi = {
-  async get() {
-    return request<ProductContext>('/product-context');
+  async get(params?: {
+    summary?: boolean;
+    includeHistory?: boolean;
+    page?: number;
+    pageSize?: number;
+  }) {
+    const searchParams = new URLSearchParams();
+    if (params?.summary !== undefined) searchParams.set('summary', String(params.summary));
+    if (params?.includeHistory !== undefined) searchParams.set('includeHistory', String(params.includeHistory));
+    if (params?.page) searchParams.set('page', String(params.page));
+    if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+    const query = searchParams.toString();
+    return request<ProductContext>(`/product-context${query ? `?${query}` : ''}`);
   },
 
   async update(payload: {
@@ -77,5 +88,20 @@ export const productContextApi = {
       method: 'DELETE',
       body: JSON.stringify({ historyIds }),
     });
+  },
+
+  async listHistory(params?: {
+    page?: number;
+    pageSize?: number;
+    summary?: boolean;
+  }) {
+    const searchParams = new URLSearchParams();
+    if (params?.page) searchParams.set('page', String(params.page));
+    if (params?.pageSize) searchParams.set('pageSize', String(params.pageSize));
+    if (params?.summary !== undefined) searchParams.set('summary', String(params.summary));
+    const query = searchParams.toString();
+    return request<{ total: number; page: number; pageSize: number; items: NonNullable<ProductContext['requirementHistory']> }>(
+      `/product-context/history${query ? `?${query}` : ''}`
+    );
   },
 };

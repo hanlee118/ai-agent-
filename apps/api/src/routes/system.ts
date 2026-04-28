@@ -29,7 +29,7 @@ import {
 } from "../system/execution-protocol.js";
 import { getUiPreferences, updateUiPreferences } from "../system/ui-preferences.js";
 import { getSystemReadiness } from "../system/readiness.js";
-import { listAuditLogs } from "../system/audit-log.js";
+import { listAuditLogs, summarizeAuditLogs } from "../system/audit-log.js";
 import { getDesignModelPolicyHealth, repairDesignModelPolicy } from "../system/design-model-policy-health.js";
 import { getIssue } from "../system/v1-method-store.js";
 import { getCachedLocalAgentMonitorOverview, subscribeLocalAgentMonitor } from "../system/local-agent-monitor.js";
@@ -98,6 +98,11 @@ const ROLE_TYPES: RoleType[] = [
   "ROLE_QA",
   "ROLE_HR"
 ];
+const AUDIT_LOG_TOTAL_CACHE_TTL_MS = Math.max(
+  3_000,
+  Number(process.env.AUDIT_LOG_TOTAL_CACHE_TTL_MS ?? 20_000)
+);
+let auditLogTotalCache: { value: number; expiresAt: number } | null = null;
 
 function parseStageType(input: unknown): StageType | undefined {
   const normalized = String(input ?? "").trim().toUpperCase();
@@ -142,7 +147,25 @@ async function withTimeoutFallback<T>(task: Promise<T>, timeoutMs: number, fallb
   }
 }
 
+const OBSERVABILITY_SUMMARY_CACHE_TTL_MS = Math.max(
+  5_000,
+  Number(process.env.OBSERVABILITY_SUMMARY_CACHE_TTL_MS ?? 30_000)
+);
+let observabilitySummaryCache:
+  | { expiresAt: number; value: unknown }
+  | null = null;
+let observabilitySummaryInflight: Promise<unknown> | null = null;
+
 export async function getObservabilitySummarySnapshot() {
+  const now = Date.now();
+  if (observabilitySummaryCache && observabilitySummaryCache.expiresAt > now) {
+    return observabilitySummaryCache.value;
+  }
+  if (observabilitySummaryInflight) {
+    return observabilitySummaryInflight;
+  }
+
+  observabilitySummaryInflight = (async () => {
   const [runtime, readiness, monitor, projectCount, executionCount, auditCount] = await Promise.all([
     getRuntimeStatus(),
     getSystemReadiness(),
@@ -181,6 +204,18 @@ export async function getObservabilitySummarySnapshot() {
       totals: monitor.totals
     }
   };
+  })();
+
+  try {
+    const value = await observabilitySummaryInflight;
+    observabilitySummaryCache = {
+      value,
+      expiresAt: Date.now() + OBSERVABILITY_SUMMARY_CACHE_TTL_MS
+    };
+    return value;
+  } finally {
+    observabilitySummaryInflight = null;
+  }
 }
 
 export function createSystemRouter(options: CreateSystemRouterOptions) {
@@ -400,11 +435,22 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
     const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
     const offset = (page - 1) * pageSize;
-    const total = await withPrismaReadRetry("count", () => prisma.auditLog.count());
+    const now = Date.now();
+    const total = auditLogTotalCache && auditLogTotalCache.expiresAt > now
+      ? auditLogTotalCache.value
+      : await withPrismaReadRetry("count", () => prisma.auditLog.count());
+    if (!auditLogTotalCache || auditLogTotalCache.expiresAt <= now) {
+      auditLogTotalCache = {
+        value: total,
+        expiresAt: now + AUDIT_LOG_TOTAL_CACHE_TTL_MS
+      };
+    }
     res.setHeader("X-Page", String(page));
     res.setHeader("X-Page-Size", String(pageSize));
     res.setHeader("X-Total-Count", String(total));
-    res.json(await listAuditLogs(pageSize, offset));
+    const summary = String(req.query.summary ?? "true").trim().toLowerCase() !== "false";
+    const logs = await listAuditLogs(pageSize, offset);
+    res.json(summary ? summarizeAuditLogs(logs) : logs);
   }));
 
   router.get("/prompt-templates", asyncRoute(async (req, res) => {

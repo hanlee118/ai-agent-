@@ -47,7 +47,7 @@ const FULL_WORKFLOW_TEMPLATE_OPTIONS: Array<{ key: string; label: string; descri
     key: 'standard_software_development',
     label: '全流程编排（推荐）',
     description: '自动初始化需求、设计、研发、QA 全链路',
-    stagePreview: '需求设计 → 视觉设计/技术设计 → 代码研发 → QA 验收',
+    stagePreview: '项目立项（INIT） → 需求分析（ANALYSIS） → 需求/视觉设计（DESIGN） → 代码研发（DEV） → QA 验收（ACCEPT）',
   },
   {
     key: 'none',
@@ -194,6 +194,7 @@ export default function ProjectExecutionConfigurator({
       <div className="space-y-1">
         <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目策略模式</label>
         <p className="text-[11px] text-slate-500">创建时直接决定：是全流程执行，还是独立阶段执行。</p>
+        <p className="text-[11px] text-slate-500">全流程模式会先进入项目立项（INIT），再推进后续阶段。</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">

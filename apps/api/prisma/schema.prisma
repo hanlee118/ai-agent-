@@ -267,6 +267,7 @@ model Stage {
 
   @@unique([projectId, type])
   @@index([projectId, sortOrder])
+  @@index([projectId, createdAt])
   @@index([status, updatedAt])
 }
 
@@ -331,6 +332,7 @@ model Task {
   gitlabSyncBindings GitLabSyncBinding[]
 
   @@index([projectId, stageType])
+  @@index([projectId, stageType, status])
   @@index([assignee, status])
   @@index([status, updatedAt])
   @@index([ownerAgentId, status])
@@ -540,6 +542,7 @@ model KnowledgeItem {
   preferences       AgentKnowledgePreference[]
 
   @@index([scope, projectId])
+  @@index([scope, projectId, updatedAt])
   @@index([createdAt])
 }
 

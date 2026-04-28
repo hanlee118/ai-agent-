@@ -27,6 +27,16 @@ services:
       WEB_URL: http://localhost:3000
       ALLOWED_ORIGINS: http://localhost:3000
       DATABASE_URL: postgresql://occ:occ@db:5432/occ?schema=public&connection_limit=20&pool_timeout=30
+      DESIGN_STITCH_MODE: ${DESIGN_STITCH_MODE:-preferred}
+      STITCH_API_KEY: ${STITCH_API_KEY:-}
+      STITCH_PROXY_STRATEGY: ${STITCH_PROXY_STRATEGY:-proxy_only}
+      HTTPS_PROXY: ${HTTPS_PROXY:-http://host.docker.internal:1087}
+      HTTP_PROXY: ${HTTP_PROXY:-http://host.docker.internal:1087}
+      ALL_PROXY: ${ALL_PROXY:-socks5://host.docker.internal:1086}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db}
+      RUNTIME_FORCED_MODEL: ${RUNTIME_FORCED_MODEL:-gpt-5.4}
+      RUNTIME_DISABLED_MODELS: ${RUNTIME_DISABLED_MODELS:-}
+      PROJECT_STAGE_STITCH_TIMEOUT_MS: ${PROJECT_STAGE_STITCH_TIMEOUT_MS:-180000}
     ports:
       - "8787:10000"
     volumes:

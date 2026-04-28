@@ -1314,6 +1314,7 @@ export async function syncTaskGitLabHarness(input: {
     status: task.status,
     description: task.description,
     syncPolicy: task.syncPolicy,
+    assignee: task.assignee,
     ownerAgentId: task.ownerAgentId,
     reviewAgentId: task.reviewAgentId,
     projectPendingApproval: task.project.pendingApproval,

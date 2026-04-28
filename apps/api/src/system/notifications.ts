@@ -35,7 +35,7 @@ const liveCandidateCache = new Map<"zh-CN" | "en-US", CandidateCacheBucket>();
 
 export async function listNotificationInbox(
   locale: "zh-CN" | "en-US" = "zh-CN",
-  options?: { page?: number; pageSize?: number }
+  options?: { page?: number; pageSize?: number; summary?: boolean; summaryMaxLength?: number }
 ): Promise<NotificationInboxItem[]> {
   const page = Number.isFinite(Number(options?.page))
     ? Math.max(1, Math.floor(Number(options?.page)))
@@ -44,6 +44,8 @@ export async function listNotificationInbox(
     ? Math.max(1, Math.min(100, Math.floor(Number(options?.pageSize))))
     : 20;
   const offset = (page - 1) * pageSize;
+  const summary = options?.summary !== false;
+  const summaryMaxLength = Math.max(40, Math.floor(Number(options?.summaryMaxLength ?? 200)));
   const candidates = await getCachedLiveNotificationCandidates(locale);
   const candidateKeys = candidates.map((item) => item.sourceKey);
   const states = await withTimeoutFallback(
@@ -64,6 +66,7 @@ export async function listNotificationInbox(
   return candidates
     .map((item) => {
       const state = stateByKey.get(item.sourceKey);
+      const detail = String(item.detail || "");
       return {
         id: state?.id ?? item.sourceKey,
         sourceKey: item.sourceKey,
@@ -71,7 +74,9 @@ export async function listNotificationInbox(
         severity: item.severity,
         category: item.category,
         title: item.title,
-        detail: item.detail,
+        detail: summary && detail.length > summaryMaxLength
+          ? `${detail.slice(0, summaryMaxLength)}...`
+          : detail,
         actionLabel: item.actionLabel,
         to: item.to,
         timestamp: item.timestamp,

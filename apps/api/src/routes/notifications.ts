@@ -7,6 +7,11 @@ import {
   listNotificationInbox,
   updateNotificationInboxState
 } from "../system/notifications.js";
+const NOTIFICATION_TOTAL_CACHE_TTL_MS = Math.max(
+  3_000,
+  Number(process.env.NOTIFICATION_TOTAL_CACHE_TTL_MS ?? 20_000)
+);
+const notificationTotalCache = new Map<"zh-CN" | "en-US", { value: number; expiresAt: number }>();
 
 interface CreateNotificationsRouterOptions {
   asyncRoute: (
@@ -37,11 +42,22 @@ export function createNotificationsRouter(options: CreateNotificationsRouterOpti
     const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
     const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
     const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
-    const total = await getNotificationInboxCandidateTotal(locale);
+    const now = Date.now();
+    const cached = notificationTotalCache.get(locale);
+    const total = cached && cached.expiresAt > now
+      ? cached.value
+      : await getNotificationInboxCandidateTotal(locale);
+    if (!cached || cached.expiresAt <= now) {
+      notificationTotalCache.set(locale, {
+        value: total,
+        expiresAt: now + NOTIFICATION_TOTAL_CACHE_TTL_MS
+      });
+    }
     res.setHeader("X-Page", String(page));
     res.setHeader("X-Page-Size", String(pageSize));
     res.setHeader("X-Total-Count", String(total));
-    res.json(await listNotificationInbox(locale, { page, pageSize }));
+    const summary = String(req.query.summary ?? "true").trim().toLowerCase() !== "false";
+    res.json(await listNotificationInbox(locale, { page, pageSize, summary }));
   }));
 
   router.patch("/notifications/:sourceKey", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {

@@ -688,7 +688,7 @@ export function buildRequirementRefinement(rawInput: string): RequirementRefinem
     outOfScopeDraft,
     acceptanceDraft: [
       "关键需求点被结构化确认",
-      "设计阶段必须提交并通过设计审查卡",
+      "设计阶段必须提交并通过设计输出审查包",
       "项目创建后可直接下发执行"
     ]
   };
@@ -1027,7 +1027,7 @@ const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedAr
     },
     {
       id: "artifact-schedule",
-      name: "项目排期",
+      name: "阶段推进计划",
       description: "里程碑、负责人、依赖与风险缓冲的执行排期。",
       stageType: "ANALYSIS",
       ownerRoleId: "ROLE_PM"
@@ -1041,14 +1041,14 @@ const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedAr
     },
     {
       id: "artifact-design-review",
-      name: "设计审查卡",
+      name: "设计输出审查包",
       description: "视觉方向、品牌语气、UX 原则、可访问性清单与审查结论。",
       stageType: "DESIGN",
       ownerRoleId: "ROLE_DESIGN"
     },
     {
       id: "artifact-visual-preview",
-      name: "视觉定稿单页",
+      name: "视觉方案定稿包",
       description: "可供业务确认和研发实现的静态图或 HTML 单页设计预览。",
       stageType: "DESIGN",
       ownerRoleId: "ROLE_DESIGN"
@@ -1099,7 +1099,7 @@ const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedAr
     },
     {
       id: "artifact-schedule",
-      name: "阶段排期与里程碑",
+      name: "阶段退出标准与责任分配",
       description: "当前阶段的里程碑、负责人与风险缓冲计划。",
       stageType: "ANALYSIS",
       ownerRoleId: "ROLE_PM"
@@ -1122,14 +1122,14 @@ const ISSUE_TEMPLATE_ARTIFACTS: Record<IssueWorkflowTemplateKey, IssueExpectedAr
     },
     {
       id: "artifact-design-review",
-      name: "设计审查卡",
+      name: "设计输出审查包",
       description: "视觉方向、信息层级、可访问性检查与审查结论。",
       stageType: "DESIGN",
       ownerRoleId: "ROLE_DESIGN"
     },
     {
       id: "artifact-visual-preview",
-      name: "视觉定稿单页",
+      name: "视觉方案定稿包",
       description: "可直接用于评审与交接的静态图或 HTML 单页设计稿。",
       stageType: "DESIGN",
       ownerRoleId: "ROLE_DESIGN"
@@ -1207,19 +1207,19 @@ const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
     {
       roleId: "ROLE_PRODUCT",
       title: "PRD 输出与需求设计",
-      input: "需求分析文档 + 项目排期",
+      input: "需求分析文档 + 阶段推进计划",
       output: "产品需求文档(PRD)、功能优先级与验收口径"
     },
     {
       roleId: "ROLE_DESIGN",
       title: "视觉与交互方案审查",
       input: "产品需求文档(PRD)",
-      output: "设计审查卡、视觉定稿单页"
+      output: "设计输出审查包、视觉方案定稿包"
     },
     {
       roleId: "ROLE_ARCH",
       title: "技术方案与契约设计",
-      input: "需求确认单 + 设计审查卡",
+      input: "需求确认单 + 设计输出审查包",
       output: "技术方案、接口与数据契约"
     },
     {
@@ -1244,9 +1244,9 @@ const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
     },
     {
       roleId: "ROLE_PM",
-      title: "需求确认与阶段排期",
+      title: "需求确认与阶段推进计划",
       input: "需求分析文档",
-      output: "需求确认单、阶段排期与交接条件"
+      output: "需求确认单、阶段推进计划与交接条件"
     },
     {
       roleId: "ROLE_PRODUCT",
@@ -1278,7 +1278,7 @@ const ISSUE_TEMPLATE_WORKFLOW_STEPS: Record<IssueWorkflowTemplateKey, Array<{
       roleId: "ROLE_DESIGN",
       title: "交互细节与设计定稿",
       input: "视觉框架与交互草案",
-      output: "设计审查卡、视觉定稿单页"
+      output: "设计输出审查包、视觉方案定稿包"
     }
   ],
   tech_design: [
@@ -1702,7 +1702,7 @@ export function buildSuggestedAnswers(input: {
     : `必须交付：${input.refinement.inScopeDraft.slice(0, 2).join("；")}。不做：${input.refinement.outOfScopeDraft.slice(0, 2).join("；")}。`;
   const acceptanceSuggestion = industryDraft?.acceptance
     ? `${industryDraft.acceptance} 建议补充：${input.refinement.acceptanceDraft.slice(0, 2).join("；")}。`
-    : `验收标准：${input.refinement.acceptanceDraft.join("；")}；并完成需求分析、项目排期、设计审查、研发实现说明、运行说明与测试报告。`;
+    : `验收标准：${input.refinement.acceptanceDraft.join("；")}；并完成需求分析、阶段推进计划、设计审查、研发实现说明、运行说明与测试报告。`;
 
   const byId: Record<string, IssueSuggestedAnswer> = {
     goal: {

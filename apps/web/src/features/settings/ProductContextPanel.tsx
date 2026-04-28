@@ -108,7 +108,15 @@ export default function ProductContextPanel({ addToast }: Props) {
   const loadContext = useCallback(async (signal?: { cancelled: boolean }) => {
     setLoading(true);
     try {
-      const context = await productContextApi.get();
+      const context = await productContextApi.get({
+        summary: true,
+        includeHistory: false,
+      });
+      const historyRes = await productContextApi.listHistory({
+        page: 1,
+        pageSize: 100,
+        summary: true,
+      });
       if (signal?.cancelled) {
         return;
       }
@@ -127,7 +135,7 @@ export default function ProductContextPanel({ addToast }: Props) {
         requiredKeywords: toMultiline(context.requiredKeywords),
       });
       setHistory(
-        (context.requirementHistory || []).map((item) => ({
+        (historyRes.items || []).map((item) => ({
           id: item.id,
           title: item.title,
           status: item.status,

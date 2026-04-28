@@ -363,6 +363,7 @@ export async function createDelegation(taskId: string, requestedByAgentId: strin
       status: task.status,
       description: task.description,
       syncPolicy: task.syncPolicy,
+      assignee: task.assignee,
       ownerAgentId: task.ownerAgentId,
       reviewAgentId: task.reviewAgentId,
       dependencies: task.dependencies
@@ -557,6 +558,7 @@ export async function dispatchDelegation(delegationId: string) {
     status: delegation.task.status,
     description: delegation.task.description,
     syncPolicy: delegation.task.syncPolicy,
+    assignee: delegation.task.assignee,
     ownerAgentId: delegation.task.ownerAgentId,
     reviewAgentId: delegation.task.reviewAgentId,
     projectPendingApproval: delegation.task.project.pendingApproval,

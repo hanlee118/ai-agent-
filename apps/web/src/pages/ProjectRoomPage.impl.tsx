@@ -200,6 +200,23 @@ const PREP_DISCUSSION_AGENT_ORDER = [
   'ROLE_QA',
   'ROLE_PM',
 ];
+const PREP_SECTION_ID_BY_STEP: Record<string, string> = {
+  discussion: 'prep-discussion-section',
+  analysis: 'prep-analysis-section',
+  backfill: 'prep-backfill-section',
+  feedback: 'prep-feedback-section',
+  confirm: 'prep-confirm-section',
+};
+const PREP_SECTION_ID_BY_MISSING_ITEM: Array<{ keyword: string; sectionId: string }> = [
+  { keyword: '用户反馈', sectionId: 'prep-feedback-section' },
+  { keyword: '修订记录', sectionId: 'prep-feedback-section' },
+  { keyword: '用户确认', sectionId: 'prep-confirm-section' },
+  { keyword: '确认预备', sectionId: 'prep-confirm-section' },
+  { keyword: '多Agent讨论', sectionId: 'prep-discussion-section' },
+  { keyword: '讨论结论', sectionId: 'prep-discussion-section' },
+  { keyword: '需求理解', sectionId: 'prep-analysis-section' },
+  { keyword: '核心输入', sectionId: 'prep-backfill-section' },
+];
 
 const createDefaultDesignReviewForm = (): ProjectRoomDesignReviewForm => ({
   visualDirection: '',
@@ -475,6 +492,7 @@ const buildDesignReviewPrefill = (input: {
   }
 
   const visualDirection = pickLine(source, [
+    /(?:设计主题|设计方向)[:：]\s*([^\n]+)/i,
     /(?:视觉方向|视觉风格|视觉主题)[:：]\s*([^\n]+)/i,
     /##\s*视觉方案[\s\S]*?-\s*([^\n]+)/i,
   ]) || '请围绕业务主链路确认视觉方向';
@@ -485,10 +503,12 @@ const buildDesignReviewPrefill = (input: {
   ]) || '专业、直接、可执行';
 
   const layoutStrategy = pickLine(source, [
+    /(?:核心场景|主路径|用户旅程)[:：]\s*([^\n]+)/i,
     /(?:版式策略|布局策略|信息架构)[:：]\s*([^\n]+)/i,
   ]) || extractSectionBullets(source, '版式策略').slice(0, 4).join('；') || '首屏价值主张 -> 核心流程 -> 执行证据 -> CTA';
 
   const componentSpecs = pickLine(source, [
+    /(?:In Scope|范围内|功能需求)[:：]\s*([^\n]+)/i,
     /(?:组件规范|组件清单|模块清单)[:：]\s*([^\n]+)/i,
   ]) || extractSectionBullets(source, '组件清单').slice(0, 6).join('；') || 'Hero、能力卡、流程步骤、证据卡、CTA';
 
@@ -522,6 +542,26 @@ const buildDesignReviewPrefill = (input: {
     notes,
     approved: true,
   };
+};
+
+const DESIGN_REVIEW_INPUT_NAME_HINTS = [
+  'prd',
+  'rawrequirements',
+  'debatesummary',
+  'prepdiscussiontrace',
+  'analysis',
+];
+
+const collectDesignReviewProjectInputSource = (projectInputs: ProjectDetailResponse['projectInputs'] | undefined) => {
+  const inputs = Array.isArray(projectInputs) ? projectInputs : [];
+  return inputs
+    .filter((item) => {
+      const name = String(item?.name || '').trim().toLowerCase();
+      return DESIGN_REVIEW_INPUT_NAME_HINTS.some((hint) => name.includes(hint));
+    })
+    .map((item) => String(item?.content || '').trim())
+    .filter(Boolean)
+    .join('\n\n');
 };
 
 const ROLE_LABELS: Record<string, string> = {
@@ -1066,6 +1106,7 @@ const ProjectRoom = ({
   const completedProjectAutoTabRef = useRef<string | null>(null);
   const lastConnectedLogAtRef = useRef<number>(0);
   const projectRefreshTimerRef = useRef<number | null>(null);
+  const lastProjectRefreshAtRef = useRef<number>(0);
   const [previewDeliverable, setPreviewDeliverable] = useState<ProjectDeliverable | null>(null);
   const [requiredActionLoadingId, setRequiredActionLoadingId] = useState<string | null>(null);
   const [prepDraftDiscussion, setPrepDraftDiscussion] = useState('');
@@ -2147,15 +2188,20 @@ const ProjectRoom = ({
 
   const scheduleProjectRefresh = useCallback(() => {
     if (projectRefreshTimerRef.current !== null) {
-      window.clearTimeout(projectRefreshTimerRef.current);
+      return;
     }
+    const now = Date.now();
+    const elapsed = now - lastProjectRefreshAtRef.current;
+    const minGapMs = 2200;
+    const delay = elapsed >= minGapMs ? 280 : Math.max(280, minGapMs - elapsed);
+
     projectRefreshTimerRef.current = window.setTimeout(() => {
       projectRefreshTimerRef.current = null;
+      lastProjectRefreshAtRef.current = Date.now();
       void loadProjectDetail();
       void loadWorkflowOverview();
-      void onRefreshData?.();
-    }, 300);
-  }, [loadProjectDetail, loadWorkflowOverview, onRefreshData]);
+    }, delay);
+  }, [loadProjectDetail, loadWorkflowOverview]);
 
   const handleProjectRoomSseEvent = useCallback((event: MessageEvent) => {
     const eventType = event.type || 'message';
@@ -2871,7 +2917,7 @@ const ProjectRoom = ({
     }
     setIsLoadingExecutions(true);
     try {
-      const report = await projectsApi.getExecutions(effectiveProjectId, 120);
+      const report = await projectsApi.getExecutions(effectiveProjectId, 40);
       setExecutionRecords(report.executions || []);
     } catch (error) {
       setExecutionRecords([]);
@@ -2901,7 +2947,7 @@ const ProjectRoom = ({
   }, [loadFinalArtifacts]);
 
   useEffect(() => {
-    if (!effectiveProjectId || !finalArtifactsRunning) {
+    if (!effectiveProjectId || !finalArtifactsRunning || isDesignReviewOpen) {
       return undefined;
     }
     const timer = window.setInterval(() => {
@@ -2910,7 +2956,7 @@ const ProjectRoom = ({
     return () => {
       window.clearInterval(timer);
     };
-  }, [effectiveProjectId, finalArtifactsGeneration?.jobId, finalArtifactsRunning, loadFinalArtifacts]);
+  }, [effectiveProjectId, finalArtifactsGeneration?.jobId, finalArtifactsRunning, isDesignReviewOpen, loadFinalArtifacts]);
 
   useEffect(() => {
     if (!effectiveProjectId || !detail || detail.status !== 'completed') {
@@ -3143,6 +3189,12 @@ const ProjectRoom = ({
     const rawUrl = String(artifact.url || '').trim();
 
     const isLocalHost = (host: string) => host === '127.0.0.1' || host === 'localhost' || host === '0.0.0.0';
+    const isArtifactPath = (pathname: string) => {
+      const normalized = String(pathname || '').trim().toLowerCase();
+      return normalized.startsWith('/generated/')
+        || normalized.endsWith('.html')
+        || /\/design-preview(?:[?#].*)?$/.test(normalized);
+    };
     const normalizeGeneratedPath = (input: string) => {
       const value = String(input || '').trim();
       if (!value) {
@@ -3161,11 +3213,11 @@ const ProjectRoom = ({
       if (/^https?:\/\//i.test(rawUrl)) {
         try {
           const parsed = new URL(rawUrl);
-          if (isLocalHost(parsed.hostname)) {
+          if (isLocalHost(parsed.hostname) && isArtifactPath(parsed.pathname)) {
             if (!localUrl) {
               localUrl = parsed.toString();
             }
-          } else if (!publicUrl) {
+          } else if (!publicUrl && isArtifactPath(parsed.pathname)) {
             publicUrl = parsed.toString();
           }
           const generatedPath = normalizeGeneratedPath(parsed.pathname);
@@ -3194,6 +3246,22 @@ const ProjectRoom = ({
     }
 
     return { localUrl, publicUrl };
+  };
+
+  const shouldShowAccessForArtifact = (artifact: FinalArtifactItem) => artifact.key === 'runtime_delivery';
+  const cleanExcerptForArtifact = (artifact: FinalArtifactItem) => {
+    const raw = String(artifact.excerpt || '');
+    if (!raw) {
+      return raw;
+    }
+    if (shouldShowAccessForArtifact(artifact)) {
+      return raw;
+    }
+    return raw
+      .split('\n')
+      .filter((line) => !/^\s*(本地地址|外网地址)\s*[:：]/.test(line.trim()))
+      .join('\n')
+      .trim();
   };
 
   const handleOpenFinalArtifact = (artifact: FinalArtifactItem) => {
@@ -3568,7 +3636,19 @@ const ProjectRoom = ({
       if (!isDesignReviewFormBlank(prev)) {
         return prev;
       }
+      const projectInputSource = collectDesignReviewProjectInputSource(detail?.projectInputs);
+      const analysisSource = [
+        prepDraftAnalysis,
+        prepDraftPrd,
+        prepDraftRawRequirements,
+        prepDraftDebateSummary,
+      ]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .join('\n\n');
       const source = [
+        projectInputSource,
+        analysisSource,
         action?.prefillContent,
         latestDesignExecution?.outputPreview,
         latestDesignExecution?.promptSummary,
@@ -3584,7 +3664,14 @@ const ProjectRoom = ({
       return prefilled || prev;
     });
     setIsDesignReviewOpen(true);
-  }, [latestDesignExecution]);
+  }, [
+    detail?.projectInputs,
+    latestDesignExecution,
+    prepDraftAnalysis,
+    prepDraftDebateSummary,
+    prepDraftPrd,
+    prepDraftRawRequirements,
+  ]);
 
   const handleSubmitDesignReview = async () => {
     if (!project.id) {
@@ -3613,6 +3700,23 @@ const ProjectRoom = ({
 
     setIsSubmittingDesignReview(true);
     try {
+      const responsiveRules = [
+        'Desktop >= 1280: 三栏信息布局，主 CTA 固定在首屏可见区',
+        'Tablet 768-1279: 双栏布局，关键决策信息前置',
+        'Mobile < 768: 单栏堆叠，主路径不超过 3 次滚动',
+      ];
+      const stateMatrixRows = [
+        '| 组件 | 默认 | 悬停 | 禁用 | 错误 | 加载 |',
+        '| --- | --- | --- | --- | --- | --- |',
+        '| 主按钮 CTA | 品牌主色实底 + 高对比文字 | 提亮 + 阴影反馈 | 降低透明度并禁止点击 | 错误提示色 + 辅助文案 | 骨架/Spinner 并锁定重复提交 |',
+        '| 输入框/筛选器 | 边框中性 + 占位提示 | 边框高亮 + 焦点环 | 灰态 + 不可编辑 | 红色边框 + 错误说明 | 保留输入并展示加载态 |',
+        '| 卡片/列表项 | 标准间距与层级 | 轻微抬升 + 高亮边框 | 信息弱化且不可交互 | 展示异常标签 + 重试入口 | 骨架占位 + 防抖刷新 |',
+      ];
+      const remediationItems = [
+        '补齐关键页面空态/错态文案与交互回路',
+        '确保 Token 命名与实现层变量一一映射',
+        '补充移动端主路径可达性回归截图',
+      ];
       const reviewChecklist = [
         '设计说明可支撑开发实施，不依赖口头解释。',
         '无障碍检查项至少 3 条并可验证。',
@@ -3624,23 +3728,38 @@ const ProjectRoom = ({
         content: [
           '# 设计阶段交付',
           '',
-          '## 视觉方案',
-          `- ${designReviewForm.visualDirection.trim()}`,
+          '## 设计目标与约束映射',
+          `- 设计目标: ${designReviewForm.visualDirection.trim()}`,
+          `- 业务约束: ${designReviewForm.brandTone.trim()}`,
+          `- 输入边界: ${designReviewForm.notes.trim() || '基于 PRD/In-Out 边界执行，不扩展范围'}`,
           '',
-          '## 版式策略',
+          '## 用户主路径与交互决策',
           `- ${designReviewForm.layoutStrategy.trim()}`,
-          '',
-          '## 组件清单',
-          `- ${designReviewForm.componentSpecs.trim()}`,
-          '',
-          '## 品牌语气',
-          `- ${designReviewForm.brandTone.trim()}`,
-          '',
-          '## UX 原则',
           ...uxPrinciples.map((item) => `- ${item}`),
           '',
-          '## 可访问性检查',
+          '## 设计 Token 映射（色彩 / 字体 / 间距）',
+          `- ${designReviewForm.brandTone.trim()}`,
+          `- ${designReviewForm.componentSpecs.trim()}`,
+          '',
+          '## 状态反馈矩阵（默认 / 悬停 / 禁用 / 错误）',
+          ...stateMatrixRows,
+          '',
+          '## 响应式断点策略',
+          ...responsiveRules.map((item) => `- ${item}`),
+          '',
+          '## 可访问性检查结果（WCAG）',
           ...accessibilityChecklist.map((item) => `- ${item}`),
+          '',
+          '## 可实现性与交接边界',
+          '- 组件拆分与接口契约已可支撑开发实现，避免口头补充。',
+          '- 主链路状态反馈与异常态已定义，前后端协作可直接落地。',
+          '- 设计变更需通过变更记录与阶段门禁同步。',
+          '',
+          '## 审查结论与整改项',
+          `- 审查结论: ${designReviewForm.approved ? '通过' : '不通过'}`,
+          `- 审查人: ${designReviewForm.approvedBy.trim()}`,
+          `- ${designReviewForm.componentSpecs.trim()}`,
+          ...remediationItems.map((item) => `- ${item}`),
           '',
           '## 验收检查清单',
           ...reviewChecklist.map((item) => `- ${item}`),
@@ -3680,9 +3799,9 @@ const ProjectRoom = ({
 
   const designReviewTips = [
     '当设计 Agent 识别到需求不清晰/无法继续时，系统会自动预填该表单',
-    '视觉方向必须明确（品牌气质 + 主色氛围）',
-    '版式策略必须说明首屏到 CTA 的叙事顺序',
-    '组件规范至少列出 Hero/能力卡/流程/案例/CTA',
+    '设计提交将按 AI-Native 审查模板校验（目标/主路径/Token/状态矩阵/断点/WCAG）',
+    '必须给出可实现证据（交接边界、状态反馈、异常态），不能只写审美描述',
+    '响应式断点与状态矩阵会作为开发阶段强约束继续校验',
     '无障碍清单至少包含对比度、键盘可达、语义结构',
   ];
 
@@ -4040,6 +4159,27 @@ const ProjectRoom = ({
     ['feedback', prepDraftFeedback, postCreatePrep?.draft?.feedback],
     ['confirmationNotes', prepConfirmNotes, postCreatePrep?.draft?.confirmationNotes],
   ].some(([, localValue, remoteValue]) => String(localValue || '').trim() !== String(remoteValue || '').trim());
+  const scrollToPrepSection = useCallback((sectionId: string) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+  const resolvePrepSectionByMissingItem = useCallback((missingItem: string) => {
+    const normalized = String(missingItem || '').trim();
+    if (!normalized) {
+      return '';
+    }
+    const matched = PREP_SECTION_ID_BY_MISSING_ITEM.find((item) => normalized.includes(item.keyword));
+    return matched?.sectionId || '';
+  }, []);
+  const prepFeedbackLines = useMemo(
+    () => String(prepDraftFeedback || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean),
+    [prepDraftFeedback],
+  );
 
   if (isPostCreatePrepBlocked) {
     return (
@@ -4090,8 +4230,26 @@ const ProjectRoom = ({
                   {prepStepCards.map((step, index) => (
                     <div
                       key={step.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => {
+                        const sectionId = PREP_SECTION_ID_BY_STEP[step.id];
+                        if (sectionId) {
+                          scrollToPrepSection(sectionId);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== 'Enter' && event.key !== ' ') {
+                          return;
+                        }
+                        event.preventDefault();
+                        const sectionId = PREP_SECTION_ID_BY_STEP[step.id];
+                        if (sectionId) {
+                          scrollToPrepSection(sectionId);
+                        }
+                      }}
                       className={cn(
-                        'rounded-2xl border px-4 py-3 space-y-1',
+                        'rounded-2xl border px-4 py-3 space-y-1 cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/40',
                         step.done ? 'border-emerald-300/40 bg-emerald-500/10' : 'border-border-subtle bg-white/5',
                       )}
                     >
@@ -4108,44 +4266,35 @@ const ProjectRoom = ({
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        if (typeof window !== 'undefined') {
-                          document.getElementById('prep-discussion-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }
-                      }}
+                      onClick={() => scrollToPrepSection('prep-discussion-section')}
                       className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
                     >
                       跳转: 多Agent讨论
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (typeof window !== 'undefined') {
-                          document.getElementById('prep-analysis-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }
-                      }}
+                      onClick={() => scrollToPrepSection('prep-analysis-section')}
                       className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
                     >
                       跳转: 需求草案
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (typeof window !== 'undefined') {
-                          document.getElementById('prep-backfill-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }
-                      }}
+                      onClick={() => scrollToPrepSection('prep-backfill-section')}
                       className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
                     >
                       跳转: 输入回填
                     </button>
                     <button
                       type="button"
-                      onClick={() => {
-                        if (typeof window !== 'undefined') {
-                          document.getElementById('prep-confirm-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-                        }
-                      }}
+                      onClick={() => scrollToPrepSection('prep-feedback-section')}
+                      className="inline-flex min-h-8 items-center justify-center rounded-lg bg-warning/10 px-3 py-1.5 text-[11px] text-warning hover:bg-warning/20"
+                    >
+                      跳转: 用户反馈修订
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => scrollToPrepSection('prep-confirm-section')}
                       className="inline-flex min-h-8 items-center justify-center rounded-lg bg-white/5 px-3 py-1.5 text-[11px] text-slate-200 hover:bg-white/10"
                     >
                       跳转: 用户确认
@@ -4301,7 +4450,18 @@ const ProjectRoom = ({
                       <p className="text-xs text-slate-300">当前缺失项</p>
                       {(postCreatePrep?.missingItems || []).length > 0 ? (
                         (postCreatePrep?.missingItems || []).map((item) => (
-                          <p key={item} className="text-[11px] text-warning">未完成 · {item}</p>
+                          <div key={item} className="flex items-center justify-between gap-2 rounded-lg border border-warning/20 bg-warning/5 px-2 py-1.5">
+                            <p className="text-[11px] text-warning">未完成 · {item}</p>
+                            {resolvePrepSectionByMissingItem(item) ? (
+                              <button
+                                type="button"
+                                onClick={() => scrollToPrepSection(resolvePrepSectionByMissingItem(item))}
+                                className="inline-flex min-h-7 items-center justify-center rounded-md border border-warning/40 bg-warning/10 px-2 py-1 text-[10px] font-semibold text-warning hover:bg-warning/20"
+                              >
+                                去填写
+                              </button>
+                            ) : null}
+                          </div>
                         ))
                       ) : (
                         <p className="text-[11px] text-slate-400">缺失项同步中，建议先执行一次“进行讨论”。</p>
@@ -4394,14 +4554,47 @@ const ProjectRoom = ({
                         className="min-h-24 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
                       />
                     </div>
-                    <div className="space-y-2">
-                      <p className="text-[11px] text-slate-400">用户反馈（用于再次触发 Agent 修订）</p>
+                    <div id="prep-feedback-section" className="space-y-2 rounded-xl border border-warning/30 bg-warning/5 p-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-[11px] font-semibold text-warning">用户反馈与修订记录（必填）</p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => void handleSavePostCreatePrepDraft()}
+                            disabled={isSavingPrepDraft}
+                            className="inline-flex min-h-8 items-center justify-center rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-[10px] font-semibold text-slate-200 hover:bg-white/20 disabled:opacity-60"
+                          >
+                            {isSavingPrepDraft ? '保存中...' : '保存反馈'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void executePostCreatePrepRun('manual_button', { includeDraft: true })}
+                            disabled={isRunningPrepDebate || !hasPrepDraftChanges || (postCreatePrepRequiredAction ? requiredActionLoadingId === postCreatePrepRequiredAction.id : false)}
+                            className="inline-flex min-h-8 items-center justify-center rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1 text-[10px] font-semibold text-warning hover:bg-warning/20 disabled:opacity-60"
+                          >
+                            反馈后继续讨论
+                          </button>
+                        </div>
+                      </div>
+                      <p className="text-[11px] text-slate-300">
+                        你可以在这里写“要修改什么、为什么、验收标准是什么”，保存后点击“反馈后继续讨论”让 Agent 按反馈重新产出。
+                      </p>
                       <textarea
                         value={prepDraftFeedback}
                         onChange={(event) => setPrepDraftFeedback(event.target.value)}
-                        placeholder="请写明你希望 Agent 修改/补充的点，例如：补全目标边界、调整排期、收敛风险..."
+                        placeholder="示例：1) 补全目标边界；2) 排期增加缓冲；3) 明确验收指标（性能<2s）。"
                         className="min-h-20 w-full rounded-xl border border-border-subtle bg-surface-muted px-3 py-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-primary/40 resize-y"
                       />
+                      <div className="rounded-lg border border-border-subtle bg-surface-muted/70 p-2 space-y-1">
+                        <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-400">修订记录预览</p>
+                        {prepFeedbackLines.length > 0 ? (
+                          prepFeedbackLines.slice(0, 8).map((line, index) => (
+                            <p key={`feedback-line-${index}`} className="text-[11px] text-slate-300">- {line}</p>
+                          ))
+                        ) : (
+                          <p className="text-[11px] text-slate-500">暂无反馈记录，请至少填写一条可执行修改意见。</p>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -4734,14 +4927,7 @@ const ProjectRoom = ({
                 ) : (
                   <Badge variant="default">暂无</Badge>
                 )}
-                <button
-                  type="button"
-                  onClick={() => void handleGenerateFinalArtifacts(finalArtifactsGeneration?.status === 'failed')}
-                  disabled={isTriggeringFinalArtifacts || finalArtifactsRunning}
-                  className="px-2.5 py-1 rounded-md bg-primary/15 border border-primary/30 text-[11px] text-primary hover:bg-primary/25 disabled:opacity-60"
-                >
-                  {isTriggeringFinalArtifacts ? '启动中...' : finalArtifactsRunning ? '生成中...' : '生成最终成果'}
-                </button>
+                {/* 地址生成改为按交付物手动触发，仅在运行地址交付物中展示按钮 */}
               </div>
             </div>
 
@@ -4784,8 +4970,8 @@ const ProjectRoom = ({
                       <p className="text-[11px] text-slate-500">
                         生成模型: {getArtifactModelLabel(artifact)}
                       </p>
-                      <p className="text-[11px] text-slate-400 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
-                      {(() => {
+                      <p className="text-[11px] text-slate-400 whitespace-pre-wrap break-words">{cleanExcerptForArtifact(artifact) || '暂无摘要'}</p>
+                      {shouldShowAccessForArtifact(artifact) ? (() => {
                         const access = resolveArtifactAccessUrls(artifact);
                         return (
                           <div className="text-[11px] text-slate-400 space-y-1">
@@ -4811,7 +4997,7 @@ const ProjectRoom = ({
                             </p>
                           </div>
                         );
-                      })()}
+                      })() : null}
                       {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
                       <div className="flex flex-wrap items-center gap-2">
                         <button
@@ -4826,31 +5012,43 @@ const ProjectRoom = ({
                               ? '打开链接'
                               : '查看内容'}
                         </button>
-                        {(() => {
-                          const access = resolveArtifactAccessUrls(artifact);
-                          return (
-                            <>
-                              {access.localUrl ? (
-                                <button
-                                  type="button"
-                                  onClick={() => window.open(resolveArtifactUrl(access.localUrl), '_blank', 'noopener,noreferrer')}
-                                  className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
-                                >
-                                  打开本地地址
-                                </button>
-                              ) : null}
-                              {access.publicUrl ? (
-                                <button
-                                  type="button"
-                                  onClick={() => window.open(resolveArtifactUrl(access.publicUrl), '_blank', 'noopener,noreferrer')}
-                                  className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
-                                >
-                                  打开外网地址
-                                </button>
-                              ) : null}
-                            </>
-                          );
-                        })()}
+                        {shouldShowAccessForArtifact(artifact) ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => void handleGenerateFinalArtifacts(finalArtifactsGeneration?.status === 'failed')}
+                              disabled={isTriggeringFinalArtifacts || finalArtifactsRunning}
+                              className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10 disabled:opacity-60"
+                            >
+                              {isTriggeringFinalArtifacts ? '生成中...' : '生成访问地址'}
+                            </button>
+                            {(() => {
+                              const access = resolveArtifactAccessUrls(artifact);
+                              return (
+                                <>
+                                  {access.localUrl ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => window.open(resolveArtifactUrl(access.localUrl), '_blank', 'noopener,noreferrer')}
+                                      className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                    >
+                                      打开本地地址
+                                    </button>
+                                  ) : null}
+                                  {access.publicUrl ? (
+                                    <button
+                                      type="button"
+                                      onClick={() => window.open(resolveArtifactUrl(access.publicUrl), '_blank', 'noopener,noreferrer')}
+                                      className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                    >
+                                      打开外网地址
+                                    </button>
+                                  ) : null}
+                                </>
+                              );
+                            })()}
+                          </>
+                        ) : null}
                         {artifact.content ? (
                           <button
                             type="button"
@@ -6104,8 +6302,8 @@ const ProjectRoom = ({
                           <p className="text-[11px] text-slate-500">
                             生成模型: {getArtifactModelLabel(artifact)}
                           </p>
-                          <p className="text-xs text-slate-300 whitespace-pre-wrap break-words">{artifact.excerpt || '暂无摘要'}</p>
-                          {(() => {
+                          <p className="text-xs text-slate-300 whitespace-pre-wrap break-words">{cleanExcerptForArtifact(artifact) || '暂无摘要'}</p>
+                          {shouldShowAccessForArtifact(artifact) ? (() => {
                             const access = resolveArtifactAccessUrls(artifact);
                             return (
                               <div className="text-[11px] text-slate-400 space-y-1">
@@ -6131,7 +6329,7 @@ const ProjectRoom = ({
                                 </p>
                               </div>
                             );
-                          })()}
+                          })() : null}
                           {artifact.issue ? <p className="text-[11px] text-warning">{artifact.issue}</p> : null}
                           <div className="flex flex-wrap items-center gap-2 pt-1">
                             <button
@@ -6146,31 +6344,43 @@ const ProjectRoom = ({
                                   ? '打开链接'
                                   : '查看内容'}
                             </button>
-                            {(() => {
-                              const access = resolveArtifactAccessUrls(artifact);
-                              return (
-                                <>
-                                  {access.localUrl ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => window.open(resolveArtifactUrl(access.localUrl), '_blank', 'noopener,noreferrer')}
-                                      className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
-                                    >
-                                      打开本地地址
-                                    </button>
-                                  ) : null}
-                                  {access.publicUrl ? (
-                                    <button
-                                      type="button"
-                                      onClick={() => window.open(resolveArtifactUrl(access.publicUrl), '_blank', 'noopener,noreferrer')}
-                                      className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
-                                    >
-                                      打开外网地址
-                                    </button>
-                                  ) : null}
-                                </>
-                              );
-                            })()}
+                            {shouldShowAccessForArtifact(artifact) ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleGenerateFinalArtifacts(finalArtifactsGeneration?.status === 'failed')}
+                                  disabled={isTriggeringFinalArtifacts || finalArtifactsRunning}
+                                  className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10 disabled:opacity-60"
+                                >
+                                  {isTriggeringFinalArtifacts ? '生成中...' : '生成访问地址'}
+                                </button>
+                                {(() => {
+                                  const access = resolveArtifactAccessUrls(artifact);
+                                  return (
+                                    <>
+                                      {access.localUrl ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => window.open(resolveArtifactUrl(access.localUrl), '_blank', 'noopener,noreferrer')}
+                                          className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                        >
+                                          打开本地地址
+                                        </button>
+                                      ) : null}
+                                      {access.publicUrl ? (
+                                        <button
+                                          type="button"
+                                          onClick={() => window.open(resolveArtifactUrl(access.publicUrl), '_blank', 'noopener,noreferrer')}
+                                          className="px-2.5 py-1 rounded-md bg-white/5 border border-border-subtle text-[11px] text-slate-300 hover:bg-white/10"
+                                        >
+                                          打开外网地址
+                                        </button>
+                                      ) : null}
+                                    </>
+                                  );
+                                })()}
+                              </>
+                            ) : null}
                             {artifact.content ? (
                               <button
                                 type="button"

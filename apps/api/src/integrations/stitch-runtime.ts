@@ -588,7 +588,7 @@ async function callStitchTool<T>(
         try {
           const result = await withPatchedFetch(dispatcher, context.baseUrl, () => client.callTool<T>(toolName, args));
           clearStitchTransportCooldown();
-          return result;
+          return result as T;
         } catch (error) {
           lastError = error;
           const retryable = isRetryableTransportError(error);

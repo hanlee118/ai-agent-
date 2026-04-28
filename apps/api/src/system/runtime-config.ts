@@ -6,35 +6,81 @@ import type {
   RuntimeValidationResult,
   RuntimeValidationStatus
 } from "@occ/shared";
-import { prisma } from "../db.js";
+import { prisma, withPrismaReadRetry } from "../db.js";
 import { decryptSecret, encryptSecret } from "../security/secret-store.js";
 import { URL } from "node:url";
 import { buildOpenAiCompatibleHeaders } from "../utils/openai-compatible-headers.js";
 
 const SYSTEM_CONFIG_ID = "default";
+const SYSTEM_CONFIG_CACHE_TTL_MS = Math.max(
+  1000,
+  Number(process.env.SYSTEM_CONFIG_CACHE_TTL_MS ?? 3000)
+);
 
 type SystemConfigRecord = Awaited<ReturnType<typeof prisma.systemConfig.findUniqueOrThrow>>;
+let systemConfigCache:
+  | {
+      value: SystemConfigRecord;
+      expiresAt: number;
+    }
+  | null = null;
+let systemConfigInflight: Promise<SystemConfigRecord> | null = null;
+
+function setSystemConfigCache(value: SystemConfigRecord) {
+  systemConfigCache = {
+    value,
+    expiresAt: Date.now() + SYSTEM_CONFIG_CACHE_TTL_MS
+  };
+}
 
 export async function ensureSystemConfig() {
-  const existing = await prisma.systemConfig.findUnique({
-    where: { id: SYSTEM_CONFIG_ID }
-  });
-
-  if (existing) {
-    return existing;
+  const now = Date.now();
+  if (systemConfigCache && systemConfigCache.expiresAt > now) {
+    return systemConfigCache.value;
+  }
+  if (systemConfigInflight) {
+    return systemConfigInflight;
   }
 
-  const bootstrap = readBootstrapConfig();
-  return prisma.systemConfig.create({
-    data: {
-      id: SYSTEM_CONFIG_ID,
-      provider: bootstrap.provider,
-      apiBaseUrl: bootstrap.apiBaseUrl,
-      apiKey: await encryptSecret(bootstrap.apiKey),
-      modelName: bootstrap.modelName,
-      configSource: bootstrap.configSource
+  systemConfigInflight = (async () => {
+    const existing = await withPrismaReadRetry("findUnique", () => prisma.systemConfig.findUnique({
+      where: { id: SYSTEM_CONFIG_ID }
+    }));
+
+    if (existing) {
+      setSystemConfigCache(existing);
+      return existing;
     }
+
+    const bootstrap = readBootstrapConfig();
+    try {
+      const created = await prisma.systemConfig.create({
+        data: {
+          id: SYSTEM_CONFIG_ID,
+          provider: bootstrap.provider,
+          apiBaseUrl: bootstrap.apiBaseUrl,
+          apiKey: await encryptSecret(bootstrap.apiKey),
+          modelName: bootstrap.modelName,
+          configSource: bootstrap.configSource
+        }
+      });
+      setSystemConfigCache(created);
+      return created;
+    } catch {
+      const fallback = await withPrismaReadRetry("findUnique", () => prisma.systemConfig.findUnique({
+        where: { id: SYSTEM_CONFIG_ID }
+      }));
+      if (!fallback) {
+        throw new Error("SYSTEM_CONFIG_INIT_FAILED");
+      }
+      setSystemConfigCache(fallback);
+      return fallback;
+    }
+  })().finally(() => {
+    systemConfigInflight = null;
   });
+
+  return systemConfigInflight;
 }
 
 export async function getRuntimeSettings(): Promise<RuntimeSettings> {
@@ -68,6 +114,7 @@ export async function updateRuntimeSettings(input: RuntimeSettingsInput): Promis
       lastValidationError: hasMaterialChange ? null : current.lastValidationError
     }
   });
+  setSystemConfigCache(updated);
 
   return toRuntimeSettings(updated);
 }
@@ -102,6 +149,7 @@ export async function validateRuntimeSettings(): Promise<RuntimeValidationResult
         lastValidationError: null
       }
     });
+    setSystemConfigCache(updated);
 
     return {
       ok: true,
@@ -121,6 +169,7 @@ export async function validateRuntimeSettings(): Promise<RuntimeValidationResult
         lastValidationError: "模型配置不完整，请检查 API Base URL、API Key 和模型名。"
       }
     });
+    setSystemConfigCache(updated);
 
     return {
       ok: false,
@@ -142,6 +191,7 @@ export async function validateRuntimeSettings(): Promise<RuntimeValidationResult
         lastValidationError: null
       }
     });
+    setSystemConfigCache(updated);
 
     return {
       ok: true,
@@ -160,6 +210,7 @@ export async function validateRuntimeSettings(): Promise<RuntimeValidationResult
         lastValidationError: message
       }
     });
+    setSystemConfigCache(updated);
 
     return {
       ok: false,

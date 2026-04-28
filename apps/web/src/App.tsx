@@ -141,7 +141,7 @@ export default function App() {
   const [toasts, setToasts] = useState<any[]>([]);
   const toastCounterRef = useRef(0);
 
-  const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+  const addToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : `${Date.now()}-${++toastCounterRef.current}`;
@@ -149,7 +149,7 @@ export default function App() {
     setTimeout(() => {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 3000);
-  };
+  }, []);
 
   const [activeTab, setActiveTab] = useState(initialRouteState.activeTab);
   const [sidebarOpen, setSidebarOpen] = useState(true);

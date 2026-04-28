@@ -112,6 +112,11 @@ const QUALITY_GATE_REPAIR_DEFAULT_VALIDATIONS = [
   "pnpm --filter @occ/web typecheck",
   "pnpm --filter @occ/web build"
 ];
+const PROJECT_LIST_TOTAL_CACHE_TTL_MS = Math.max(
+  3_000,
+  Number(process.env.PROJECT_LIST_TOTAL_CACHE_TTL_MS ?? 20_000)
+);
+let projectListTotalCache: { value: number; expiresAt: number } | null = null;
 type LifecycleReplayJob = {
   id: string;
   projectId: string;
@@ -1578,6 +1583,17 @@ interface CreateProjectsRouterOptions {
   projectAdvanceLocks: Set<string>;
   projectAdvanceJobs: Map<string, Promise<void>>;
   projectAdvanceJobErrors: Map<string, { message: string; at: string }>;
+  projectAdvanceStates: Map<string, {
+    projectId: string;
+    status: string;
+    updatedAt: string;
+    startedAt?: string;
+    finishedAt?: string;
+    attempt?: number;
+    message?: string;
+    lastError?: string;
+    lastErrorAt?: string;
+  }>;
   markProjectAdvanceCancelled: (projectId: string) => void;
   clearProjectAdvanceCancelled: (projectId: string) => void;
   ensureManualAdvanceJob: (projectId: string) => void;
@@ -2047,6 +2063,7 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
     projectAdvanceLocks,
     projectAdvanceJobs,
     projectAdvanceJobErrors,
+    projectAdvanceStates,
     markProjectAdvanceCancelled,
     clearProjectAdvanceCancelled,
     ensureManualAdvanceJob,
@@ -2107,19 +2124,39 @@ router.post("/api/projects/preview", validateBody(ProjectPreviewRequestSchema), 
 }));
 
 router.get("/api/projects", asyncRoute(async (req, res) => {
+  const summary = String(req.query.summary ?? "true").trim().toLowerCase() !== "false";
+  const truncateText = (value: string, limit = 200) => {
+    const source = String(value || "");
+    return source.length > limit ? `${source.slice(0, limit)}...` : source;
+  };
   const pageRaw = Number(req.query.page ?? 1);
   const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
   const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
   const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
   const offset = (page - 1) * pageSize;
   const projects = await listProjects({ limit: pageSize, offset });
-  const total = await prisma.project.count();
+  const now = Date.now();
+  const total = projectListTotalCache && projectListTotalCache.expiresAt > now
+    ? projectListTotalCache.value
+    : await prisma.project.count();
+  if (!projectListTotalCache || projectListTotalCache.expiresAt <= now) {
+    projectListTotalCache = {
+      value: total,
+      expiresAt: now + PROJECT_LIST_TOTAL_CACHE_TTL_MS
+    };
+  }
   res.setHeader("X-Page", String(page));
   res.setHeader("X-Page-Size", String(pageSize));
   res.setHeader("X-Total-Count", String(total));
   const currentUser = getCurrentUserFromLocals(res);
   if (!currentUser) {
-    res.json(projects);
+    res.json(summary
+      ? projects.map((project) => ({
+        ...project,
+        name: truncateText(project.name, 200),
+        summary: truncateText(project.summary || "", 200)
+      }))
+      : projects);
     return;
   }
 
@@ -2146,8 +2183,13 @@ router.get("/api/projects", asyncRoute(async (req, res) => {
 
   res.json(projects.map((project) => {
     const projectRole = currentUser.role === "admin" ? "owner" : (projectRoleMap.get(project.id) || null);
-    return {
+    const payload = {
       ...project,
+      name: summary ? truncateText(project.name, 200) : project.name,
+      summary: summary ? truncateText(project.summary || "", 200) : project.summary,
+    };
+    return {
+      ...payload,
       permissions: {
         projectRole,
         canApprove: isPermissionAllowed({
@@ -2533,6 +2575,18 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
       projectAdvanceJobs
     });
     const pollAfterMs = nextProjectAdvancePollAfterMs(projectId, recovered);
+    if (recovered) {
+      projectAdvanceStates.set(projectId, {
+        ...(projectAdvanceStates.get(projectId) || {
+          projectId,
+          status: "recovering",
+          updatedAt: new Date().toISOString()
+        }),
+        status: "recovering",
+        updatedAt: new Date().toISOString(),
+        message: "推进状态恢复中，已重新拉起任务"
+      });
+    }
     res.status(409).json({
       success: false,
       error: {
@@ -2599,7 +2653,21 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
 
   const runtime = await getRuntimeStatus();
   const requiredActions = buildProjectRequiredActions(project, runtime);
+  const needsDesignReviewInput = requiredActions.some((item) => item.action === "open_design_review");
   const blockedByUserIntervention = project.pendingApproval;
+
+  if (needsDesignReviewInput) {
+    resetProjectAdvancePollHint(projectId);
+    res.status(409).json({
+      success: false,
+      error: {
+        code: "REQUIRES_USER_INTERVENTION",
+        message: formatRequiredActionsMessage(requiredActions),
+        requiredActions
+      }
+    });
+    return;
+  }
 
   if (blockedByUserIntervention) {
     resetProjectAdvancePollHint(projectId);
@@ -2745,6 +2813,36 @@ router.post("/api/projects/:id/advance", validateBody(MutationOptionalSchema), a
   });
 }));
 
+router.get("/api/projects/:id/advance-status", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id);
+  const hasAdvanceLock = projectAdvanceLocks.has(projectId);
+  const hasAdvanceJob = projectAdvanceJobs.has(projectId);
+  const inProgress = hasAdvanceLock || hasAdvanceJob;
+  const pollAfterMs = inProgress ? nextProjectAdvancePollAfterMs(projectId) : undefined;
+  const latestError = projectAdvanceJobErrors.get(projectId);
+  const state = projectAdvanceStates.get(projectId) || {
+    projectId,
+    status: inProgress ? "running" : "idle",
+    updatedAt: new Date().toISOString(),
+    message: inProgress ? "推进任务正在运行" : "暂无推进任务"
+  };
+
+  res.json({
+    success: true,
+    data: {
+      projectId,
+      inProgress,
+      hasAdvanceLock,
+      hasAdvanceJob,
+      pollAfterMs,
+      state,
+      latestError: latestError || (state.lastError
+        ? { message: state.lastError, at: state.lastErrorAt || state.updatedAt }
+        : null)
+    }
+  });
+}));
+
 router.post("/api/projects/:id/reconcile-deliverables", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const project = await reconcileProjectDeliverablesNow(projectId);
@@ -2831,7 +2929,7 @@ router.post("/api/projects/:id/lifecycle-quality-audit/replay", validateBody(Mut
     return;
   }
 
-  const replayRoleTimeoutMs = Math.max(30_000, Number(req.body?.roleTimeoutMs ?? 120_000));
+  const replayRoleTimeoutMs = Math.max(30_000, Number(req.body?.roleTimeoutMs ?? 240_000));
   const jobId = `replay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const job: LifecycleReplayJob = {
     id: jobId,
@@ -2850,6 +2948,14 @@ router.post("/api/projects/:id/lifecycle-quality-audit/replay", validateBody(Mut
       const roles = getStageRealModelGateRoles(stageType);
       for (const role of roles) {
         job.attempted.push({ stageType, role });
+        const stageRoleTimeoutMs = stageType === "DESIGN"
+          ? (role === "ROLE_DESIGN"
+            ? Math.max(replayRoleTimeoutMs, 300_000)
+            : Math.max(replayRoleTimeoutMs, 240_000))
+          : replayRoleTimeoutMs;
+        const replaySummary = stageType === "DESIGN"
+          ? `回放：${ROLE_LABELS[role]}补齐${STAGE_LABELS[stageType]}可验证执行证据（精简输出，优先结论与关键证据）。`
+          : `回放：${ROLE_LABELS[role]}补齐${STAGE_LABELS[stageType]}真实执行证据。`;
         try {
           await Promise.race([
             runProjectStageAgent({
@@ -2860,7 +2966,7 @@ router.post("/api/projects/:id/lifecycle-quality-audit/replay", validateBody(Mut
               stageType,
               role,
               action: "project.lifecycle_audit.replay_real_execution",
-              summary: `质量门禁回放：请以${ROLE_LABELS[role]}身份补充${STAGE_LABELS[stageType]}阶段真实执行证据。`,
+              summary: replaySummary,
               metadata: {
                 replay: "lifecycle-quality-audit",
                 stageType,
@@ -2869,7 +2975,7 @@ router.post("/api/projects/:id/lifecycle-quality-audit/replay", validateBody(Mut
               }
             }),
             new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error(`replay_timeout_${replayRoleTimeoutMs}ms`)), replayRoleTimeoutMs);
+              setTimeout(() => reject(new Error(`replay_timeout_${stageRoleTimeoutMs}ms`)), stageRoleTimeoutMs);
             })
           ]);
           job.succeeded.push({ stageType, role });
@@ -4183,6 +4289,7 @@ router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
   projectAdvanceJobErrors.delete(projectId);
   projectAdvanceJobs.delete(projectId);
   projectAdvanceLocks.delete(projectId);
+  projectAdvanceStates.delete(projectId);
 
   res.json({ success: true, id: projectId });
 }));

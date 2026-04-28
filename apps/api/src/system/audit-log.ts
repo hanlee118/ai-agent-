@@ -48,3 +48,17 @@ export async function listAuditLogs(limit = 20, offset = 0): Promise<AuditLogIte
     createdAt: log.createdAt.toISOString()
   }));
 }
+
+export function summarizeAuditLogs(
+  logs: AuditLogItem[],
+  maxLength = 200
+): AuditLogItem[] {
+  const safe = Math.max(40, Math.floor(maxLength));
+  return logs.map((log) => {
+    const detail = String(log.detail || "");
+    return {
+      ...log,
+      detail: detail.length > safe ? `${detail.slice(0, safe)}...` : (detail || undefined)
+    };
+  });
+}

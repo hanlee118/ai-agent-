@@ -48,8 +48,87 @@ function normalizeOptionalStringArray(input: unknown) {
 export function createProductContextRouter() {
   const router = express.Router();
 
-  router.get("/", asyncRoute(async (_req, res) => {
-    sendSuccess(res, await getProductContext());
+  const truncateText = (value: string, limit = 200) => {
+    const normalized = String(value ?? "");
+    if (normalized.length <= limit) {
+      return normalized;
+    }
+    return `${normalized.slice(0, Math.max(0, limit))}...`;
+  };
+
+  const parsePage = (value: unknown, fallback: number) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return fallback;
+    }
+    return Math.max(1, Math.floor(num));
+  };
+
+  const parsePageSize = (value: unknown, fallback: number) => {
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+      return fallback;
+    }
+    return Math.max(1, Math.min(100, Math.floor(num)));
+  };
+
+  router.get("/", asyncRoute(async (req, res) => {
+    const context = await getProductContext();
+    const summary = String(req.query.summary ?? "true").trim().toLowerCase() !== "false";
+    const includeHistory = String(req.query.includeHistory ?? "false").trim().toLowerCase() !== "false";
+    const page = parsePage(req.query.page, 1);
+    const pageSize = parsePageSize(req.query.pageSize ?? req.query.limit, 20);
+    const history = Array.isArray(context.requirementHistory) ? context.requirementHistory : [];
+    const total = history.length;
+    const offset = (page - 1) * pageSize;
+    const pagedHistory = includeHistory ? history.slice(offset, offset + pageSize) : [];
+    const normalizedHistory = summary
+      ? pagedHistory.map((item) => ({
+          ...item,
+          title: truncateText(item.title, 200),
+          refinedRequirement: truncateText(item.refinedRequirement, 200),
+          validationNote: truncateText(item.validationNote ?? "", 200),
+          implementationSummary: truncateText(item.implementationSummary ?? "", 200)
+        }))
+      : pagedHistory;
+
+    sendSuccess(res, {
+      ...context,
+      background: summary ? truncateText(context.background, 200) : context.background,
+      mission: summary ? truncateText(context.mission, 200) : context.mission,
+      requirementHistory: normalizedHistory,
+      requirementHistoryTotal: total,
+      historyPage: page,
+      historyPageSize: pageSize
+    });
+  }));
+
+  router.get("/history", asyncRoute(async (req, res) => {
+    const context = await getProductContext();
+    const summary = String(req.query.summary ?? "true").trim().toLowerCase() !== "false";
+    const page = parsePage(req.query.page, 1);
+    const pageSize = parsePageSize(req.query.pageSize ?? req.query.limit, 20);
+    const history = Array.isArray(context.requirementHistory) ? context.requirementHistory : [];
+    const total = history.length;
+    const offset = (page - 1) * pageSize;
+    const items = history.slice(offset, offset + pageSize).map((item) => (
+      summary
+        ? {
+            ...item,
+            title: truncateText(item.title, 200),
+            refinedRequirement: truncateText(item.refinedRequirement, 200),
+            validationNote: truncateText(item.validationNote ?? "", 200),
+            implementationSummary: truncateText(item.implementationSummary ?? "", 200)
+          }
+        : item
+    ));
+
+    sendSuccess(res, {
+      total,
+      page,
+      pageSize,
+      items
+    });
   }));
 
   router.put("/", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {

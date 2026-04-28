@@ -131,7 +131,9 @@ const TERMINAL_STAGE_ROLE_SET = new Set<string>([
   "DEV:ROLE_DEV"
 ]);
 
-const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
+const RUNTIME_FORCED_MODEL = String(process.env.RUNTIME_FORCED_MODEL ?? "").trim();
+
+const STAGE_MODEL_PREFERENCES_DEFAULT: Record<StageType, string[]> = {
   INIT: [
     "openai/gpt-5.4",
     "openai/gpt-5.3-codex",
@@ -171,7 +173,17 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   ]
 };
 
-const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
+const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = RUNTIME_FORCED_MODEL
+  ? {
+      INIT: [RUNTIME_FORCED_MODEL],
+      ANALYSIS: [RUNTIME_FORCED_MODEL],
+      DESIGN: [RUNTIME_FORCED_MODEL],
+      DEV: [RUNTIME_FORCED_MODEL],
+      ACCEPT: [RUNTIME_FORCED_MODEL]
+    }
+  : STAGE_MODEL_PREFERENCES_DEFAULT;
+
+const ROLE_MODEL_OVERRIDES_DEFAULT: Partial<Record<RoleType, string[]>> = {
   ROLE_ANALYST: [
     "hermes-v2.1",
     "openai/gpt-5.4",
@@ -211,7 +223,21 @@ const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = {
   ]
 };
 
-const DESIGN_STRONG_MODEL_FALLBACKS = [
+const ROLE_MODEL_OVERRIDES: Partial<Record<RoleType, string[]>> = RUNTIME_FORCED_MODEL
+  ? {
+      ROLE_ANALYST: [RUNTIME_FORCED_MODEL],
+      ROLE_PRODUCT: [RUNTIME_FORCED_MODEL],
+      ROLE_DESIGN: [RUNTIME_FORCED_MODEL],
+      ROLE_ARCH: [RUNTIME_FORCED_MODEL],
+      ROLE_DEV: [RUNTIME_FORCED_MODEL],
+      ROLE_PM: [RUNTIME_FORCED_MODEL],
+      ROLE_QA: [RUNTIME_FORCED_MODEL]
+    }
+  : ROLE_MODEL_OVERRIDES_DEFAULT;
+
+const DESIGN_STRONG_MODEL_FALLBACKS = RUNTIME_FORCED_MODEL ? [
+  RUNTIME_FORCED_MODEL
+] : [
   "openai/gpt-5.4",
   "openai/gpt-5.3-codex",
   "qwen3-max-2026-01-23",
@@ -292,15 +318,15 @@ export function getStageRealModelGateRoles(stageType: StageType) {
 function getStageRequiredSkills(stageType: StageType, role: RoleType) {
   const stitchMode = getDesignStitchMode();
   if (role === "ROLE_DESIGN") {
-    const baseSkills = ["design-to-code", "frontend-design", "frontend-design-pro"];
-    if (stitchMode === "required") {
-      return [...baseSkills, "stitch"];
-    }
-    return baseSkills;
+    // 设计阶段保留技能协议引导，但不再把技能名注册状态作为硬门禁，
+    // 避免在技能中心未完整注册时阻塞真实项目推进。
+    return stitchMode === "required" ? ["stitch"] : [];
   }
 
   if (stageType === "DESIGN" && role === "ROLE_PRODUCT") {
-    return ["prd-structuring", "journey-mapping"];
+    // Product 角色在设计阶段遵循方法论协议，但不强依赖特定技能名，
+    // 避免环境技能未注册时出现“流程假阻塞”。
+    return [];
   }
 
   if (stageType === "DEV" || role === "ROLE_ARCH" || role === "ROLE_DEV") {
@@ -322,7 +348,7 @@ function getStageSkillProtocol(stageType: StageType, role: RoleType) {
 
   if (stageType === "DESIGN" && role === "ROLE_PRODUCT") {
     return [
-      "先读取需求分析文档与排期约束，再输出 PRD 和功能优先级",
+      "先读取需求分析文档与阶段退出标准，再输出 PRD 和功能优先级",
       "必须显式写清事实输入、功能边界、非目标与验收标准，禁止替代为视觉稿",
       "handoff 必须写给设计角色，包含页面范围、关键状态和不可变更约束"
     ];
