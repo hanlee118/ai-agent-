@@ -144,6 +144,7 @@ import { createKnowledgeV2Router } from "./routes/knowledge-v2.js";
 import { createSkillsV2Router } from "./routes/skills-v2.js";
 import { createWorkflowsV2Router } from "./routes/workflows-v2.js";
 import { createUsersRouter } from "./routes/users.js";
+import { runAuditInspectionNow } from "./workflow-v2/audit-tasks.js";
 import { configureSecurityMiddleware } from "./middleware/security.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { validateJsonMutationBody } from "./validation/middleware.js";
@@ -213,7 +214,9 @@ const PROJECT_STATE_SWEEP_INTERVAL_MS = Math.max(
 let projectAutomationTimer: ReturnType<typeof setInterval> | null = null;
 let projectAutomationKickTimer: ReturnType<typeof setTimeout> | null = null;
 let projectStateSweepTimer: ReturnType<typeof setInterval> | null = null;
+let auditInspectionTimer: ReturnType<typeof setInterval> | null = null;
 let projectStateSweepRunning = false;
+let auditInspectionRunning = false;
 const projectAdvanceLocks = new Set<string>();
 const projectAdvanceJobs = new Map<string, Promise<void>>();
 const projectAdvanceJobErrors = new Map<string, { message: string; at: string }>();
@@ -233,6 +236,11 @@ const projectAdvanceStates = new Map<string, ProjectAdvanceRuntimeState>();
 const PROJECT_ADVANCE_CANCEL_TTL_MS = Math.max(
   60_000,
   Number(process.env.PROJECT_ADVANCE_CANCEL_TTL_MS ?? 10 * 60 * 1000)
+);
+const AUDIT_INSPECTION_SCHEDULER_ENABLED = resolveBooleanEnvDefaultFalse("AUDIT_INSPECTION_SCHEDULER_ENABLED");
+const AUDIT_INSPECTION_INTERVAL_MS = Math.max(
+  5 * 60 * 1000,
+  Number(process.env.AUDIT_INSPECTION_INTERVAL_MS ?? 2 * 60 * 60 * 1000)
 );
 
 const STAGE_AUTO_DELIVERABLE_TITLES: Record<StageType, string[]> = {
@@ -2489,6 +2497,48 @@ function restartProjectStateSweepTicker() {
   projectStateSweepTimer = setInterval(() => {
     void runProjectStateConsistencySweep();
   }, PROJECT_STATE_SWEEP_INTERVAL_MS);
+}
+
+async function runAuditInspectionTick() {
+  if (!AUDIT_INSPECTION_SCHEDULER_ENABLED || auditInspectionRunning) {
+    return;
+  }
+  auditInspectionRunning = true;
+  try {
+    const result = await runAuditInspectionNow();
+    await writeAuditLog({
+      actorType: "system",
+      actorLabel: "audit-scheduler",
+      action: result.ok ? "system.audit_scheduler.tick.ok" : "system.audit_scheduler.tick.failed",
+      resourceType: "system",
+      summary: `巡检调度执行完成（ok=${result.ok} scanned=${result.scanned ?? 0}）`,
+      detail: JSON.stringify(result).slice(0, 2000)
+    });
+  } catch (error) {
+    await writeAuditLog({
+      actorType: "system",
+      actorLabel: "audit-scheduler",
+      action: "system.audit_scheduler.tick.error",
+      resourceType: "system",
+      summary: "巡检调度执行异常",
+      detail: (error instanceof Error ? error.message : String(error)).slice(0, 1000)
+    });
+  } finally {
+    auditInspectionRunning = false;
+  }
+}
+
+function restartAuditInspectionTicker() {
+  if (auditInspectionTimer) {
+    clearInterval(auditInspectionTimer);
+    auditInspectionTimer = null;
+  }
+  if (!AUDIT_INSPECTION_SCHEDULER_ENABLED) {
+    return;
+  }
+  auditInspectionTimer = setInterval(() => {
+    void runAuditInspectionTick();
+  }, AUDIT_INSPECTION_INTERVAL_MS);
 }
 
 type AcceptanceStageReport = {
@@ -4898,6 +4948,7 @@ app.get("/health", asyncRoute(async (_req, res) => {
   const runtimeStore = getRuntimeStoreHealth();
   const systemHealth = await getSystemHealth();
   const databaseHealthy = systemHealth.services.find((service) => service.name === "database")?.status === "healthy";
+  res.setHeader("Cache-Control", "public, max-age=5");
   res.json({
     ok: databaseHealthy,
     service: "occ-api",
@@ -4912,6 +4963,7 @@ app.get("/api/health", asyncRoute(async (_req, res) => {
   const runtimeStore = getRuntimeStoreHealth();
   const systemHealth = await getSystemHealth();
   const databaseHealthy = systemHealth.services.find((service) => service.name === "database")?.status === "healthy";
+  res.setHeader("Cache-Control", "public, max-age=5");
   res.json({
     ok: databaseHealthy,
     service: "occ-api",
@@ -5158,7 +5210,11 @@ async function start() {
   ensureLocalAgentMonitorLive();
   restartProjectAutomationTicker();
   restartProjectStateSweepTicker();
+  restartAuditInspectionTicker();
   void runProjectStateConsistencySweep();
+  if (AUDIT_INSPECTION_SCHEDULER_ENABLED) {
+    void runAuditInspectionTick();
+  }
   if (projectAutomationState.enabled) {
     void runProjectAutomationTick();
   }

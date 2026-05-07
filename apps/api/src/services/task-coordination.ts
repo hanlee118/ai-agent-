@@ -38,6 +38,7 @@ const ROLE_TO_AGENT_ID: Record<RoleType, string> = {
   ROLE_ARCH: "rd_director",
   ROLE_DEV: "rd_manager",
   ROLE_QA: "qa_engineer",
+  ROLE_AUDITOR: "auditor-agent",
   ROLE_HR: "hr_director"
 };
 

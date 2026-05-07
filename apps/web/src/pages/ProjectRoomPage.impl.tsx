@@ -2062,6 +2062,30 @@ const ProjectRoom = ({
 
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
 
+  const isStandaloneSingleStageProject = useMemo(() => {
+    const mode = String(detail?.projectType || project.projectType || '').trim().toLowerCase();
+    if (mode === 'standalone') {
+      return true;
+    }
+    if (workflowOverview?.template?.category === 'single_stage') {
+      return true;
+    }
+    const workflowStages = Array.isArray(workflowOverview?.stages) ? workflowOverview.stages.length : 0;
+    const coreStages = Array.isArray(stageItems) ? stageItems.length : 0;
+    return workflowStages === 1 || coreStages === 1;
+  }, [detail?.projectType, project.projectType, stageItems, workflowOverview?.stages, workflowOverview?.template?.category]);
+
+  const visibleTabs = useMemo<ProjectRoomTab[]>(
+    () => (isStandaloneSingleStageProject ? ['交付物'] : ['任务', '阶段', '交付物', '时间线']),
+    [isStandaloneSingleStageProject],
+  );
+
+  useEffect(() => {
+    if (!visibleTabs.includes(activeTab)) {
+      setActiveTab(visibleTabs[0]);
+    }
+  }, [activeTab, visibleTabs]);
+
   const tabStats = useMemo(() => ({
     任务: effectiveProjectTasks.length,
     阶段: stageItems.length,
@@ -2357,8 +2381,14 @@ const ProjectRoom = ({
   }, [effectiveProjectTasks, executionRecords, sseLogs, timelineEvents]);
 
   const projectDeliverablesSide = useMemo<SideDeliverableItem[]>(() => {
+    const activeStageType = String(detail?.currentStage || '').trim().toUpperCase();
+    const scopedDeliverables = activeStageType
+      ? deliverables.filter((item) => String(item.stageType || '').trim().toUpperCase() === activeStageType)
+      : deliverables;
+
     if (deliverables.length > 0) {
-      return deliverables.slice(0, 8).map((item) => ({
+      const displayList = (scopedDeliverables.length > 0 ? scopedDeliverables : deliverables).slice(0, 8);
+      return displayList.map((item) => ({
         id: item.id,
         name: item.name,
         type: `${STAGE_LABELS[item.stageType] || item.stageType} · ${DELIVERABLE_STATUS_LABELS[item.status]}`,
@@ -2367,7 +2397,10 @@ const ProjectRoom = ({
       }));
     }
 
-    const mapped = effectiveProjectTasks.slice(0, 6).map((task) => ({
+    const scopedTasks = activeStageType
+      ? effectiveProjectTasks.filter((task) => String(task.stageType || '').trim().toUpperCase() === activeStageType)
+      : effectiveProjectTasks;
+    const mapped = (scopedTasks.length > 0 ? scopedTasks : effectiveProjectTasks).slice(0, 6).map((task) => ({
       id: task.id,
       name: `${task.title}${task.status === 'Completed' ? '.md' : ''}`,
       type: task.status === 'Completed' ? '交付文档' : task.status === 'Blocked' ? '阻塞项' : '进行项',
@@ -2375,7 +2408,7 @@ const ProjectRoom = ({
     }));
 
     return mapped.length > 0 ? mapped : [{ id: 'empty', name: '暂无交付物', type: '等待任务推进', size: '-' }];
-  }, [deliverables, effectiveProjectTasks]);
+  }, [deliverables, detail?.currentStage, effectiveProjectTasks]);
 
   const currentStageType = detail?.currentStage || stageItems.find((stage) => stage.status === 'active')?.type || stageItems[0]?.type;
   const currentStageLabel = STAGE_LABELS[currentStageType || ''] || currentStageType || '当前阶段';
@@ -2401,6 +2434,94 @@ const ProjectRoom = ({
     }
     return workflowStageRows.filter((item) => item.status === workflowOverviewFilter);
   }, [workflowOverviewFilter, workflowStageRows]);
+  const workflowBlockingReasons = useMemo(() => {
+    const reasonCounts = new Map<string, number>();
+    const normalizeReason = (value: string) => value.replace(/\s+/g, ' ').trim();
+
+    visibleWorkflowStageRows.forEach((stage) => {
+      (stage.gate?.violations || []).forEach((rawReason) => {
+        const reason = normalizeReason(String(rawReason || ''));
+        if (!reason) return;
+        reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+      });
+    });
+
+    requiredActions.forEach((action) => {
+      const detail = normalizeReason(String(action.detail || ''));
+      if (detail) {
+        reasonCounts.set(detail, (reasonCounts.get(detail) || 0) + 1);
+      }
+      const title = normalizeReason(String(action.title || ''));
+      if (title) {
+        reasonCounts.set(title, (reasonCounts.get(title) || 0) + 1);
+      }
+    });
+
+    const severityScore = (text: string) => {
+      if (/阻断|失败|critical|error|驳回|未通过/i.test(text)) return 4;
+      if (/缺少|缺失|待处理|risk|风险|告警/i.test(text)) return 3;
+      if (/建议|提醒|注意/i.test(text)) return 2;
+      return 1;
+    };
+
+    return Array.from(reasonCounts.entries())
+      .map(([reason, count]) => ({ reason, count, score: severityScore(reason) }))
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.count !== a.count) return b.count - a.count;
+        return a.reason.localeCompare(b.reason, 'zh-CN');
+      })
+      .slice(0, 8);
+  }, [requiredActions, visibleWorkflowStageRows]);
+  const workflowNextActions = useMemo(() => {
+    const dedup = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        reason: string;
+        requiredAction?: ProjectRequiredAction;
+        fallbackAction?: 'deliverables' | 'knowledge' | 'refresh';
+      }
+    >();
+
+    requiredActions.forEach((action) => {
+      const key = `required:${action.action}:${action.id}`;
+      if (dedup.has(key)) return;
+      dedup.set(key, {
+        key,
+        label: String(action.ctaLabel || action.title || '执行待处理动作'),
+        reason: String(action.detail || action.title || '系统要求执行该动作后可继续推进'),
+        requiredAction: action,
+      });
+    });
+
+    if (requiredActions.length === 0 && workflowBlockingReasons.length > 0) {
+      const firstBlockedStage = visibleWorkflowStageRows.find((stage) => (stage.gate?.violationCount || 0) > 0);
+      if (firstBlockedStage) {
+        dedup.set(`fallback:deliverables:${firstBlockedStage.id}`, {
+          key: `fallback:deliverables:${firstBlockedStage.id}`,
+          label: `查看${workflowTemplateLabel(firstBlockedStage.templateKey)}阶段交付物`,
+          reason: '先确认阶段交付物完整性，排除门禁阻塞',
+          fallbackAction: 'deliverables',
+        });
+        dedup.set(`fallback:knowledge:${firstBlockedStage.id}`, {
+          key: `fallback:knowledge:${firstBlockedStage.id}`,
+          label: `查看${workflowTemplateLabel(firstBlockedStage.templateKey)}阶段知识`,
+          reason: '检查协作证据和分析结论是否完整',
+          fallbackAction: 'knowledge',
+        });
+      }
+      dedup.set('fallback:refresh:workflow', {
+        key: 'fallback:refresh:workflow',
+        label: '刷新项目运行态',
+        reason: '重新同步 workflow-v2 状态与门禁结果',
+        fallbackAction: 'refresh',
+      });
+    }
+
+    return Array.from(dedup.values()).slice(0, 6);
+  }, [requiredActions, visibleWorkflowStageRows, workflowBlockingReasons.length]);
   const toggleWorkflowStageDetails = useCallback((stageId: string) => {
     setExpandedWorkflowStageIds((current) => {
       if (current.includes(stageId)) {
@@ -3951,8 +4072,16 @@ const ProjectRoom = ({
     setRequiredActionLoadingId(action.id);
     try {
       if (action.action === 'submit_stage_deliverable') {
+        if (!project.id) {
+          addToast('当前项目不可用，无法生成交付物', 'error');
+          return;
+        }
         setActiveTab('交付物');
-        addToast('请先补全并提交当前阶段交付物', 'info');
+        setProjectActionHint('正在由 Agent 生成当前阶段核心交付物并执行模板校验，预计 30-90 秒...');
+        addToast('正在生成当前阶段核心交付物，请稍候...', 'info');
+        await projectsApi.reconcileDeliverables(project.id);
+        await refreshProjectView();
+        addToast('当前阶段核心交付物已刷新，请继续验收', 'success');
         return;
       }
       if (action.action === 'open_design_review') {
@@ -4654,7 +4783,7 @@ const ProjectRoom = ({
                     </button>
                   </div>
                   {prepDiscussionTraceView.items.length < 3 ? (
-                    <p className="text-[11px] text-warning">当前讨论日志角色回合不足（至少 3 个角色），请先触发“进行讨论”或“提交补充并继续讨论”。</p>
+                    <p className="text-[11px] text-warning">硬性门禁：必须由多角色（至少 3 个角色）参与真实模型讨论，单角色或 fallback 日志均不允许进入下一步。</p>
                   ) : null}
                 </div>
               </div>
@@ -4831,7 +4960,7 @@ const ProjectRoom = ({
 
           <div className="w-full overflow-x-auto scrollbar-hide">
             <div className="inline-flex min-w-max items-center gap-2 p-1 bg-white/5 rounded-xl border border-border-subtle">
-              {(['任务', '阶段', '交付物', '时间线'] as ProjectRoomTab[]).map((tab) => (
+              {visibleTabs.map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setActiveTab(tab)}
@@ -5538,6 +5667,73 @@ const ProjectRoom = ({
                       <Badge variant={workflowStageSummary.failed > 0 ? 'danger' : 'default'}>
                         执行失败 {workflowStageSummary.failed}
                       </Badge>
+                    </div>
+
+                    <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+                      <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">阻断原因 Top</p>
+                          <Badge variant={workflowBlockingReasons.length > 0 ? 'warning' : 'primary'}>
+                            {workflowBlockingReasons.length > 0 ? `${workflowBlockingReasons.length} 项` : '无阻断'}
+                          </Badge>
+                        </div>
+                        {workflowBlockingReasons.length > 0 ? (
+                          <div className="space-y-2">
+                            {workflowBlockingReasons.map((item) => (
+                              <div key={item.reason} className="rounded-lg border border-border-subtle bg-surface-soft p-2">
+                                <p className="text-[12px] text-slate-200 leading-relaxed">{item.reason}</p>
+                                <p className="text-[10px] text-slate-500 mt-1">出现次数: {item.count}</p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-500">当前未发现阻断原因，流程可继续推进。</p>
+                        )}
+                      </div>
+
+                      <div className="rounded-xl border border-border-subtle bg-white/5 p-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <p className="text-[11px] font-semibold uppercase tracking-widest text-slate-400">下一步动作</p>
+                          <Badge variant={workflowNextActions.length > 0 ? 'accent' : 'default'}>
+                            {workflowNextActions.length > 0 ? `${workflowNextActions.length} 项` : '暂无动作'}
+                          </Badge>
+                        </div>
+                        {workflowNextActions.length > 0 ? (
+                          <div className="space-y-2">
+                            {workflowNextActions.map((item) => (
+                              <div key={item.key} className="rounded-lg border border-border-subtle bg-surface-soft p-2 space-y-2">
+                                <p className="text-[12px] text-slate-200">{item.label}</p>
+                                <p className="text-[10px] text-slate-500 leading-relaxed">{item.reason}</p>
+                                <button
+                                  onClick={() => {
+                                    if (item.requiredAction) {
+                                      void handleRequiredAction(item.requiredAction);
+                                      return;
+                                    }
+                                    const firstBlockedStage = visibleWorkflowStageRows.find((stage) => (stage.gate?.violationCount || 0) > 0);
+                                    if (item.fallbackAction === 'deliverables' && firstBlockedStage) {
+                                      handleFocusWorkflowStageDeliverables(firstBlockedStage.templateKey);
+                                      return;
+                                    }
+                                    if (item.fallbackAction === 'knowledge' && firstBlockedStage) {
+                                      handleFocusWorkflowStageKnowledge(firstBlockedStage.templateKey);
+                                      return;
+                                    }
+                                    if (item.fallbackAction === 'refresh') {
+                                      void refreshProjectView();
+                                    }
+                                  }}
+                                  className="px-2 py-1 rounded-lg text-[11px] border bg-primary/15 text-primary border-primary/30 hover:bg-primary/25"
+                                >
+                                  立即执行
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-slate-500">当前无待处理动作。</p>
+                        )}
+                      </div>
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2">

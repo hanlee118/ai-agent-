@@ -26,6 +26,10 @@ let systemConfigCache:
   | null = null;
 let systemConfigInflight: Promise<SystemConfigRecord> | null = null;
 
+export function invalidateSystemConfigCache() {
+  systemConfigCache = null;
+}
+
 function setSystemConfigCache(value: SystemConfigRecord) {
   systemConfigCache = {
     value,

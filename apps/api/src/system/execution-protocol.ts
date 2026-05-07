@@ -19,7 +19,10 @@ const DEFAULT_EXECUTION_PROTOCOL_SETTINGS: ExecutionProtocolSettings = {
   allowDirectModelFallbackForCriticalStages: false,
   requireSkillEvidence: true,
   requireCollaborationHandoff: true,
-  blockDegradedWrites: true
+  blockDegradedWrites: true,
+  blockSecretLeak: true,
+  blockLargeFileCommit: true,
+  largeFileSizeThreshold: 10 * 1024 * 1024
 };
 
 const EXECUTION_PROTOCOL_LOCKS: ExecutionProtocolLocks = {
@@ -49,7 +52,12 @@ function normalizeExecutionProtocolSettings(input: unknown): ExecutionProtocolSe
     allowDirectModelFallbackForCriticalStages: false,
     requireSkillEvidence: source.requireSkillEvidence !== false,
     requireCollaborationHandoff: source.requireCollaborationHandoff !== false,
-    blockDegradedWrites: source.blockDegradedWrites !== false
+    blockDegradedWrites: source.blockDegradedWrites !== false,
+    blockSecretLeak: source.blockSecretLeak !== false,
+    blockLargeFileCommit: source.blockLargeFileCommit !== false,
+    largeFileSizeThreshold: Number.isFinite(Number(source.largeFileSizeThreshold))
+      ? Math.max(1024 * 1024, Math.floor(Number(source.largeFileSizeThreshold)))
+      : 10 * 1024 * 1024
   };
 }
 
@@ -104,7 +112,10 @@ export async function updateExecutionProtocolSettings(
     ...currentSettings,
     requireSkillEvidence: input.requireSkillEvidence ?? currentSettings.requireSkillEvidence,
     requireCollaborationHandoff: input.requireCollaborationHandoff ?? currentSettings.requireCollaborationHandoff,
-    blockDegradedWrites: input.blockDegradedWrites ?? currentSettings.blockDegradedWrites
+    blockDegradedWrites: input.blockDegradedWrites ?? currentSettings.blockDegradedWrites,
+    blockSecretLeak: input.blockSecretLeak ?? currentSettings.blockSecretLeak,
+    blockLargeFileCommit: input.blockLargeFileCommit ?? currentSettings.blockLargeFileCommit,
+    largeFileSizeThreshold: input.largeFileSizeThreshold ?? currentSettings.largeFileSizeThreshold
   });
 
   const updated = await prisma.systemConfig.update({

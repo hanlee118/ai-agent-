@@ -10,13 +10,54 @@ type Props = {
   onNavigate?: (tab: string, id?: string) => void;
 };
 
-export default function MonitoringPage({ addToast }: Props) {
+export default function MonitoringPage({ addToast, onNavigate }: Props) {
   const [activeFilter, setActiveFilter] = useState('all');
   const [observability, setObservability] = useState<SystemObservabilitySummary | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isAuditRunning, setIsAuditRunning] = useState(false);
+
+  const loadSummary = async (silent = false) => {
+    if (!silent) {
+      setIsRefreshing(true);
+    }
+    try {
+      const summary = await systemApi.getObservabilitySummary();
+      setObservability(summary);
+      if (!silent) {
+        addToast('监控快照已刷新', 'success');
+      }
+    } catch {
+      setObservability(null);
+      if (!silent) {
+        addToast('监控刷新失败，请稍后重试', 'error');
+      }
+    } finally {
+      if (!silent) {
+        setIsRefreshing(false);
+      }
+    }
+  };
+
+  const handleTriggerAudit = async () => {
+    setIsAuditRunning(true);
+    try {
+      const result = await systemApi.triggerAudit();
+      if (result.ok) {
+        addToast(`巡检完成，扫描 ${result.scanned ?? 0} 个 MR`, 'success');
+      } else {
+        addToast(`巡检失败：${result.message || '未知错误'}`, 'error');
+      }
+      await loadSummary(true);
+    } catch {
+      addToast('巡检触发失败，请检查登录态和服务连通性', 'error');
+    } finally {
+      setIsAuditRunning(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
-    const loadSummary = async () => {
+    const load = async () => {
       try {
         const summary = await systemApi.getObservabilitySummary();
         if (!cancelled) {
@@ -28,7 +69,7 @@ export default function MonitoringPage({ addToast }: Props) {
         }
       }
     };
-    void loadSummary();
+    void load();
     return () => {
       cancelled = true;
     };
@@ -72,8 +113,12 @@ export default function MonitoringPage({ addToast }: Props) {
               </button>
             ))}
           </div>
-          <button onClick={() => addToast('监控快照已刷新', 'success')} className="px-3 py-1.5 text-xs bg-white/5 border border-border-subtle rounded-lg hover:bg-white/10">
-            刷新
+          <button
+            onClick={() => void loadSummary(false)}
+            disabled={isRefreshing}
+            className="px-3 py-1.5 text-xs bg-white/5 border border-border-subtle rounded-lg hover:bg-white/10 disabled:opacity-60"
+          >
+            {isRefreshing ? '刷新中...' : '刷新'}
           </button>
         </div>
       </header>
@@ -108,9 +153,18 @@ export default function MonitoringPage({ addToast }: Props) {
       <div className="bg-surface-soft border border-border-subtle rounded-2xl p-5 space-y-3">
         <div className="flex items-center justify-between gap-3">
           <h2 className="text-sm font-semibold text-white">平台可观测性摘要</h2>
-          <span className="text-[11px] text-slate-500">
-            {observability?.generatedAt ? `更新于 ${new Date(observability.generatedAt).toLocaleString('zh-CN')}` : '暂无数据'}
-          </span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => void handleTriggerAudit()}
+              disabled={isAuditRunning}
+              className="px-2.5 py-1 text-[11px] rounded-md border border-border-subtle bg-white/5 hover:bg-white/10 disabled:opacity-60"
+            >
+              {isAuditRunning ? '巡检中...' : '触发巡检'}
+            </button>
+            <span className="text-[11px] text-slate-500">
+              {observability?.generatedAt ? `更新于 ${new Date(observability.generatedAt).toLocaleString('zh-CN')}` : '暂无数据'}
+            </span>
+          </div>
         </div>
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
           <div className="rounded-xl border border-border-subtle bg-white/5 p-3">
@@ -138,12 +192,36 @@ export default function MonitoringPage({ addToast }: Props) {
             </p>
           </div>
         </div>
+        <div className="rounded-xl border border-border-subtle bg-white/5 p-3 text-xs">
+          <p className="text-slate-500">最近巡检</p>
+          <p className="mt-1 text-white">
+            {observability?.governance?.latestAudit?.available
+              ? observability.governance.latestAudit.summary || '巡检已执行'
+              : observability?.governance?.latestAudit?.message || '暂无巡检记录'}
+          </p>
+          {observability?.governance?.latestAudit?.createdAt && (
+            <p className="mt-1 text-slate-500">
+              {new Date(observability.governance.latestAudit.createdAt).toLocaleString('zh-CN')}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
         <div className="px-6 py-4 border-b border-border-subtle flex justify-between items-center bg-white/5">
           <h2 className="font-semibold text-white">会话活动流</h2>
-          <button className="text-xs text-primary hover:underline">查看历史</button>
+          <button
+            className="text-xs text-primary hover:underline"
+            onClick={() => {
+              if (onNavigate) {
+                onNavigate('audit');
+                return;
+              }
+              addToast('已打开历史日志入口', 'info');
+            }}
+          >
+            查看历史
+          </button>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">

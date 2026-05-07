@@ -25,6 +25,7 @@ export const roleOrder: RoleType[] = [
   "ROLE_ARCH",
   "ROLE_DEV",
   "ROLE_QA",
+  "ROLE_AUDITOR",
   "ROLE_HR"
 ];
 
@@ -124,6 +125,17 @@ export const seedAgents: AgentProfile[] = [
     styles: ["严谨", "系统性", "挑剔"],
     skills: { professional: 91, collaboration: 79, learning: 84, stability: 93, innovation: 69 },
     recentHighlights: ["补充验收标准", "发现审批链路遗漏"]
+  },
+  {
+    roleId: "ROLE_AUDITOR",
+    name: "巡检治理",
+    tagline: "持续巡检工程规范与协作健康度",
+    description: "负责 GitLab 协作规范巡检、异常预警与治理闭环跟踪。",
+    status: "idle",
+    workload: 29,
+    styles: ["客观", "持续", "规则导向"],
+    skills: { professional: 90, collaboration: 83, learning: 86, stability: 94, innovation: 71 },
+    recentHighlights: ["新增 MR 生命周期巡检", "自动识别缺失 Issue 关联"]
   },
   {
     roleId: "ROLE_HR",

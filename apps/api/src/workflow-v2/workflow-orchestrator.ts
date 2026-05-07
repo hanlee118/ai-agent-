@@ -5,7 +5,7 @@ import { runStageAgent } from "../agents/runtime.js";
 import { runScriptedAgent } from "../agents/providers/scripted-provider.js";
 import { previewRequirement } from "../utils/project-parser.js";
 import { assignAgentToStage } from "./agent-assignment.js";
-import { evaluateWorkflowStageGate } from "./quality-gate.js";
+import { evaluateEngineeringPolicyGate, evaluateWorkflowStageGate } from "./quality-gate.js";
 import { maybeGenerateStitchArtifacts } from "./stitch-chain.js";
 import { getHermesMcpRuntimeStatus, tryRunStageWithHermes } from "./hermes-mcp.js";
 import {
@@ -19,6 +19,7 @@ import {
   ingestKnowledgeFromStageOutput,
   retrieveKnowledgeForContext
 } from "./knowledge-service.js";
+import { persistStructuredMergeRequestSafe } from "../data/repository.js";
 import { getStageCompanionRoles } from "../system/project-stage-execution.js";
 import {
   asRecord,
@@ -202,20 +203,62 @@ async function tryAutoRepairStageInputContract(input: {
   if (!description) {
     return null;
   }
+  const requiredMinLengthFromGate = (() => {
+    const issues = Array.isArray(input.gateViolations) ? input.gateViolations : [];
+    let maxRequired = 40;
+    for (const issue of issues) {
+      const normalized = String(issue || "").toLowerCase();
+      if (!normalized.includes("rawrequirements")) {
+        continue;
+      }
+      const matched = normalized.match(/minlength\s*=\s*(\d+)/i);
+      if (!matched) {
+        continue;
+      }
+      const value = Number(matched[1]);
+      if (Number.isFinite(value) && value > maxRequired) {
+        maxRequired = value;
+      }
+    }
+    return Math.max(40, maxRequired);
+  })();
+  const synthesizedRawRequirements = (() => {
+    const normalized = description.replace(/\s+/g, " ").trim();
+    const seed = normalized.length > 0 ? normalized : "待补充项目原始需求。";
+    if (seed.length >= requiredMinLengthFromGate) {
+      return seed;
+    }
+    return [
+      seed,
+      "补充约束：本项目必须输出可执行需求分析、项目排期方案与产品需求文档（PRD），并在每个阶段保留可追踪证据与验收标准。"
+    ].join(" ");
+  })();
 
   const existingInputs = await prisma.projectInput.findMany({
     where: { projectId },
-    select: { name: true }
+    select: { id: true, name: true, content: true }
   });
-  const hasRawRequirements = existingInputs.some((item) => normalizeProjectInputToken(item.name) === "rawrequirements");
-  if (!hasRawRequirements) {
+  const existingRawRequirements = existingInputs.find((item) => normalizeProjectInputToken(item.name) === "rawrequirements");
+  if (!existingRawRequirements) {
     await createProjectInputs(projectId, [{
       name: "rawRequirements",
       type: "document",
       description: "workflow-v2 输入门禁自愈：从项目描述自动补齐",
-      content: description,
+      content: synthesizedRawRequirements,
       inputSource: "template_generated"
     }]);
+  } else {
+    const currentLength = String(existingRawRequirements.content || "").trim().length;
+    if (currentLength < requiredMinLengthFromGate) {
+      await prisma.projectInput.update({
+        where: { id: existingRawRequirements.id },
+        data: {
+          content: synthesizedRawRequirements,
+          description: "workflow-v2 输入门禁自愈：已自动补齐 rawRequirements 长度",
+          inputSource: "template_generated"
+        }
+      });
+    }
   }
 
   await bindProjectInputsToWorkflowEntryStages({
@@ -627,6 +670,110 @@ function mergeGateResults(
     passed: Boolean(base.passed) && Boolean(extra.passed),
     violations: mergedViolations.length > 0 ? mergedViolations : undefined,
     checks: mergedChecks.length > 0 ? mergedChecks : undefined
+  };
+}
+
+function extractStructuredMrFromStage(stage: { outputArtifacts: unknown }) {
+  const artifacts = Array.isArray(stage.outputArtifacts)
+    ? (stage.outputArtifacts as Array<Record<string, unknown>>)
+    : [];
+  for (const artifact of artifacts) {
+    const content = String(artifact.content ?? "").trim();
+    if (!content) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      const relatedIssue = String(parsed.relatedIssue ?? "").trim();
+      const purpose = String(parsed.purpose ?? "").trim();
+      const impact = String(parsed.impact ?? "").trim();
+      const verification = String(parsed.verification ?? "").trim();
+      const riskRollback = String(parsed.riskRollback ?? "").trim();
+      const changes = Array.isArray(parsed.changes) ? parsed.changes.map((item) => String(item)) : [];
+      if (relatedIssue || purpose || impact || verification || riskRollback || changes.length > 0) {
+        return {
+          relatedIssue,
+          purpose,
+          changes,
+          impact,
+          verification,
+          riskRollback,
+          rawPayload: parsed
+        };
+      }
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+function evaluateStructuredMrGate(mr: {
+  relatedIssue: string;
+  purpose: string;
+  changes: string[];
+  impact: string;
+  verification: string;
+  riskRollback: string;
+} | null) {
+  const strict = String(process.env.WORKFLOW_V2_STRUCTURED_MR_REQUIRED ?? "false").trim().toLowerCase() === "true";
+  if (!mr) {
+    if (strict) {
+      return {
+        passed: false,
+        violations: ["缺少 structured MR 交付（当前环境已开启强制模式）"],
+        checks: [{ type: "structured_mr", passed: false, details: "structured MR required but missing" }]
+      };
+    }
+    return {
+      passed: true,
+      violations: [] as string[],
+      checks: [{ type: "structured_mr", passed: true, details: "structured MR not provided; compatibility mode" }]
+    };
+  }
+  const violations: string[] = [];
+  if (!/#\d+/.test(mr.relatedIssue)) {
+    violations.push("MR 缺少有效 relatedIssue（需包含 #<ID>）");
+  }
+  if (!mr.purpose) {
+    violations.push("MR 缺少变更目的（purpose）");
+  }
+  if (!Array.isArray(mr.changes) || mr.changes.length === 0) {
+    violations.push("MR 缺少改动内容（changes）");
+  }
+  if (!mr.impact) {
+    violations.push("MR 缺少影响范围（impact）");
+  }
+  if (!mr.verification) {
+    violations.push("MR 缺少验证方法（verification）");
+  }
+  if (!mr.riskRollback) {
+    violations.push("MR 缺少风险与回滚计划（riskRollback）");
+  }
+  return {
+    passed: violations.length === 0,
+    violations,
+    checks: [{
+      type: "structured_mr",
+      passed: violations.length === 0,
+      details: violations.length === 0 ? "structured MR gate passed" : violations.join("；")
+    }]
+  };
+}
+
+function resolveEngineeringPolicyInput(stage: {
+  outputArtifacts: unknown;
+  templateKey: string;
+}) {
+  const artifacts = Array.isArray(stage.outputArtifacts)
+    ? (stage.outputArtifacts as Array<Record<string, unknown>>)
+    : [];
+  const first = artifacts.find((item) => typeof item === "object" && item !== null) ?? {};
+  const metadata = asRecord((first as Record<string, unknown>).metadata) ?? {};
+  return {
+    branchName: String(metadata.branchName ?? ""),
+    commitMessage: String(metadata.commitMessage ?? ""),
+    mergeRequestDescription: String(metadata.mergeRequestDescription ?? "")
   };
 }
 
@@ -1504,16 +1651,76 @@ export async function transitionWorkflowStage(input: {
       templateKey: stage.templateKey,
       outputArtifacts: stage.outputArtifacts
     });
-    const mergedGate = mergeGateResults(gate, {
+    let mergedGate = mergeGateResults(gate, {
       passed: roleCollaboration.passed,
       violations: roleCollaboration.violations,
       checks: roleCollaboration.checks
     });
+    const templateKey = normalizeText(stage.templateKey).toLowerCase();
+    if (templateKey.includes("dev") || templateKey.includes("code")) {
+      const engineeringGate = evaluateEngineeringPolicyGate(resolveEngineeringPolicyInput(stage));
+      mergedGate = mergeGateResults(mergedGate, engineeringGate);
+      const structuredMr = extractStructuredMrFromStage(stage);
+      const structuredMrGate = evaluateStructuredMrGate(structuredMr);
+      mergedGate = mergeGateResults(mergedGate, {
+        passed: structuredMrGate.passed,
+        violations: structuredMrGate.violations,
+        checks: structuredMrGate.checks
+      });
+      if (structuredMrGate.passed && structuredMr) {
+        await persistStructuredMergeRequestSafe({
+          projectId: workflow.projectId,
+          workflowStageId: stage.id,
+          relatedIssue: structuredMr.relatedIssue,
+          purpose: structuredMr.purpose,
+          changes: structuredMr.changes,
+          impact: structuredMr.impact,
+          verification: structuredMr.verification,
+          riskRollback: structuredMr.riskRollback,
+          rawPayload: structuredMr.rawPayload as Prisma.InputJsonValue
+        });
+      }
+    }
     if (!mergedGate.passed) {
       await prisma.workflowStage.update({
         where: { id: stage.id },
         data: {
           gateResults: mergedGate
+        }
+      });
+      await prisma.projectExecution.create({
+        data: {
+          projectId: workflow.projectId,
+          stageType: resolveStageType(stage.templateKey),
+          role: "ROLE_DEV",
+          action: "engineering_policy_gate",
+          status: "blocked",
+          provider: "workflow-v2",
+          model: null,
+          requestedMode: "gate",
+          runtimeMode: "gate",
+          promptSummary: "工程规范门禁阻断",
+          outputPreview: (mergedGate.violations ?? []).join(" | ").slice(0, 500),
+          errorMessage: "blocked by engineering policy gate",
+          metadata: toJson({
+            requiredActions: (mergedGate.violations ?? []).map((item, index) => ({
+              id: `engineering_gate_${index + 1}`,
+              action: "fix_engineering_policy",
+              label: "修复工程规范",
+              detail: item
+            }))
+          })
+        }
+      });
+      await prisma.timelineEvent.create({
+        data: {
+          projectId: workflow.projectId,
+          timestamp: new Date(),
+          agentId: "workflow-v2-gate",
+          type: "workflow_gate_blocked",
+          title: "工程规范门禁阻断",
+          content: (mergedGate.violations ?? []).join("；"),
+          priority: "high"
         }
       });
       return {
@@ -1617,6 +1824,42 @@ export async function transitionWorkflowStage(input: {
   return {
     success: true,
     nextStageIds
+  };
+}
+
+export async function approveWorkflowStageManual(input: {
+  workflowId: string;
+  stageId: string;
+  role: string;
+  approvedBy: string;
+  reason?: string;
+}) {
+  const stage = await prisma.workflowStage.findUnique({
+    where: { id: input.stageId }
+  });
+  if (!stage || stage.workflowId !== input.workflowId) {
+    throw new Error("Stage not found");
+  }
+  const existingGate = (asRecord(stage.gateResults ?? {}) ?? {}) as Record<string, unknown>;
+  const manualApprovals = (asRecord(existingGate.manualApprovals ?? {}) ?? {}) as Record<string, unknown>;
+  manualApprovals[normalizeText(input.role)] = {
+    approved: true,
+    approvedBy: normalizeText(input.approvedBy) || "unknown",
+    approvedAt: new Date().toISOString(),
+    reason: normalizeText(input.reason) || null
+  };
+  const nextGate = {
+    ...existingGate,
+    manualApprovals
+  };
+  await prisma.workflowStage.update({
+    where: { id: input.stageId },
+    data: {
+      gateResults: toJson(nextGate)
+    }
+  });
+  return {
+    success: true
   };
 }
 

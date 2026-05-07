@@ -42,6 +42,7 @@ import {
   finalizeRequirementBackfill,
   getIssueByProjectId,
   listIssues,
+  listIssueCreatedProjectIdsByPrefix,
   type RequirementContract
 } from "../system/v1-method-store.js";
 import { getTemplateRequiredRoles } from "../system/issue-engine.js";
@@ -134,6 +135,10 @@ const SYSTEM_HEALTH_CACHE_TTL_MS = Math.max(
   1000,
   Number(process.env.SYSTEM_HEALTH_CACHE_TTL_MS ?? 5000)
 );
+const SYSTEM_HEALTH_COUNT_CACHE_TTL_MS = Math.max(
+  5_000,
+  Number(process.env.SYSTEM_HEALTH_COUNT_CACHE_TTL_MS ?? 45_000)
+);
 
 let systemHealthCache:
   | {
@@ -142,6 +147,36 @@ let systemHealthCache:
     }
   | null = null;
 let systemHealthInflight: Promise<SystemHealth> | null = null;
+let systemHealthCountCache:
+  | {
+      expiresAt: number;
+      value: {
+        totalProjects: number;
+        activeProjects: number;
+        pendingApprovals: number;
+        activeTasks: number;
+        blockedTasks: number;
+        rejectedStages: number;
+        averageAgentWorkload: number;
+      };
+    }
+  | null = null;
+let systemHealthCountInflight:
+  | Promise<{
+      totalProjects: number;
+      activeProjects: number;
+      pendingApprovals: number;
+      activeTasks: number;
+      blockedTasks: number;
+      rejectedStages: number;
+      averageAgentWorkload: number;
+    }>
+  | null = null;
+const PROJECT_API_DETAIL_CACHE_TTL_MS = Math.max(
+  1_000,
+  Number(process.env.PROJECT_API_DETAIL_CACHE_TTL_MS ?? 2_000)
+);
+const projectApiDetailCache = new Map<string, { expiresAt: number; value: ProjectDetail | undefined }>();
 const STAGE_EXPECTED_DELIVERABLE_NAMES: Record<StageType, string[]> = {
   INIT: ["项目章程.md"],
   ANALYSIS: ["需求分析文档.md", "项目排期方案.md", "产品需求文档(PRD).md"],
@@ -235,6 +270,16 @@ function triggerWorkflowV2StartInBackground(workflowId: string, projectId: strin
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[project] workflow-v2 async start failed for ${projectId} (${workflowId}): ${message}`);
   });
+}
+
+function shouldInitializeWorkflowV2Synchronously() {
+  const fallback = process.env.NODE_ENV === "test" ? "true" : "false";
+  return String(process.env.PROJECT_WORKFLOW_V2_AUTO_INIT_SYNC ?? fallback).trim().toLowerCase() === "true";
+}
+
+function shouldAlignLegacyStagesSynchronously() {
+  const fallback = process.env.NODE_ENV === "test" ? "true" : "false";
+  return String(process.env.PROJECT_ALIGN_LEGACY_STAGES_SYNC ?? fallback).trim().toLowerCase() === "true";
 }
 
 function shouldAttachStitchForExecution(stageType: StageType, role: RoleType) {
@@ -1930,10 +1975,10 @@ function evaluateAnalysisRequirementDepth(input: {
 
   const countSectionBullets = (source: string, headingPattern: RegExp) => {
     const matched = source.match(headingPattern);
-    if (!matched?.[1]) {
+    if (!matched?.[0]) {
       return 0;
     }
-    return countBulletLines(matched[1]);
+    return countBulletLines(matched[0]);
   };
 
   const countMatches = (pattern: RegExp) => (text.match(pattern) || []).length;
@@ -2146,6 +2191,12 @@ function enrichDeliverableContentForGate(input: {
   content: string;
   roleLabel?: string;
 }) {
+  const disableTemplateAutoEnrich =
+    String(process.env.DELIVERABLE_TEMPLATE_AUTO_ENRICH ?? "false").trim().toLowerCase() !== "true";
+  if (disableTemplateAutoEnrich) {
+    return String(input.content || "").trim();
+  }
+
   let content = String(input.content || "").trim();
   const name = String(input.deliverableName || "");
   const stageType = input.stageType;
@@ -2489,6 +2540,29 @@ function validateDeliverableTemplateGate(input: {
 }
 
 function assertCoreDeliverablesTemplateGate(project: ProjectDetail, stageType: StageType) {
+  const projectMode = String(project.projectType || "").trim().toLowerCase();
+  if (projectMode === "standalone") {
+    const stageDeliverables = project.deliverables
+      .filter((item) => item.stageType === stageType)
+      .filter((item) => item.status === "submitted" || item.status === "approved")
+      .sort((left, right) => {
+        const versionDelta = (right.version || 0) - (left.version || 0);
+        if (versionDelta !== 0) {
+          return versionDelta;
+        }
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      });
+    const latest = stageDeliverables[0];
+    if (!latest) {
+      throw new Error("STAGE_TEMPLATE_VALIDATION_FAILED: 单阶段项目当前阶段缺少可审批交付物");
+    }
+    const normalized = String(latest.content || "").trim();
+    if (normalized.length < MIN_DELIVERABLE_CONTENT_LENGTH || hasTemplatePlaceholderTokens(normalized)) {
+      throw new Error("STAGE_TEMPLATE_VALIDATION_FAILED: 单阶段项目当前交付物正文不足或包含占位内容");
+    }
+    return;
+  }
+
   const expectedNames = STAGE_EXPECTED_DELIVERABLE_NAMES[stageType] || [];
   if (expectedNames.length === 0) {
     return;
@@ -3712,6 +3786,9 @@ async function reconcileProjectStateWithWorkflowIfNeeded(projectId: string) {
         }
       });
     }
+  }, {
+    maxWait: 10_000,
+    timeout: 60_000
   });
 }
 
@@ -4221,41 +4298,46 @@ async function tryApproveProjectViaWorkflowV2(projectId: string) {
 
 async function loadProjectRecord(id: string, options?: { detailLevel?: ProjectDetailLevel }) {
   const detailLevel = options?.detailLevel ?? "full";
-  const executionTake = detailLevel === "api" ? 40 : 240;
-  const timelineTake = detailLevel === "api" ? 80 : undefined;
-  const deliverableTake = detailLevel === "api" ? 120 : undefined;
+  const executionTake = detailLevel === "api" ? 12 : 240;
+  const timelineTake = detailLevel === "api" ? 12 : undefined;
+  const deliverableTake = detailLevel === "api" ? 60 : undefined;
+  const taskTake = detailLevel === "api" ? 80 : undefined;
+  const taskRelationInclude = detailLevel === "api"
+    ? undefined
+    : {
+      dependencies: {
+        include: {
+          dependsOnTask: {
+            select: {
+              id: true,
+              title: true,
+              status: true,
+              ownerAgentId: true
+            }
+          }
+        }
+      },
+      delegations: {
+        orderBy: [{ updatedAt: "desc" as const }],
+        take: 3
+      },
+      gitlabSyncBindings: {
+        where: { bindingType: "task" },
+        orderBy: [{ updatedAt: "desc" as const }],
+        take: 1
+      }
+    };
   return prisma.project.findUnique({
     where: { id },
     include: {
       stages: { orderBy: { sortOrder: "asc" } },
       tasks: {
-        orderBy: [{ stageType: "asc" }, { sortOrder: "asc" }],
-        include: {
-          dependencies: {
-            include: {
-              dependsOnTask: {
-                select: {
-                  id: true,
-                  title: true,
-                  status: true,
-                  ownerAgentId: true
-                }
-              }
-            }
-          },
-          delegations: {
-            orderBy: [{ updatedAt: "desc" }],
-            take: 3
-          },
-          gitlabSyncBindings: {
-            where: { bindingType: "task" },
-            orderBy: [{ updatedAt: "desc" }],
-            take: 1
-          }
-        }
+        orderBy: [{ stageType: "asc" as const }, { sortOrder: "asc" as const }],
+        ...(taskTake ? { take: taskTake } : {}),
+        ...(taskRelationInclude ? { include: taskRelationInclude } : {})
       },
       deliverables: {
-        orderBy: [{ updatedAt: "desc" }],
+        orderBy: [{ updatedAt: "desc" as const }],
         ...(deliverableTake ? { take: deliverableTake } : {})
       },
       projectInputs: {
@@ -4430,6 +4512,22 @@ type StageAgentExecutionRecord = {
   updatedAt: string;
 };
 
+export type StructuredMergeRequestRecord = {
+  id: string;
+  projectId: string;
+  workflowStageId?: string;
+  executionId?: string;
+  relatedIssue: string;
+  purpose: string;
+  changes: string[];
+  impact: string;
+  verification: string;
+  riskRollback: string;
+  rawPayload?: Prisma.JsonValue;
+  createdAt: string;
+  updatedAt: string;
+};
+
 async function persistProjectExecutionSafe(data: Prisma.ProjectExecutionUncheckedCreateInput) {
   try {
     const projectExists = await prisma.project.count({
@@ -4447,6 +4545,76 @@ async function persistProjectExecutionSafe(data: Prisma.ProjectExecutionUnchecke
       error instanceof Error ? error.message : String(error)
     );
   }
+}
+
+export async function persistStructuredMergeRequestSafe(input: {
+  projectId: string;
+  workflowStageId?: string;
+  executionId?: string;
+  relatedIssue: string;
+  purpose: string;
+  changes: string[];
+  impact: string;
+  verification: string;
+  riskRollback: string;
+  rawPayload?: Prisma.InputJsonValue;
+}) {
+  try {
+    const id = randomUUID();
+    await prisma.$executeRawUnsafe(
+      `
+      INSERT INTO "StructuredMergeRequest"
+      ("id","projectId","workflowStageId","executionId","relatedIssue","purpose","changes","impact","verification","riskRollback","rawPayload","createdAt","updatedAt")
+      VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,NOW(),NOW())
+      `,
+      id,
+      input.projectId,
+      input.workflowStageId ?? null,
+      input.executionId ?? null,
+      input.relatedIssue,
+      input.purpose,
+      JSON.stringify(input.changes ?? []),
+      input.impact,
+      input.verification,
+      input.riskRollback,
+      JSON.stringify(input.rawPayload ?? null)
+    );
+  } catch (error) {
+    console.warn(
+      `[structured-mr] persist failed project=${input.projectId}:`,
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+export async function listStructuredMergeRequests(projectId: string, limit = 50): Promise<StructuredMergeRequestRecord[]> {
+  const safeLimit = Math.max(1, Math.min(limit, 200));
+  const rows = await prisma.$queryRawUnsafe<Array<Record<string, unknown>>>(
+    `
+    SELECT "id","projectId","workflowStageId","executionId","relatedIssue","purpose","changes","impact","verification","riskRollback","rawPayload","createdAt","updatedAt"
+    FROM "StructuredMergeRequest"
+    WHERE "projectId" = $1
+    ORDER BY "createdAt" DESC
+    LIMIT $2
+    `,
+    projectId,
+    safeLimit
+  );
+  return rows.map((row: Record<string, unknown>) => ({
+    id: String(row.id),
+    projectId: String(row.projectId),
+    workflowStageId: row.workflowStageId ? String(row.workflowStageId) : undefined,
+    executionId: row.executionId ? String(row.executionId) : undefined,
+    relatedIssue: String(row.relatedIssue ?? ""),
+    purpose: String(row.purpose ?? ""),
+    changes: Array.isArray(row.changes) ? row.changes.map((item: unknown) => String(item)) : [],
+    impact: String(row.impact ?? ""),
+    verification: String(row.verification ?? ""),
+    riskRollback: String(row.riskRollback ?? ""),
+    rawPayload: (row.rawPayload as Prisma.JsonValue | undefined) ?? undefined,
+    createdAt: new Date(String(row.createdAt)).toISOString(),
+    updatedAt: new Date(String(row.updatedAt)).toISOString()
+  }));
 }
 
 function composeExecutionMetadata(
@@ -6152,6 +6320,7 @@ async function buildDeliverableBackfillContentWithAgent(
 }
 
 async function reconcileProjectDeliverables(project: ProjectRecord) {
+  const isStandaloneProject = String(project.projectType || "").trim().toLowerCase() === "standalone";
   const stageStatusByType = new Map(project.stages.map((stage) => [stage.type, stage.status]));
   const stageRunCache = new Map<string, Awaited<ReturnType<typeof runStageAgent>>>();
   const allowAgentBackfill =
@@ -6228,6 +6397,38 @@ async function reconcileProjectDeliverables(project: ProjectRecord) {
   }
 
   // 补齐每个阶段的标准产物，避免出现“阶段已完成但关键交付缺失”。
+  // 单阶段项目不自动补齐，避免把真实单阶段闭环污染为多阶段模板稿。
+  if (isStandaloneProject) {
+    if (updates.length === 0 && creates.length === 0) {
+      return false;
+    }
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      for (const update of updates) {
+        await tx.deliverable.update({
+          where: { id: update.id },
+          data: {
+            content: update.content,
+            ...(update.status ? { status: update.status } : {}),
+            updatedAt: now
+          }
+        });
+      }
+      await tx.timelineEvent.create({
+        data: {
+          id: randomUUID(),
+          projectId: project.id,
+          type: "system",
+          title: "单阶段项目交付补齐策略已生效",
+          content: "已跳过多阶段模板补齐，仅保留当前阶段真实交付闭环。",
+          priority: "normal",
+          agentId: "ROLE_PM",
+          timestamp: now
+        }
+      });
+    });
+    return true;
+  }
+
   for (const stage of project.stages) {
     const stageType = resolveStageType(stage.type);
     if (!stageType) {
@@ -6483,11 +6684,28 @@ type ProjectDetailLevel = "full" | "api";
 
 export async function findProject(
   id: string,
-  options?: { detailLevel?: ProjectDetailLevel }
+  options?: { detailLevel?: ProjectDetailLevel; skipWorkflowStateReconcile?: boolean }
 ): Promise<ProjectDetail | undefined> {
-  await reconcileProjectStateWithWorkflowIfNeeded(id);
+  const isApiFastPath = options?.detailLevel === "api" && options?.skipWorkflowStateReconcile === true;
+  if (isApiFastPath) {
+    const now = Date.now();
+    const cached = projectApiDetailCache.get(id);
+    if (cached && cached.expiresAt > now) {
+      return cached.value;
+    }
+  }
+  if (!options?.skipWorkflowStateReconcile) {
+    await reconcileProjectStateWithWorkflowIfNeeded(id);
+  }
   const project = await loadProjectRecord(id, options);
-  return project ? toProjectDetail(project) : undefined;
+  const value = project ? toProjectDetail(project) : undefined;
+  if (isApiFastPath) {
+    projectApiDetailCache.set(id, {
+      value,
+      expiresAt: Date.now() + PROJECT_API_DETAIL_CACHE_TTL_MS
+    });
+  }
+  return value;
 }
 
 export async function archiveProjectAcceptanceReport(
@@ -6735,12 +6953,27 @@ export async function createProject(
     await createProjectInputs(persistedProjectId, mergedProjectInputs);
   }
   const created = await findProject(persistedProjectId).then((value) => value as ProjectDetail);
-  await tryAutoInitializeProjectWorkflowV2(created, {
+  const autoInitInput = {
     ...input,
     workflowTemplateKey,
     projectType
-  });
-  await alignLegacyStagesWithCurrentStage(persistedProjectId);
+  };
+  if (shouldInitializeWorkflowV2Synchronously()) {
+    await tryAutoInitializeProjectWorkflowV2(created, autoInitInput);
+  } else {
+    void tryAutoInitializeProjectWorkflowV2(created, autoInitInput).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[project] workflow-v2 async init failed for ${persistedProjectId}: ${message}`);
+    });
+  }
+  if (shouldAlignLegacyStagesSynchronously()) {
+    await alignLegacyStagesWithCurrentStage(persistedProjectId);
+  } else {
+    void alignLegacyStagesWithCurrentStage(persistedProjectId).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[project] async legacy stage align failed for ${persistedProjectId}: ${message}`);
+    });
+  }
   return (await findProject(persistedProjectId).then((value) => value as ProjectDetail));
 }
 
@@ -7137,6 +7370,81 @@ export async function approveProject(id: string): Promise<ProjectDetail | undefi
 
   if (!project || !project.pendingApproval) {
     return project;
+  }
+  const approvedProject = project;
+
+  const isStandaloneProject = String(approvedProject.projectType || "").trim().toLowerCase() === "standalone";
+  if (isStandaloneProject) {
+    const currentStageType = approvedProject.currentStage;
+    const currentStage = approvedProject.stages.find((stage) => stage.type === currentStageType);
+    const stageDeliverables = approvedProject.deliverables
+      .filter((item) => item.stageType === currentStageType)
+      .sort((left, right) => {
+        const versionDelta = (right.version || 0) - (left.version || 0);
+        if (versionDelta !== 0) {
+          return versionDelta;
+        }
+        return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      });
+    const latest = stageDeliverables[0];
+    const latestContent = String(latest?.content || "").trim();
+    if (!latest || latestContent.length < MIN_DELIVERABLE_CONTENT_LENGTH || hasTemplatePlaceholderTokens(latestContent)) {
+      throw new Error("STAGE_TEMPLATE_VALIDATION_FAILED: 单阶段项目缺少可验收的真实交付物，无法审批。");
+    }
+
+    await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+      if (currentStage) {
+        await tx.stage.update({
+          where: { projectId_type: { projectId: id, type: currentStage.type } },
+          data: {
+            status: "completed",
+            progress: 100,
+            endedAt: new Date()
+          }
+        });
+      }
+      await tx.deliverable.updateMany({
+        where: {
+          projectId: id,
+          stageType: currentStageType,
+          status: { in: ["submitted", "draft"] }
+        },
+        data: {
+          status: "approved",
+          updatedAt: new Date()
+        }
+      });
+      await tx.task.updateMany({
+        where: { projectId: id, stageType: currentStageType },
+        data: { status: "done" }
+      });
+      await tx.project.update({
+        where: { id },
+        data: {
+          status: "completed",
+          currentRole: "ROLE_PM",
+          progress: 100,
+          pendingApproval: false,
+          summary: "单阶段项目已完成最小闭环验收。",
+          liveTitle: "单阶段项目已验收完成",
+          liveBody: "## 验收结论\n\n当前单阶段交付物已通过验收，项目闭环完成。",
+          liveProvider: approvedProject.liveSession.provider,
+          liveStartedAt: new Date()
+        }
+      });
+      await tx.timelineEvent.create({
+        data: {
+          projectId: id,
+          timestamp: new Date(),
+          agentId: "ROLE_PM",
+          type: "approval_done",
+          title: `${STAGE_LABELS[currentStageType]}阶段已通过（单阶段闭环）`,
+          content: `单阶段项目已完成审批并结项，交付物 ${latest.name} 已归档为通过。`,
+          priority: "high"
+        }
+      });
+    });
+    return findProject(id);
   }
 
   const handledByWorkflow = await tryApproveProjectViaWorkflowV2(id);
@@ -7825,6 +8133,7 @@ export async function submitCurrentStage(
   }
 
   const currentStageType = project.currentStage;
+  const isStandaloneProject = String(project.projectType || "").trim().toLowerCase() === "standalone";
   const currentRole = project.currentRole;
   const stageLabel = STAGE_LABELS[currentStageType];
   const versions = project.deliverables
@@ -7878,7 +8187,16 @@ export async function submitCurrentStage(
     projectDescription: project.description,
     keywords: project.parsedIntent.keywords
   });
-  if (!templateGate.passed) {
+  const standaloneGatePassed = (() => {
+    if (!isStandaloneProject) {
+      return false;
+    }
+    const normalized = String(submittedContent || "").trim();
+    return normalized.length >= MIN_DELIVERABLE_CONTENT_LENGTH
+      && !hasTemplatePlaceholderTokens(normalized)
+      && !DELIVERABLE_TEMPLATE_SCAFFOLD_PATTERN.test(normalized);
+  })();
+  if (!templateGate.passed && !standaloneGatePassed) {
     const normalizedTemplateIssues = templateGate.issues.map((item) => normalizeTemplateGateIssueForDraft(item));
     if (options?.persistDraftOnTemplateFailure) {
       const draftContent = [
@@ -7947,12 +8265,14 @@ export async function submitCurrentStage(
   }
   const requestedFinalizeApproval = options?.finalizeApproval !== false;
   const finalizeReadiness = requestedFinalizeApproval
-    ? await evaluateStageFinalizeReadiness({
+    ? (isStandaloneProject
+      ? { canFinalize: true, reasons: [] as string[] }
+      : await evaluateStageFinalizeReadiness({
       project,
       stageType: currentStageType,
       deliverableName,
       content: submittedContent
-    })
+    }))
     : { canFinalize: false, reasons: [] as string[] };
   const finalizeApproval = requestedFinalizeApproval && finalizeReadiness.canFinalize;
   const currentStageRecord = project.stages.find((item) => item.type === currentStageType);
@@ -8566,9 +8886,28 @@ export async function getProjectLifecycleQualityAudit(projectId: string) {
   };
 }
 
-export async function listProjectTasks(projectId?: string): Promise<Task[]> {
+export async function listProjectTasks(
+  projectId?: string,
+  options?: {
+    status?: string;
+    assignee?: string;
+    page?: number;
+    pageSize?: number;
+  }
+): Promise<Task[]> {
+  const status = String(options?.status ?? "").trim();
+  const assignee = String(options?.assignee ?? "").trim();
+  const page = Number.isFinite(options?.page as number) ? Math.max(1, Math.floor(options?.page as number)) : 1;
+  const pageSize = Number.isFinite(options?.pageSize as number) ? Math.max(1, Math.min(100, Math.floor(options?.pageSize as number))) : 20;
+  const where: Prisma.TaskWhereInput = {
+    ...(projectId ? { projectId } : {}),
+    ...(status ? { status } : {}),
+    ...(assignee ? { assignee } : {})
+  };
   const tasks = await withPrismaReadRetry("findMany", () => prisma.task.findMany({
-    where: projectId ? { projectId } : undefined,
+    where,
+    skip: (page - 1) * pageSize,
+    take: pageSize,
     orderBy: [{ updatedAt: "desc" }],
     include: {
       project: {
@@ -8603,8 +8942,24 @@ export async function listProjectTasks(projectId?: string): Promise<Task[]> {
   return tasks.map((task) => toTask(task, { projectPendingApproval: task.project.pendingApproval }));
 }
 
-export async function listTasks(): Promise<TaskBoardItem[]> {
+export async function listTasks(options?: {
+  status?: string;
+  assignee?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<TaskBoardItem[]> {
+  const status = String(options?.status ?? "").trim();
+  const assignee = String(options?.assignee ?? "").trim();
+  const page = Number.isFinite(options?.page as number) ? Math.max(1, Math.floor(options?.page as number)) : 1;
+  const pageSize = Number.isFinite(options?.pageSize as number) ? Math.max(1, Math.min(100, Math.floor(options?.pageSize as number))) : 20;
+  const where: Prisma.TaskWhereInput = {
+    ...(status ? { status } : {}),
+    ...(assignee ? { assignee } : {})
+  };
   const tasks = await withPrismaReadRetry("findMany", () => prisma.task.findMany({
+    where,
+    skip: (page - 1) * pageSize,
+    take: pageSize,
     include: {
       project: {
         select: {
@@ -8763,39 +9118,70 @@ async function computeSystemHealth(): Promise<SystemHealth> {
   let databaseDetail = "Prisma 与 PostgreSQL 已连通";
 
   try {
-    const [
-      projectTotalCount,
-      projectActiveCount,
-      projectPendingApprovalCount,
-      taskActiveCount,
-      taskBlockedCount,
-      stageRejectedCount,
-      workloadAgg
-    ] = await Promise.all([
-      withPrismaReadRetry("count", () => prisma.project.count()),
-      withPrismaReadRetry("count", () => prisma.project.count({ where: { status: "active" } })),
-      withPrismaReadRetry("count", () => prisma.project.count({ where: { pendingApproval: true } })),
-      withPrismaReadRetry("count", () => prisma.task.count({
-        where: {
-          status: {
-            in: ["todo", "in_progress"]
-          }
-        }
-      })),
-      withPrismaReadRetry("count", () => prisma.task.count({ where: { status: "blocked" } })),
-      withPrismaReadRetry("count", () => prisma.stage.count({ where: { status: "rejected" } })),
-      withPrismaReadRetry("aggregate", () => prisma.agentProfile.aggregate({
-        _avg: { workload: true }
-      }))
-    ]);
-
-    totalProjects = projectTotalCount;
-    activeProjects = projectActiveCount;
-    pendingApprovals = projectPendingApprovalCount;
-    activeTasks = taskActiveCount;
-    blockedTasks = taskBlockedCount;
-    rejectedStages = stageRejectedCount;
-    averageAgentWorkload = Math.round(Number(workloadAgg._avg.workload ?? 0));
+    const now = Date.now();
+    if (systemHealthCountCache && systemHealthCountCache.expiresAt > now) {
+      totalProjects = systemHealthCountCache.value.totalProjects;
+      activeProjects = systemHealthCountCache.value.activeProjects;
+      pendingApprovals = systemHealthCountCache.value.pendingApprovals;
+      activeTasks = systemHealthCountCache.value.activeTasks;
+      blockedTasks = systemHealthCountCache.value.blockedTasks;
+      rejectedStages = systemHealthCountCache.value.rejectedStages;
+      averageAgentWorkload = systemHealthCountCache.value.averageAgentWorkload;
+    } else {
+      if (!systemHealthCountInflight) {
+        systemHealthCountInflight = (async () => {
+          const [
+            projectTotalCount,
+            projectActiveCount,
+            projectPendingApprovalCount,
+            taskActiveCount,
+            taskBlockedCount,
+            stageRejectedCount,
+            workloadAgg
+          ] = await Promise.all([
+            withPrismaReadRetry("count", () => prisma.project.count()),
+            withPrismaReadRetry("count", () => prisma.project.count({ where: { status: "active" } })),
+            withPrismaReadRetry("count", () => prisma.project.count({ where: { pendingApproval: true } })),
+            withPrismaReadRetry("count", () => prisma.task.count({
+              where: {
+                status: {
+                  in: ["todo", "in_progress"]
+                }
+              }
+            })),
+            withPrismaReadRetry("count", () => prisma.task.count({ where: { status: "blocked" } })),
+            withPrismaReadRetry("count", () => prisma.stage.count({ where: { status: "rejected" } })),
+            withPrismaReadRetry("aggregate", () => prisma.agentProfile.aggregate({
+              _avg: { workload: true }
+            }))
+          ]);
+          return {
+            totalProjects: projectTotalCount,
+            activeProjects: projectActiveCount,
+            pendingApprovals: projectPendingApprovalCount,
+            activeTasks: taskActiveCount,
+            blockedTasks: taskBlockedCount,
+            rejectedStages: stageRejectedCount,
+            averageAgentWorkload: Math.round(Number(workloadAgg._avg.workload ?? 0))
+          };
+        })()
+          .finally(() => {
+            systemHealthCountInflight = null;
+          });
+      }
+      const counts = await systemHealthCountInflight;
+      systemHealthCountCache = {
+        value: counts,
+        expiresAt: Date.now() + SYSTEM_HEALTH_COUNT_CACHE_TTL_MS
+      };
+      totalProjects = counts.totalProjects;
+      activeProjects = counts.activeProjects;
+      pendingApprovals = counts.pendingApprovals;
+      activeTasks = counts.activeTasks;
+      blockedTasks = counts.blockedTasks;
+      rejectedStages = counts.rejectedStages;
+      averageAgentWorkload = counts.averageAgentWorkload;
+    }
   } catch (error) {
     databaseStatus = "degraded";
     databaseDetail = error instanceof Error ? error.message : "数据库检查失败";
@@ -9260,7 +9646,7 @@ function toProjectDetail(project: {
     status: string;
     priority: string;
     updatedAt: Date;
-    dependencies: Array<{
+    dependencies?: Array<{
       id: string;
       projectId: string;
       taskId: string;
@@ -9274,7 +9660,7 @@ function toProjectDetail(project: {
         ownerAgentId: string | null;
       };
     }>;
-    delegations: Array<{
+    delegations?: Array<{
       id: string;
       mode: string;
       status: string;
@@ -9287,7 +9673,7 @@ function toProjectDetail(project: {
       completedAt: Date | null;
       expiredAt: Date | null;
     }>;
-    gitlabSyncBindings: Array<{
+    gitlabSyncBindings?: Array<{
       gitlabProjectId: string;
       issueIid: number | null;
       bindingType: string;
@@ -9682,7 +10068,7 @@ function readSkills(value: Prisma.JsonValue): AgentProfile["skills"] {
 async function nextProjectId() {
   const today = new Date().toISOString().slice(0, 10).replaceAll("-", "");
   const dayPrefix = `OCC-${today}-`;
-  const [todayProjects, todayProjectInputs, issues] = await Promise.all([
+  const [todayProjects, todayProjectInputs, issueProjectIds] = await Promise.all([
     prisma.project.findMany({
       where: { id: { startsWith: dayPrefix } },
       select: { id: true }
@@ -9692,7 +10078,7 @@ async function nextProjectId() {
       select: { projectId: true },
       distinct: ["projectId"]
     }),
-    listIssues()
+    listIssueCreatedProjectIdsByPrefix(dayPrefix)
   ]);
 
   const reservedSequence = new Set<number>();
@@ -9711,7 +10097,7 @@ async function nextProjectId() {
 
   todayProjects.forEach((project) => readSequence(project.id));
   todayProjectInputs.forEach((item) => readSequence(item.projectId));
-  issues.forEach((issue) => readSequence(issue.createdProjectId));
+  issueProjectIds.forEach((projectId) => readSequence(projectId));
 
   let nextSequence = reservedSequence.size > 0 ? Math.max(...reservedSequence) + 1 : 1;
   while (reservedSequence.has(nextSequence)) {

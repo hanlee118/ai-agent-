@@ -115,4 +115,26 @@ export const workflowsApi = {
   async getHermesRuntimeStatus(probe = true) {
     return request<WorkflowHermesRuntimeStatus>(`/v1/workflows/hermes/status?probe=${probe ? 'true' : 'false'}`);
   },
+
+  async advanceProject(projectId: string, payload?: { triggeredBy?: string; reason?: string }) {
+    const id = encodeURIComponent(String(projectId || "").trim());
+    return request<{ success: boolean; nextStageIds?: string[]; blocked?: boolean; violations?: string[] }>(
+      `/v1/workflows/projects/${id}/advance`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      },
+    );
+  },
+
+  async skipProjectStage(projectId: string, payload?: { triggeredBy?: string; reason?: string }) {
+    const id = encodeURIComponent(String(projectId || "").trim());
+    return request<{ success: boolean; nextStageIds?: string[]; blocked?: boolean; violations?: string[] }>(
+      `/v1/workflows/projects/${id}/skip-stage`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload || {}),
+      },
+    );
+  },
 };

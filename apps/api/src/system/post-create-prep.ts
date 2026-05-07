@@ -296,7 +296,7 @@ function shouldEnforcePrepModelRound() {
   if (runtimeMode === "scripted" || nodeEnv === "test") {
     return false;
   }
-  return false;
+  return true;
 }
 
 function normalizePrepDocumentByName(

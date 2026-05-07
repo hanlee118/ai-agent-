@@ -32,6 +32,7 @@ export type RoleType =
   | "ROLE_ARCH"
   | "ROLE_DEV"
   | "ROLE_QA"
+  | "ROLE_AUDITOR"
   | "ROLE_HR";
 export type TimelinePriority = "low" | "normal" | "high" | "urgent";
 export type RuntimeMode = "scripted" | "openai-compatible";
@@ -411,6 +412,9 @@ export interface ExecutionProtocolSettings {
   requireSkillEvidence: boolean;
   requireCollaborationHandoff: boolean;
   blockDegradedWrites: boolean;
+  blockSecretLeak: boolean;
+  blockLargeFileCommit: boolean;
+  largeFileSizeThreshold: number;
 }
 
 export interface ExecutionProtocolLocks {
@@ -424,6 +428,9 @@ export interface ExecutionProtocolSettingsInput {
   requireSkillEvidence?: boolean;
   requireCollaborationHandoff?: boolean;
   blockDegradedWrites?: boolean;
+  blockSecretLeak?: boolean;
+  blockLargeFileCommit?: boolean;
+  largeFileSizeThreshold?: number;
 }
 
 export interface ExecutionProtocolStageRule {
@@ -494,6 +501,12 @@ export interface NotificationInboxItem {
   detail: string;
   actionLabel: string;
   to: string;
+  target?: {
+    tab?: string;
+    projectId?: string;
+    agentId?: string;
+    modal?: string;
+  };
   timestamp?: string;
   read: boolean;
   assignedTo?: string;
@@ -1084,6 +1097,7 @@ export const ROLE_LABELS: Record<RoleType, string> = {
   ROLE_ARCH: "研发总监",
   ROLE_DEV: "研发经理",
   ROLE_QA: "测试工程师",
+  ROLE_AUDITOR: "巡检审计员",
   ROLE_HR: "HR总监"
 };
 

@@ -1,6 +1,6 @@
 import type { AuthStatus } from "@occ/shared";
 import { prisma } from "../db.js";
-import { ensureSystemConfig } from "../system/runtime-config.js";
+import { ensureSystemConfig, invalidateSystemConfigCache } from "../system/runtime-config.js";
 import {
   createSalt,
   generateSessionToken,
@@ -54,6 +54,7 @@ export async function setupAdmin(password: string) {
       adminPasswordUpdatedAt: new Date()
     }
   });
+  invalidateSystemConfigCache();
 
   const adminUser = await ensureAdminUser();
   return createSession(adminUser.id);

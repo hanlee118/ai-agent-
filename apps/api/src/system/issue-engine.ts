@@ -18,6 +18,7 @@ const ROLE_HINTS: Record<RoleType, RegExp[]> = {
   ROLE_ARCH: [/架构|系统|服务|安全|性能|architecture|backend/i],
   ROLE_DEV: [/研发|开发|工程|代码|api|frontend|backend|dev/i],
   ROLE_QA: [/测试|验收|质量|回归|qa|bug/i],
+  ROLE_AUDITOR: [/审计|巡检|治理|合规|audit|auditor/i],
   ROLE_HR: [/人力|招聘|组织|hr/i]
 };
 

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync } from 'node:fs';
 import { test, expect } from 'playwright/test';
+import { loginAsAdminToken } from './helpers/project-create';
 
 const WEB_URL = process.env.UI_WEB_URL || 'http://127.0.0.1:5173';
 const UI_REPORT_DIR = 'docs/reports';
@@ -13,29 +14,12 @@ type CreatePayload = {
   projectType?: 'complete' | 'standalone' | 'relay';
 };
 
-async function createTemporarySessionCookie() {
-  const [{ prisma }, { generateSessionToken, hashSessionToken }] = await Promise.all([
-    import('../../apps/api/dist/db.js'),
-    import('../../apps/api/dist/security/secret-store.js'),
-  ]);
-
-  const token = generateSessionToken();
-  await prisma.authSession.create({
-    data: {
-      tokenHash: await hashSessionToken(token),
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
-    },
-  });
-
-  return { prisma, token, hashSessionToken };
-}
-
 test.describe.configure({ mode: 'serial' });
 
 test('new project modal should submit selected workflow template in create-first flow', async ({ context, page }) => {
   test.setTimeout(180_000);
 
-  const { prisma, token, hashSessionToken } = await createTemporarySessionCookie();
+  const token = await loginAsAdminToken(process.env.UI_API_URL || 'http://127.0.0.1:8787');
   let capturedCreatePayload: CreatePayload | null = null;
 
   await context.addCookies([
@@ -77,31 +61,51 @@ test('new project modal should submit selected workflow template in create-first
       });
     });
 
-    await page.goto(WEB_URL, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${WEB_URL}?app_tab=projects`, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('load');
-    await expect(page.getByRole('button', { name: '新建项目' })).toBeVisible({ timeout: 60_000 });
-    await page.getByRole('button', { name: '新建项目' }).click();
+    const openCreateModal = async () => {
+      const trigger = page.getByRole('button', { name: /新建项目|创建项目/ }).first();
+      await expect(trigger).toBeVisible({ timeout: 60_000 });
+      await trigger.click({ force: true });
+      const modal = page.locator('[role="dialog"]').filter({ hasText: '创建新项目' }).first();
+      const opened = await modal.isVisible({ timeout: 4000 }).catch(() => false);
+      if (!opened) {
+        await trigger.click({ force: true });
+        await expect(modal).toBeVisible({ timeout: 20_000 });
+      }
+      return modal;
+    };
 
-    await expect(page.getByText('创建新项目')).toBeVisible();
-    await expect(page.getByText('项目策略模式')).toBeVisible();
-    await expect(page.getByText('执行阶段模板')).toBeVisible();
+    const createModal = await openCreateModal();
+    await expect(createModal.getByText('项目策略模式').first()).toBeVisible();
+    await expect(createModal.getByText('执行阶段模板').first()).toBeVisible();
 
-    await page.getByRole('button', { name: /视觉设计阶段/ }).click();
-    await expect(page.getByText(/当前选择：视觉设计阶段/)).toBeVisible();
-    await expect(page.getByText(/关键角色: 需求分析师、视觉设计总监/).first()).toBeVisible();
+    const pickStandaloneMode = createModal.getByRole('button', { name: /单阶段交付/ }).first();
+    await expect(pickStandaloneMode).toBeVisible({ timeout: 30_000 });
+    await pickStandaloneMode.click({ force: true });
 
-    await page.getByRole('button', { name: /代码研发阶段/ }).click();
-    await expect(page.getByText(/当前选择：代码研发阶段/)).toBeVisible();
-    await expect(page.getByText(/关键角色: 需求分析师、研发总监、研发经理/).first()).toBeVisible();
+    const pickVisual = createModal.getByRole('button', { name: /视觉设计阶段/ }).first();
+    await expect(pickVisual).toBeVisible({ timeout: 30_000 });
+    await pickVisual.click({ force: true });
+    await expect(createModal.getByText(/当前选择：视觉设计阶段/)).toBeVisible();
+    await expect(createModal.getByText(/关键角色: 需求分析师、视觉设计总监/).first()).toBeVisible();
 
-    await page.getByRole('button', { name: /仅创建项目/ }).first().click();
-    await expect(page.getByText(/当前选择：仅创建项目/)).toBeVisible();
-    await expect(page.getByLabel('创建后自动启动 workflow')).toBeDisabled();
+    const pickDev = createModal.getByRole('button', { name: /代码研发阶段/ }).first();
+    await expect(pickDev).toBeVisible({ timeout: 30_000 });
+    await pickDev.click({ force: true });
+    await expect(createModal.getByText(/当前选择：代码研发阶段/)).toBeVisible();
+    await expect(createModal.getByText(/关键角色: 需求分析师、研发总监、研发经理/).first()).toBeVisible();
 
-    await page
+    const pickStandalone = createModal.getByRole('button', { name: /仅创建项目/ }).first();
+    await expect(pickStandalone).toBeVisible({ timeout: 30_000 });
+    await pickStandalone.click({ force: true });
+    await expect(createModal.getByText(/当前选择：仅创建项目/)).toBeVisible();
+    await expect(createModal.getByLabel('创建后自动启动 workflow')).toBeDisabled();
+
+    await createModal
       .getByPlaceholder('例如：请创建一个电商客服优化项目，2周内完成 MVP，优先由多个 Agent 并行推进。')
       .fill('请验证创建项目弹窗中模板切换是否正确影响创建 payload。');
-    await page.getByRole('button', { name: '创建项目（先创建后分析）' }).click();
+    await createModal.getByRole('button', { name: '创建项目（先创建后分析）' }).click();
 
     await expect.poll(() => capturedCreatePayload !== null).toBeTruthy();
     assert.equal(capturedCreatePayload?.workflowTemplateKey, 'none');
@@ -111,9 +115,6 @@ test('new project modal should submit selected workflow template in create-first
     mkdirSync(UI_REPORT_DIR, { recursive: true });
     await page.screenshot({ path: `${UI_REPORT_DIR}/ui-workflow-template-create-first.png`, fullPage: true });
   } finally {
-    await prisma.authSession.deleteMany({
-      where: { tokenHash: await hashSessionToken(token) },
-    });
-    await prisma.$disconnect();
+    // no-op
   }
 });

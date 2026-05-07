@@ -206,6 +206,7 @@ model Project {
   projectInputs       ProjectInput[]
   timeline            TimelineEvent[]
   executions          ProjectExecution[]
+  structuredMergeRequests StructuredMergeRequest[]
   workflows           Workflow[]
   projectMembers      ProjectMember[]
   outgoingRelayRelations StageRelayRelation[] @relation("RelaySourceProject")
@@ -214,6 +215,27 @@ model Project {
   @@index([projectType, createdAt])
   @@index([parentProjectId])
   @@index([status, pendingApproval, updatedAt])
+}
+
+model StructuredMergeRequest {
+  id            String   @id @default(cuid())
+  projectId     String
+  workflowStageId String?
+  executionId   String?
+  relatedIssue  String
+  purpose       String
+  changes       Json
+  impact        String
+  verification  String
+  riskRollback  String
+  rawPayload    Json?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  project       Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, createdAt])
+  @@index([workflowStageId])
+  @@index([executionId])
 }
 
 model UserProfile {
@@ -454,6 +476,8 @@ model Model {
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
   logs        ModelLog[]
+
+  @@index([status, updatedAt])
 }
 
 model ModelLog {
@@ -464,6 +488,9 @@ model ModelLog {
   content   String
   label     String?
   model     Model   @relation(fields: [modelId], references: [id], onDelete: Cascade)
+
+  @@index([modelId, timestamp])
+  @@index([modelId, type, timestamp])
 }
 
 model AgentSoul {

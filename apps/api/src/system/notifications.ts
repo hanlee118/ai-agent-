@@ -19,6 +19,12 @@ type LiveNotificationCandidate = {
   detail: string;
   actionLabel: string;
   to: string;
+  target?: {
+    tab?: string;
+    projectId?: string;
+    agentId?: string;
+    modal?: string;
+  };
   timestamp?: string;
 };
 type CandidateCacheBucket = {
@@ -79,6 +85,7 @@ export async function listNotificationInbox(
           : detail,
         actionLabel: item.actionLabel,
         to: item.to,
+        target: item.target,
         timestamp: item.timestamp,
         read: state?.isRead ?? false,
         assignedTo: state?.assignedTo ?? undefined,
@@ -322,7 +329,11 @@ async function buildLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
         ? "Clearing the queue will unblock downstream delivery and agent execution."
         : "尽快清理审批队列，可以解除后续交付和 Agent 执行阻塞。",
       actionLabel: isEnglish ? "Open notifications" : "进入通知中心",
-      to: "/notifications"
+      to: "/notifications",
+      target: {
+        tab: "notifications",
+        modal: "notification-center",
+      }
     });
   }
 

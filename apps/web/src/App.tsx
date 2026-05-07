@@ -673,6 +673,38 @@ export default function App() {
   const handleNotificationClick = async (notification: NotificationItem) => {
     setShowNotifications(false);
 
+    if (notification.target && typeof notification.target === 'object') {
+      const targetTab = String(notification.target.tab || '').trim();
+      const targetProjectId = String(notification.target.projectId || '').trim();
+      const targetAgentId = String(notification.target.agentId || '').trim();
+      const targetModal = String(notification.target.modal || '').trim();
+
+      if (targetProjectId) {
+        setSelectedProjectId(targetProjectId);
+        setActiveTab(targetTab || 'project-room');
+        await markNotificationRead(notification);
+        return;
+      }
+
+      if (targetAgentId) {
+        setSelectedAgentId(targetAgentId);
+        setActiveTab(targetTab || 'agent-commander');
+        await markNotificationRead(notification);
+        return;
+      }
+
+      if (targetTab) {
+        if (targetTab === 'notifications' || targetModal === 'notification-center') {
+          setShowNotifications(true);
+          await markNotificationRead(notification);
+          return;
+        }
+        setActiveTab(targetTab);
+        await markNotificationRead(notification);
+        return;
+      }
+    }
+
     const target = notification.to || '/dashboard';
     if (target.startsWith('/projects/')) {
       const projectId = target.split('/')[2];
@@ -701,7 +733,7 @@ export default function App() {
     } else if (target.startsWith('/system')) {
       setActiveTab('system-health');
     } else if (target.startsWith('/notifications')) {
-      setActiveTab('audit');
+      setShowNotifications(true);
     } else {
       setActiveTab('dashboard');
     }

@@ -3,6 +3,7 @@ import { AlertCircle, BarChart3, Briefcase, ChevronDown, Filter, Pause, Play, Pl
 import { cn } from '../lib/utils';
 import { agents, projects } from '../lib/runtimeCollections';
 import { ApiRequestError, projectsApi, type ProjectCleanupCandidate, type ProjectRequiredAction } from '../lib/api';
+import { workflowsApi } from '../lib/api/workflowsApi';
 import { Badge } from './impl/GovernanceShared';
 import SurfaceModal from './impl/SurfaceModal';
 
@@ -79,8 +80,16 @@ export default function ProjectsPage({ recentProjectId = null, onSelectProject, 
         addToast('项目已恢复执行', 'success');
       } else if (action === 'advance') {
         addToast('正在推进项目阶段，可能需要 1-3 分钟，请稍候...', 'info');
-        await projectsApi.advance(projectId);
-        addToast('项目已手动推进一步', 'success');
+        const advanced = await workflowsApi.advanceProject(projectId, {
+          triggeredBy: 'ROLE_PM',
+          reason: 'projects_page_manual_advance',
+        });
+        if (advanced?.blocked) {
+          const violations = Array.isArray(advanced.violations) ? advanced.violations : [];
+          addToast(violations[0] || '当前阶段门禁未通过，请先处理阻断项', 'info');
+        } else {
+          addToast('项目已通过 workflow-v2 推进一步', 'success');
+        }
       } else if (action === 'close') {
         await projectsApi.close(projectId);
         addToast('项目已关闭', 'success');

@@ -526,7 +526,7 @@ const AgentCommander = ({
   const handleModelChange = (modelId: string) => {
     setCurrentModelId(modelId);
     const model = models.find(m => m.id === modelId);
-    addToast(`已切换本地查看模型为: ${model?.name || modelId}；当前不会持久化到后端`, 'info');
+    addToast(`已切换本地预览模型为: ${model?.name || modelId}。如需生效到后端，请点击“保存到配置”。`, 'info');
   };
 
   const handleConfirmAction = () => {
@@ -536,7 +536,7 @@ const AgentCommander = ({
   const handleTokenLimitChange = (e: ChangeEvent<HTMLInputElement>) => {
     const val = Math.max(parseInt(e.target.value) || 0, 1);
     setTokenLimit(val);
-    addToast(`已更新本地 Token 观察值为 ${val.toLocaleString()}；当前不会持久化到后端`, "info");
+    addToast(`已更新本地 Token 预览值为 ${val.toLocaleString()}。如需持久化，请点击“保存到配置”。`, "info");
   };
 
   const handleTrySend = () => {
@@ -691,11 +691,11 @@ const AgentCommander = ({
           </div>
         </div>
         
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3 bg-white/5 p-1.5 rounded-xl border border-border-subtle shadow-inner">
-            <div className="flex items-center gap-2 px-3 border-r border-border-subtle mr-1">
-              <Lock size={12} className="text-slate-500" />
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">限额</span>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-3 bg-white/5 p-1.5 rounded-xl border border-border-subtle shadow-inner">
+              <div className="flex items-center gap-2 px-3 border-r border-border-subtle mr-1">
+                <Lock size={12} className="text-slate-500" />
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">限额</span>
               <input 
                 type="number" 
                 value={tokenLimit}
@@ -723,8 +723,15 @@ const AgentCommander = ({
               >
                 自主运行
               </button>
+              </div>
             </div>
-          </div>
+
+            <button
+              onClick={handleOpenConfig}
+              className="px-3 py-2 rounded-lg text-[10px] font-bold border border-primary/30 bg-primary/15 text-primary hover:bg-primary/25 transition-colors uppercase tracking-wider"
+            >
+              保存到配置
+            </button>
           
           <div className="h-8 w-px bg-border-subtle" />
           
@@ -748,6 +755,7 @@ const AgentCommander = ({
               ))}
             </div>
           </div>
+          <Badge variant="warning">本地预览态</Badge>
         </div>
       </header>
 
@@ -835,10 +843,13 @@ const AgentCommander = ({
                   max="500000" 
                   step="10000"
                   value={tokenLimit}
-                  onChange={(e) => setTokenLimit(parseInt(e.target.value))}
+                  onChange={(e) => {
+                    const val = Math.max(parseInt(e.target.value) || 0, 1);
+                    setTokenLimit(val);
+                  }}
                   className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-primary"
                 />
-                <p className="text-[9px] text-slate-500 text-center italic">拖动滑块调整每日配额</p>
+                <p className="text-[9px] text-slate-500 text-center italic">拖动滑块调整每日配额（仅本地预览，需“保存到配置”才会持久化）</p>
               </div>
               <div className="h-px bg-border-subtle" />
               <div className="flex justify-between items-center">

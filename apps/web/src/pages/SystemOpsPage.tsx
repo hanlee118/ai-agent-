@@ -23,6 +23,8 @@ import {
 } from 'recharts';
 import { cn } from '../lib/utils';
 import { agents, models, projects, sessions } from '../lib/runtimeCollections';
+import { systemApi } from '../lib/api';
+import type { SystemDiagnosticsReport } from '../lib/api/types';
 
 const ROLE_BINDING_RULES: Array<{
   roleId: string;
@@ -155,7 +157,9 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isDiagnosing, setIsDiagnosing] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
+  const [isExportingReport, setIsExportingReport] = useState(false);
   const [optimizationSuggestions, setOptimizationSuggestions] = useState<Array<{ title: string; message: string; type: 'warning' | 'info' }>>([]);
+  const [diagnosticReport, setDiagnosticReport] = useState<SystemDiagnosticsReport | null>(null);
 
   const topConsumers = useMemo(
     () => [...agents].sort((a, b) => (b.tokensUsed || 0) - (a.tokensUsed || 0)).slice(0, 5),
@@ -256,13 +260,27 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
     }
   };
 
-  const handleDiagnose = () => {
+  const handleDiagnose = async () => {
     setIsDiagnosing(true);
     addToast('正在启动全系统诊断...', 'info');
-    setTimeout(() => {
+    try {
+      const report = await systemApi.runDiagnostics();
+      setDiagnosticReport(report);
+      const suggestions = report.suggestions.map((item) => ({
+        title: item.title,
+        message: item.message,
+        type: 'warning' as const,
+      }));
+      if (suggestions.length > 0) {
+        setOptimizationSuggestions(suggestions);
+      }
+      const failedCount = report.checks.filter((item) => !item.passed).length;
+      addToast(failedCount === 0 ? '诊断完成: 未发现异常' : `诊断完成: 发现 ${failedCount} 项异常`, failedCount === 0 ? 'success' : 'info');
+    } catch {
+      addToast('诊断失败，请检查登录态与系统连通性', 'error');
+    } finally {
       setIsDiagnosing(false);
-      addToast(allHealthy ? '诊断完成: 未发现异常' : '诊断完成: 建议关注离线服务', allHealthy ? 'success' : 'info');
-    }, 1200);
+    }
   };
 
   const handleOptimizeStrategy = () => {
@@ -294,6 +312,36 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
     setOptimizationSuggestions(suggestions);
     setIsOptimizing(false);
     addToast('优化建议已生成', 'success');
+  };
+
+  const handleExportReport = async () => {
+    setIsExportingReport(true);
+    try {
+      const [observability, readiness] = await Promise.all([
+        systemApi.getObservabilitySummary(),
+        systemApi.getReadiness(),
+      ]);
+      const exportPayload = {
+        exportedAt: new Date().toISOString(),
+        observability,
+        readiness,
+      };
+      const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      link.href = href;
+      link.download = `system-ops-report-${ts}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(href);
+      addToast('系统报告已导出（JSON）', 'success');
+    } catch {
+      addToast('导出失败，请检查登录态与系统连通性', 'error');
+    } finally {
+      setIsExportingReport(false);
+    }
   };
 
   return (
@@ -360,8 +408,12 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
                 <BarChart3 size={18} className="text-accent" />
                 成本治理
               </h2>
-              <button onClick={() => addToast('正在导出成本报告...', 'info')} className="text-xs text-primary hover:underline">
-                导出报告
+              <button
+                onClick={() => void handleExportReport()}
+                disabled={isExportingReport}
+                className="text-xs text-primary hover:underline disabled:opacity-60"
+              >
+                {isExportingReport ? '导出中...' : '导出报告'}
               </button>
             </div>
             <div className="p-6 space-y-8">
@@ -403,7 +455,39 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
                       <div key={idx} className={cn('p-3 rounded-xl border', item.type === 'warning' ? 'bg-warning/5 border-warning/20' : 'bg-primary/5 border-primary/20')}>
                         <p className="text-xs font-bold text-white">{item.title}</p>
                         <p className="text-xs text-slate-400 mt-1">{item.message}</p>
-                        <button onClick={() => addToast(`已采纳建议: ${item.title}`, 'success')} className="mt-2 text-[11px] text-primary hover:underline">
+                        <button
+                          onClick={async () => {
+                            const mapped = diagnosticReport?.suggestions.find((s) => s.title === item.title && s.message === item.message);
+                            if (!mapped) {
+                              addToast(`建议已记录：${item.title}`, 'info');
+                              if (onNavigate) {
+                                onNavigate('settings');
+                              }
+                              return;
+                            }
+                            if (mapped.action === 'run-model-routing-self-heal') {
+                              try {
+                                const result = await systemApi.selfHealModelRouting(true);
+                                addToast(`模型路由修复完成：fixed=${result.fixed}, pending=${result.pending}`, 'success');
+                              } catch {
+                                addToast('模型路由修复失败，请稍后重试', 'error');
+                              }
+                              return;
+                            }
+                            if (mapped.action === 'open-workflow-console') {
+                              if (onNavigate) {
+                                onNavigate('project-room');
+                              }
+                              addToast('已跳转到项目作战室，请查看 workflow-v2 控制台', 'info');
+                              return;
+                            }
+                            if (onNavigate) {
+                              onNavigate('settings');
+                            }
+                            addToast('已跳转到设置中心执行修复', 'info');
+                          }}
+                          className="mt-2 text-[11px] text-primary hover:underline"
+                        >
                           应用建议
                         </button>
                       </div>
@@ -493,7 +577,7 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
               ))}
             </div>
             <button
-              onClick={handleDiagnose}
+              onClick={() => void handleDiagnose()}
               disabled={isDiagnosing}
               className="w-full py-2 bg-white/5 border border-border-subtle rounded-lg text-xs font-bold text-white hover:bg-white/10 transition-colors disabled:opacity-50"
             >

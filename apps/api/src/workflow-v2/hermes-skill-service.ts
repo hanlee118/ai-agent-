@@ -103,6 +103,29 @@ function toSkillView(row: {
 
 function buildFallbackSkillCatalog() {
   const aggregate = new Map<string, HermesSkillView>();
+  const allStageTypes = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
+
+  // Ensure baseline built-in skills are always exported even when a stage strategy
+  // currently does not hard-require them (for example design-to-code in DESIGN).
+  for (const [skillKey, descriptor] of Object.entries(SKILL_FALLBACK_DESCRIPTOR)) {
+    aggregate.set(skillKey, {
+      id: `builtin-${skillKey}`,
+      hermesSkillId: null,
+      skillKey,
+      name: descriptor.name,
+      instruction: descriptor.instruction,
+      type: descriptor.type,
+      manifest: {
+        stageTypes: [...allStageTypes],
+        source: "builtin"
+      },
+      sourceProjectId: null,
+      source: "builtin",
+      isCertified: true,
+      updatedAt: new Date(0).toISOString()
+    });
+  }
+
   for (const combo of STAGE_ROLE_COMBOS) {
     const strategy = getProjectStageExecutionStrategy(combo.stageType, combo.role);
     for (const key of strategy.requiredSkills) {

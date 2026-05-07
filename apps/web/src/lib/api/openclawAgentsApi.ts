@@ -1,4 +1,5 @@
 import { request } from "./core";
+import type { OpenClawProjectReport } from "./types";
 
 export type OpenClawAgentDetail = {
   agentId: string;
@@ -83,5 +84,10 @@ export const openclawAgentsApi = {
   async delete(agentId: string) {
     const safeId = encodeURIComponent(String(agentId || "").trim());
     return request(`/openclaw/agents/${safeId}`, { method: "DELETE" });
+  },
+
+  async getProjectReport(projectId: string) {
+    const safeId = encodeURIComponent(String(projectId || "").trim());
+    return request<OpenClawProjectReport>(`/openclaw/projects/${safeId}/report`);
   },
 };

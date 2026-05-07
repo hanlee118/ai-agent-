@@ -30,6 +30,7 @@ import {
   getProjectLifecycleQualityAudit,
   interveneProject,
   listProjectExecutions,
+  listStructuredMergeRequests,
   listProjectTasks,
   listProjects,
   listTasks,
@@ -72,6 +73,7 @@ import {
   importRelayInputs,
   listProjectInputs
 } from "../workflow-v2/project-modes.js";
+import { getActiveWorkflow, addStageOutputArtifact } from "../workflow-v2/workflow-orchestrator.js";
 import { validateBody } from "../validation/middleware.js";
 import {
   MutationOptionalSchema,
@@ -117,6 +119,161 @@ const PROJECT_LIST_TOTAL_CACHE_TTL_MS = Math.max(
   Number(process.env.PROJECT_LIST_TOTAL_CACHE_TTL_MS ?? 20_000)
 );
 let projectListTotalCache: { value: number; expiresAt: number } | null = null;
+const TASK_LIST_TOTAL_CACHE_TTL_MS = Math.max(
+  3_000,
+  Number(process.env.TASK_LIST_TOTAL_CACHE_TTL_MS ?? 15_000)
+);
+const PROJECT_DETAIL_SOFT_TIMEOUT_MS = Math.max(
+  300,
+  Number(process.env.PROJECT_DETAIL_SOFT_TIMEOUT_MS ?? 1_200)
+);
+const taskListTotalCache = new Map<string, { value: number; expiresAt: number }>();
+const projectDetailSnapshotCache = new Map<string, {
+  updatedAt: number;
+  value: unknown;
+}>();
+const PROJECT_DETAIL_STALE_MAX_AGE_MS = Math.max(
+  3_000,
+  Number(process.env.PROJECT_DETAIL_STALE_MAX_AGE_MS ?? 15_000)
+);
+const projectDetailRefreshInflight = new Map<string, Promise<void>>();
+const PROJECT_DETAIL_PREWARM_ENABLED = String(process.env.PROJECT_DETAIL_PREWARM_ENABLED ?? "true").trim().toLowerCase() !== "false";
+const PROJECT_DETAIL_PREWARM_LIMIT = Math.max(
+  1,
+  Number(process.env.PROJECT_DETAIL_PREWARM_LIMIT ?? 8)
+);
+const PROJECT_DETAIL_PREWARM_DELAY_MS = Math.max(
+  500,
+  Number(process.env.PROJECT_DETAIL_PREWARM_DELAY_MS ?? 2_500)
+);
+
+async function ensureProjectExists(projectId: string) {
+  const count = await prisma.project.count({
+    where: { id: projectId }
+  });
+  return count > 0;
+}
+
+async function getCachedTaskTotal(key: string, where: Record<string, unknown>) {
+  const now = Date.now();
+  const cached = taskListTotalCache.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.value;
+  }
+  const value = await prisma.task.count({ where });
+  taskListTotalCache.set(key, {
+    value,
+    expiresAt: now + TASK_LIST_TOTAL_CACHE_TTL_MS
+  });
+  return value;
+}
+let buildProjectRequiredActionsDelegate: ((project: unknown, runtime: unknown) => ProjectRequiredAction[]) | null = null;
+let formatRequiredActionsMessageDelegate: ((actions: ProjectRequiredAction[]) => string) | null = null;
+
+function buildProjectRequiredActions(project: unknown, runtime: unknown): ProjectRequiredAction[] {
+  if (buildProjectRequiredActionsDelegate) {
+    return buildProjectRequiredActionsDelegate(project, runtime);
+  }
+  return [];
+}
+
+function formatRequiredActionsMessage(actions: ProjectRequiredAction[]) {
+  if (formatRequiredActionsMessageDelegate) {
+    return formatRequiredActionsMessageDelegate(actions);
+  }
+  return actions.map((item) => item.title).join("；");
+}
+
+async function withSoftTimeout<T>(
+  task: Promise<T>,
+  timeoutMs: number
+): Promise<{ timedOut: boolean; value?: T }> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    const timeoutPromise = new Promise<{ timedOut: boolean; value?: T }>((resolve) => {
+      timer = setTimeout(() => resolve({ timedOut: true }), timeoutMs);
+      timer.unref?.();
+    });
+    const valuePromise = task.then((value) => ({ timedOut: false as const, value }));
+    return await Promise.race([valuePromise, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
+function refreshProjectDetailSnapshot(projectId: string) {
+  const existing = projectDetailRefreshInflight.get(projectId);
+  if (existing) {
+    return existing;
+  }
+  const promise = (async () => {
+    const project = await findProject(projectId, {
+      detailLevel: "api",
+      skipWorkflowStateReconcile: true
+    });
+    if (!project) {
+      return;
+    }
+    const runtime = await getRuntimeStatus();
+    const requiredActions = buildProjectRequiredActions(project, runtime);
+    const postCreatePrep = await resolveProjectPostCreatePrepState(project);
+    if (postCreatePrep.required && !postCreatePrep.completed) {
+      requiredActions.unshift(buildPostCreatePrepRequiredAction({
+        missingItems: postCreatePrep.missingItems
+      }));
+    }
+    const payload = {
+      ...project,
+      permissions: LEGACY_DEV_AUTH_BYPASS
+        ? { projectRole: "owner", canApprove: true, canDelete: true, canEdit: true }
+        : { projectRole: null, canApprove: false, canDelete: false, canEdit: false },
+      requiredActions,
+      postCreatePrep
+    };
+    projectDetailSnapshotCache.set(projectId, {
+      updatedAt: Date.now(),
+      value: payload
+    });
+  })().finally(() => {
+    projectDetailRefreshInflight.delete(projectId);
+  });
+  projectDetailRefreshInflight.set(projectId, promise);
+  return promise;
+}
+
+let projectDetailPrewarmStarted = false;
+function scheduleProjectDetailPrewarm() {
+  if (projectDetailPrewarmStarted || !PROJECT_DETAIL_PREWARM_ENABLED) {
+    return;
+  }
+  projectDetailPrewarmStarted = true;
+  const timer = setTimeout(() => {
+    void (async () => {
+      try {
+        const candidates = await prisma.project.findMany({
+          where: {
+            status: { in: ["active", "blocked", "paused"] }
+          },
+          orderBy: [{ updatedAt: "desc" }],
+          take: PROJECT_DETAIL_PREWARM_LIMIT,
+          select: { id: true }
+        });
+        for (const item of candidates) {
+          await refreshProjectDetailSnapshot(item.id);
+        }
+      } catch (error) {
+        console.warn(
+          "[project] detail prewarm failed:",
+          error instanceof Error ? error.message : String(error)
+        );
+      }
+    })();
+  }, PROJECT_DETAIL_PREWARM_DELAY_MS);
+  timer.unref?.();
+}
+scheduleProjectDetailPrewarm();
 type LifecycleReplayJob = {
   id: string;
   projectId: string;
@@ -452,6 +609,22 @@ async function syncProjectInputsToLatestWorkflow(projectId: string) {
     projectId,
     entryNodeIds
   });
+}
+
+function shouldSyncProjectInputsSynchronously() {
+  const fallback = process.env.NODE_ENV === "test" ? "true" : "false";
+  return String(process.env.PROJECT_INPUT_SYNC_SYNC ?? fallback).trim().toLowerCase() === "true";
+}
+
+function scheduleProjectInputSync(projectId: string, reason: string) {
+  if (shouldSyncProjectInputsSynchronously()) {
+    return syncProjectInputsToLatestWorkflow(projectId);
+  }
+  void syncProjectInputsToLatestWorkflow(projectId).catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[project] async input sync failed for ${projectId} (${reason}): ${message}`);
+  });
+  return Promise.resolve();
 }
 
 async function buildProjectQualityGateRepairResult(input: {
@@ -1643,6 +1816,7 @@ const PROJECT_PARSE_ROLE_LABELS: Record<RoleType, string> = {
   ROLE_ARCH: "研发总监",
   ROLE_DEV: "研发经理",
   ROLE_QA: "测试工程师",
+  ROLE_AUDITOR: "巡检治理",
   ROLE_HR: "HR总监"
 };
 
@@ -1903,7 +2077,7 @@ function createFallbackRequiredAction(
         title: "当前阶段缺少交付物",
         detail: `请先补齐 ${stageLabel} 的交付物后，再重新执行阶段验收。`,
         action: "submit_stage_deliverable",
-        ctaLabel: "前往提交交付物"
+        ctaLabel: "自动生成当前阶段交付物"
       };
     case "reconcile_deliverables":
       return {
@@ -2078,6 +2252,8 @@ export function createProjectsRouter(options: CreateProjectsRouterOptions) {
     toFinalArtifactsJobProgress,
     finalArtifactsJobsById
   } = options;
+  buildProjectRequiredActionsDelegate = buildProjectRequiredActions;
+  formatRequiredActionsMessageDelegate = formatRequiredActionsMessage;
 
   const router = express.Router();
 router.post("/api/projects/parse", validateBody(ProjectParseRequestSchema), asyncRoute(async (req, res) => {
@@ -3211,7 +3387,7 @@ router.post("/api/projects/:id/inputs", validateBody(MutationPassthroughSchema),
     return;
   }
   const items = await createProjectInputs(projectId, normalized);
-  await syncProjectInputsToLatestWorkflow(projectId);
+  await scheduleProjectInputSync(projectId, "post-create-prep");
   res.status(201).json({
     success: true,
     data: {
@@ -3266,7 +3442,72 @@ router.post("/api/projects/:id/relay/import", validateBody(MutationPassthroughSc
 
 router.get("/api/projects/:id", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const project = await findProject(projectId, { detailLevel: "api" });
+  const stale = projectDetailSnapshotCache.get(projectId);
+  if (stale && (Date.now() - stale.updatedAt) <= PROJECT_DETAIL_STALE_MAX_AGE_MS) {
+    void refreshProjectDetailSnapshot(projectId).catch(() => undefined);
+    res.setHeader("X-Data-Stale", "true");
+    res.setHeader("X-Data-Stale-At", new Date(stale.updatedAt).toISOString());
+    res.json(stale.value);
+    return;
+  }
+  const projectPromise = findProject(projectId, {
+    detailLevel: "api",
+    skipWorkflowStateReconcile: true,
+  });
+  const projectResult = await withSoftTimeout(projectPromise, PROJECT_DETAIL_SOFT_TIMEOUT_MS);
+
+  if (projectResult.timedOut) {
+    const stale = projectDetailSnapshotCache.get(projectId);
+    if (stale) {
+      res.setHeader("X-Data-Stale", "true");
+      res.setHeader("X-Data-Stale-At", new Date(stale.updatedAt).toISOString());
+      res.json(stale.value);
+      return;
+    }
+    // 没有可回退快照时，继续等待真实查询结果，避免误报 404。
+    const waitedProject = await projectPromise;
+    if (!waitedProject) {
+      res.status(404).json({ message: "Project not found" });
+      return;
+    }
+    const runtime = await getRuntimeStatus();
+    const requiredActions = buildProjectRequiredActions(waitedProject, runtime);
+    const postCreatePrep = await resolveProjectPostCreatePrepState(waitedProject);
+    const currentUser = getCurrentUserFromLocals(res);
+    const permissions = currentUser
+      ? await buildProjectPermissions(projectId, currentUser)
+      : LEGACY_DEV_AUTH_BYPASS
+        ? {
+            projectRole: "owner",
+            canApprove: true,
+            canDelete: true,
+            canEdit: true
+          }
+        : {
+            projectRole: null,
+            canApprove: false,
+            canDelete: false,
+            canEdit: false
+          };
+    if (postCreatePrep.required && !postCreatePrep.completed) {
+      requiredActions.unshift(buildPostCreatePrepRequiredAction({
+        missingItems: postCreatePrep.missingItems
+      }));
+    }
+    const responsePayload = {
+      ...waitedProject,
+      permissions,
+      requiredActions,
+      postCreatePrep
+    };
+    projectDetailSnapshotCache.set(projectId, {
+      updatedAt: Date.now(),
+      value: responsePayload
+    });
+    res.json(responsePayload);
+    return;
+  }
+  const project = projectResult.value;
 
   if (!project) {
     res.status(404).json({ message: "Project not found" });
@@ -3297,18 +3538,23 @@ router.get("/api/projects/:id", asyncRoute(async (req, res) => {
       missingItems: postCreatePrep.missingItems
     }));
   }
-  res.json({
+  const responsePayload = {
     ...project,
     permissions,
     requiredActions,
     postCreatePrep
+  };
+  projectDetailSnapshotCache.set(projectId, {
+    updatedAt: Date.now(),
+    value: responsePayload
   });
+  res.json(responsePayload);
 }));
 
 router.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const project = await findProject(projectId);
-  if (!project) {
+  const exists = await ensureProjectExists(projectId);
+  if (!exists) {
     res.status(404).json({ message: "Project not found" });
     return;
   }
@@ -3324,6 +3570,23 @@ router.get("/api/projects/:id/executions", asyncRoute(async (req, res) => {
       total: executions.length,
       executions
     }
+  });
+}));
+
+router.get("/api/projects/:id/structured-merge-requests", asyncRoute(async (req, res) => {
+  const projectId = String(req.params.id ?? "").trim();
+  const project = await findProject(projectId);
+  if (!project) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  const limitRaw = Number(req.query.limit ?? 50);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 50;
+  const items = await listStructuredMergeRequests(projectId, limit);
+  res.json({
+    projectId,
+    total: items.length,
+    items
   });
 }));
 
@@ -3433,7 +3696,7 @@ router.post("/api/projects/:id/post-create-prep", validateBody(ProjectPostCreate
       triggeredBy: "projects_route_manual_trigger_gitlab_publish_status"
     });
   }
-  await syncProjectInputsToLatestWorkflow(projectId);
+  await scheduleProjectInputSync(projectId, "post-create-prep-draft");
 
   const refreshed = await findProject(projectId);
   if (!refreshed) {
@@ -3488,7 +3751,7 @@ router.post("/api/projects/:id/post-create-prep/draft", validateBody(ProjectPost
     draft,
     triggeredBy: "projects_route_manual_draft_save"
   });
-  await syncProjectInputsToLatestWorkflow(projectId);
+  await scheduleProjectInputSync(projectId, "post-create-prep-confirm");
   const refreshed = await findProject(projectId);
   if (!refreshed) {
     res.status(404).json({ message: "Project not found" });
@@ -3849,7 +4112,28 @@ router.get("/api/projects/:id/official-site", asyncRoute(async (req, res) => {
 
 router.get("/api/projects/:id/tasks", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  res.json(await listProjectTasks(projectId));
+  const exists = await ensureProjectExists(projectId);
+  if (!exists) {
+    res.status(404).json({ message: "Project not found" });
+    return;
+  }
+  const status = typeof req.query.status === "string" ? req.query.status.trim() : "";
+  const assignee = typeof req.query.assignee === "string" ? req.query.assignee.trim() : "";
+  const pageRaw = Number(req.query.page ?? 1);
+  const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+  const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+  const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+  const tasks = await listProjectTasks(projectId, { status, assignee, page, pageSize });
+  const where = {
+    projectId,
+    ...(status ? { status } : {}),
+    ...(assignee ? { assignee } : {})
+  };
+  const total = await getCachedTaskTotal(`project:${projectId}:status:${status || "*"}:assignee:${assignee || "*"}`, where);
+  res.setHeader("X-Page", String(page));
+  res.setHeader("X-Page-Size", String(pageSize));
+  res.setHeader("X-Total-Count", String(total));
+  res.json(tasks);
 }));
 
 router.get("/api/tasks", asyncRoute(async (req, res) => {
@@ -3860,40 +4144,37 @@ router.get("/api/tasks", asyncRoute(async (req, res) => {
   const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
   const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
   const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
-  const offset = (page - 1) * pageSize;
 
   if (projectId) {
-    const scopedTasks = await listProjectTasks(projectId);
-    const filtered = scopedTasks.filter((task) => {
-      if (status && task.status !== status) {
-        return false;
-      }
-      if (assignee && task.assignee !== assignee) {
-        return false;
-      }
-      return true;
-    });
+    const exists = await ensureProjectExists(projectId);
+    if (!exists) {
+      res.status(404).json({ message: "Project not found" });
+      return;
+    }
+    const scopedTasks = await listProjectTasks(projectId, { status, assignee, page, pageSize });
+    const where = {
+      projectId,
+      ...(status ? { status } : {}),
+      ...(assignee ? { assignee } : {})
+    };
+    const total = await getCachedTaskTotal(`project:${projectId}:status:${status || "*"}:assignee:${assignee || "*"}`, where);
     res.setHeader("X-Page", String(page));
     res.setHeader("X-Page-Size", String(pageSize));
-    res.setHeader("X-Total-Count", String(filtered.length));
-    res.json(filtered.slice(offset, offset + pageSize));
+    res.setHeader("X-Total-Count", String(total));
+    res.json(scopedTasks);
     return;
   }
 
-  const tasks = await listTasks();
-  const filtered = tasks.filter((task) => {
-    if (status && task.status !== status) {
-      return false;
-    }
-    if (assignee && task.assignee !== assignee) {
-      return false;
-    }
-    return true;
-  });
+  const tasks = await listTasks({ status, assignee, page, pageSize });
+  const where = {
+    ...(status ? { status } : {}),
+    ...(assignee ? { assignee } : {})
+  };
+  const total = await getCachedTaskTotal(`global:status:${status || "*"}:assignee:${assignee || "*"}`, where);
   res.setHeader("X-Page", String(page));
   res.setHeader("X-Page-Size", String(pageSize));
-  res.setHeader("X-Total-Count", String(filtered.length));
-  res.json(filtered.slice(offset, offset + pageSize));
+  res.setHeader("X-Total-Count", String(total));
+  res.json(tasks);
 }));
 
 const handleApproveProject = asyncRoute(async (req, res) => {
@@ -4297,7 +4578,21 @@ router.delete("/api/projects/:id", asyncRoute(async (req, res) => {
 router.post("/api/projects/:id/stages/submit", validateBody(ProjectStageSubmitSchema), asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
   const payload = req.body as StageSubmissionInput;
-  const content = String(payload?.content ?? "").trim();
+  const deliverables = Array.isArray((payload as { deliverables?: Array<{ name?: string; content?: string }> })?.deliverables)
+    ? (payload as { deliverables?: Array<{ name?: string; content?: string }> }).deliverables ?? []
+    : [];
+  const normalizedDeliverableContent = deliverables
+    .map((item) => {
+      const name = String(item?.name ?? "").trim();
+      const body = String(item?.content ?? "").trim();
+      if (!name || !body) {
+        return "";
+      }
+      return `## ${name}\n${body}`;
+    })
+    .filter(Boolean)
+    .join("\n\n");
+  const content = String(payload?.content ?? "").trim() || normalizedDeliverableContent;
   const finalizeApproval =
     typeof req.body?.finalizeApproval === "boolean"
       ? req.body.finalizeApproval
@@ -4306,6 +4601,22 @@ router.post("/api/projects/:id/stages/submit", validateBody(ProjectStageSubmitSc
   if (!content) {
     res.status(400).json({ message: "content is required" });
     return;
+  }
+  const stageSnapshot = await findProject(projectId);
+  const shouldEnforceDevSourceCodeEvidence = String(stageSnapshot?.currentStage || "").toUpperCase() === "DEV";
+  if (shouldEnforceDevSourceCodeEvidence) {
+    const normalized = content.toLowerCase();
+    const hasSourceCodeMarker = /(sourcecode|source code|代码路径|code path|src\/|apps\/|packages\/)/i.test(normalized);
+    if (!hasSourceCodeMarker) {
+      res.status(422).json({
+        success: false,
+        error: {
+          code: "SOURCE_CODE_EVIDENCE_REQUIRED",
+          message: "开发阶段提交缺少 sourceCode 证据，请在内容中包含代码路径或 sourceCode 章节。"
+        }
+      });
+      return;
+    }
   }
 
   let project;
@@ -4359,6 +4670,118 @@ router.post("/api/projects/:id/stages/submit", validateBody(ProjectStageSubmitSc
   if (!project) {
     res.status(404).json({ message: "Project not found" });
     return;
+  }
+
+  // Bridge legacy stage submission into workflow-v2 artifacts to avoid gate mismatch.
+  try {
+    const activeWorkflow = await getActiveWorkflow(projectId);
+    const hasActiveWorkflowStage = Array.isArray(activeWorkflow.currentStageIds)
+      && activeWorkflow.currentStageIds.length > 0;
+    if (!hasActiveWorkflowStage) {
+      res.status(409).json({
+        success: false,
+        error: {
+          code: "WORKFLOW_STAGE_NOT_ACTIVE",
+          message: "当前 workflow 未激活到可提交阶段，请先推进到目标阶段后再提交交付物。"
+        }
+      });
+      return;
+    }
+    const currentStageIds = Array.isArray(activeWorkflow.currentStageIds) ? activeWorkflow.currentStageIds as string[] : [];
+    const currentStageType = String(project.currentStage || "").toUpperCase();
+    const templateByStageType: Record<string, string> = {
+      ANALYSIS: "requirements_design",
+      DESIGN: "visual_design",
+      DEV: "code_dev",
+      ACCEPT: "qa_acceptance"
+    };
+    const preferredTemplateKey = templateByStageType[currentStageType] || "";
+    const stageIdFromCurrent = String(currentStageIds[0] || "").trim();
+    const stageIdFromTemplate = String(
+      activeWorkflow.stages.find((item) => String(item.templateKey || "").trim() === preferredTemplateKey)?.id || ""
+    ).trim();
+    const targetStageId = stageIdFromCurrent || stageIdFromTemplate;
+    if (targetStageId) {
+      const explicitTitle = String(payload?.title || "").trim();
+      const artifactNames = new Set<string>();
+      if (explicitTitle) {
+        artifactNames.add(explicitTitle);
+      }
+      if (currentStageType === "DEV") {
+        artifactNames.add("sourceCode");
+      } else if (currentStageType === "ACCEPT") {
+        artifactNames.add("testReport");
+      } else if (!explicitTitle) {
+        artifactNames.add("deliverable");
+      }
+      for (const artifactName of artifactNames) {
+        await addStageOutputArtifact({
+          stageId: targetStageId,
+          artifact: {
+            name: artifactName,
+            type: "markdown",
+            content,
+            createdAt: new Date().toISOString(),
+            metadata: {
+              source: "legacy_stage_submit_bridge",
+              projectId,
+              stageType: project.currentStage
+            }
+          }
+        });
+      }
+    }
+
+    // Semantic fallback: when submit payload contains dev/qa evidence, bridge to matching workflow template stage
+    // even if project.currentStage has drifted from workflow current stage.
+    const normalizedTitle = String(payload?.title || "").toLowerCase();
+    const normalizedContent = content.toLowerCase();
+    const looksLikeSourceCode = /(sourcecode|source code|代码路径|src\/|apps\/|packages\/|变更证据)/i.test(
+      `${normalizedTitle}\n${normalizedContent}`
+    );
+    const looksLikeTestReport = /(testreport|test report|测试报告|缺陷分级|测试覆盖矩阵)/i.test(
+      `${normalizedTitle}\n${normalizedContent}`
+    );
+    if (looksLikeSourceCode) {
+      const codeDevStage = activeWorkflow.stages.find((item) => String(item.templateKey || "") === "code_dev");
+      if (codeDevStage) {
+        await addStageOutputArtifact({
+          stageId: codeDevStage.id,
+          artifact: {
+            name: "sourceCode",
+            type: "markdown",
+            content,
+            createdAt: new Date().toISOString(),
+            metadata: {
+              source: "legacy_stage_submit_bridge_semantic",
+              projectId,
+              stageType: "DEV"
+            }
+          }
+        });
+      }
+    }
+    if (looksLikeTestReport) {
+      const qaStage = activeWorkflow.stages.find((item) => String(item.templateKey || "") === "qa_acceptance");
+      if (qaStage) {
+        await addStageOutputArtifact({
+          stageId: qaStage.id,
+          artifact: {
+            name: "testReport",
+            type: "markdown",
+            content,
+            createdAt: new Date().toISOString(),
+            metadata: {
+              source: "legacy_stage_submit_bridge_semantic",
+              projectId,
+              stageType: "ACCEPT"
+            }
+          }
+        });
+      }
+    }
+  } catch {
+    // Best effort bridge for compatibility; submission already succeeded in legacy path.
   }
 
   await safeAudit(req, res, {
@@ -4480,7 +4903,10 @@ router.patch("/api/tasks/:taskId", validateBody(TaskStatusUpdateSchema), asyncRo
 }));
 router.get("/api/projects/:id/live", asyncRoute(async (req, res) => {
   const projectId = String(req.params.id);
-  const project = await findProject(projectId);
+  const project = await findProject(projectId, {
+    detailLevel: "api",
+    skipWorkflowStateReconcile: true
+  });
 
   if (!project) {
     res.status(404).end();
@@ -4503,7 +4929,10 @@ router.get("/api/projects/:id/live", asyncRoute(async (req, res) => {
   });
 
   const interval = setInterval(async () => {
-    const currentProject = await findProject(projectId);
+    const currentProject = await findProject(projectId, {
+      detailLevel: "api",
+      skipWorkflowStateReconcile: true
+    });
 
     if (!currentProject) {
       clearInterval(interval);

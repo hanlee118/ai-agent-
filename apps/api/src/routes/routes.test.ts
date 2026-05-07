@@ -1,31 +1,22 @@
 import assert from "node:assert/strict";
 import { execSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import express from "express";
 import request from "supertest";
-import { snapshotSqliteSeedDatabase } from "../test/sqlite-snapshot.js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const apiRoot = path.resolve(__dirname, "../../");
-const seedDbPath = path.join(apiRoot, "prisma/dev.db");
-const migrationPaths = [
-  path.join(apiRoot, "prisma/migrations/20260411103000_add_knowledge_workflow_v2/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411124500_add_knowledge_operation_logs/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411193000_add_hermes_skill_sync/migration.sql"),
-  path.join(apiRoot, "prisma/migrations/20260411205000_add_mixed_project_mode/migration.sql")
-];
-
-const tempDir = mkdtempSync(path.join(os.tmpdir(), "occ-api-routes-"));
-const dbPath = path.join(tempDir, "test.db");
+const TEST_DATABASE_URL =
+  String(process.env.TEST_DATABASE_URL || "").trim()
+  || "postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test";
 
 process.env.NODE_ENV = "test";
 process.env.MODEL_PROVIDER = "scripted";
-process.env.DATABASE_URL = `file:${dbPath}`;
+process.env.DATABASE_URL = TEST_DATABASE_URL;
+process.env.TEST_DATABASE_URL = TEST_DATABASE_URL;
 process.env.PROJECT_AUTO_ADVANCE = "false";
 process.env.PROJECT_WARMUP = "false";
 process.env.PROJECT_MANUAL_ADVANCE_ENABLED = "false";
@@ -44,134 +35,29 @@ after(async () => {
   if (prismaClient) {
     await prismaClient.$disconnect();
   }
-
-  rmSync(tempDir, { recursive: true, force: true });
 });
 
 before(async () => {
-  snapshotSqliteSeedDatabase({
-    seedDbPath,
-    dbPath,
-    cwd: apiRoot
-  });
-
-  execSync(
-    [
-      `sqlite3 ${JSON.stringify(dbPath)} <<'SQL'`,
-      "PRAGMA foreign_keys = ON;",
-      "CREATE TABLE IF NOT EXISTS \"Model\" (",
-      "  \"id\" TEXT NOT NULL PRIMARY KEY,",
-      "  \"name\" TEXT NOT NULL,",
-      "  \"provider\" TEXT NOT NULL,",
-      "  \"apiKey\" TEXT,",
-      "  \"apiBaseUrl\" TEXT,",
-      "  \"status\" TEXT NOT NULL DEFAULT 'Offline',",
-      "  \"totalTokens\" INTEGER NOT NULL DEFAULT 0,",
-      "  \"dailyTokens\" INTEGER NOT NULL DEFAULT 0,",
-      "  \"tokenLimit\" INTEGER NOT NULL DEFAULT 1000000,",
-      "  \"createdAt\" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,",
-      "  \"updatedAt\" DATETIME NOT NULL",
-      ");",
-      "CREATE TABLE IF NOT EXISTS \"ModelLog\" (",
-      "  \"id\" TEXT NOT NULL PRIMARY KEY,",
-      "  \"modelId\" TEXT NOT NULL,",
-      "  \"timestamp\" DATETIME NOT NULL,",
-      "  \"type\" TEXT NOT NULL,",
-      "  \"content\" TEXT NOT NULL,",
-      "  \"label\" TEXT,",
-      "  CONSTRAINT \"ModelLog_modelId_fkey\" FOREIGN KEY (\"modelId\") REFERENCES \"Model\" (\"id\") ON DELETE CASCADE ON UPDATE CASCADE",
-      ");",
-      "CREATE TABLE IF NOT EXISTS \"AgentSoul\" (",
-      "  \"agentId\" TEXT NOT NULL PRIMARY KEY,",
-      "  \"content\" TEXT NOT NULL,",
-      "  \"updatedAt\" DATETIME NOT NULL",
-      ");",
-      "CREATE TABLE IF NOT EXISTS \"AgentSop\" (",
-      "  \"agentId\" TEXT NOT NULL PRIMARY KEY,",
-      "  \"steps\" TEXT NOT NULL,",
-      "  \"updatedAt\" DATETIME NOT NULL",
-      ");",
-      "SQL"
-    ].join("\n"),
-    {
-      cwd: apiRoot,
-      stdio: "pipe"
-    }
-  );
-
-  // Compatibility: sqlite seed snapshots can lag behind latest schema; best-effort cleanup only.
-  const resetTables = [
-    "AuthSession",
-    "ProjectExecution",
-    "TimelineEvent",
-    "Deliverable",
-    "Stage",
-    "Task",
-    "Project",
-    "AuditLog"
-  ];
-
-  execSync(`sqlite3 ${JSON.stringify(dbPath)} "PRAGMA foreign_keys = OFF;"`, {
-    cwd: apiRoot,
-    stdio: "pipe"
-  });
-
-  for (const tableName of resetTables) {
-    try {
-      execSync(`sqlite3 ${JSON.stringify(dbPath)} "DELETE FROM \\"${tableName}\\";"`, {
-        cwd: apiRoot,
-        stdio: "pipe"
-      });
-    } catch {
-      // Ignore missing table errors to keep fixture setup compatible across schema snapshots.
-    }
-  }
-
-  try {
-    execSync(
-      [
-        `sqlite3 ${JSON.stringify(dbPath)} <<'SQL'`,
-        "UPDATE \"SystemConfig\"",
-        "SET \"adminPasswordHash\" = '',",
-        "    \"adminPasswordSalt\" = '',",
-        "    \"adminPasswordUpdatedAt\" = NULL,",
-        "    \"provider\" = 'scripted',",
-        "    \"apiBaseUrl\" = '',",
-        "    \"modelName\" = '',",
-        "    \"configSource\" = 'default',",
-        "    \"lastValidatedAt\" = NULL,",
-        "    \"lastValidationStatus\" = 'unknown',",
-        "    \"lastValidationError\" = NULL,",
-        "    \"updatedAt\" = CURRENT_TIMESTAMP;",
-        "SQL"
-      ].join("\n"),
-      {
-        cwd: apiRoot,
-        stdio: "pipe"
+  const retryExec = (command: string, max = 3) => {
+    let lastError: unknown = null;
+    for (let attempt = 1; attempt <= max; attempt += 1) {
+      try {
+        execSync(command, { cwd: apiRoot, stdio: "pipe", shell: "/bin/zsh" });
+        return;
+      } catch (error) {
+        lastError = error;
       }
-    );
-  } catch {
-    // Ignore missing SystemConfig on older snapshots.
-  }
-
-  execSync(`sqlite3 ${JSON.stringify(dbPath)} "PRAGMA foreign_keys = ON;"`, {
-    cwd: apiRoot,
-    stdio: "pipe"
-  });
-
-  for (const migrationPath of migrationPaths) {
-    try {
-      execSync(
-        `sqlite3 ${JSON.stringify(dbPath)} < ${JSON.stringify(migrationPath)}`,
-        {
-          cwd: apiRoot,
-          stdio: "pipe"
-        }
-      );
-    } catch {
-      // Ignore idempotent migration replay errors in newer seed databases.
     }
-  }
+    throw lastError;
+  };
+
+  retryExec(
+    `DATABASE_URL=${JSON.stringify(TEST_DATABASE_URL)} pnpm exec prisma migrate reset --force --skip-seed`
+  );
+  execSync(
+    `DATABASE_URL=${JSON.stringify(TEST_DATABASE_URL)} pnpm exec tsx ../../scripts/seed-workflow-templates-v2.ts`,
+    { cwd: apiRoot, stdio: "pipe", shell: "/bin/zsh" }
+  );
 
   const [modelsMod, agentsMod, teamMod, roleSetsMod, issuesMod, dbMod, indexMod] = await Promise.all([
     import("./models.js"),
@@ -184,6 +70,39 @@ before(async () => {
   ]);
 
   prismaClient = dbMod.prisma;
+  await prismaClient.systemConfig.upsert({
+    where: { id: "default" },
+    update: {
+      provider: "scripted",
+      apiBaseUrl: "",
+      apiKey: "",
+      modelName: "",
+      adminPasswordHash: "",
+      adminPasswordSalt: "",
+      adminPasswordUpdatedAt: null,
+      configSource: "default",
+      lastValidatedAt: null,
+      lastValidationStatus: "unknown",
+      lastValidationError: null
+    },
+    create: {
+      id: "default",
+      provider: "scripted",
+      apiBaseUrl: "",
+      apiKey: "",
+      modelName: "",
+      adminPasswordHash: "",
+      adminPasswordSalt: "",
+      adminPasswordUpdatedAt: null,
+      configSource: "default",
+      lastValidatedAt: null,
+      lastValidationStatus: "unknown",
+      lastValidationError: null
+    }
+  });
+  await prismaClient.userProfile.deleteMany({});
+  await prismaClient.authSession.deleteMany({});
+
   fullApp = indexMod.app;
 
   app = express();

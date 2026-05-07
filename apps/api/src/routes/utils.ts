@@ -6,6 +6,7 @@ export type ApiErrorCode =
   | "FORBIDDEN"
   | "NOT_FOUND"
   | "VALIDATION_ERROR"
+  | "WORKFLOW_ADVANCE_TIMEOUT"
   | "INTERNAL_ERROR"
   | "SERVICE_UNAVAILABLE";
 

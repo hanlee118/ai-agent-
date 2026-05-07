@@ -71,7 +71,11 @@ export const ProjectInterveneSchema = z.object({
 
 export const ProjectStageSubmitSchema = z.object({
   title: z.string().optional(),
-  content: z.string().trim().min(1, "content is required"),
+  content: z.string().trim().min(1, "content is required").optional(),
+  deliverables: z.array(z.object({
+    name: z.string().trim().min(1, "deliverables[].name is required"),
+    content: z.string().trim().min(1, "deliverables[].content is required")
+  })).optional(),
   designReview: z.unknown().optional(),
   finalizeApproval: z.boolean().optional()
 });
@@ -153,7 +157,10 @@ export const RuntimeConfigUpdateSchema = z.object({
 export const ExecutionProtocolUpdateSchema = z.object({
   requireSkillEvidence: z.boolean().optional(),
   requireCollaborationHandoff: z.boolean().optional(),
-  blockDegradedWrites: z.boolean().optional()
+  blockDegradedWrites: z.boolean().optional(),
+  blockSecretLeak: z.boolean().optional(),
+  blockLargeFileCommit: z.boolean().optional(),
+  largeFileSizeThreshold: z.coerce.number().int().positive().optional()
 });
 
 export const UiPreferencesUpdateSchema = z.object({

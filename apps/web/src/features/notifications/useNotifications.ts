@@ -11,6 +11,12 @@ export type NotificationItem = {
   read: boolean;
   sourceKey?: string;
   to?: string;
+  target?: {
+    tab?: string;
+    projectId?: string;
+    agentId?: string;
+    modal?: string;
+  };
 };
 
 type ToastFn = (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -150,6 +156,7 @@ export function useNotifications({
         read: Boolean(item.read),
         type: (item.severity === 'critical' || item.severity === 'warning' ? 'warning' : 'info') as 'info' | 'success' | 'warning',
         to: item.to,
+        target: item.target,
       }));
   }, [inboxNotifications, fallbackNotifications, toRelativeLabel]);
 

@@ -22,6 +22,55 @@ type WorkflowTemplateSeed = {
 
 export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
   {
+    key: "audit_inspection",
+    name: "巡检治理",
+    category: "ops",
+    description: "GitLab 工程治理巡检（MR 生命周期、Issue 关联、分支命名）",
+    isStandalone: true,
+    standaloneCategory: "audit",
+    executorConfig: {
+      type: "agent",
+      agentRole: "Auditor",
+      requiredCapabilities: ["gitlab_audit", "governance"],
+      modelPreference: "openai/gpt-5.3-codex"
+    },
+    inputSchema: {
+      type: "object",
+      properties: { trigger: { type: "string" } },
+      required: []
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        scannedCount: { type: "number" },
+        actions: { type: "array" }
+      },
+      required: ["scannedCount"]
+    },
+    inputContract: {
+      requiresExternalInput: false,
+      allowedInputTypes: [],
+      inputValidationRules: []
+    },
+    outputContract: {
+      deliverables: ["auditReport"],
+      handoffFormat: "json",
+      archiveLocation: "system_audit"
+    },
+    acceptanceCriteria: [
+      { type: "artifact_exists", config: { artifact: "auditReport", minLength: 20 } }
+    ],
+    defaultTimeout: 90,
+    allowParallel: false,
+    stageTasks: {
+      ACCEPT: [
+        { title: "扫描打开中的 MR", assignedRole: "ROLE_QA" },
+        { title: "标记规范异常", assignedRole: "ROLE_QA", dependsOn: ["扫描打开中的 MR"] },
+        { title: "输出巡检报告", assignedRole: "ROLE_PM", dependsOn: ["标记规范异常"] }
+      ]
+    }
+  },
+  {
     key: "requirements_design",
     name: "需求设计",
     category: "pm",

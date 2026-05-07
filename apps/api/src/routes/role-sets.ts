@@ -16,6 +16,7 @@ export type RoleId =
   | "ROLE_ARCH"
   | "ROLE_DEV"
   | "ROLE_QA"
+  | "ROLE_AUDITOR"
   | "ROLE_HR";
 
 type RoleSetStatus = "active" | "inactive";
@@ -472,6 +473,7 @@ function buildDefaultWorkflows(roleSet: IndustryRoleSet): TeamSopWorkflow[] {
     ROLE_ARCH: "系统架构与技术方案",
     ROLE_DEV: "研发实现与联调",
     ROLE_QA: "质量验证与回归测试",
+    ROLE_AUDITOR: "工程巡检与治理审计",
     ROLE_HR: "组织协同与资源保障"
   };
   return [

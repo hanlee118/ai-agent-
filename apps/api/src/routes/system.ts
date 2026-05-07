@@ -43,9 +43,12 @@ import {
 import { probeStitchRuntimeConnection } from "../integrations/stitch-runtime.js";
 import {
   applyOpenClawAutonomousModePreference,
-  inspectOpenClawModelRouting
+  inspectOpenClawModelRouting,
+  getOpenClawStatusSummary
 } from "../openclaw/workspace.js";
+import { getHermesMcpRuntimeStatus, probeHermesMcpEndpoint } from "../workflow-v2/hermes-mcp.js";
 import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
+import { getLatestAuditInspectionSummary, runAuditInspectionNow } from "../workflow-v2/audit-tasks.js";
 import { prisma, withPrismaReadRetry } from "../db.js";
 import { validateBody } from "../validation/middleware.js";
 import {
@@ -132,6 +135,154 @@ function buildLocalMonitorFallback(): Awaited<ReturnType<typeof getCachedLocalAg
   };
 }
 
+type IntegrationReadinessState = "code_available" | "configured" | "reachable" | "validated" | "unavailable";
+
+type IntegrationReadinessItem = {
+  key: "openclaw" | "hermes" | "gitlab" | "stitch";
+  label: string;
+  state: IntegrationReadinessState;
+  configured: boolean;
+  reachable: boolean;
+  validated: boolean;
+  message: string;
+  checkedAt: string;
+  details?: Record<string, unknown>;
+};
+
+async function probeGitLabConnection(): Promise<{ ok: boolean; message: string; details?: Record<string, unknown> }> {
+  const token = String(process.env.GITLAB_TOKEN ?? "").trim();
+  const base = String(process.env.GITLAB_API_BASE_URL ?? "https://gitlab.com/api/v4").trim();
+  if (!token) {
+    return {
+      ok: false,
+      message: "GITLAB_TOKEN 未配置"
+    };
+  }
+  try {
+    const response = await fetch(`${base.replace(/\/$/, "")}/user`, {
+      headers: { "PRIVATE-TOKEN": token }
+    });
+    if (!response.ok) {
+      return {
+        ok: false,
+        message: `GitLab API 探活失败（HTTP ${response.status}）`
+      };
+    }
+    const payload = await response.json().catch(() => null) as { username?: string } | null;
+    return {
+      ok: true,
+      message: "GitLab API 可达",
+      details: { username: payload?.username ?? null }
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "GitLab 连接异常";
+    return {
+      ok: false,
+      message
+    };
+  }
+}
+
+async function getIntegrationReadinessSnapshot(): Promise<{
+  generatedAt: string;
+  integrations: IntegrationReadinessItem[];
+}> {
+  const checkedAt = new Date().toISOString();
+  const [openclaw, stitch, gitlab, hermesProbe] = await Promise.all([
+    getOpenClawStatusSummary()
+      .then((result) => ({ ok: true as const, result }))
+      .catch((error) => ({ ok: false as const, error })),
+    probeStitchRuntimeConnection()
+      .then((result) => ({ ok: true as const, result }))
+      .catch((error) => ({ ok: false as const, error })),
+    probeGitLabConnection(),
+    (async () => {
+      const runtime = getHermesMcpRuntimeStatus();
+      if (!runtime.enabled) {
+        return { configured: false, reachable: false, validated: false, message: "Hermes MCP 未启用" };
+      }
+      const probe = await probeHermesMcpEndpoint();
+      return {
+        configured: true,
+        reachable: Boolean(probe.reachable),
+        validated: Boolean(probe.reachable),
+        message: probe.reachable ? "Hermes MCP 可达" : probe.message || "Hermes MCP 不可达",
+        details: { endpoint: runtime.endpoint }
+      };
+    })()
+  ]);
+
+  const integrations: IntegrationReadinessItem[] = [
+    openclaw.ok
+      ? {
+          key: "openclaw",
+          label: "OpenClaw",
+          state: "validated",
+          configured: true,
+          reachable: true,
+          validated: true,
+          message: "OpenClaw 状态探测成功",
+          checkedAt,
+          details: {
+            runtimeVersion: openclaw.result.runtimeVersion,
+            sessionCount: openclaw.result.sessionCount
+          }
+        }
+      : {
+          key: "openclaw",
+          label: "OpenClaw",
+          state: "unavailable",
+          configured: true,
+          reachable: false,
+          validated: false,
+          message: openclaw.error instanceof Error ? openclaw.error.message : "OpenClaw 探测失败",
+          checkedAt
+        },
+    {
+      key: "hermes",
+      label: "Hermes MCP",
+      state: hermesProbe.validated ? "validated" : hermesProbe.configured ? "configured" : "code_available",
+      configured: hermesProbe.configured,
+      reachable: hermesProbe.reachable,
+      validated: hermesProbe.validated,
+      message: hermesProbe.message,
+      checkedAt,
+      details: hermesProbe.details
+    },
+    {
+      key: "gitlab",
+      label: "GitLab",
+      state: gitlab.ok ? "validated" : String(process.env.GITLAB_TOKEN ?? "").trim() ? "configured" : "code_available",
+      configured: Boolean(String(process.env.GITLAB_TOKEN ?? "").trim()),
+      reachable: gitlab.ok,
+      validated: gitlab.ok,
+      message: gitlab.message,
+      checkedAt,
+      details: gitlab.details
+    },
+    {
+      key: "stitch",
+      label: "Stitch",
+      state: stitch.ok
+        ? (stitch.result.ok ? "validated" : stitch.result.apiKeyConfigured ? "configured" : "code_available")
+        : "unavailable",
+      configured: stitch.ok ? Boolean(stitch.result.apiKeyConfigured) : false,
+      reachable: stitch.ok ? Boolean(stitch.result.ok) : false,
+      validated: stitch.ok ? Boolean(stitch.result.ok) : false,
+      message: stitch.ok
+        ? (stitch.result.message || (stitch.result.ok ? "Stitch 探测通过" : "Stitch 不可达"))
+        : (stitch.error instanceof Error ? stitch.error.message : "Stitch 探测失败"),
+      checkedAt,
+      details: stitch.ok ? { endpoint: stitch.result.baseUrl ?? null, reason: stitch.result.reason } : undefined
+    }
+  ];
+
+  return {
+    generatedAt: checkedAt,
+    integrations
+  };
+}
+
 async function withTimeoutFallback<T>(task: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
   let timer: NodeJS.Timeout | null = null;
   try {
@@ -151,10 +302,21 @@ const OBSERVABILITY_SUMMARY_CACHE_TTL_MS = Math.max(
   5_000,
   Number(process.env.OBSERVABILITY_SUMMARY_CACHE_TTL_MS ?? 30_000)
 );
+const OBSERVABILITY_TOTALS_CACHE_TTL_MS = Math.max(
+  10_000,
+  Number(process.env.OBSERVABILITY_TOTALS_CACHE_TTL_MS ?? 60_000)
+);
 let observabilitySummaryCache:
   | { expiresAt: number; value: unknown }
   | null = null;
 let observabilitySummaryInflight: Promise<unknown> | null = null;
+let observabilityTotalsCache:
+  | {
+      expiresAt: number;
+      value: { projectCount: number; executionCount: number; auditCount: number };
+    }
+  | null = null;
+let observabilityTotalsInflight: Promise<{ projectCount: number; executionCount: number; auditCount: number }> | null = null;
 
 export async function getObservabilitySummarySnapshot() {
   const now = Date.now();
@@ -166,14 +328,35 @@ export async function getObservabilitySummarySnapshot() {
   }
 
   observabilitySummaryInflight = (async () => {
-  const [runtime, readiness, monitor, projectCount, executionCount, auditCount] = await Promise.all([
+  const [runtime, readiness, monitor] = await Promise.all([
     getRuntimeStatus(),
     getSystemReadiness(),
-    withTimeoutFallback(getCachedLocalAgentMonitorOverview(), 1500, buildLocalMonitorFallback()),
-    withPrismaReadRetry("count", () => prisma.project.count()),
-    withPrismaReadRetry("count", () => prisma.projectExecution.count()),
-    withPrismaReadRetry("count", () => prisma.auditLog.count())
+    withTimeoutFallback(getCachedLocalAgentMonitorOverview(), 1500, buildLocalMonitorFallback())
   ]);
+  const nowTotals = Date.now();
+  let totals = observabilityTotalsCache && observabilityTotalsCache.expiresAt > nowTotals
+    ? observabilityTotalsCache.value
+    : null;
+  if (!totals) {
+    if (!observabilityTotalsInflight) {
+      observabilityTotalsInflight = Promise.all([
+        withPrismaReadRetry("count", () => prisma.project.count()),
+        withPrismaReadRetry("count", () => prisma.projectExecution.count()),
+        withPrismaReadRetry("count", () => prisma.auditLog.count())
+      ]).then(([projectCount, executionCount, auditCount]) => ({
+        projectCount,
+        executionCount,
+        auditCount
+      })).finally(() => {
+        observabilityTotalsInflight = null;
+      });
+    }
+    totals = await observabilityTotalsInflight;
+    observabilityTotalsCache = {
+      value: totals,
+      expiresAt: Date.now() + OBSERVABILITY_TOTALS_CACHE_TTL_MS
+    };
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -188,9 +371,9 @@ export async function getObservabilitySummarySnapshot() {
       warnings: readiness.warnings
     },
     data: {
-      projectCount,
-      executionCount,
-      auditCount
+      projectCount: totals.projectCount,
+      executionCount: totals.executionCount,
+      auditCount: totals.auditCount
     },
     localAgentMonitor: {
       scannedAt: monitor.scannedAt,
@@ -279,12 +462,18 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
       requireSkillEvidence?: unknown;
       requireCollaborationHandoff?: unknown;
       blockDegradedWrites?: unknown;
+      blockSecretLeak?: unknown;
+      blockLargeFileCommit?: unknown;
+      largeFileSizeThreshold?: unknown;
     };
 
     const updated = await updateExecutionProtocolSettings({
       requireSkillEvidence: payload.requireSkillEvidence === undefined ? undefined : Boolean(payload.requireSkillEvidence),
       requireCollaborationHandoff: payload.requireCollaborationHandoff === undefined ? undefined : Boolean(payload.requireCollaborationHandoff),
-      blockDegradedWrites: payload.blockDegradedWrites === undefined ? undefined : Boolean(payload.blockDegradedWrites)
+      blockDegradedWrites: payload.blockDegradedWrites === undefined ? undefined : Boolean(payload.blockDegradedWrites),
+      blockSecretLeak: payload.blockSecretLeak === undefined ? undefined : Boolean(payload.blockSecretLeak),
+      blockLargeFileCommit: payload.blockLargeFileCommit === undefined ? undefined : Boolean(payload.blockLargeFileCommit),
+      largeFileSizeThreshold: payload.largeFileSizeThreshold === undefined ? undefined : Number(payload.largeFileSizeThreshold)
     });
 
     await safeAudit(req, res, {
@@ -397,7 +586,68 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
   }));
 
   router.get("/observability/summary", asyncRoute(async (_req, res) => {
-    res.json(await getObservabilitySummarySnapshot());
+    const summary = await getObservabilitySummarySnapshot();
+    const latestAudit = await getLatestAuditInspectionSummary();
+    const summaryObject = (summary && typeof summary === "object")
+      ? summary as Record<string, unknown>
+      : {};
+    res.json({
+      ...summaryObject,
+      governance: {
+        latestAudit
+      }
+    });
+  }));
+
+  router.get("/integration-readiness", asyncRoute(async (_req, res) => {
+    res.json(await getIntegrationReadinessSnapshot());
+  }));
+
+  router.post("/diagnostics/run", validateBody(MutationOptionalSchema), asyncRoute(async (_req, res) => {
+    const [observability, readiness, integrations] = await Promise.all([
+      getObservabilitySummarySnapshot(),
+      getSystemReadiness(),
+      getIntegrationReadinessSnapshot()
+    ]);
+    const integrationWarnings = integrations.integrations.filter((item) => !item.validated);
+    const checks = [
+      {
+        key: "system.readiness",
+        passed: readiness.warnings.length === 0,
+        message: readiness.warnings.length === 0 ? "系统就绪检查通过" : `系统存在 ${readiness.warnings.length} 条告警`,
+      },
+      ...integrations.integrations.map((item) => ({
+        key: `integration.${item.key}`,
+        passed: item.validated,
+        message: item.message
+      }))
+    ];
+    const suggestions = [
+      ...integrationWarnings.map((item) => ({
+        key: `integration-fix-${item.key}`,
+        title: `${item.label} 连通性修复`,
+        message: item.message,
+        action: item.key === "openclaw" ? "open-settings"
+          : item.key === "hermes" ? "open-workflow-console"
+          : item.key === "gitlab" ? "open-settings"
+          : "open-settings"
+      })),
+      ...(readiness.warnings.length > 0 ? [{
+        key: "runtime-self-heal",
+        title: "执行模型路由自愈",
+        message: "检测到系统就绪告警，建议先执行模型路由自检与修复。",
+        action: "run-model-routing-self-heal"
+      }] : [])
+    ];
+
+    res.json({
+      generatedAt: new Date().toISOString(),
+      observability,
+      readiness,
+      integrations,
+      checks,
+      suggestions
+    });
   }));
 
   router.get("/context-hygiene", asyncRoute(async (_req, res) => {
@@ -427,6 +677,19 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
     }
 
     res.json(result);
+  }));
+
+  router.post("/trigger-audit", validateBody(MutationOptionalSchema), asyncRoute(async (req, res) => {
+    const result = await runAuditInspectionNow();
+    await safeAudit(req, res, {
+      actorType: "admin",
+      actorLabel: "管理员",
+      action: "system.audit_triggered",
+      resourceType: "system",
+      summary: `手动触发巡检（ok=${result.ok} scanned=${result.scanned ?? 0}）`,
+      detail: JSON.stringify(result).slice(0, 2000)
+    });
+    res.status(result.ok ? 200 : 422).json(result);
   }));
 
   router.get("/audit-logs", asyncRoute(async (req, res) => {
@@ -624,6 +887,10 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
   }));
 
   router.get("/local-agent-monitor", asyncRoute(async (_req, res) => {
+    res.json(await getCachedLocalAgentMonitorOverview());
+  }));
+
+  router.get("/local-agent-monitor/overview", asyncRoute(async (_req, res) => {
     res.json(await getCachedLocalAgentMonitorOverview());
   }));
 
