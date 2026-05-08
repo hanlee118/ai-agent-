@@ -56,6 +56,12 @@ import {
   runProjectPostCreatePrep,
   saveProjectPostCreatePrepDraft
 } from "../system/post-create-prep.js";
+import {
+  isProjectModeTemplateCompatible,
+  isWorkflowTemplateKeyNone,
+  normalizeGovernedProjectType,
+  projectModeTemplateCompatibilityError
+} from "../system/project-governance.js";
 import { getStageRealModelGateRoles } from "../system/project-stage-execution.js";
 import { prisma } from "../db.js";
 import { getProjectRole, isPermissionAllowed, type ProjectRole } from "../security/rbac.js";
@@ -491,35 +497,6 @@ function normalizeStringArrayInput(input: unknown) {
   return input
     .map((item) => String(item ?? "").trim())
     .filter(Boolean);
-}
-
-function normalizeProjectType(input: unknown) {
-  const normalized = String(input ?? "").trim().toLowerCase();
-  if (normalized === "standalone" || normalized === "relay") {
-    return normalized as "standalone" | "relay";
-  }
-  return "complete" as const;
-}
-
-function isProjectModeTemplateCompatible(input: {
-  projectType: "complete" | "standalone" | "relay";
-  workflowTemplateKey: unknown;
-}) {
-  const normalizedTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
-  const templateKey = normalizedTemplateKey || "standard_software_development";
-  if (input.projectType === "complete") {
-    return templateKey === "standard_software_development"
-      || templateKey === "full"
-      || templateKey === "lean"
-      || templateKey === "maintenance"
-      || templateKey === "none";
-  }
-  return templateKey === "none"
-    || templateKey === "requirements_design"
-    || templateKey === "visual_design"
-    || templateKey === "tech_design"
-    || templateKey === "code_dev"
-    || templateKey === "qa_acceptance";
 }
 
 function normalizeProjectInputs(input: unknown) {
@@ -2643,7 +2620,7 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
     res.status(400).json({ message: "description is required" });
     return;
   }
-  const projectType = normalizeProjectType(req.body?.projectType);
+  const projectType = normalizeGovernedProjectType(req.body?.projectType);
   const parentProjectId = String(req.body?.parentProjectId ?? "").trim() || undefined;
   const relaySourceStageId = String(req.body?.relaySourceStageId ?? "").trim() || undefined;
   const projectInputs = normalizeProjectInputs(req.body?.projectInputs);
@@ -2652,13 +2629,11 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
     return;
   }
   if (!isProjectModeTemplateCompatible({ projectType, workflowTemplateKey: req.body?.workflowTemplateKey })) {
-    const message = projectType === "complete"
-      ? "workflowTemplateKey must be standard_software_development/full/lean/maintenance when projectType=complete"
-      : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance for standalone or relay projectType";
+    const message = projectModeTemplateCompatibilityError(projectType);
     res.status(400).json({ message });
     return;
   }
-  if (String(req.body?.workflowTemplateKey ?? "").trim().toLowerCase() === "none") {
+  if (isWorkflowTemplateKeyNone(req.body?.workflowTemplateKey)) {
     res.status(400).json({
       message: "workflowTemplateKey=none is forbidden. Every new project must bind workflow-v2 template."
     });
