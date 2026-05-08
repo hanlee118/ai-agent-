@@ -153,11 +153,9 @@ function isProjectModeTemplateCompatible(input: {
     return templateKey === "standard_software_development"
       || templateKey === "full"
       || templateKey === "lean"
-      || templateKey === "maintenance"
-      || templateKey === "none";
+      || templateKey === "maintenance";
   }
-  return templateKey === "none"
-    || templateKey === "requirements_design"
+  return templateKey === "requirements_design"
     || templateKey === "visual_design"
     || templateKey === "tech_design"
     || templateKey === "code_dev"
@@ -1256,7 +1254,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const userProjectInputs = normalizeProjectInputs(payload.projectInputs);
     const workflowTemplateKeyRaw = String(payload.workflowTemplateKey ?? "").trim();
     const workflowTemplateKey = workflowTemplateKeyRaw || undefined;
-    const enforceIndustryAssemblyRule = workflowTemplateKeyRaw.toLowerCase() === "none";
+    const enforceIndustryAssemblyRule = false;
     const autoStartWorkflow = normalizeOptionalBoolean(payload.autoStartWorkflow);
     if (projectType === "relay" && !parentProjectId) {
       sendError(res, 400, "VALIDATION_ERROR", "relay mode requires parentProjectId");
@@ -1264,9 +1262,18 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     }
     if (!isProjectModeTemplateCompatible({ projectType, workflowTemplateKey })) {
       const message = projectType === "complete"
-        ? "workflowTemplateKey must be standard_software_development or none when projectType=complete"
-        : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance/none for standalone or relay projectType";
+        ? "workflowTemplateKey must be standard_software_development/full/lean/maintenance when projectType=complete"
+        : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance for standalone or relay projectType";
       sendError(res, 400, "VALIDATION_ERROR", message);
+      return;
+    }
+    if (workflowTemplateKeyRaw.toLowerCase() === "none") {
+      sendError(
+        res,
+        400,
+        "VALIDATION_ERROR",
+        "workflowTemplateKey=none is forbidden. Every new project must bind workflow-v2 template."
+      );
       return;
     }
     const requiredQuestions = issue.questions.filter((question) => question.required);
