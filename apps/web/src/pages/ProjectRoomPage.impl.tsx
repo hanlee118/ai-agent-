@@ -2063,17 +2063,29 @@ const ProjectRoom = ({
   const projectBlockedCount = effectiveProjectTasks.filter((task) => task.status === 'Blocked').length;
 
   const isStandaloneSingleStageProject = useMemo(() => {
-    const mode = String(detail?.projectType || project.projectType || '').trim().toLowerCase();
+    const detailProjectType =
+      detail && typeof detail === 'object' && 'projectType' in detail
+        ? String((detail as { projectType?: unknown }).projectType || '')
+        : '';
+    const projectProjectType =
+      project && typeof project === 'object' && 'projectType' in project
+        ? String((project as { projectType?: unknown }).projectType || '')
+        : '';
+    const mode = String(detailProjectType || projectProjectType || '').trim().toLowerCase();
     if (mode === 'standalone') {
       return true;
     }
-    if (workflowOverview?.template?.category === 'single_stage') {
+    const templateCategory =
+      workflowOverview?.template && typeof workflowOverview.template === 'object' && 'category' in workflowOverview.template
+        ? String((workflowOverview.template as { category?: unknown }).category || '').trim().toLowerCase()
+        : '';
+    if (templateCategory === 'single_stage') {
       return true;
     }
     const workflowStages = Array.isArray(workflowOverview?.stages) ? workflowOverview.stages.length : 0;
     const coreStages = Array.isArray(stageItems) ? stageItems.length : 0;
     return workflowStages === 1 || coreStages === 1;
-  }, [detail?.projectType, project.projectType, stageItems, workflowOverview?.stages, workflowOverview?.template?.category]);
+  }, [detail, project, stageItems, workflowOverview?.stages, workflowOverview?.template]);
 
   const visibleTabs = useMemo<ProjectRoomTab[]>(
     () => (isStandaloneSingleStageProject ? ['交付物'] : ['任务', '阶段', '交付物', '时间线']),
