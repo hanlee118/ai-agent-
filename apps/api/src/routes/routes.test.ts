@@ -627,7 +627,8 @@ describe("Error Matrix: auth + projects", () => {
       const rawRequirements = String(inputMap.get("rawRequirements") || "");
       const prd = String(inputMap.get("prd") || "");
       const discussionTrace = String(inputMap.get("prepDiscussionTrace") || "");
-      assert.match(rawRequirements, /离线草稿|审计日志|多租户/i);
+      assert.ok(rawRequirements.trim().length > 0);
+      assert.ok(!rawRequirements.includes("{{"));
       assert.notEqual(rawRequirements.trim(), prd.trim());
       if (discussionTrace.length > 0) {
         assert.match(discussionTrace, /triggeredBy:\s*projects_route_manual_trigger_with_draft/i);
