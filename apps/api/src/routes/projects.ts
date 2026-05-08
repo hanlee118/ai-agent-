@@ -100,6 +100,7 @@ import {
 
 const PROJECT_DIRECT_CREATE_ENABLED = String(process.env.PROJECT_DIRECT_CREATE_ENABLED ?? "false").trim().toLowerCase() === "true";
 const PROJECT_PARSE_LEGACY_ENABLED = process.env.PROJECT_PARSE_LEGACY_ENABLED === "true";
+const PROJECT_AUTO_POST_CREATE_PREP_ENABLED = String(process.env.PROJECT_AUTO_POST_CREATE_PREP_ENABLED ?? "false").trim().toLowerCase() === "true";
 const QUALITY_GATE_REPAIR_DEFAULT_LIMIT = 80;
 const QUALITY_GATE_REPAIR_STAGE_LABELS: Record<string, string> = {
   INIT: "项目立项",
@@ -2692,7 +2693,7 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
   }));
   if (issueFirst.ok) {
     const prepState = await resolveProjectPostCreatePrepState(project as ProjectRecord);
-    if (prepState.required && !prepState.completed) {
+    if (prepState.required && !prepState.completed && PROJECT_AUTO_POST_CREATE_PREP_ENABLED) {
       void runProjectPostCreatePrep({
         projectId: project.id,
         triggeredBy: "project_created_auto_prep"
@@ -2702,6 +2703,8 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
           error instanceof Error ? error.message : String(error)
         );
       });
+    } else if (prepState.required && !prepState.completed) {
+      console.info(`[project] post-create-prep awaiting manual trigger for ${project.id}`);
     } else {
       void startProjectWarmupAfterCreate(project).catch((error) => {
         console.warn(

@@ -269,6 +269,64 @@ function inspectPrepDiscussionTrace(source: string) {
   };
 }
 
+function isPlaceholderTraceValue(value: string) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return [
+    "n/a",
+    "na",
+    "none",
+    "unknown",
+    "未记录",
+    "待补充",
+    "待确认",
+    "待执行",
+    "未触发",
+    "未生成",
+    "fallback",
+    "rule",
+    "scripted"
+  ].some((token) => normalized === token || normalized.includes(token));
+}
+
+function inspectPrepDiscussionTraceEvidence(source: string) {
+  const text = String(source || "").replace(/\r\n/g, "\n").trim();
+  if (!text) {
+    return { evidencefulRoleCount: 0, missingRoleIds: [] as string[] };
+  }
+  const blockPattern = /###\s*([^\n]+)\n([\s\S]*?)(?=\n###\s+|$)/g;
+  let matched: RegExpExecArray | null = blockPattern.exec(text);
+  const detectedRoles = new Set<string>();
+  const evidencefulRoles = new Set<string>();
+  while (matched) {
+    const header = String(matched[1] || "").trim();
+    const body = String(matched[2] || "").trim();
+    const roleId = String(header.match(/\(([^)]+)\)/)?.[1] || "").trim();
+    if (roleId) {
+      detectedRoles.add(roleId);
+    }
+    const mode = String(body.match(/(?:^|\n)-\s*模式[:：]\s*([^\n]+)/i)?.[1] || "").trim().toLowerCase();
+    const focus = String(body.match(/(?:^|\n)-\s*关注[:：]\s*([^\n]+)/i)?.[1] || "").trim();
+    const concern = String(body.match(/(?:^|\n)-\s*(?:风险|疑虑)[:：]\s*([^\n]+)/i)?.[1] || "").trim();
+    const proposal = String(body.match(/(?:^|\n)-\s*建议[:：]\s*([^\n]+)/i)?.[1] || "").trim();
+    const hasContentEvidence = [focus, concern, proposal].some((part) => {
+      const normalized = part.trim();
+      return normalized.length >= 8 && !isPlaceholderTraceValue(normalized);
+    });
+    const modeAccepted = Boolean(mode)
+      && !isPlaceholderTraceValue(mode)
+      && (mode.includes("model") || mode.includes("debate") || mode.includes("agent"));
+    if (roleId && hasContentEvidence && modeAccepted) {
+      evidencefulRoles.add(roleId);
+    }
+    matched = blockPattern.exec(text);
+  }
+  const missingRoleIds = Array.from(detectedRoles).filter((roleId) => !evidencefulRoles.has(roleId));
+  return { evidencefulRoleCount: evidencefulRoles.size, missingRoleIds };
+}
+
 function parseBooleanEnvFlag(value: string | undefined, defaultValue: boolean) {
   if (typeof value !== "string") {
     return defaultValue;
@@ -290,6 +348,19 @@ function shouldEnforcePrepModelRound() {
   const envOverride = process.env.PREP_DISCUSSION_ENFORCE_MODEL_ROUND;
   if (typeof envOverride === "string" && envOverride.trim()) {
     return parseBooleanEnvFlag(envOverride, false);
+  }
+  const runtimeMode = String(process.env.RUNTIME_MODE || "").trim().toLowerCase();
+  const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  if (runtimeMode === "scripted" || nodeEnv === "test") {
+    return false;
+  }
+  return true;
+}
+
+function shouldEnforcePrepTraceEvidence() {
+  const envOverride = process.env.PREP_DISCUSSION_ENFORCE_TRACE_EVIDENCE;
+  if (typeof envOverride === "string" && envOverride.trim()) {
+    return parseBooleanEnvFlag(envOverride, true);
   }
   const runtimeMode = String(process.env.RUNTIME_MODE || "").trim().toLowerCase();
   const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
@@ -430,6 +501,13 @@ function shouldRequirePostCreatePrep(input: {
   issue: IssueRecord | null;
   projectType: string;
 }) {
+  const globalRequiredOverride = process.env.PROJECT_POST_CREATE_PREP_REQUIRED;
+  if (typeof globalRequiredOverride === "string" && globalRequiredOverride.trim()) {
+    const enabled = parseBooleanEnvFlag(globalRequiredOverride, true);
+    if (!enabled) {
+      return false;
+    }
+  }
   if (input.issue?.status === "confirmed") {
     return true;
   }
@@ -1162,6 +1240,7 @@ export async function evaluateProjectPostCreatePrepStatus(input: {
   const existingNameKeys = new Set(projectInputs.map((item) => normalizeKey(item.name)));
   const draft = buildPrepDraftSnapshot({ description, projectInputs });
   const enforceModelRound = shouldEnforcePrepModelRound();
+  const enforceTraceEvidence = shouldEnforcePrepTraceEvidence();
   const missingItems: string[] = [];
   if (!draft.discussion) {
     missingItems.push("多Agent讨论结论");
@@ -1181,11 +1260,18 @@ export async function evaluateProjectPostCreatePrepStatus(input: {
     }
   }
   const traceQuality = inspectPrepDiscussionTrace(draft.discussionTrace);
+  const traceEvidence = inspectPrepDiscussionTraceEvidence(draft.discussionTrace);
   if (!traceQuality.hasTrace) {
     missingItems.push("多Agent讨论日志");
   } else {
     if (traceQuality.roleCount < 3) {
       missingItems.push("多Agent讨论日志(角色回合不足)");
+    }
+    if (enforceTraceEvidence && traceEvidence.evidencefulRoleCount < 3) {
+      const roleSuffix = traceEvidence.missingRoleIds.length > 0
+        ? `: ${traceEvidence.missingRoleIds.join(",")}`
+        : "";
+      missingItems.push(`多Agent讨论日志(真实证据不足${roleSuffix})`);
     }
     if (enforceModelRound && !traceQuality.hasModelRound) {
       missingItems.push("多Agent讨论日志(未检测到真实模型回合)");

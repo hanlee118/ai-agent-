@@ -38,8 +38,19 @@ let prismaClient: any;
 let app: express.Express;
 
 async function createProject(projectId: string) {
-  await prismaClient.project.create({
-    data: {
+  await prismaClient.project.upsert({
+    where: { id: projectId },
+    update: {
+      name: "Workflow V2 Test Project",
+      description: "用于验证 workflow-v2 主流程",
+      status: "active",
+      currentStage: "INIT",
+      progress: 0,
+      pendingApproval: false,
+      currentRole: "ROLE_PM",
+      team: ["ROLE_PM", "ROLE_ANALYST"]
+    },
+    create: {
       id: projectId,
       name: "Workflow V2 Test Project",
       description: "用于验证 workflow-v2 主流程",

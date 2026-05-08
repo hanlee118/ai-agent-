@@ -446,6 +446,64 @@ const parsePrepDiscussionTraceView = (source: string): PrepDiscussionTraceView =
   };
 };
 
+const isPlaceholderTraceValue = (value: string) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return true;
+  }
+  return [
+    'n/a',
+    'na',
+    'none',
+    'unknown',
+    '未记录',
+    '待补充',
+    '待确认',
+    '待执行',
+    '未触发',
+    '未生成',
+    'fallback',
+    'rule',
+    'scripted',
+  ].some((token) => normalized === token || normalized.includes(token));
+};
+
+const isEvidencefulPrepTraceItem = (item?: PrepDiscussionTraceItem | null) => {
+  if (!item) {
+    return false;
+  }
+  const mode = String(item.mode || '').trim().toLowerCase();
+  const hasContentEvidence = [item.focus, item.concern, item.proposal]
+    .map((part) => sanitizePrefillText(part || ''))
+    .some((part) => part.length >= 8 && !isPlaceholderTraceValue(part));
+  if (!hasContentEvidence) {
+    return false;
+  }
+  if (!mode) {
+    return false;
+  }
+  if (isPlaceholderTraceValue(mode)) {
+    return false;
+  }
+  return mode.includes('model') || mode.includes('debate') || mode.includes('agent');
+};
+
+const formatPrepMissingItem = (item: string) => {
+  const text = String(item || '').trim();
+  const matched = text.match(/^多Agent讨论日志\(真实证据不足:\s*([^)]+)\)$/i);
+  if (!matched?.[1]) {
+    return text;
+  }
+  const labels = matched[1]
+    .split(',')
+    .map((roleId) => roleLabel(String(roleId || '').trim()))
+    .filter(Boolean);
+  if (labels.length === 0) {
+    return '多Agent讨论日志(真实证据不足)';
+  }
+  return `多Agent讨论日志(真实证据不足: ${labels.join('、')})`;
+};
+
 const parsePrepAnalysisView = (source: string): PrepAnalysisView => {
   const text = String(source || '').replace(/\r\n/g, '\n');
   const objective = sanitizePrefillText(text.match(/(?:^|\n)-\s*目标[:：]\s*([^\n]+)/i)?.[1] || '');
@@ -4234,6 +4292,10 @@ const ProjectRoom = ({
     () => new Map(prepDiscussionTraceView.items.map((item) => [String(item.roleId || '').trim(), item])),
     [prepDiscussionTraceView.items],
   );
+  const prepEvidencefulTraceCount = useMemo(
+    () => prepDiscussionTraceView.items.filter((item) => isEvidencefulPrepTraceItem(item)).length,
+    [prepDiscussionTraceView.items],
+  );
   const prepAnalysisView = useMemo(
     () => parsePrepAnalysisView(prepDraftAnalysis),
     [prepDraftAnalysis],
@@ -4271,7 +4333,8 @@ const ProjectRoom = ({
       ? 'GitLab 留痕失败'
       : (prepGitlabPublishRequired ? '待写入 GitLab' : '无需 GitLab 留痕'));
   const prepDiscussionReady = String(prepDraftDiscussion || '').trim().length > 0
-    && prepDiscussionTraceView.items.length > 0
+    && prepEvidencefulTraceCount >= 3
+    && prepDiscussionMode === 'model'
     && prepGitlabPublishReady;
   const prepAnalysisReady = String(prepDraftAnalysis || '').trim().length > 0;
   const prepBackfillReady = [
@@ -4518,17 +4581,18 @@ const ProjectRoom = ({
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-2">
                       {PREP_DISCUSSION_AGENT_ORDER.map((roleId, index) => {
                         const trace = prepDiscussionTraceByRole.get(roleId);
+                        const traceBackfilled = isEvidencefulPrepTraceItem(trace);
                         const isCurrentRunning = isRunningPrepDebate && !trace && index === prepDebateProgressStep;
                         const isScheduled = isRunningPrepDebate && !trace && index < prepDebateProgressStep;
-                        const statusLabel = trace
+                        const statusLabel = traceBackfilled
                           ? '已回填'
-                          : (isCurrentRunning ? '讨论中' : (isScheduled ? '已调度' : '待执行'));
+                          : (isCurrentRunning ? '讨论中' : (isScheduled ? '已调度' : (trace ? '待补证据' : '待执行')));
                         return (
                           <div key={roleId} className="rounded-lg border border-border-subtle bg-surface-muted/70 px-3 py-2 space-y-1">
                             <p className="text-[11px] font-semibold text-slate-200">{roleLabel(roleId)}</p>
                             <p className={cn(
                               'text-[10px]',
-                              trace ? 'text-emerald-300' : (isCurrentRunning ? 'text-primary' : (isScheduled ? 'text-accent' : 'text-slate-500')),
+                              traceBackfilled ? 'text-emerald-300' : (isCurrentRunning ? 'text-primary' : (isScheduled ? 'text-accent' : 'text-slate-500')),
                             )}
                             >
                               {statusLabel}
@@ -4592,7 +4656,7 @@ const ProjectRoom = ({
                       {(postCreatePrep?.missingItems || []).length > 0 ? (
                         (postCreatePrep?.missingItems || []).map((item) => (
                           <div key={item} className="flex items-center justify-between gap-2 rounded-lg border border-warning/20 bg-warning/5 px-2 py-1.5">
-                            <p className="text-[11px] text-warning">未完成 · {item}</p>
+                            <p className="text-[11px] text-warning">未完成 · {formatPrepMissingItem(item)}</p>
                             {resolvePrepSectionByMissingItem(item) ? (
                               <button
                                 type="button"

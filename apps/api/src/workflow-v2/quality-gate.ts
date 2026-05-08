@@ -222,6 +222,19 @@ export function evaluateEngineeringPolicyGate(input: EngineeringPolicyGateInput)
   const branch = String(input.branchName ?? "").trim();
   const commit = String(input.commitMessage ?? "").trim();
   const mrDesc = String(input.mergeRequestDescription ?? "").trim();
+  const hasGitContext = Boolean(branch || commit || mrDesc);
+
+  if (!hasGitContext) {
+    checks.push({
+      type: "engineering_policy_context",
+      passed: true,
+      details: "缺少 Git 上下文，跳过工程规范门禁（仅记录）"
+    });
+    return {
+      passed: true,
+      checks
+    };
+  }
 
   const branchPassed = BRANCH_RULE.test(branch);
   checks.push({

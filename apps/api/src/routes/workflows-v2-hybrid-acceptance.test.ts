@@ -38,6 +38,7 @@ process.env.WORKFLOW_V2_STAGE_AUTO_PROCEED = "true";
 process.env.WORKFLOW_V2_HERMES_ENABLED = "true";
 process.env.WORKFLOW_V2_HERMES_STAGE_MATCH = "design";
 process.env.WORKFLOW_V2_KNOWLEDGE_LLM_ENABLED = "false";
+process.env.PROJECT_POST_CREATE_PREP_REQUIRED = "false";
 
 const projectId = "WFV2-HYBRID-001";
 const hermesAgentId = "hermes-agent-1";

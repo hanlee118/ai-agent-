@@ -105,8 +105,19 @@ before(async () => {
   ]);
   prismaClient = dbMod.prisma;
 
-  await prismaClient.project.create({
-    data: {
+  await prismaClient.project.upsert({
+    where: { id: "WFV2-HERMES-001" },
+    update: {
+      name: "Workflow Hermes UI Stage",
+      description: "验证 UI 设计阶段由 Hermes 参与执行",
+      status: "active",
+      currentStage: "INIT",
+      progress: 0,
+      pendingApproval: false,
+      currentRole: "ROLE_PM",
+      team: ["ROLE_PM", "ROLE_DESIGN"]
+    },
+    create: {
       id: "WFV2-HERMES-001",
       name: "Workflow Hermes UI Stage",
       description: "验证 UI 设计阶段由 Hermes 参与执行",
