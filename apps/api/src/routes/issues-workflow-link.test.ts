@@ -196,21 +196,20 @@ test("issues preview should adapt artifacts and SOP by workflow template", async
     true
   );
 
-  const noneRes = await request(app)
+  const fallbackRes = await request(app)
     .post("/api/issues/preview")
     .send({
-      input: "当前仅需创建项目，不自动初始化任何 workflow。",
+      input: "当前仅需创建项目并按默认流程推进。",
       industryCode: "saas",
       sourceType: "text",
-      debateMode: "off",
-      workflowTemplateKey: "none"
+      debateMode: "off"
     });
 
-  assert.equal(noneRes.status, 200);
-  assert.equal(noneRes.body.success, true);
-  assert.equal(Array.isArray(noneRes.body.data.expectedArtifacts), true);
-  assert.equal((noneRes.body.data.expectedArtifacts as unknown[]).length, 0);
-  assert.equal(noneRes.body.data.workflow, null);
+  assert.equal(fallbackRes.status, 200);
+  assert.equal(fallbackRes.body.success, true);
+  assert.equal(Array.isArray(fallbackRes.body.data.expectedArtifacts), true);
+  assert.equal((fallbackRes.body.data.expectedArtifacts as unknown[]).length > 0, true);
+  assert.notEqual(fallbackRes.body.data.workflow, null);
 });
 
 test("issues confirm can pass workflow template fields and auto-link workflow-v2", async () => {
@@ -287,7 +286,7 @@ test("issues confirm can pass workflow template fields and auto-link workflow-v2
   assert.equal(workflow.stages.length >= 1, true);
 });
 
-test("issues confirm keeps workflowTemplateKey=none and skips workflow-v2 auto-init", async () => {
+test("issues confirm rejects workflowTemplateKey=none to enforce workflow-v2 binding", async () => {
   const previewRes = await request(app)
     .post("/api/issues/preview")
     .send({
@@ -334,18 +333,10 @@ test("issues confirm keeps workflowTemplateKey=none and skips workflow-v2 auto-i
       workflowTemplateKey: "none",
       autoStartWorkflow: true
     });
-
-  assert.equal(confirmRes.status, 200);
-  assert.equal(confirmRes.body.success, true);
-  const projectId = String(confirmRes.body.data.project?.id || "");
-  assert.ok(projectId);
-
-  const prepCompleted = await waitForPostCreatePrep(projectId);
-  assert.equal(prepCompleted, true, "project post-create prep should also complete when workflowTemplateKey=none");
-
-  const workflow = await prismaClient.workflow.findFirst({
-    where: { projectId },
-    orderBy: { createdAt: "desc" }
-  });
-  assert.equal(workflow, null);
+  assert.equal(confirmRes.status, 400);
+  assert.equal(confirmRes.body.success, false);
+  assert.match(
+    String(confirmRes.body.error?.message || ""),
+    /(workflowTemplateKey=none is forbidden|must be standard_software_development\/full\/lean\/maintenance)/i
+  );
 });

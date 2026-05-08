@@ -1194,6 +1194,12 @@ export async function evaluateProjectPostCreatePrepStatus(input: {
   if (!hasMeaningfulPrepFeedback(draft.feedback)) {
     missingItems.push("用户反馈与修订记录");
   }
+  const hasGitLabIssueRef = /(^|\s)(related to|closes)\s+#\d+/i.test(draft.discussion)
+    || /issue\s*id[:：]\s*#?\d+/i.test(String(description || ""))
+    || /gitlab\s*项目[:：]/i.test(String(description || ""));
+  if (!hasGitLabIssueRef) {
+    missingItems.push("GitLab 留痕(缺少 Issue/MR 关联)");
+  }
   if (!draft.confirmed) {
     missingItems.push("用户确认预备内容");
   }

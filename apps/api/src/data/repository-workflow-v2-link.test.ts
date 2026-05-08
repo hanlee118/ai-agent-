@@ -216,13 +216,12 @@ test("complete project auto-seeds rawRequirements when projectInputs are missing
   assert.equal(inputArtifacts.some((item) => String(item.name || "") === "rawRequirements"), true);
 });
 
-test("createProject skips workflow-v2 auto-init when workflowTemplateKey is none", async () => {
+test("createProject binds workflow-v2 even when workflowTemplateKey is omitted", async () => {
   const project = await createProjectFn(
     {
-      name: "Workflow Disabled Test",
-      description: "验证 workflowTemplateKey=none 时不会自动初始化 workflow-v2",
+      name: "Workflow Mandatory Binding Test",
+      description: "验证默认创建项目也会强制绑定并启动 workflow-v2",
       projectType: "complete",
-      workflowTemplateKey: "none",
       autoStartWorkflow: true
     },
     "scripted"
@@ -232,7 +231,8 @@ test("createProject skips workflow-v2 auto-init when workflowTemplateKey is none
     where: { projectId: project.id },
     orderBy: { createdAt: "desc" }
   });
-  assert.equal(workflow, null);
+  assert.ok(workflow);
+  assert.equal(workflow.status, "active");
 });
 
 test("standalone project binds projectInputs into entry stage and uses standalone template", async () => {

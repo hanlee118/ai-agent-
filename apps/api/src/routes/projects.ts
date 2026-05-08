@@ -2653,9 +2653,15 @@ router.post("/api/projects", validateBody(ProjectCreateSchema), asyncRoute(async
   }
   if (!isProjectModeTemplateCompatible({ projectType, workflowTemplateKey: req.body?.workflowTemplateKey })) {
     const message = projectType === "complete"
-      ? "workflowTemplateKey must be standard_software_development or none when projectType=complete"
-      : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance/none for standalone or relay projectType";
+      ? "workflowTemplateKey must be standard_software_development/full/lean/maintenance when projectType=complete"
+      : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance for standalone or relay projectType";
     res.status(400).json({ message });
+    return;
+  }
+  if (String(req.body?.workflowTemplateKey ?? "").trim().toLowerCase() === "none") {
+    res.status(400).json({
+      message: "workflowTemplateKey=none is forbidden. Every new project must bind workflow-v2 template."
+    });
     return;
   }
 

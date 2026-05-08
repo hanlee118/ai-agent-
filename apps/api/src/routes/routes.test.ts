@@ -376,6 +376,8 @@ describe("Error Matrix: auth + projects", () => {
         .send({
           notes: "测试确认通过",
           discussion: [
+            "Related to #101",
+            "",
             "### 共识",
             "- MVP 范围先覆盖项目创建、预备确认、阶段推进主链路。",
             "",
@@ -403,6 +405,8 @@ describe("Error Matrix: auth + projects", () => {
           ].join("\n"),
           rawRequirements: [
             "# rawRequirements",
+            "",
+            "Related to #101",
             "",
             "## 原始需求输入",
             "用户要求预备阶段真实多Agent协作、可追踪、可确认通过。",
@@ -533,6 +537,28 @@ describe("Error Matrix: auth + projects", () => {
         .post(`/api/projects/${projectId}/post-create-prep/confirm`)
         .send({
           notes: "二次确认通过",
+          discussion: [
+            "Closes #102",
+            "",
+            "### 共识",
+            "- 幂等执行不应回退已形成的预备结论。",
+            "",
+            "### 分歧与处理",
+            "- 在缺少 GitLab 留痕时一律阻断确认，避免虚假完成。",
+            "",
+            "### 角色决策建议",
+            "- PM 负责确认流程闭环，DEV 负责保留可追踪证据。",
+            "",
+            "### 决策锚点",
+            "- 完成确认前必须具备 Issue/MR 关联语义。"
+          ].join("\n"),
+          rawRequirements: [
+            "# rawRequirements",
+            "",
+            "Closes #102",
+            "",
+            "目标：重复执行后仍保持 GitLab 留痕要求。"
+          ].join("\n"),
           feedback: [
             "# prepUserFeedback",
             "",
