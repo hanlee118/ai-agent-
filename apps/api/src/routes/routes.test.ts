@@ -42,7 +42,7 @@ before(async () => {
     let lastError: unknown = null;
     for (let attempt = 1; attempt <= max; attempt += 1) {
       try {
-        execSync(command, { cwd: apiRoot, stdio: "pipe", shell: true });
+        execSync(command, { cwd: apiRoot, stdio: "pipe", shell: "/bin/bash" });
         return;
       } catch (error) {
         lastError = error;
@@ -56,7 +56,7 @@ before(async () => {
   );
   execSync(
     `DATABASE_URL=${JSON.stringify(TEST_DATABASE_URL)} pnpm exec tsx ../../scripts/seed-workflow-templates-v2.ts`,
-    { cwd: apiRoot, stdio: "pipe", shell: true }
+    { cwd: apiRoot, stdio: "pipe", shell: "/bin/bash" }
   );
 
   const [modelsMod, agentsMod, teamMod, roleSetsMod, issuesMod, dbMod, indexMod] = await Promise.all([
