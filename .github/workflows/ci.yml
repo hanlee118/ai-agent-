@@ -87,6 +87,14 @@ jobs:
       - name: Smoke test runtime
         run: CI_SKIP_OPENCLAW_CHECKS=true pnpm test:smoke
 
+      - name: Performance gate
+        env:
+          PERF_GATE_API_BASE: http://127.0.0.1:8787
+          PERF_GATE_ROUNDS: 3
+          PERF_GATE_P95_MS: 1200
+          PERF_GATE_ADMIN_PASSWORD: Admin@123456
+        run: pnpm verify:perf:gate
+
       - name: Optional single-project strict audit
         if: ${{ env.PROJECT_ID != '' }}
         env:
