@@ -1,31 +1,8 @@
 import { test, expect } from 'playwright/test';
-import { apiRequest, createProjectWithIssueFirstFallback } from './helpers/project-create';
+import { apiRequest, createProjectWithIssueFirstFallback, loginAsAdminToken } from './helpers/project-create';
 
 const WEB_URL = process.env.UI_WEB_URL || 'http://127.0.0.1:5173';
 const API_URL = process.env.UI_API_URL || 'http://127.0.0.1:8787';
-
-type SessionBundle = {
-  prisma: Awaited<ReturnType<(typeof import('../../apps/api/dist/db.js'))['prisma']['$connect']>> extends never ? any : any;
-  token: string;
-  hashSessionToken: (token: string) => Promise<string>;
-};
-
-async function createTemporarySessionCookie(): Promise<SessionBundle> {
-  const [{ prisma }, { generateSessionToken, hashSessionToken }] = await Promise.all([
-    import('../../apps/api/dist/db.js'),
-    import('../../apps/api/dist/security/secret-store.js'),
-  ]);
-
-  const token = generateSessionToken();
-  await prisma.authSession.create({
-    data: {
-      tokenHash: await hashSessionToken(token),
-      expiresAt: new Date(Date.now() + 45 * 60 * 1000),
-    },
-  });
-
-  return { prisma, token, hashSessionToken };
-}
 
 async function createProjectWithRetry(
   token: string,
@@ -59,7 +36,8 @@ test.describe.configure({ mode: 'serial' });
 test('real backend: applying Step 1 draft should persist markers and unlock gate', async ({ context, page }) => {
   test.setTimeout(240_000);
 
-  const { prisma, token, hashSessionToken } = await createTemporarySessionCookie();
+  const token = await loginAsAdminToken(API_URL);
+  const { prisma } = await import('../../apps/api/dist/db.js');
   const webHost = new URL(WEB_URL).hostname;
   const projectName = `真实联动验收-${Date.now()}`;
   let projectId = '';
@@ -168,9 +146,6 @@ test('real backend: applying Step 1 draft should persist markers and unlock gate
         // ignore cleanup failure
       }
     }
-    await prisma.authSession.deleteMany({
-      where: { tokenHash: await hashSessionToken(token) },
-    });
     await prisma.$disconnect();
   }
 });

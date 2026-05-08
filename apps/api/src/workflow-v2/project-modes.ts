@@ -307,11 +307,21 @@ export function validateStageInputContract(input: {
 
     const minLength = Number(rule.minLength ?? 0);
     if (Number.isFinite(minLength) && minLength > 0) {
-      const passed = matched.some((item) => artifactContent(item).length >= minLength);
+      let passed = matched.some((item) => artifactContent(item).length >= minLength);
+      const normalizedLabel = normalizeText(label).toLowerCase();
+      // AI-native workflow soft gate:
+      // rawRequirements length不足时不再阻断阶段执行，只保留质量告警。
+      if (!passed && normalizedLabel === "rawrequirements") {
+        passed = matched.some((item) => artifactContent(item).length > 0);
+      }
       checks.push({
         type: "input_rule",
         passed,
-        details: passed ? `${label} minLength satisfied` : `${label} minLength=${minLength} not met`
+        details: passed
+          ? (normalizedLabel === "rawrequirements"
+            ? `${label} minLength soft-passed (content exists)`
+            : `${label} minLength satisfied`)
+          : `${label} minLength=${minLength} not met`
       });
       if (!passed) {
         violations.push(`input_rule: ${label} minLength=${minLength} not met`);

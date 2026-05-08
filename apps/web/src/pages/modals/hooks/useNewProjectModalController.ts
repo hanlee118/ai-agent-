@@ -61,6 +61,27 @@ function uniqueNormalizedRoles(input: string[]) {
   return Array.from(new Set(input.map((item) => normalizeRoleId(item)).filter(Boolean)));
 }
 
+const COMPLETE_MODE_TEMPLATE_KEYS = new Set(['standard_software_development', 'none']);
+const SINGLE_STAGE_TEMPLATE_KEYS = new Set([
+  'requirements_design',
+  'visual_design',
+  'tech_design',
+  'code_dev',
+  'qa_acceptance',
+  'none',
+]);
+
+function isWorkflowTemplateCompatible(
+  projectType: 'complete' | 'standalone' | 'relay',
+  workflowTemplateKey: string,
+) {
+  const normalizedTemplate = String(workflowTemplateKey || '').trim() || 'standard_software_development';
+  if (projectType === 'complete') {
+    return COMPLETE_MODE_TEMPLATE_KEYS.has(normalizedTemplate);
+  }
+  return SINGLE_STAGE_TEMPLATE_KEYS.has(normalizedTemplate);
+}
+
 export function useNewProjectModalController({
   isOpen,
   onClose,
@@ -673,6 +694,13 @@ export function useNewProjectModalController({
       addToast('接力模式需要填写来源项目 ID', 'error');
       return;
     }
+    if (!isWorkflowTemplateCompatible(projectType, workflowTemplateKey)) {
+      const suggestion = projectType === 'complete'
+        ? '请改为“全流程编排（推荐）”或“仅创建项目”'
+        : '请改为对应单阶段模板（需求/视觉/技术/研发/QA）或“仅创建项目”';
+      addToast(`当前项目策略模式与执行模板不匹配。${suggestion}`, 'error');
+      return;
+    }
 
     const roleSeed = formData.agentIds.length > 0
       ? formData.agentIds
@@ -1056,6 +1084,14 @@ export function useNewProjectModalController({
     try {
       if (projectType === 'relay' && !parentProjectId.trim()) {
         addToast('接力模式需要填写来源项目 ID', 'error');
+        setIsCreating(false);
+        return;
+      }
+      if (!isWorkflowTemplateCompatible(projectType, workflowTemplateKey)) {
+        const suggestion = projectType === 'complete'
+          ? '请改为“全流程编排（推荐）”或“仅创建项目”'
+          : '请改为对应单阶段模板（需求/视觉/技术/研发/QA）或“仅创建项目”';
+        addToast(`当前项目策略模式与执行模板不匹配。${suggestion}`, 'error');
         setIsCreating(false);
         return;
       }

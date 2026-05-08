@@ -25,6 +25,7 @@ export const roleOrder: RoleType[] = [
   "ROLE_ARCH",
   "ROLE_DEV",
   "ROLE_QA",
+  "ROLE_AUDITOR",
   "ROLE_HR"
 ];
 
@@ -124,6 +125,17 @@ export const seedAgents: AgentProfile[] = [
     styles: ["严谨", "系统性", "挑剔"],
     skills: { professional: 91, collaboration: 79, learning: 84, stability: 93, innovation: 69 },
     recentHighlights: ["补充验收标准", "发现审批链路遗漏"]
+  },
+  {
+    roleId: "ROLE_AUDITOR",
+    name: "巡检治理",
+    tagline: "持续巡检工程规范与协作健康度",
+    description: "负责 GitLab 协作规范巡检、异常预警与治理闭环跟踪。",
+    status: "idle",
+    workload: 29,
+    styles: ["客观", "持续", "规则导向"],
+    skills: { professional: 90, collaboration: 83, learning: 86, stability: 94, innovation: 71 },
+    recentHighlights: ["新增 MR 生命周期巡检", "自动识别缺失 Issue 关联"]
   },
   {
     roleId: "ROLE_HR",
@@ -432,11 +444,11 @@ export function buildTasks(
     ANALYSIS: [
       { title: "提炼目标与边界", description: "从原始需求中抽出目标、约束与风险。", assignee: "ROLE_ANALYST" },
       { title: "输出需求分析文档", description: "形成分析阶段正式交付并沉淀风险与验收口径。", assignee: "ROLE_ANALYST" },
-      { title: "输出项目排期", description: "由项目经理形成里程碑、依赖关系和负责人计划。", assignee: "ROLE_PM" }
+      { title: "输出项目排期", description: "由项目经理形成里程碑、依赖关系和负责人计划。", assignee: "ROLE_PM" },
+      { title: "输出产品需求文档(PRD)", description: "由产品角色基于分析文档完成用户旅程、功能清单与验收标准。", assignee: "ROLE_PRODUCT" },
+      { title: "定义页面与结构", description: "固定核心页面、布局与交互顺序并给出信息架构。", assignee: "ROLE_PRODUCT" }
     ],
     DESIGN: [
-      { title: "输出产品需求文档(PRD)", description: "由产品角色基于分析文档完成用户旅程、功能清单与验收标准。", assignee: "ROLE_PRODUCT" },
-      { title: "定义页面与结构", description: "固定核心页面、布局与交互顺序并给出信息架构。", assignee: "ROLE_PRODUCT" },
       { title: "完成设计审查卡", description: "由设计角色确认视觉方向、品牌语气、可访问性与审查结论。", assignee: "ROLE_DESIGN" },
       { title: "输出视觉定稿单页", description: "生成可视化确认稿（静态图或单页 HTML），供业务确认后再开发。", assignee: "ROLE_DESIGN" }
     ],
@@ -542,7 +554,7 @@ export function buildStageLiveSession(input: {
   const script: Record<StageType, string> = {
     INIT: `## 项目立项\n\n- 整理需求原文\n- 生成项目编号\n- 初始化阶段与团队配置\n- 准备进入分析阶段`,
     ANALYSIS: `## 需求分析\n\n- 提炼项目目标与核心用户场景\n- 识别隐含约束与时间风险\n- 收敛 MVP 边界，避免范围失控\n- 输出需求分析文档等待审批\n\n### 当前项目\n${input.projectName}`,
-    DESIGN: `## 产品与视觉设计\n\n- 产品角色先基于分析文档输出 PRD（目标、范围、验收标准）\n- 明确页面结构、用户旅程与关键交互优先级\n- 设计角色输出设计审查卡（含可访问性清单）\n- 交付视觉定稿单页并为开发阶段准备设计交接边界\n\n### 当前聚焦\n${input.summary}`,
+    DESIGN: `## 视觉设计\n\n- 以已确认 PRD 作为唯一输入，不允许反向补需求\n- 设计角色输出设计审查卡（含可访问性清单）\n- 交付视觉定稿单页并为开发阶段准备设计交接边界\n\n### 当前聚焦\n${input.summary}`,
     DEV: `## 开发阶段\n\n- 先输出技术方案与关键选型（架构、依赖、权衡、风险）\n- 建立前后端目录与共享类型\n- 接入数据库和持久化仓储\n- 接入 Agent 运行抽象与实时流\n- 完成主要页面与操作链路`,
     ACCEPT: `## 验收阶段\n\n- 校验创建、审批、干预、恢复主路径\n- 检查时间轴与交付物展示\n- 汇总结论并准备归档复盘`
   };

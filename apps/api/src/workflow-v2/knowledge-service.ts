@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { prisma } from "../db.js";
+import { prisma, withPrismaReadRetry } from "../db.js";
 import { extractKnowledgeFromStageOutput } from "./knowledge-llm.js";
 import {
   asRecord,
@@ -1095,18 +1095,18 @@ export async function listKnowledgeItems(filters: KnowledgeListFilters) {
 
   // SQLite JSON filter portability is limited; stageContext uses normalized in-memory filtering.
   if (!normalizedStageContext) {
-    return prisma.knowledgeItem.findMany({
+    return withPrismaReadRetry("findMany", () => prisma.knowledgeItem.findMany({
       where: whereClause,
       orderBy: { createdAt: "desc" },
       skip: offset,
       take: limit
-    });
+    }));
   }
 
-  const rows = await prisma.knowledgeItem.findMany({
+  const rows = await withPrismaReadRetry("findMany", () => prisma.knowledgeItem.findMany({
     where: whereClause,
     orderBy: { createdAt: "desc" }
-  });
+  }));
   const filtered = rows.filter((row) => {
     const stageContext = normalizeStageContextList(asStringArray(row.stageContext));
     return stageContext.includes(normalizedStageContext);
@@ -1132,13 +1132,13 @@ export async function countKnowledgeItems(filters: Omit<KnowledgeListFilters, "l
   };
 
   if (!normalizedStageContext) {
-    return prisma.knowledgeItem.count({ where: whereClause });
+    return withPrismaReadRetry("count", () => prisma.knowledgeItem.count({ where: whereClause }));
   }
 
-  const rows = await prisma.knowledgeItem.findMany({
+  const rows = await withPrismaReadRetry("findMany", () => prisma.knowledgeItem.findMany({
     where: whereClause,
     select: { stageContext: true }
-  });
+  }));
   return rows.filter((row) => {
     const stageContext = normalizeStageContextList(asStringArray(row.stageContext));
     return stageContext.includes(normalizedStageContext);
@@ -1146,9 +1146,9 @@ export async function countKnowledgeItems(filters: Omit<KnowledgeListFilters, "l
 }
 
 export async function getKnowledgeItemById(id: string) {
-  return prisma.knowledgeItem.findUnique({
+  return withPrismaReadRetry("findUnique", () => prisma.knowledgeItem.findUnique({
     where: { id: normalizeText(id) }
-  });
+  }));
 }
 
 export async function updateKnowledgeItemById(

@@ -56,6 +56,8 @@ import type {
 } from "@occ/shared";
 import { promisify } from "node:util";
 import { prisma } from "../db.js";
+import { writeAuditLog } from "../system/audit-log.js";
+import { getExecutionProtocolSettings } from "../system/execution-protocol.js";
 import {
   DESIGN_MODEL_FALLBACKS,
   DESIGN_MODEL_PRIMARY,
@@ -67,6 +69,7 @@ import {
   OPENCLAW_WORKSPACE_ROOT
 } from "./paths.js";
 import { getUiPreferences } from "../system/ui-preferences.js";
+import { matchGitRecoveryPolicy } from "../workflow-v2/error-recovery-policies.js";
 
 function resolveOpenClawBin(): string {
   const envPath = String(process.env.OPENCLAW_BIN ?? "").trim();
@@ -294,6 +297,11 @@ const OPENCLAW_LEGACY_TOOL_ALIASES = new Map<string, string>([
   ["feishu_im_user_search_messages", "feishu_chat"],
   ["feishu_im_user_fetch_resource", "feishu_chat"]
 ]);
+
+const SECRET_LEAK_PATTERN = /(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36}|-----BEGIN RSA PRIVATE KEY-----)/;
+const LARGE_FILE_EXT_PATTERN = /\.(bin|safetensors|gguf|ckpt|csv|parquet)$/i;
+const ENGINEERING_BRANCH_RULE = /^(feature|fix|hotfix)\/issue-\d+-[a-z0-9-]+$/;
+const ENGINEERING_COMMIT_RULE = /^(feat:|fix:|refactor:|docs:|test:|chore:)/i;
 type AgentExecutionQueueState = {
   tail: Promise<void>;
   pending: number;
@@ -2030,6 +2038,12 @@ async function sendOpenClawAgentMessageInternal(
     throw new Error(`OpenClaw agent ${agentId} not found`);
   }
 
+  await enforceGitCommitExecutionProtocol({
+    agentId,
+    workspacePath: agent.workspacePath,
+    message
+  });
+
   await ensureManagedAgentConfigExists(agentId, agent.name, agent.title, agent.commander.selectedModel);
   const estimatedPromptTokens = estimateTokenCount(message);
   enforceTokenBudgets(agent.commander, agent.usage, estimatedPromptTokens);
@@ -2322,6 +2336,31 @@ async function sendOpenClawAgentMessageInternal(
         .join("\n")
         .slice(0, 1500);
       finalError = detail || "OpenClaw agent command failed";
+      const recovery = matchGitRecoveryPolicy(finalError);
+      if (recovery) {
+        const autoRecovery = await tryAutoRecoverGitFailure({
+          workspacePath: agent.workspacePath,
+          message,
+          recovery
+        }).catch((recoveryError) => ({
+          recovered: false as const,
+          reason: recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+        }));
+        if (autoRecovery.recovered) {
+          await writeAuditLog({
+            actorType: "system",
+            actorLabel: "openclaw-guard",
+            action: "git_recovery_auto_applied",
+            resourceType: "agent",
+            resourceId: agentId,
+            summary: `已自动恢复 Git 失败：${recovery.action.id}`,
+            detail: JSON.stringify(autoRecovery).slice(0, 1200)
+          });
+          await sleep(Math.min(700, 200 * attempt));
+          continue;
+        }
+        finalError = `${finalError}\n[recovery_hint] ${recovery.action.hint}\n[recovery_commands] ${recovery.action.commands.join(" ; ")}`;
+      }
 
       await prisma.agentUsageLog.create({
         data: {
@@ -2673,6 +2712,141 @@ async function sendOpenClawAgentMessageInternal(
     reply,
     attempts
   };
+}
+
+async function enforceGitCommitExecutionProtocol(input: {
+  agentId: string;
+  workspacePath: string;
+  message: string;
+}) {
+  const instruction = String(input.message || "");
+  if (!/\bgit\s+(commit|push)\b/i.test(instruction)) {
+    return;
+  }
+  const settings = await getExecutionProtocolSettings();
+  const workspacePath = String(input.workspacePath || "").trim();
+  if (!workspacePath) {
+    return;
+  }
+
+  const auditHighViolation = async (summary: string, detail: string) => {
+    await writeAuditLog({
+      actorType: "system",
+      actorLabel: "openclaw-guard",
+      action: "execution_protocol_violation_high",
+      resourceType: "agent",
+      resourceId: input.agentId,
+      summary: `[HIGH] ${summary}`,
+      detail
+    });
+  };
+
+  if (settings.blockSecretLeak) {
+    const diff = await safeExecGit(workspacePath, ["diff", "--cached", "--unified=0"]).catch(() => "");
+    const matched = diff.match(SECRET_LEAK_PATTERN);
+    if (matched) {
+      const reason = "检测到疑似密钥，禁止提交";
+      await auditHighViolation(reason, `matched=${matched[0].slice(0, 20)}...`);
+      throw new Error(reason);
+    }
+  }
+
+  if (settings.blockLargeFileCommit) {
+    const threshold = Math.max(1024 * 1024, Number(settings.largeFileSizeThreshold || 10 * 1024 * 1024));
+    const stagedFilesRaw = await safeExecGit(workspacePath, ["diff", "--cached", "--name-only"]).catch(() => "");
+    const stagedFiles = stagedFilesRaw
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+    for (const file of stagedFiles) {
+      if (!LARGE_FILE_EXT_PATTERN.test(file)) {
+        continue;
+      }
+      const fullPath = path.join(workspacePath, file);
+      try {
+        const fileStat = await stat(fullPath);
+        if (fileStat.size > threshold) {
+          const reason = "请将大文件上传至对象存储，仓库内只保留 URL 和 hash";
+          await auditHighViolation(reason, `${file} size=${fileStat.size}`);
+          throw new Error(reason);
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  // 仅在提交/推送意图下做工程规范预检，避免打扰普通指令。
+  const isCommitOrPush = /\bgit\s+(commit|push)\b/i.test(instruction);
+  if (!isCommitOrPush) {
+    return;
+  }
+  const currentBranch = (await safeExecGit(workspacePath, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "")).trim();
+  if (currentBranch && !ENGINEERING_BRANCH_RULE.test(currentBranch)) {
+    const reason = "分支名不符合规范，请使用 feature/issue-<ID>-<描述> 格式";
+    await auditHighViolation(reason, `branch=${currentBranch}`);
+    throw new Error(`${reason}（当前：${currentBranch}）`);
+  }
+  const latestCommitMessage = (await safeExecGit(workspacePath, ["log", "-1", "--pretty=%s"]).catch(() => "")).trim();
+  if (latestCommitMessage && !ENGINEERING_COMMIT_RULE.test(latestCommitMessage)) {
+    const reason = "Commit message 不符合规范，需以 feat:/fix:/refactor:/docs:/test:/chore: 开头";
+    await auditHighViolation(reason, `commit=${latestCommitMessage}`);
+    throw new Error(reason);
+  }
+}
+
+async function safeExecGit(cwd: string, args: string[]) {
+  const result = await execFileAsync("git", args, {
+    cwd,
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024 * 2
+  });
+  return String(result.stdout ?? "");
+}
+
+function normalizeIssueIdForRecovery(message: string) {
+  const match = String(message || "").match(/(?:issue|#)\s*[-:]?\s*(\d{2,})/i);
+  return match?.[1] || "100";
+}
+
+function slugifyRecoveryBranchSuffix(message: string) {
+  return String(message || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40) || "auto-recover";
+}
+
+async function tryAutoRecoverGitFailure(input: {
+  workspacePath: string;
+  message: string;
+  recovery: NonNullable<ReturnType<typeof matchGitRecoveryPolicy>>;
+}) {
+  const { workspacePath, message, recovery } = input;
+  if (!recovery.action.autoRecoverable) {
+    return { recovered: false as const, reason: "not_auto_recoverable" };
+  }
+  if (recovery.action.id === "branch_name_invalid") {
+    const currentBranch = (await safeExecGit(workspacePath, ["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => "")).trim();
+    if (!currentBranch) {
+      return { recovered: false as const, reason: "branch_unknown" };
+    }
+    const issueId = normalizeIssueIdForRecovery(message);
+    const nextBranch = `feature/issue-${issueId}-${slugifyRecoveryBranchSuffix(message)}`;
+    if (currentBranch === nextBranch) {
+      return { recovered: false as const, reason: "branch_already_normalized", nextBranch };
+    }
+    await safeExecGit(workspacePath, ["branch", "-m", nextBranch]);
+    return { recovered: true as const, action: "rename_branch", nextBranch };
+  }
+  if (recovery.action.id === "commit_message_invalid") {
+    const issueId = normalizeIssueIdForRecovery(message);
+    const subject = String(message || "").split("\n")[0]?.trim() || "auto recovery commit";
+    const nextCommit = `feat: ${subject.replace(/\s+/g, " ").slice(0, 72)} (#${issueId})`;
+    await safeExecGit(workspacePath, ["commit", "--amend", "-m", nextCommit]);
+    return { recovered: true as const, action: "amend_commit_message", nextCommit };
+  }
+  return { recovered: false as const, reason: `unsupported_recovery:${recovery.action.id}` };
 }
 
 export async function sendOpenClawAgentMessage(

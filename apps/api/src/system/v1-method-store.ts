@@ -510,6 +510,22 @@ export async function listIssues(status?: IssueStatus) {
   return data.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
+export async function listIssueCreatedProjectIdsByPrefix(prefix: string) {
+  const normalizedPrefix = String(prefix ?? "").trim();
+  if (!normalizedPrefix) {
+    return [] as string[];
+  }
+  const store = await loadStoreOrDefault();
+  const ids = new Set<string>();
+  for (const issue of store.issues) {
+    const projectId = String(issue.createdProjectId ?? "").trim();
+    if (projectId.startsWith(normalizedPrefix)) {
+      ids.add(projectId);
+    }
+  }
+  return Array.from(ids);
+}
+
 export async function getIssue(issueId: string) {
   const store = await loadStoreOrDefault();
   return store.issues.find((item) => item.id === issueId) ?? null;

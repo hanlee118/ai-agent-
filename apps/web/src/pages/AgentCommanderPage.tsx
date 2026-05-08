@@ -21,7 +21,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { cn } from '../lib/utils';
 import type { Agent, Task as RuntimeTask } from '../types';
 import { fetchOpenClawAgentDetail } from '../lib/adapters';
-import { agentsApi } from '../lib/api/agentsApi';
+import { agentsApi, type AgentRoleTemplate } from '../lib/api/agentsApi';
 import { openclawAgentsApi } from '../lib/api/openclawAgentsApi';
 import {
   normalizeCompareValue,
@@ -69,6 +69,23 @@ const parseSopSteps = (content: string) =>
     .filter(Boolean)
     .slice(0, 8);
 
+const normalizeRoleToken = (value: string | null | undefined) => String(value || '').trim().toUpperCase();
+
+const resolveRoleTemplate = (
+  templates: AgentRoleTemplate[],
+  roleHints: Array<string | null | undefined>,
+) => {
+  const wanted = new Set(
+    roleHints
+      .map((item) => normalizeRoleToken(item))
+      .filter((item) => item.startsWith('ROLE_')),
+  );
+  if (wanted.size === 0) {
+    return null;
+  }
+  return templates.find((item) => wanted.has(normalizeRoleToken(item.roleId))) || null;
+};
+
 const Badge = ({ children, variant = 'default' }: any) => {
   const variants: any = {
     default: 'bg-white/5 text-slate-400 border-border-subtle',
@@ -91,11 +108,13 @@ const AgentCommander = ({
   selectedProjectId,
   addToast,
   sendCommand,
+  onOpenConfig,
 }: {
   agentId: string | null;
   selectedProjectId?: string | null;
   addToast: (msg: string, type?: any) => void;
   sendCommand?: (agentId: string, message: string) => Promise<unknown>;
+  onOpenConfig?: (agentId: string) => void;
 }) => {
   const [mode, setMode] = useState('confirm'); // 'confirm' | 'auto'
   const fallbackAgent: Agent = {
@@ -163,6 +182,19 @@ const AgentCommander = ({
   const [isLoadingTaskBundle, setIsLoadingTaskBundle] = useState(false);
   const [taskActionLoadingKey, setTaskActionLoadingKey] = useState<string | null>(null);
 
+  const handleOpenConfig = useCallback(() => {
+    const targetAgentId = String(activeAgent.id || "").trim();
+    if (!targetAgentId) {
+      addToast("当前未选择可配置的 Agent", "error");
+      return;
+    }
+    if (onOpenConfig) {
+      onOpenConfig(targetAgentId);
+      return;
+    }
+    addToast("当前页面未接入配置弹窗，请在 Agent 名册中编辑。", "info");
+  }, [activeAgent.id, addToast, onOpenConfig]);
+
   useEffect(() => {
     setTokenLimit(activeAgent.tokenLimit || DEFAULT_AGENT_TOKEN_LIMIT);
     setDailyUsage(activeAgent.tokensUsed || 0);
@@ -182,6 +214,7 @@ const AgentCommander = ({
 
       setIsLoadingAgentProfile(true);
       try {
+        const templates = await agentsApi.listTemplates().catch(() => [] as AgentRoleTemplate[]);
         const openclawList = await openclawAgentsApi.list();
         const binding = resolveOpenClawAgentBinding({
           agentId: activeAgent.id,
@@ -206,29 +239,73 @@ const AgentCommander = ({
 
         const soulContent = detail.soul?.content?.trim() || '';
         const sopContent = detail.sop?.content?.trim() || '';
+        const sopSteps = parseSopSteps(sopContent);
+        const roleTemplate = resolveRoleTemplate(templates, [
+          binding.linkedRoleId,
+          activeAgent.role,
+          OPENCLAW_AGENT_TO_ROLE_ID[nextResolvedOpenClawAgentId],
+          OPENCLAW_AGENT_TO_ROLE_ID[activeAgent.id],
+        ]);
+        const fallbackSoul = soulContent || String(roleTemplate?.soul || '').trim();
+        const fallbackSop = sopSteps.length > 0
+          ? sopSteps
+          : (Array.isArray(roleTemplate?.sop)
+              ? roleTemplate.sop.map((item) => String(item || '').trim()).filter(Boolean)
+              : []);
         const memoryTags = (detail.memoryEntries || [])
           .slice(0, 8)
           .map((entry) => entry.summary?.trim())
           .filter((item): item is string => Boolean(item));
 
-        setAgentSoul(soulContent);
-        setAgentSopSteps(parseSopSteps(sopContent));
+        setAgentSoul(fallbackSoul);
+        setAgentSopSteps(fallbackSop);
         setAgentMemoryTags(memoryTags);
       } catch {
-        try {
-          const managedAgentId = /^ROLE_/i.test(String(activeAgent.id || '').trim())
-            ? linkedRoleId || String(activeAgent.id || '').trim()
-            : String(activeAgent.id || '').trim();
-          const managed = await agentsApi.get(managedAgentId);
-          if (!active) {
-            return;
+        const templates = await agentsApi.listTemplates().catch(() => [] as AgentRoleTemplate[]);
+        const fallbackId = String(activeAgent.id || "").trim();
+        const fallbackRole = String(activeAgent.role || "").trim();
+        const managedCandidates = Array.from(new Set([
+          linkedRoleId,
+          OPENCLAW_AGENT_TO_ROLE_ID[fallbackId],
+          /^ROLE_/i.test(fallbackRole) ? fallbackRole : "",
+          /^ROLE_/i.test(fallbackId) ? fallbackId : "",
+          fallbackId,
+        ].map((item) => String(item || "").trim()).filter(Boolean)));
+
+        let managedLoaded = false;
+        for (const candidateId of managedCandidates) {
+          try {
+            const managed = await agentsApi.get(candidateId);
+            if (!active) {
+              return;
+            }
+            const managedSoul = String(managed.soul || "").trim();
+            const managedSop = Array.isArray(managed.sop)
+              ? managed.sop.map((step) => String(step || "").trim()).filter(Boolean)
+              : [];
+            const roleTemplate = resolveRoleTemplate(templates, [
+              managed.role,
+              linkedRoleId,
+              fallbackRole,
+              OPENCLAW_AGENT_TO_ROLE_ID[fallbackId],
+            ]);
+            setAgentSoul(managedSoul || String(roleTemplate?.soul || '').trim());
+            setAgentSopSteps(
+              managedSop.length > 0
+                ? managedSop
+                : (Array.isArray(roleTemplate?.sop)
+                    ? roleTemplate.sop.map((item) => String(item || '').trim()).filter(Boolean)
+                    : []),
+            );
+            setAgentMemoryTags([]);
+            managedLoaded = true;
+            break;
+          } catch {
+            continue;
           }
-          const managedSoul = String(managed.soul || '').trim();
-          const managedSop = Array.isArray(managed.sop) ? managed.sop.map((step) => String(step || '').trim()).filter(Boolean) : [];
-          setAgentSoul(managedSoul);
-          setAgentSopSteps(managedSop);
-          setAgentMemoryTags([]);
-        } catch {
+        }
+
+        if (!managedLoaded) {
           if (!active) {
             return;
           }
@@ -449,7 +526,7 @@ const AgentCommander = ({
   const handleModelChange = (modelId: string) => {
     setCurrentModelId(modelId);
     const model = models.find(m => m.id === modelId);
-    addToast(`已切换本地查看模型为: ${model?.name || modelId}；当前不会持久化到后端`, 'info');
+    addToast(`已切换本地预览模型为: ${model?.name || modelId}。如需生效到后端，请点击“保存到配置”。`, 'info');
   };
 
   const handleConfirmAction = () => {
@@ -459,7 +536,7 @@ const AgentCommander = ({
   const handleTokenLimitChange = (e: ChangeEvent<HTMLInputElement>) => {
     const val = Math.max(parseInt(e.target.value) || 0, 1);
     setTokenLimit(val);
-    addToast(`已更新本地 Token 观察值为 ${val.toLocaleString()}；当前不会持久化到后端`, "info");
+    addToast(`已更新本地 Token 预览值为 ${val.toLocaleString()}。如需持久化，请点击“保存到配置”。`, "info");
   };
 
   const handleTrySend = () => {
@@ -614,11 +691,11 @@ const AgentCommander = ({
           </div>
         </div>
         
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3 bg-white/5 p-1.5 rounded-xl border border-border-subtle shadow-inner">
-            <div className="flex items-center gap-2 px-3 border-r border-border-subtle mr-1">
-              <Lock size={12} className="text-slate-500" />
-              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">限额</span>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-3 bg-white/5 p-1.5 rounded-xl border border-border-subtle shadow-inner">
+              <div className="flex items-center gap-2 px-3 border-r border-border-subtle mr-1">
+                <Lock size={12} className="text-slate-500" />
+                <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">限额</span>
               <input 
                 type="number" 
                 value={tokenLimit}
@@ -646,8 +723,15 @@ const AgentCommander = ({
               >
                 自主运行
               </button>
+              </div>
             </div>
-          </div>
+
+            <button
+              onClick={handleOpenConfig}
+              className="px-3 py-2 rounded-lg text-[10px] font-bold border border-primary/30 bg-primary/15 text-primary hover:bg-primary/25 transition-colors uppercase tracking-wider"
+            >
+              保存到配置
+            </button>
           
           <div className="h-8 w-px bg-border-subtle" />
           
@@ -671,6 +755,7 @@ const AgentCommander = ({
               ))}
             </div>
           </div>
+          <Badge variant="warning">本地预览态</Badge>
         </div>
       </header>
 
@@ -683,7 +768,12 @@ const AgentCommander = ({
                 <ShieldCheck size={12} />
                 核心身份 (SOUL)
               </h3>
-              <button className="text-[10px] text-primary hover:underline">编辑</button>
+              <button
+                className="text-[10px] text-primary hover:underline"
+                onClick={handleOpenConfig}
+              >
+                编辑
+              </button>
             </div>
             <div className="bg-surface-soft border border-border-subtle rounded-xl p-4 font-mono text-xs text-slate-300 leading-relaxed relative group">
               {isLoadingAgentProfile
@@ -699,7 +789,12 @@ const AgentCommander = ({
                 <Workflow size={12} />
                 标准操作程序 (SOP)
               </h3>
-              <button className="text-[10px] text-primary hover:underline">编辑</button>
+              <button
+                className="text-[10px] text-primary hover:underline"
+                onClick={handleOpenConfig}
+              >
+                编辑
+              </button>
             </div>
             <div className="space-y-2">
               {(agentSopSteps.length > 0 ? agentSopSteps : ['当前 Agent 暂无 SOP 步骤']).map((step, i) => (
@@ -748,10 +843,13 @@ const AgentCommander = ({
                   max="500000" 
                   step="10000"
                   value={tokenLimit}
-                  onChange={(e) => setTokenLimit(parseInt(e.target.value))}
+                  onChange={(e) => {
+                    const val = Math.max(parseInt(e.target.value) || 0, 1);
+                    setTokenLimit(val);
+                  }}
                   className="w-full h-1 bg-white/10 rounded-lg appearance-none cursor-pointer accent-primary"
                 />
-                <p className="text-[9px] text-slate-500 text-center italic">拖动滑块调整每日配额</p>
+                <p className="text-[9px] text-slate-500 text-center italic">拖动滑块调整每日配额（仅本地预览，需“保存到配置”才会持久化）</p>
               </div>
               <div className="h-px bg-border-subtle" />
               <div className="flex justify-between items-center">

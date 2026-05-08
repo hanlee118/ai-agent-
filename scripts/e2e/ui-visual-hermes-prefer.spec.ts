@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test, expect } from 'playwright/test';
-import { apiRequest } from './helpers/project-create';
+import { apiRequest, loginAsAdminToken } from './helpers/project-create';
 
 const WEB_URL = process.env.UI_WEB_URL || 'http://127.0.0.1:5173';
 const API_URL = process.env.UI_API_URL || 'http://127.0.0.1:8787';
@@ -14,28 +14,11 @@ type CreatePayload = {
   projectType?: 'complete' | 'standalone' | 'relay';
 };
 
-async function createTemporarySessionCookie() {
-  const [{ prisma }, { generateSessionToken, hashSessionToken }] = await Promise.all([
-    import('../../apps/api/dist/db.js'),
-    import('../../apps/api/dist/security/secret-store.js'),
-  ]);
-
-  const token = generateSessionToken();
-  await prisma.authSession.create({
-    data: {
-      tokenHash: await hashSessionToken(token),
-      expiresAt: new Date(Date.now() + 30 * 60 * 1000),
-    },
-  });
-
-  return { prisma, token, hashSessionToken };
-}
-
 test.describe.configure({ mode: 'serial' });
 
 test('visual design template prefers Hermes agent selection for design role in create-first flow', async ({ context, page }) => {
   test.setTimeout(180_000);
-  const { prisma, token, hashSessionToken } = await createTemporarySessionCookie();
+  const token = await loginAsAdminToken(API_URL);
   const webHost = new URL(WEB_URL).hostname;
   let capturedCreatePayload: CreatePayload | null = null;
 
@@ -78,18 +61,33 @@ test('visual design template prefers Hermes agent selection for design role in c
       });
     });
 
-    await page.goto(WEB_URL, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${WEB_URL}?app_tab=projects`, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('load');
-    await expect(page.getByRole('button', { name: '新建项目' })).toBeVisible({ timeout: 60_000 });
-    await page.getByRole('button', { name: '新建项目' }).click();
+    const openCreateModal = async () => {
+      const trigger = page.getByRole('button', { name: /新建项目|创建项目/ }).first();
+      await expect(trigger).toBeVisible({ timeout: 60_000 });
+      await trigger.click({ force: true });
+      const targetModal = page.getByRole('dialog', { name: '创建新项目' });
+      const opened = await targetModal.isVisible({ timeout: 4000 }).catch(() => false);
+      if (!opened) {
+        await trigger.click({ force: true });
+        await expect(targetModal).toBeVisible({ timeout: 20_000 });
+      }
+      return targetModal;
+    };
 
-    const modal = page.getByRole('dialog', { name: '创建新项目' });
-    await expect(modal).toBeVisible({ timeout: 30_000 });
-    await modal.getByRole('button', { name: /视觉设计阶段/ }).first().click();
+    const modal = await openCreateModal();
+    const pickStandaloneMode = modal.getByRole('button', { name: /单阶段交付/ }).first();
+    await expect(pickStandaloneMode).toBeVisible({ timeout: 30_000 });
+    await pickStandaloneMode.click({ force: true });
+
+    const pickVisual = modal.getByRole('button', { name: /视觉设计阶段/ }).first();
+    await expect(pickVisual).toBeVisible({ timeout: 30_000 });
+    await pickVisual.click({ force: true });
     await expect(modal.getByText(/当前选择：视觉设计阶段/)).toBeVisible({ timeout: 30_000 });
     await expect(modal.getByText(/关键角色: 需求分析师、视觉设计总监/).first()).toBeVisible({ timeout: 30_000 });
 
-    await modal.getByRole('button', { name: '手动填写' }).click();
+    await modal.getByRole('button', { name: '手动填写' }).click({ force: true });
     const hermesDesignCheckbox = modal.locator('label:has-text("视觉设计总监"):has-text("Hermes") input[type="checkbox"]');
     await expect(hermesDesignCheckbox.first()).toBeVisible({ timeout: 60_000 });
     assert.equal((await hermesDesignCheckbox.count()) > 0, true);
@@ -122,9 +120,6 @@ test('visual design template prefers Hermes agent selection for design role in c
     });
     assert.equal(hasHermesDesignAgent, true);
   } finally {
-    await prisma.authSession.deleteMany({
-      where: { tokenHash: await hashSessionToken(token) },
-    });
-    await prisma.$disconnect();
+    // no-op
   }
 });

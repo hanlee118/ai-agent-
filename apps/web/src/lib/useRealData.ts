@@ -37,6 +37,7 @@ export function useRealData(): RealDataState {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastRefreshAtRef = useRef(0);
   const hasLoadedOnceRef = useRef(false);
 
   const toDataLoadError = useCallback((err: unknown) => {
@@ -169,10 +170,15 @@ export function useRealData(): RealDataState {
     if (refreshTimerRef.current) {
       return;
     }
+    const now = Date.now();
+    const elapsed = now - lastRefreshAtRef.current;
+    const minGapMs = 2500;
+    const delay = elapsed >= minGapMs ? 250 : Math.max(250, minGapMs - elapsed);
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
+      lastRefreshAtRef.current = Date.now();
       void refresh();
-    }, 250);
+    }, delay);
   }, [refresh]);
 
   const sseEvents = useMemo(
@@ -193,7 +199,11 @@ export function useRealData(): RealDataState {
     setError(null);
   }, []);
 
-  const handleSseEvent = useCallback(() => {
+  const handleSseEvent = useCallback((event: MessageEvent) => {
+    const eventType = String(event.type || 'message');
+    if (eventType === 'heartbeat' || eventType === 'snapshot' || eventType === 'connected') {
+      return;
+    }
     scheduleRefresh();
   }, [scheduleRefresh]);
 

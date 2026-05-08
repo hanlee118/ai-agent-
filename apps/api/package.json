@@ -7,8 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test:routes": "DATABASE_URL=${TEST_DATABASE_URL:-postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test} pnpm exec prisma migrate reset --force --skip-seed && DATABASE_URL=${TEST_DATABASE_URL:-postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test} tsx --test src/routes/routes.test.ts",
-    "test:workflow-v2": "bash -lc 'set -euo pipefail; DB=\"${TEST_DATABASE_URL:-postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test}\"; files=(src/workflow-v2/agent-assignment.test.ts src/workflow-v2/quality-gate.test.ts src/workflow-v2/hermes-mcp.test.ts src/system/issue-debate.test.ts src/data/repository-workflow-v2-link.test.ts src/routes/workflows-v2.test.ts src/routes/workflows-v2-hermes.test.ts src/routes/workflows-v2-hybrid-acceptance.test.ts src/routes/knowledge-v2.test.ts src/routes/skills-v2.test.ts src/routes/agents-hermes.test.ts src/routes/issues-workflow-link.test.ts); for f in \"${files[@]}\"; do DATABASE_URL=\"$DB\" pnpm exec prisma migrate reset --force --skip-seed >/dev/null; DATABASE_URL=\"$DB\" pnpm exec tsx ../../scripts/seed-workflow-templates-v2.ts >/dev/null; DATABASE_URL=\"$DB\" tsx --test \"$f\"; done'",
+    "test:routes": "bash -lc 'set -euo pipefail; DB=\"${TEST_DATABASE_URL_ROUTES:-${TEST_DATABASE_URL:-postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test_routes}}\"; retry(){ local max=3; local n=1; while true; do \"$@\" && break || { if [ $n -ge $max ]; then return 1; fi; n=$((n+1)); sleep 1; }; done; }; retry env DATABASE_URL=\"$DB\" pnpm exec prisma migrate reset --force --skip-seed; retry env DATABASE_URL=\"$DB\" pnpm exec tsx --test src/routes/routes.test.ts'",
+    "test:workflow-v2": "bash -lc 'set -euo pipefail; DB=\"${TEST_DATABASE_URL_WORKFLOW_V2:-${TEST_DATABASE_URL:-postgresql://occ:occ@127.0.0.1:5432/occ?schema=api_test_workflow_v2}}\"; files=(src/workflow-v2/agent-assignment.test.ts src/workflow-v2/quality-gate.test.ts src/workflow-v2/hermes-mcp.test.ts src/system/issue-debate.test.ts src/data/repository-workflow-v2-link.test.ts src/routes/workflows-v2.test.ts src/routes/workflows-v2-hermes.test.ts src/routes/workflows-v2-hybrid-acceptance.test.ts src/routes/knowledge-v2.test.ts src/routes/skills-v2.test.ts src/routes/agents-hermes.test.ts src/routes/issues-workflow-link.test.ts); retry(){ local max=3; local n=1; while true; do \"$@\" && break || { if [ $n -ge $max ]; then return 1; fi; n=$((n+1)); sleep 1; }; done; }; for f in \"${files[@]}\"; do retry env DATABASE_URL=\"$DB\" pnpm exec prisma migrate reset --force --skip-seed >/dev/null; retry env DATABASE_URL=\"$DB\" pnpm exec tsx ../../scripts/seed-workflow-templates-v2.ts >/dev/null; retry env DATABASE_URL=\"$DB\" pnpm exec tsx --test \"$f\"; done'",
     "db:generate": "prisma generate",
     "db:push": "prisma db push",
     "db:migrate:deploy": "prisma migrate deploy",
@@ -21,6 +21,8 @@
     "@google/stitch-sdk": "^0.1.0",
     "@occ/shared": "workspace:*",
     "@prisma/client": "^6.6.0",
+    "@types/compression": "^1.8.1",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "^8.4.1",
@@ -29,7 +31,7 @@
     "multer": "^2.1.1",
     "pdf-parse": "^1.1.4",
     "swagger-ui-express": "^5.0.1",
-    "undici": "^8.0.2",
+    "undici": "^6.21.3",
     "zod": "^4.3.6"
   },
   "devDependencies": {

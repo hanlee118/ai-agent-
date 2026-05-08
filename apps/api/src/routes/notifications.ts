@@ -2,7 +2,16 @@ import express from "express";
 import { MutationPassthroughSchema } from "../validation/schemas.js";
 import { validateBody } from "../validation/middleware.js";
 import type { NotificationInboxUpdateInput } from "@occ/shared";
-import { listNotificationInbox, updateNotificationInboxState } from "../system/notifications.js";
+import {
+  getNotificationInboxCandidateTotal,
+  listNotificationInbox,
+  updateNotificationInboxState
+} from "../system/notifications.js";
+const NOTIFICATION_TOTAL_CACHE_TTL_MS = Math.max(
+  3_000,
+  Number(process.env.NOTIFICATION_TOTAL_CACHE_TTL_MS ?? 20_000)
+);
+const notificationTotalCache = new Map<"zh-CN" | "en-US", { value: number; expiresAt: number }>();
 
 interface CreateNotificationsRouterOptions {
   asyncRoute: (
@@ -29,7 +38,26 @@ export function createNotificationsRouter(options: CreateNotificationsRouterOpti
 
   router.get("/notifications", asyncRoute(async (req, res) => {
     const locale = String(req.query.locale ?? "zh-CN").trim() === "en-US" ? "en-US" : "zh-CN";
-    res.json(await listNotificationInbox(locale));
+    const pageRaw = Number(req.query.page ?? 1);
+    const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+    const now = Date.now();
+    const cached = notificationTotalCache.get(locale);
+    const total = cached && cached.expiresAt > now
+      ? cached.value
+      : await getNotificationInboxCandidateTotal(locale);
+    if (!cached || cached.expiresAt <= now) {
+      notificationTotalCache.set(locale, {
+        value: total,
+        expiresAt: now + NOTIFICATION_TOTAL_CACHE_TTL_MS
+      });
+    }
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Page-Size", String(pageSize));
+    res.setHeader("X-Total-Count", String(total));
+    const summary = String(req.query.summary ?? "true").trim().toLowerCase() !== "false";
+    res.json(await listNotificationInbox(locale, { page, pageSize, summary }));
   }));
 
   router.patch("/notifications/:sourceKey", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {

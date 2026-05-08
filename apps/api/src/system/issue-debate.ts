@@ -53,6 +53,7 @@ const FALLBACK_FOCUS: Record<RoleType, string> = {
   ROLE_ARCH: "数据链路与架构约束",
   ROLE_DEV: "可实现性与交付节奏",
   ROLE_QA: "验收标准与质量门禁",
+  ROLE_AUDITOR: "工程合规与可追溯审计",
   ROLE_HR: "协作资源与组织节奏"
 };
 
@@ -96,6 +97,11 @@ const ROLE_DEBATE_BRIEFS: Record<RoleType, { objective: string; pushback: string
     objective: "定义可验证的验收标准和阻断条件",
     pushback: "反对只有主观描述、没有量化验收口径",
     handoff: "向 PM 和研发交接必测路径、样例和阻断条件"
+  },
+  ROLE_AUDITOR: {
+    objective: "验证工程规范执行闭环与审计可追溯性",
+    pushback: "反对缺失 issue 链接、分支/提交不合规仍直接放行",
+    handoff: "向 PM 与 QA 交接巡检结论和整改事项"
   },
   ROLE_HR: {
     objective: "识别资源协同与责任边界风险",

@@ -6,6 +6,8 @@ import type {
   SystemExecutionProtocolInput,
   SystemExecutionProtocolSnapshot,
   HermesUpgradeState,
+  IntegrationReadinessSnapshot,
+  SystemDiagnosticsReport,
   SystemHealth,
   SystemRuntime,
   SystemRuntimeConfig,
@@ -71,6 +73,31 @@ export const systemApi = {
 
   async getObservabilitySummary() {
     return request<SystemObservabilitySummary>('/observability/summary');
+  },
+
+  async getIntegrationReadiness() {
+    return request<IntegrationReadinessSnapshot>('/system/integration-readiness');
+  },
+
+  async runDiagnostics() {
+    return request<SystemDiagnosticsReport>('/system/diagnostics/run', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async triggerAudit() {
+    return request<{ ok: boolean; message?: string; scanned?: number; actions?: Array<Record<string, unknown>> }>('/system/trigger-audit', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    });
+  },
+
+  async selfHealModelRouting(apply = true) {
+    return request<{ fixed: number; pending: number; issues: Array<{ reason: string }> }>('/system/model-routing/self-heal', {
+      method: 'POST',
+      body: JSON.stringify({ apply }),
+    });
   },
 
   async validateRuntime() {

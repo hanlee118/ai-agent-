@@ -325,16 +325,19 @@ async function agentExists(agentId: string) {
 }
 
 async function getAgentDetail(agentId: string) {
-  const [profile, config, soul, sop, taskCount, memoryCount, usageLogs, models] = await prisma.$transaction([
+  const [profile, config, soul, sop, taskCount, memoryCount, usageAggregate, usageCount, models] = await prisma.$transaction([
     prisma.agentProfile.findUnique({ where: { roleId: agentId } }),
     prisma.managedAgentConfig.findUnique({ where: { agentId } }),
     prisma.agentSoul.findUnique({ where: { agentId } }),
     prisma.agentSop.findUnique({ where: { agentId } }),
     prisma.task.count({ where: { assignee: agentId, status: { not: "done" } } }),
     prisma.agentMemoryEntry.count({ where: { agentId } }),
-    prisma.agentUsageLog.findMany({
+    prisma.agentUsageLog.aggregate({
       where: { agentId },
-      select: { totalTokens: true }
+      _sum: { totalTokens: true }
+    }),
+    prisma.agentUsageLog.count({
+      where: { agentId }
     }),
     prisma.model.findMany({
       select: {
@@ -359,7 +362,7 @@ async function getAgentDetail(agentId: string) {
     modelLimitById,
     modelLimitByName
   );
-  const tokensUsed = usageLogs.reduce((sum, item) => sum + item.totalTokens, 0);
+  const tokensUsed = usageAggregate._sum.totalTokens ?? 0;
 
   const integrationEngine = inferIntegrationEngine([
     agentId,
@@ -382,35 +385,47 @@ async function getAgentDetail(agentId: string) {
     memoryCount,
     tokensUsed,
     tokenLimit,
-    sessionCount: usageLogs.length,
+    sessionCount: usageCount,
     soul: soul?.content ?? "",
     sop: parseStoredSteps(sop?.steps ?? null),
     createdAt: (config?.createdAt ?? profile?.createdAt ?? new Date()).toISOString(),
     updatedAt: (config?.updatedAt ?? profile?.updatedAt ?? new Date()).toISOString(),
     allowedAgentIds: toStringArrayFromJson(config?.allowedAgentIds),
-    integrationEngine
+    integrationEngine,
+    ...(agentId === HERMES_AGENT_DEFAULT_ID && integrationEngine === "hermes"
+      ? { builtin: true }
+      : {})
   };
 }
 
 export function createAgentsRouter() {
   const router = express.Router();
 
-  router.get("/", asyncRoute(async (_req, res) => {
-    const [profiles, configs, tasks, memoryEntries, usageLogs, models] = await prisma.$transaction([
+  router.get("/", asyncRoute(async (req, res) => {
+    const pageRaw = Number(req.query.page ?? 1);
+    const pageSizeRaw = Number(req.query.pageSize ?? req.query.limit ?? 20);
+    const page = Number.isFinite(pageRaw) ? Math.max(1, Math.floor(pageRaw)) : 1;
+    const pageSize = Number.isFinite(pageSizeRaw) ? Math.max(1, Math.min(100, Math.floor(pageSizeRaw))) : 20;
+    const offset = (page - 1) * pageSize;
+    const [profiles, configs, taskGroups, memoryGroups, usageGroups, models] = await prisma.$transaction([
       prisma.agentProfile.findMany(),
       prisma.managedAgentConfig.findMany(),
-      prisma.task.findMany({
+      prisma.task.groupBy({
+        by: ["assignee"],
         where: { status: { not: "done" } },
-        select: { assignee: true }
+        orderBy: { assignee: "asc" },
+        _count: { assignee: true }
       }),
-      prisma.agentMemoryEntry.findMany({
-        select: { agentId: true }
+      prisma.agentMemoryEntry.groupBy({
+        by: ["agentId"],
+        orderBy: { agentId: "asc" },
+        _count: { agentId: true }
       }),
-      prisma.agentUsageLog.findMany({
-        select: {
-          agentId: true,
-          totalTokens: true
-        }
+      prisma.agentUsageLog.groupBy({
+        by: ["agentId"],
+        orderBy: { agentId: "asc" },
+        _sum: { totalTokens: true },
+        _count: { agentId: true }
       }),
       prisma.model.findMany({
         select: {
@@ -427,22 +442,18 @@ export function createAgentsRouter() {
     const memoryCountMap = new Map<string, number>();
     const usageMap = new Map<string, { tokensUsed: number; sessionCount: number }>();
 
-    for (const task of tasks) {
-      taskCountMap.set(task.assignee, (taskCountMap.get(task.assignee) ?? 0) + 1);
+    for (const task of taskGroups) {
+      taskCountMap.set(task.assignee, Number((task._count as { assignee?: number } | undefined)?.assignee ?? 0));
     }
 
-    for (const entry of memoryEntries) {
-      memoryCountMap.set(entry.agentId, (memoryCountMap.get(entry.agentId) ?? 0) + 1);
+    for (const entry of memoryGroups) {
+      memoryCountMap.set(entry.agentId, Number((entry._count as { agentId?: number } | undefined)?.agentId ?? 0));
     }
 
-    for (const log of usageLogs) {
-      const current = usageMap.get(log.agentId) ?? {
-        tokensUsed: 0,
-        sessionCount: 0
-      };
+    for (const log of usageGroups) {
       usageMap.set(log.agentId, {
-        tokensUsed: current.tokensUsed + log.totalTokens,
-        sessionCount: current.sessionCount + 1
+        tokensUsed: Number(log._sum?.totalTokens ?? 0),
+        sessionCount: Number((log._count as { agentId?: number } | undefined)?.agentId ?? 0)
       });
     }
     const modelLimitById = new Map(models.map((item) => [item.id, item.tokenLimit]));
@@ -509,7 +520,10 @@ export function createAgentsRouter() {
       }
     }
 
-    sendSuccess(res, list);
+    res.setHeader("X-Page", String(page));
+    res.setHeader("X-Page-Size", String(pageSize));
+    res.setHeader("X-Total-Count", String(list.length));
+    sendSuccess(res, list.slice(offset, offset + pageSize));
   }));
 
   router.get("/templates", asyncRoute(async (_req, res) => {

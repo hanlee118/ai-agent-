@@ -1,7 +1,8 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { AlertCircle, Briefcase, CheckCircle2, ChevronRight, Database, FileText, Globe, RotateCcw } from 'lucide-react';
 import { agents, projects, sessions } from '../lib/runtimeCollections';
 import { Badge } from './impl/GovernanceShared';
+import { openclawAgentsApi, type OpenClawProjectReport } from '../lib/api';
 
 type Props = {
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -23,6 +24,7 @@ const getRelativeTime = (date: string | Date | undefined) => {
 
 export default function WorkspacePage({ addToast, workspace, onRefreshData, onNavigate }: Props) {
   const agentNameById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.name])), [agents]);
+  const [projectReports, setProjectReports] = useState<Record<string, OpenClawProjectReport>>({});
 
   const healthChecks = [
     { label: 'Agent 连接', ok: agents.length > 0 },
@@ -30,15 +32,67 @@ export default function WorkspacePage({ addToast, workspace, onRefreshData, onNa
     { label: 'API 服务', ok: true },
   ];
 
-  const recentReports = useMemo(
-    () =>
-      sessions.slice(0, 4).map((session) => ({
-        title: agentNameById.get(session.agentId) || 'Agent 会话',
-        date: getRelativeTime(session.updatedAt || session.createdAt),
-        type: '会话',
-      })),
-    [agentNameById, sessions],
-  );
+  useEffect(() => {
+    let cancelled = false;
+    const loadReports = async () => {
+      const targets = projects.slice(0, 4);
+      if (targets.length === 0) {
+        if (!cancelled) {
+          setProjectReports({});
+        }
+        return;
+      }
+      const settled = await Promise.allSettled(
+        targets.map((project) => openclawAgentsApi.getProjectReport(project.id)),
+      );
+      if (cancelled) {
+        return;
+      }
+      const next: Record<string, OpenClawProjectReport> = {};
+      for (let i = 0; i < settled.length; i += 1) {
+        const result = settled[i];
+        if (result.status === 'fulfilled') {
+          next[result.value.projectId] = result.value;
+        }
+      }
+      setProjectReports(next);
+    };
+    void loadReports();
+    return () => {
+      cancelled = true;
+    };
+  }, [projects]);
+
+  const recentReports = useMemo(() => {
+    const fromProjects = projects
+      .slice(0, 4)
+      .map((project) => {
+        const report = projectReports[project.id];
+        if (!report) {
+          return null;
+        }
+        return {
+          id: project.id,
+          title: report.projectName,
+          date: getRelativeTime(report.generatedAt),
+          type: '项目报告',
+          summary: report.summary,
+        };
+      })
+      .filter((item): item is { id: string; title: string; date: string; type: string; summary: string } => Boolean(item));
+
+    if (fromProjects.length > 0) {
+      return fromProjects;
+    }
+
+    return sessions.slice(0, 4).map((session) => ({
+      id: session.projectId || session.id,
+      title: agentNameById.get(session.agentId) || 'Agent 会话',
+      date: getRelativeTime(session.updatedAt || session.createdAt),
+      type: '会话',
+      summary: '当前未获取到项目报告，回退为会话摘要。',
+    }));
+  }, [agentNameById, projects, projectReports, sessions]);
 
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
@@ -126,16 +180,21 @@ export default function WorkspacePage({ addToast, workspace, onRefreshData, onNa
               <button className="text-xs text-primary hover:underline">查看全部</button>
             </div>
             <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-4">
-              {recentReports.map((report, i) => (
-                <div key={i} className="p-4 bg-white/5 rounded-xl border border-border-subtle hover:bg-white/10 transition-colors cursor-pointer flex items-center gap-4">
+              {recentReports.map((report) => (
+                <button
+                  key={report.id}
+                  onClick={() => onNavigate?.('project-room', report.id)}
+                  className="p-4 bg-white/5 rounded-xl border border-border-subtle hover:bg-white/10 transition-colors cursor-pointer flex items-center gap-4 text-left w-full"
+                >
                   <div className="w-10 h-10 rounded-lg bg-white/5 flex items-center justify-center text-slate-500">
                     <FileText size={20} />
                   </div>
                   <div>
                     <h4 className="text-sm font-semibold text-white">{report.title}</h4>
                     <p className="text-xs text-slate-500">{report.type} • {report.date}</p>
+                    <p className="text-[11px] text-slate-400 mt-1">{report.summary}</p>
                   </div>
-                </div>
+                </button>
               ))}
               {recentReports.length === 0 && <p className="text-xs text-slate-500">暂无活动</p>}
             </div>

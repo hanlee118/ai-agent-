@@ -38,6 +38,7 @@ const ROLE_TO_AGENT_ID: Record<RoleType, string> = {
   ROLE_ARCH: "rd_director",
   ROLE_DEV: "rd_manager",
   ROLE_QA: "qa_engineer",
+  ROLE_AUDITOR: "auditor-agent",
   ROLE_HR: "hr_director"
 };
 
@@ -129,6 +130,7 @@ function toTask(task: {
     status: task.status,
     description: task.description,
     syncPolicy: task.syncPolicy,
+    assignee: task.assignee,
     ownerAgentId: task.ownerAgentId,
     reviewAgentId: task.reviewAgentId,
     projectPendingApproval: task.project?.pendingApproval,
@@ -143,7 +145,7 @@ function toTask(task: {
     title: task.title,
     description: task.description,
     assignee: task.assignee as RoleType,
-    ownerAgentId: task.ownerAgentId ?? undefined,
+    ownerAgentId: task.ownerAgentId ?? collaboration.resolvedOwnerAgentId ?? undefined,
     reviewAgentId: task.reviewAgentId ?? undefined,
     coordinationMode: task.coordinationMode as CoordinationMode,
     delegationPolicy: task.delegationPolicy as DelegationPolicy,
@@ -210,6 +212,7 @@ async function ensureNoBlockingDependencies(tx: typeof prisma | any, taskId: str
   const summary = buildTaskCollaboration({
     status: "blocked",
     description: "",
+    assignee: null,
     dependencies
   }).dependencies;
   if (hasBlockingDependencies(summary)) {

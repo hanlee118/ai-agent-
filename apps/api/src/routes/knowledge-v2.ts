@@ -851,8 +851,13 @@ export function createKnowledgeV2Router() {
     if (!(await ensureSchemaReady(res))) {
       return;
     }
-    const limit = parsePositiveInt(req.query.limit, 20, 200);
-    const offset = Math.max(0, Math.floor(Number(req.query.offset ?? 0) || 0));
+    const page = parsePositiveInt(req.query.page, 1, 100000);
+    const pageSize = parsePositiveInt(req.query.pageSize ?? req.query.limit, 20, 100);
+    const offset = Math.max(
+      0,
+      Math.floor(Number(req.query.offset ?? ((page - 1) * pageSize)) || 0)
+    );
+    const limit = pageSize;
     const type = normalizeKnowledgeType(req.query.type);
     const memoryType = normalizeMemoryType(req.query.memoryType);
     const stageContext = normalizeText(req.query.stageContext) || normalizeText(req.query.stage) || undefined;
@@ -884,6 +889,8 @@ export function createKnowledgeV2Router() {
     ]);
     sendSuccess(res, {
       total,
+      page,
+      pageSize: limit,
       items: items.map((item) => ({
         ...resolveKnowledgeSourceMeta(item.metadata),
         id: item.id,

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { evaluateWorkflowStageGate, runAutoCheck } from "./quality-gate.js";
+import { evaluateEngineeringPolicyGate, evaluateWorkflowStageGate, runAutoCheck } from "./quality-gate.js";
 
 function mockStage(outputArtifacts: unknown[]) {
   return {
@@ -56,4 +56,26 @@ test("evaluateWorkflowStageGate supports artifact_exists + auto_check", async ()
   });
   assert.equal(gate.passed, true);
   assert.equal(gate.violations, undefined);
+});
+
+test("engineering policy gate blocks invalid branch/commit/mr", () => {
+  const result = evaluateEngineeringPolicyGate({
+    branchName: "my-random-branch",
+    commitMessage: "update something",
+    mergeRequestDescription: "no issue ref"
+  });
+  assert.equal(result.passed, false);
+  assert.ok((result.violations ?? []).some((item) => item.includes("engineering_branch_name")));
+  assert.ok((result.violations ?? []).some((item) => item.includes("engineering_commit_message")));
+  assert.ok((result.violations ?? []).some((item) => item.includes("engineering_mr_issue_link")));
+});
+
+test("engineering policy gate passes compliant inputs", () => {
+  const result = evaluateEngineeringPolicyGate({
+    branchName: "feature/issue-101-rag-pipeline",
+    commitMessage: "feat: add rag adapter (#101)",
+    mergeRequestDescription: "Related to #101"
+  });
+  assert.equal(result.passed, true);
+  assert.equal(result.violations, undefined);
 });

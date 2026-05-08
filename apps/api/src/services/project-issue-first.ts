@@ -44,9 +44,9 @@ export async function ensureProjectIssueFirst(input: {
   projectPath?: string;
 }) {
   const gitlabIssueFirstEnabled = Boolean(ISSUE_FIRST_GITLAB_TOKEN && ISSUE_FIRST_GITLAB_PROJECT);
-  const localIssue = ISSUE_FIRST_LOCAL_ENFORCED
-    ? await getIssueByProjectId(input.projectId)
-    : null;
+  // Always inspect local issue binding so GitLab-side failures can still
+  // gracefully degrade when a confirmed local issue already exists.
+  const localIssue = await getIssueByProjectId(input.projectId);
   const localIssueReady = Boolean(localIssue?.id && localIssue?.status === "confirmed");
 
   if (ISSUE_FIRST_LOCAL_ENFORCED && !localIssueReady) {
@@ -104,11 +104,45 @@ export async function ensureProjectIssueFirst(input: {
     } as const;
   }
 
-  const ensured = await ensureProjectMainIssueSync({
-    projectId: input.projectId,
-    projectPath: input.projectPath || ISSUE_FIRST_GITLAB_PROJECT
-  });
+  let ensured:
+    | Awaited<ReturnType<typeof ensureProjectMainIssueSync>>
+    | { ok: false; code: string; message: string };
+  try {
+    ensured = await ensureProjectMainIssueSync({
+      projectId: input.projectId,
+      projectPath: input.projectPath || ISSUE_FIRST_GITLAB_PROJECT
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(
+      `[issue-first] gitlab sync exception for ${input.projectId}; localIssueReady=${localIssueReady} localIssueId=${localIssue?.id || ""} localIssueStatus=${localIssue?.status || ""}; error=${message}`
+    );
+    if (localIssueReady) {
+      return {
+        ok: true,
+        enforced: true,
+        data: {
+          projectId: input.projectId,
+          issueId: localIssue?.id,
+          source: "local_issue_store_fallback"
+        },
+        warning: {
+          code: "GITLAB_SYNC_EXCEPTION",
+          message
+        }
+      } as const;
+    }
+    return {
+      ok: false,
+      enforced: true,
+      code: "GITLAB_SYNC_EXCEPTION",
+      message
+    } as const;
+  }
   if (!ensured.ok) {
+    console.warn(
+      `[issue-first] gitlab sync failed for ${input.projectId}: code=${ensured.code} message=${ensured.message}; localIssueReady=${localIssueReady} localIssueId=${localIssue?.id || ""} localIssueStatus=${localIssue?.status || ""}`
+    );
     // GitLab 同步异常时，若本地 issue-first 已满足，则降级为本地门禁通过，
     // 避免外部 GitLab 波动导致项目推进长期阻塞。
     if (localIssueReady) {

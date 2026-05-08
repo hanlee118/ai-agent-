@@ -3,7 +3,7 @@ import type {
   NotificationInboxUpdateInput,
   NotificationSeverity
 } from "@occ/shared";
-import { prisma } from "../db.js";
+import { prisma, withPrismaReadRetry } from "../db.js";
 import { listProjects, listTasks, getSystemHealth } from "../data/repository.js";
 import { listAuditLogs } from "./audit-log.js";
 import { getRuntimeStatus } from "../agents/runtime.js";
@@ -19,56 +19,60 @@ type LiveNotificationCandidate = {
   detail: string;
   actionLabel: string;
   to: string;
+  target?: {
+    tab?: string;
+    projectId?: string;
+    agentId?: string;
+    modal?: string;
+  };
   timestamp?: string;
 };
+type CandidateCacheBucket = {
+  expiresAt: number;
+  data: LiveNotificationCandidate[];
+  inflight?: Promise<LiveNotificationCandidate[]>;
+};
 
-export async function listNotificationInbox(locale: "zh-CN" | "en-US" = "zh-CN"): Promise<NotificationInboxItem[]> {
-  const candidates = await buildLiveNotificationCandidates(locale);
+const LIVE_NOTIFICATION_CACHE_TTL_MS = Math.max(
+  1000,
+  Number.parseInt(String(process.env.NOTIFICATION_LIVE_CACHE_TTL_MS ?? "5000"), 10) || 5000
+);
+const liveCandidateCache = new Map<"zh-CN" | "en-US", CandidateCacheBucket>();
 
-  await Promise.all(
-    candidates.map((item) =>
-      prisma.notificationState.upsert({
-        where: { sourceKey: item.sourceKey },
-        update: {
-          sourceType: item.sourceType,
-          severity: item.severity,
-          category: item.category,
-          title: item.title,
-          detail: item.detail,
-          actionLabel: item.actionLabel,
-          to: item.to,
-          eventAt: item.timestamp ? new Date(item.timestamp) : null,
-          lastSeenAt: new Date()
-        },
-        create: {
-          sourceKey: item.sourceKey,
-          sourceType: item.sourceType,
-          severity: item.severity,
-          category: item.category,
-          title: item.title,
-          detail: item.detail,
-          actionLabel: item.actionLabel,
-          to: item.to,
-          eventAt: item.timestamp ? new Date(item.timestamp) : null,
-          lastSeenAt: new Date()
+export async function listNotificationInbox(
+  locale: "zh-CN" | "en-US" = "zh-CN",
+  options?: { page?: number; pageSize?: number; summary?: boolean; summaryMaxLength?: number }
+): Promise<NotificationInboxItem[]> {
+  const page = Number.isFinite(Number(options?.page))
+    ? Math.max(1, Math.floor(Number(options?.page)))
+    : 1;
+  const pageSize = Number.isFinite(Number(options?.pageSize))
+    ? Math.max(1, Math.min(100, Math.floor(Number(options?.pageSize))))
+    : 20;
+  const offset = (page - 1) * pageSize;
+  const summary = options?.summary !== false;
+  const summaryMaxLength = Math.max(40, Math.floor(Number(options?.summaryMaxLength ?? 200)));
+  const candidates = await getCachedLiveNotificationCandidates(locale);
+  const candidateKeys = candidates.map((item) => item.sourceKey);
+  const states = await withTimeoutFallback(
+    withPrismaReadRetry("findMany", () => prisma.notificationState.findMany({
+      where: {
+        sourceKey: {
+          in: candidateKeys
         }
-      })
-    )
+      }
+    })),
+    1200,
+    []
   );
 
-  const states = await prisma.notificationState.findMany({
-    where: {
-      sourceKey: {
-        in: candidates.map((item) => item.sourceKey)
-      }
-    }
-  });
-
   const stateByKey = new Map(states.map((item) => [item.sourceKey, item]));
+  void ensureNotificationStateBackfill(candidates, stateByKey);
 
   return candidates
     .map((item) => {
       const state = stateByKey.get(item.sourceKey);
+      const detail = String(item.detail || "");
       return {
         id: state?.id ?? item.sourceKey,
         sourceKey: item.sourceKey,
@@ -76,9 +80,12 @@ export async function listNotificationInbox(locale: "zh-CN" | "en-US" = "zh-CN")
         severity: item.severity,
         category: item.category,
         title: item.title,
-        detail: item.detail,
+        detail: summary && detail.length > summaryMaxLength
+          ? `${detail.slice(0, summaryMaxLength)}...`
+          : detail,
         actionLabel: item.actionLabel,
         to: item.to,
+        target: item.target,
         timestamp: item.timestamp,
         read: state?.isRead ?? false,
         assignedTo: state?.assignedTo ?? undefined,
@@ -87,7 +94,13 @@ export async function listNotificationInbox(locale: "zh-CN" | "en-US" = "zh-CN")
         updatedAt: (state?.updatedAt ?? new Date()).toISOString()
       } satisfies NotificationInboxItem;
     })
-    .sort((left, right) => (right.timestamp ?? "").localeCompare(left.timestamp ?? ""));
+    .sort((left, right) => (right.timestamp ?? "").localeCompare(left.timestamp ?? ""))
+    .slice(offset, offset + pageSize);
+}
+
+export async function getNotificationInboxCandidateTotal(locale: "zh-CN" | "en-US" = "zh-CN") {
+  const candidates = await getCachedLiveNotificationCandidates(locale);
+  return candidates.length;
 }
 
 export async function updateNotificationInboxState(
@@ -133,11 +146,31 @@ async function buildLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
   const [projects, tasks, auditLogs, runtime, health, agents, uiPreferences] = await Promise.all([
     listProjects(),
     listTasks(),
-    listAuditLogs(12),
+    withTimeoutFallback(listAuditLogs(12), 1200, []),
     getRuntimeStatus(),
-    getSystemHealth(),
-    listOpenClawAgents(),
-    getUiPreferences().catch(() => ({
+    withTimeoutFallback(getSystemHealth(), 1500, {
+      totalProjects: 0,
+      activeProjects: 0,
+      pendingApprovals: 0,
+      activeTasks: 0,
+      blockedTasks: 0,
+      rejectedStages: 0,
+      averageAgentWorkload: 0,
+      runtime: {
+        mode: "scripted",
+        requestedMode: "scripted",
+        modelName: "scripted",
+        configured: false,
+        apiBaseUrl: "",
+        apiKeyConfigured: false,
+        configSource: "environment",
+        lastValidationStatus: "failed",
+        lastValidationError: "notifications_timeout_fallback"
+      },
+      services: []
+    }),
+    withTimeoutFallback(listOpenClawAgents(), 1200, []),
+    withTimeoutFallback(getUiPreferences().catch(() => ({
       language: "zh" as const,
       workspacePath: "",
       autoSync: true,
@@ -146,7 +179,16 @@ async function buildLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
       usageAlert: true,
       usageAlertThresholdPercent: 80,
       source: "default" as const
-    }))
+    })), 1200, {
+      language: "zh" as const,
+      workspacePath: "",
+      autoSync: true,
+      apiProtection: true,
+      autonomousMode: false,
+      usageAlert: true,
+      usageAlertThresholdPercent: 80,
+      source: "default" as const
+    })
   ]);
 
   const next: LiveNotificationCandidate[] = [];
@@ -287,11 +329,81 @@ async function buildLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
         ? "Clearing the queue will unblock downstream delivery and agent execution."
         : "尽快清理审批队列，可以解除后续交付和 Agent 执行阻塞。",
       actionLabel: isEnglish ? "Open notifications" : "进入通知中心",
-      to: "/notifications"
+      to: "/notifications",
+      target: {
+        tab: "notifications",
+        modal: "notification-center",
+      }
     });
   }
 
   return next;
+}
+
+async function getCachedLiveNotificationCandidates(locale: "zh-CN" | "en-US") {
+  const now = Date.now();
+  const bucket = liveCandidateCache.get(locale);
+  if (bucket && bucket.data.length > 0 && bucket.expiresAt > now) {
+    return bucket.data;
+  }
+  if (bucket?.inflight) {
+    return bucket.inflight;
+  }
+
+  const inflight = buildLiveNotificationCandidates(locale);
+  liveCandidateCache.set(locale, {
+    expiresAt: now,
+    data: bucket?.data ?? [],
+    inflight
+  });
+
+  try {
+    const data = await inflight;
+    liveCandidateCache.set(locale, {
+      expiresAt: Date.now() + LIVE_NOTIFICATION_CACHE_TTL_MS,
+      data
+    });
+    return data;
+  } finally {
+    const latest = liveCandidateCache.get(locale);
+    if (latest?.inflight === inflight) {
+      liveCandidateCache.set(locale, {
+        expiresAt: latest.expiresAt,
+        data: latest.data
+      });
+    }
+  }
+}
+
+async function ensureNotificationStateBackfill(
+  candidates: LiveNotificationCandidate[],
+  stateByKey: Map<string, { sourceKey: string }>
+) {
+  const missing = candidates.filter((item) => !stateByKey.has(item.sourceKey));
+  if (missing.length === 0) {
+    return;
+  }
+
+  try {
+    await prisma.notificationState.createMany({
+      data: missing.map((item) => ({
+        sourceKey: item.sourceKey,
+        sourceType: item.sourceType,
+        severity: item.severity,
+        category: item.category,
+        title: item.title,
+        detail: item.detail,
+        actionLabel: item.actionLabel,
+        to: item.to,
+        eventAt: item.timestamp ? new Date(item.timestamp) : null,
+        lastSeenAt: new Date()
+      })),
+      skipDuplicates: true
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error ?? "unknown");
+    console.warn(`[notifications] state backfill skipped: ${message}`);
+  }
 }
 
 function normalizeSeverity(value: string): NotificationSeverity {
@@ -308,4 +420,19 @@ function normalizeWorkflowStatus(value?: string): NotificationInboxItem["workflo
   }
 
   return "open";
+}
+
+async function withTimeoutFallback<T>(task: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | null = null;
+  try {
+    const timeoutPromise = new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), timeoutMs);
+      timer.unref?.();
+    });
+    return await Promise.race([task, timeoutPromise]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }

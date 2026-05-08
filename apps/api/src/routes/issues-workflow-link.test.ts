@@ -254,9 +254,10 @@ test("issues confirm can pass workflow template fields and auto-link workflow-v2
     .post(`/api/issues/${issueId}/confirm`)
     .send({
       finalName: "Issue Confirm Workflow Link",
-      finalDescription: "确认后应自动初始化 workflow-v2",
+      finalDescription: "确认后应自动初始化 workflow-v2（单阶段模板）",
       clarificationAnswers: requiredQuestions,
       conflictResolution: "按当前边界推进。",
+      projectType: "standalone",
       workflowTemplateKey: "requirements_design",
       autoStartWorkflow: true
     });

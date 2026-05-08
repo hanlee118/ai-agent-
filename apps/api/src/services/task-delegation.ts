@@ -3,6 +3,8 @@ import type { TaskDelegation, TaskDelegationMode, TaskDelegationStatus } from "@
 import { prisma } from "../db.js";
 import { sendOpenClawAgentMessage, findOpenClawAgent } from "../openclaw/workspace.js";
 import { buildDelegationContext } from "./context-packing.js";
+import { ingestKnowledgeItem } from "../workflow-v2/knowledge-service.js";
+import { extractKnowledgeFromStageOutput } from "../workflow-v2/knowledge-llm.js";
 import {
   buildTaskCollaboration,
   hasBlockingDependencies
@@ -19,7 +21,8 @@ const DELEGATION_MODES = new Set<TaskDelegationMode>([
   "coding",
   "validation",
   "summarization",
-  "review"
+  "review",
+  "clarification"
 ]);
 const FINAL_DELEGATION_STATUSES = new Set<TaskDelegationStatus>([
   "completed",
@@ -45,15 +48,22 @@ export type CreateDelegationInput = {
   timeoutSec?: number;
   spawnDepth?: number;
   maxRetries?: number;
+  clarificationDeliverableId?: string;
+  clarificationTargetRole?: string;
 };
 
 type CompleteDelegationInput = {
   outputSummary: string;
   outputPayloadJson?: Prisma.InputJsonValue;
   outputArtifactsJson?: Prisma.InputJsonValue;
+  clarificationResponse?: string;
+  clarificationRespondedBy?: string;
+  clarificationRespondedAt?: Date;
 };
 
 type FinalDelegationStatus = "failed" | "cancelled" | "expired";
+
+const AUTO_KNOWLEDGE_EXTRACTION_ENABLED = String(process.env.AUTO_KNOWLEDGE_EXTRACTION ?? "false").trim().toLowerCase() === "true";
 
 function assertNonEmpty(value: unknown, field: string) {
   const normalized = String(value ?? "").trim();
@@ -102,6 +112,11 @@ function toDelegation(delegation: {
   completedAt: Date | null;
   expiredAt: Date | null;
   failureReason: string | null;
+  clarificationDeliverableId: string | null;
+  clarificationTargetRole: string | null;
+  clarificationResponse: string | null;
+  clarificationRespondedBy: string | null;
+  clarificationRespondedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }): TaskDelegation {
@@ -131,6 +146,11 @@ function toDelegation(delegation: {
     completedAt: delegation.completedAt?.toISOString(),
     expiredAt: delegation.expiredAt?.toISOString(),
     failureReason: delegation.failureReason ?? undefined,
+    clarificationDeliverableId: delegation.clarificationDeliverableId ?? undefined,
+    clarificationTargetRole: delegation.clarificationTargetRole ?? undefined,
+    clarificationResponse: delegation.clarificationResponse ?? undefined,
+    clarificationRespondedBy: delegation.clarificationRespondedBy ?? undefined,
+    clarificationRespondedAt: delegation.clarificationRespondedAt?.toISOString(),
     createdAt: delegation.createdAt.toISOString(),
     updatedAt: delegation.updatedAt.toISOString()
   };
@@ -343,6 +363,7 @@ export async function createDelegation(taskId: string, requestedByAgentId: strin
       status: task.status,
       description: task.description,
       syncPolicy: task.syncPolicy,
+      assignee: task.assignee,
       ownerAgentId: task.ownerAgentId,
       reviewAgentId: task.reviewAgentId,
       dependencies: task.dependencies
@@ -374,7 +395,9 @@ export async function createDelegation(taskId: string, requestedByAgentId: strin
         budgetTokens: normalizeInteger(payload.budgetTokens),
         timeoutSec: normalizeInteger(payload.timeoutSec),
         spawnDepth,
-        maxRetries: Math.max(0, normalizeInteger(payload.maxRetries) ?? 0)
+        maxRetries: Math.max(0, normalizeInteger(payload.maxRetries) ?? 0),
+        clarificationDeliverableId: payload.clarificationDeliverableId || null,
+        clarificationTargetRole: payload.clarificationTargetRole || null
       }
     });
 
@@ -432,6 +455,9 @@ export async function completeDelegation(delegationId: string, result: CompleteD
         outputSummary,
         outputPayloadJson: result.outputPayloadJson,
         outputArtifactsJson: result.outputArtifactsJson,
+        clarificationResponse: result.clarificationResponse || null,
+        clarificationRespondedBy: result.clarificationRespondedBy || null,
+        clarificationRespondedAt: result.clarificationRespondedAt || null,
         failureReason: null
       }
     });
@@ -532,6 +558,7 @@ export async function dispatchDelegation(delegationId: string) {
     status: delegation.task.status,
     description: delegation.task.description,
     syncPolicy: delegation.task.syncPolicy,
+    assignee: delegation.task.assignee,
     ownerAgentId: delegation.task.ownerAgentId,
     reviewAgentId: delegation.task.reviewAgentId,
     projectPendingApproval: delegation.task.project.pendingApproval,
@@ -587,7 +614,17 @@ export async function dispatchDelegation(delegationId: string) {
 
 export async function mergeDelegationResultIntoTask(taskId: string, delegationId: string) {
   const delegation = await prisma.taskDelegation.findUnique({
-    where: { id: delegationId }
+    where: { id: delegationId },
+    include: {
+      task: {
+        select: {
+          id: true,
+          stageType: true,
+          projectId: true,
+          title: true
+        }
+      }
+    }
   });
   if (!delegation) {
     throw new Error("Delegation not found");
@@ -645,4 +682,173 @@ export async function mergeDelegationResultIntoTask(taskId: string, delegationId
 
   await publishDelegationSummary(taskId, delegationId).catch(() => undefined);
   await syncTaskStatus(taskId).catch(() => undefined);
+
+  if (AUTO_KNOWLEDGE_EXTRACTION_ENABLED) {
+    await tryAutoIngestDelegationKnowledge({
+      projectId: delegation.task.projectId,
+      stageType: delegation.task.stageType,
+      taskTitle: delegation.task.title,
+      mode: delegation.mode,
+      outputSummary: delegation.outputSummary || "",
+      outputPayloadJson: delegation.outputPayloadJson
+    });
+  }
+}
+
+async function tryAutoIngestDelegationKnowledge(input: {
+  projectId: string;
+  stageType: string;
+  taskTitle: string;
+  mode: string;
+  outputSummary: string;
+  outputPayloadJson: Prisma.JsonValue | null;
+}) {
+  const normalizedSummary = String(input.outputSummary || "").trim();
+  if (!normalizedSummary) {
+    return;
+  }
+  const project = await prisma.project.findUnique({
+    where: { id: input.projectId },
+    select: {
+      name: true,
+      description: true
+    }
+  });
+  if (!project) {
+    return;
+  }
+  const payloadText = input.outputPayloadJson ? JSON.stringify(input.outputPayloadJson) : "";
+  const extraction = await extractKnowledgeFromStageOutput({
+    projectName: project.name,
+    projectDescription: project.description,
+    stageKey: String(input.stageType || "ANALYSIS"),
+    outputText: [normalizedSummary, payloadText].filter(Boolean).join("\n\n"),
+    summary: normalizedSummary
+  });
+  await ingestKnowledgeItem({
+    scope: "project",
+    projectId: input.projectId,
+    type: "text",
+    title: `Delegation 知识提取 · ${input.taskTitle}`,
+    content: extraction.summary,
+    tags: [...new Set([
+      ...extraction.tags,
+      String(input.stageType || "").toLowerCase(),
+      String(input.mode || "").toLowerCase(),
+      "auto-extracted"
+    ])],
+    stageContext: [String(input.stageType || "ANALYSIS")],
+    techStack: extraction.techStack,
+    memoryType: extraction.memoryType,
+    importanceScore: extraction.importanceScore,
+    metadata: {
+      source: "task_delegation_auto_extract",
+      taskType: input.mode
+    }
+  });
+}
+
+export async function createClarificationDelegation(
+  taskId: string,
+  requestedByAgentId: string,
+  payload: {
+    question: string;
+    targetAgentId?: string;
+    targetRole?: string;
+    deliverableId?: string;
+    timeoutSec?: number;
+  }
+) {
+  const question = assertNonEmpty(payload.question, "question");
+  if (!payload.targetAgentId && !payload.targetRole) {
+    throw new Error("targetAgentId or targetRole is required");
+  }
+  const delegation = await createDelegation(taskId, requestedByAgentId, {
+    title: `clarification: ${question}`,
+    goal: question,
+    mode: "clarification",
+    targetAgentId: payload.targetAgentId,
+    timeoutSec: payload.timeoutSec,
+    clarificationDeliverableId: payload.deliverableId,
+    clarificationTargetRole: payload.targetRole
+  });
+  const updated = await prisma.taskDelegation.update({
+    where: { id: delegation.id },
+    data: {
+      status: "running",
+      startedAt: new Date()
+    }
+  });
+  return toDelegation(updated);
+}
+
+export async function replyClarificationDelegation(
+  delegationId: string,
+  payload: {
+    respondedByAgentId: string;
+    response: string;
+  }
+) {
+  const respondedByAgentId = assertNonEmpty(payload.respondedByAgentId, "respondedByAgentId");
+  const response = assertNonEmpty(payload.response, "response");
+  const delegation = await prisma.taskDelegation.findUnique({
+    where: { id: delegationId },
+    select: {
+      id: true,
+      mode: true,
+      status: true
+    }
+  });
+  if (!delegation) {
+    throw new Error("Delegation not found");
+  }
+  if (delegation.mode !== "clarification") {
+    throw new Error("Delegation is not clarification mode");
+  }
+  if (FINAL_DELEGATION_STATUSES.has(delegation.status as TaskDelegationStatus)) {
+    throw new Error("Delegation is already final");
+  }
+  return completeDelegation(delegationId, {
+    outputSummary: summarizeText(response, 400),
+    outputPayloadJson: {
+      clarification: true,
+      response,
+      respondedByAgentId
+    },
+    clarificationResponse: response,
+    clarificationRespondedBy: respondedByAgentId,
+    clarificationRespondedAt: new Date()
+  });
+}
+
+export async function expireTimedOutClarificationDelegations() {
+  const now = new Date();
+  const candidates = await prisma.taskDelegation.findMany({
+    where: {
+      mode: "clarification",
+      status: { in: ["queued", "running"] },
+      timeoutSec: { gt: 0 }
+    },
+    select: {
+      id: true,
+      createdAt: true,
+      startedAt: true,
+      timeoutSec: true
+    }
+  });
+  const expiredIds = candidates
+    .filter((item) => {
+      const baseAt = item.startedAt || item.createdAt;
+      const timeoutMs = Math.max(1, Number(item.timeoutSec || 0)) * 1000;
+      return baseAt.getTime() + timeoutMs <= now.getTime();
+    })
+    .map((item) => item.id);
+
+  for (const delegationId of expiredIds) {
+    await expireDelegation(delegationId, "clarification timeout: no response received");
+  }
+  return {
+    scanned: candidates.length,
+    expired: expiredIds.length
+  };
 }

@@ -55,6 +55,14 @@ function resolveCorsOrigin(): cors.CorsOptions["origin"] {
 
 export function configureSecurityMiddleware(app: Express) {
   const globalRateLimitMax = Math.max(100, Number(process.env.RATE_LIMIT_MAX ?? 5000));
+  const authLoginRateLimitMax = Math.max(
+    1,
+    Number(process.env.AUTH_LOGIN_RATE_LIMIT_MAX ?? (process.env.NODE_ENV === "production" ? 5 : 1000))
+  );
+  const authLoginRateLimitWindowMs = Math.max(
+    60_000,
+    Number(process.env.AUTH_LOGIN_RATE_LIMIT_WINDOW_MS ?? (15 * 60 * 1000))
+  );
 
   app.use(cors({
     origin: resolveCorsOrigin(),
@@ -81,8 +89,8 @@ export function configureSecurityMiddleware(app: Express) {
   }));
 
   app.use("/api/auth/login", rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 5,
+    windowMs: authLoginRateLimitWindowMs,
+    max: authLoginRateLimitMax,
     standardHeaders: true,
     legacyHeaders: false,
     handler: (_req, res) => {

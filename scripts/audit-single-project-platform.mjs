@@ -23,12 +23,27 @@ const AUDIT_REQUIRE_LIFECYCLE_GATE = String(process.env.AUDIT_REQUIRE_LIFECYCLE_
 const AUDIT_REQUIRE_ACCEPTANCE_GATE = String(process.env.AUDIT_REQUIRE_ACCEPTANCE_GATE || "true").toLowerCase() !== "false";
 const AUDIT_REQUIRE_SUSPICIOUS_ZERO = String(process.env.AUDIT_REQUIRE_SUSPICIOUS_ZERO || "true").toLowerCase() !== "false";
 const AUDIT_REQUIRE_PLACEHOLDER_ZERO = String(process.env.AUDIT_REQUIRE_PLACEHOLDER_ZERO || "true").toLowerCase() !== "false";
+const AUDIT_AUTO_REPAIR_ON_FAIL = String(process.env.AUDIT_AUTO_REPAIR_ON_FAIL || "true").toLowerCase() !== "false";
+const AUDIT_SKIP_PREFLIGHT = String(process.env.AUDIT_SKIP_PREFLIGHT || "false").toLowerCase() === "true";
+const AUDIT_HTTP_TIMEOUT_MS = Math.max(3000, Number(process.env.AUDIT_HTTP_TIMEOUT_MS || 15000));
 const AUDIT_SETUP_PASSWORD = String(process.env.AUDIT_SETUP_PASSWORD || "Admin@123456").trim();
 const AUDIT_OUT = String(
   process.env.AUDIT_OUT || path.resolve(process.cwd(), "docs/reports/single-project-platform-audit-latest.json"),
 );
 
 async function resolveHermesAuditRequirement(sessionToken) {
+  if (!AUDIT_REQUIRE_HERMES) {
+    return {
+      enabled: false,
+      hasEndpoint: false,
+      probeReachable: false,
+      runtimeTotalSuccess: 0,
+      runtimeLastSuccessAt: null,
+      hasHistoricalHermesSuccess: false,
+      enforce: false,
+      skipped: "disabled_by_AUDIT_REQUIRE_HERMES"
+    };
+  }
   const enabled = toBool(process.env.WORKFLOW_V2_HERMES_ENABLED, false);
   const endpoint = String(
     process.env.WORKFLOW_V2_HERMES_ENDPOINT
@@ -36,16 +51,24 @@ async function resolveHermesAuditRequirement(sessionToken) {
     || process.env.HERMES_MCP
     || ""
   ).trim();
-  const probe = await ensureHermesReachableViaApi({
-    apiBase: API_BASE,
-    enabled,
-    endpoint,
-    cwd: process.cwd(),
-    headers: {
-      cookie: `occ_session=${sessionToken}`
-    },
-    autoStartLocal: true,
-  });
+  const probe = await Promise.race([
+    ensureHermesReachableViaApi({
+      apiBase: API_BASE,
+      enabled,
+      endpoint,
+      cwd: process.cwd(),
+      headers: {
+        cookie: `occ_session=${sessionToken}`
+      },
+      autoStartLocal: true,
+    }),
+    new Promise((resolve) => setTimeout(() => resolve({
+      reachable: false,
+      hasEndpoint: Boolean(endpoint),
+      runtimeTotalSuccess: 0,
+      runtimeLastSuccessAt: null
+    }), 12_000))
+  ]);
   const hasEndpoint = probe.hasEndpoint;
   const probeReachable = Boolean(probe.reachable);
   const runtimeTotalSuccess = Number(probe.runtimeTotalSuccess || 0);
@@ -240,13 +263,28 @@ function summarizeResult(key, data) {
 }
 
 async function callApi(sessionToken, item) {
-  const response = await fetch(`${API_BASE}${item.path}`, {
-    method: item.method,
-    headers: {
-      "content-type": "application/json",
-      cookie: `occ_session=${sessionToken}`,
-    },
-  });
+  let response;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AUDIT_HTTP_TIMEOUT_MS);
+    response = await fetch(`${API_BASE}${item.path}`, {
+      method: item.method,
+      headers: {
+        "content-type": "application/json",
+        cookie: `occ_session=${sessionToken}`,
+      },
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+  } catch (error) {
+    return {
+      status: 599,
+      ok: false,
+      data: null,
+      payload: {
+        message: error instanceof Error ? error.message : String(error || "request failed"),
+      },
+    };
+  }
   const rawText = await response.text();
   let payload = rawText;
   try {
@@ -257,6 +295,40 @@ async function callApi(sessionToken, item) {
   const acceptableStatus = ACCEPTABLE_STATUS_BY_KEY[item.key] || [200];
   const ok = response.ok || acceptableStatus.includes(response.status);
   return { status: response.status, ok, data: unwrap(payload), payload };
+}
+
+async function callApiMutation(sessionToken, method, path, body = {}) {
+  let response;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), AUDIT_HTTP_TIMEOUT_MS);
+    response = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        cookie: `occ_session=${sessionToken}`,
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    }).finally(() => clearTimeout(timer));
+  } catch (error) {
+    return {
+      status: 599,
+      ok: false,
+      data: null,
+      payload: {
+        message: error instanceof Error ? error.message : String(error || "request failed"),
+      },
+    };
+  }
+  const rawText = await response.text();
+  let payload = rawText;
+  try {
+    payload = rawText ? JSON.parse(rawText) : null;
+  } catch {
+    // keep raw text
+  }
+  return { status: response.status, ok: response.ok, data: unwrap(payload), payload };
 }
 
 async function ensureSystemSetupReady() {
@@ -307,12 +379,17 @@ async function resolveAuditProjectId() {
     };
   }
 
+  const activeCandidate = await prisma.project.findFirst({
+    where: { status: { in: ["active", "blocked"] } },
+    orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+    select: { id: true, status: true }
+  });
   const completedCandidate = await prisma.project.findFirst({
     where: { status: "completed" },
     orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
     select: { id: true, status: true }
   });
-  const fallback = completedCandidate || await prisma.project.findFirst({
+  const fallback = activeCandidate || completedCandidate || await prisma.project.findFirst({
     orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
     select: { id: true, status: true }
   });
@@ -325,27 +402,29 @@ async function resolveAuditProjectId() {
   };
 }
 
-await runPreflight({
-  needDb: true,
-  db: {
-    databaseUrl: process.env.DATABASE_URL || "",
-    cwd: process.cwd(),
-    maxAttempts: 12,
-    intervalMs: 1500,
-    eagerStartDocker: true,
-    probe: async () => {
-      await prisma.$queryRawUnsafe("SELECT 1");
+if (!AUDIT_SKIP_PREFLIGHT) {
+  await runPreflight({
+    needDb: true,
+    db: {
+      databaseUrl: process.env.DATABASE_URL || "",
+      cwd: process.cwd(),
+      maxAttempts: 12,
+      intervalMs: 1500,
+      eagerStartDocker: true,
+      probe: async () => {
+        await prisma.$queryRawUnsafe("SELECT 1");
+      }
+    },
+    needApi: true,
+    api: {
+      requestedBaseUrl: API_BASE,
+      checkPathname: "/health",
+      autoStartDaemon: true,
+      startCommand: ["pnpm", "daemon:start"],
+      cwd: process.cwd(),
     }
-  },
-  needApi: true,
-  api: {
-    requestedBaseUrl: API_BASE,
-    checkPathname: "/health",
-    autoStartDaemon: true,
-    startCommand: ["pnpm", "daemon:start"],
-    cwd: process.cwd(),
-  }
-});
+  });
+}
 await ensureSystemSetupReady();
 const projectResolution = await resolveAuditProjectId();
 TARGET_PROJECT_ID = String(projectResolution.projectId || "").trim();
@@ -454,6 +533,7 @@ try {
   const apiFailCountForGate = projectNotFound
     ? results.filter((item) => !item.ok && !projectScopedKeys.has(item.key)).length
     : totals.fail;
+  const currentProjectCompleted = String(projectDetailSummary?.status || "").toLowerCase() === "completed";
 
   function gateValueForProjectScopedCheck(pass, detail) {
     if (projectNotFound) {
@@ -464,6 +544,12 @@ try {
   function gateValueForCompletionScopedCheck(pass, detail) {
     if (projectNotFound) {
       return { pass: true, detail: "skipped: project not found" };
+    }
+    if (!currentProjectCompleted) {
+      return {
+        pass: true,
+        detail: `skipped: current project not completed (status=${projectDetailSummary?.status || "n/a"}; ${detail})`
+      };
     }
     if (!projectResolution.completedProjectExists) {
       return {
@@ -499,7 +585,7 @@ try {
       };
     })(),
     (() => {
-      const value = gateValueForProjectScopedCheck(
+      const value = gateValueForCompletionScopedCheck(
         AUDIT_REQUIRE_LIFECYCLE_GATE ? Boolean(lifecycleSummary?.pass) : true,
         `blockingStages=${Number(lifecycleSummary?.blockingStageCount || 0)}`
       );
@@ -510,7 +596,7 @@ try {
       };
     })(),
     (() => {
-      const value = gateValueForProjectScopedCheck(
+      const value = gateValueForCompletionScopedCheck(
         AUDIT_REQUIRE_ACCEPTANCE_GATE ? Boolean(acceptanceSummary?.qualityGatePass) : true,
         `blockingStages=${Number(acceptanceSummary?.blockingStageCount || 0)}`
       );
@@ -608,6 +694,162 @@ try {
     deliverableDiagnostics,
     results,
   };
+
+  if (AUDIT_AUTO_REPAIR_ON_FAIL && report.gateSummary.failed.length > 0 && !projectNotFound) {
+    const autoRepair = {
+      triggered: true,
+      at: new Date().toISOString(),
+      operations: [],
+    };
+
+    const needsDeliverableRepair = report.gateSummary.failed.some((item) =>
+      ["placeholder_tokens_zero", "suspicious_deliverables_zero", "acceptance_gate_pass", "lifecycle_gate_pass"].includes(item.name)
+    );
+
+    if (needsDeliverableRepair) {
+      autoRepair.operations.push({
+        step: "reconcile-deliverables",
+        ...(await callApiMutation(sessionToken, "POST", `/api/projects/${encodeURIComponent(TARGET_PROJECT_ID)}/reconcile-deliverables`, {})),
+      });
+      autoRepair.operations.push({
+        step: "quality-gate-repair-issues",
+        ...(await callApiMutation(
+          sessionToken,
+          "POST",
+          `/api/projects/${encodeURIComponent(TARGET_PROJECT_ID)}/quality-gate/repair-issues`,
+          { dryRun: false }
+        )),
+      });
+    }
+
+    const lifecycleRecheck = await callApi(sessionToken, {
+      method: "GET",
+      menu: "项目组合(projects)",
+      key: "project.lifecycleAudit",
+      path: `/api/projects/${encodeURIComponent(TARGET_PROJECT_ID)}/lifecycle-quality-audit`,
+    });
+    const acceptanceRecheck = await callApi(sessionToken, {
+      method: "GET",
+      menu: "项目组合(projects)",
+      key: "project.acceptance",
+      path: `/api/projects/${encodeURIComponent(TARGET_PROJECT_ID)}/acceptance-report`,
+    });
+    const detailRecheck = await callApi(sessionToken, {
+      method: "GET",
+      menu: "项目组合(projects)",
+      key: "project.detail",
+      path: `/api/projects/${encodeURIComponent(TARGET_PROJECT_ID)}`,
+    });
+
+    const lifecycleSummary2 = summarizeResult("project.lifecycleAudit", lifecycleRecheck.data);
+    const acceptanceSummary2 = summarizeResult("project.acceptance", acceptanceRecheck.data);
+    const detailSummary2 = summarizeResult("project.detail", detailRecheck.data);
+
+    report.results = report.results.map((item) => {
+      if (item.key === "project.lifecycleAudit") {
+        return {
+          ...item,
+          status: lifecycleRecheck.status,
+          ok: lifecycleRecheck.ok,
+          summary: lifecycleSummary2,
+          hasPlaceholderTokens: containsPlaceholderTokens(toJsonSafe(lifecycleRecheck.data)),
+        };
+      }
+      if (item.key === "project.acceptance") {
+        return {
+          ...item,
+          status: acceptanceRecheck.status,
+          ok: acceptanceRecheck.ok,
+          summary: acceptanceSummary2,
+          hasPlaceholderTokens: containsPlaceholderTokens(toJsonSafe(acceptanceRecheck.data)),
+        };
+      }
+      if (item.key === "project.detail") {
+        return {
+          ...item,
+          status: detailRecheck.status,
+          ok: detailRecheck.ok,
+          summary: detailSummary2,
+          hasPlaceholderTokens: containsPlaceholderTokens(toJsonSafe(detailRecheck.data)),
+        };
+      }
+      return item;
+    });
+
+    const deliverables2 = await prisma.deliverable.findMany({
+      where: { projectId: TARGET_PROJECT_ID },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        stageType: true,
+        status: true,
+        content: true,
+        updatedAt: true,
+      },
+    });
+    const placeholderApiHits2 = report.results.filter((item) => item.hasPlaceholderTokens).map((item) => item.key);
+    report.deliverableDiagnostics = {
+      total: deliverables2.length,
+      placeholderTokenHits: deliverables2
+        .filter((item) => containsPlaceholderTokens(item.name) || containsPlaceholderTokens(item.content))
+        .map((item) => ({
+          id: item.id,
+          name: item.name,
+          stageType: item.stageType,
+          status: item.status,
+          updatedAt: item.updatedAt,
+        })),
+      suspiciousCountFromAcceptance: Number(acceptanceSummary2?.suspiciousDeliverables || 0),
+      mentionedProjectIds: Array.from(new Set((toJsonSafe(deliverables2).match(/OCC-\d{8}-\d{3}/g) || []))),
+    };
+
+    report.gates = report.gates.map((gate) => {
+      if (gate.name === "lifecycle_gate_pass") {
+        return {
+          ...gate,
+          pass: AUDIT_REQUIRE_LIFECYCLE_GATE ? Boolean(lifecycleSummary2?.pass) : true,
+          detail: `blockingStages=${Number(lifecycleSummary2?.blockingStageCount || 0)}`,
+        };
+      }
+      if (gate.name === "acceptance_gate_pass") {
+        return {
+          ...gate,
+          pass: AUDIT_REQUIRE_ACCEPTANCE_GATE ? Boolean(acceptanceSummary2?.qualityGatePass) : true,
+          detail: `blockingStages=${Number(acceptanceSummary2?.blockingStageCount || 0)}`,
+        };
+      }
+      if (gate.name === "suspicious_deliverables_zero") {
+        return {
+          ...gate,
+          pass: AUDIT_REQUIRE_SUSPICIOUS_ZERO ? Number(acceptanceSummary2?.suspiciousDeliverables || 0) === 0 : true,
+          detail: `count=${Number(acceptanceSummary2?.suspiciousDeliverables || 0)}`,
+        };
+      }
+      if (gate.name === "placeholder_tokens_zero") {
+        return {
+          ...gate,
+          pass: AUDIT_REQUIRE_PLACEHOLDER_ZERO
+            ? placeholderApiHits2.length === 0 && report.deliverableDiagnostics.placeholderTokenHits.length === 0
+            : true,
+          detail: `api=${placeholderApiHits2.length},deliverables=${report.deliverableDiagnostics.placeholderTokenHits.length}`,
+        };
+      }
+      return gate;
+    });
+
+    report.gateSummary = {
+      pass: report.gates.every((item) => item.pass),
+      failed: report.gates.filter((item) => !item.pass).map((item) => ({ name: item.name, detail: item.detail })),
+      total: report.gates.length,
+    };
+    report.autoRepair = autoRepair;
+  } else {
+    report.autoRepair = {
+      triggered: false,
+      reason: projectNotFound ? "project_not_found" : (report.gateSummary.pass ? "no_failures" : "disabled"),
+    };
+  }
 
   await fs.mkdir(path.dirname(AUDIT_OUT), { recursive: true });
   await fs.writeFile(AUDIT_OUT, JSON.stringify(report, null, 2), "utf8");

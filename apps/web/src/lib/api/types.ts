@@ -191,12 +191,36 @@ export interface NotificationInboxItem {
   detail: string;
   actionLabel: string;
   to: string;
+  target?: {
+    tab?: string;
+    projectId?: string;
+    agentId?: string;
+    modal?: string;
+  };
   timestamp?: string;
   read: boolean;
   assignedTo?: string;
   confirmedBy?: string;
   workflowStatus: 'open' | 'acknowledged' | 'resolved';
   updatedAt: string;
+}
+
+export interface OpenClawProjectReport {
+  projectId: string;
+  projectName: string;
+  generatedAt: string;
+  summary: string;
+  highlights: string[];
+  blockers: string[];
+  nextActions: string[];
+  agentSummaries: Array<{
+    agentId: string;
+    name: string;
+    status: string;
+    lastActiveAt?: string;
+    currentTaskTitle?: string;
+  }>;
+  markdown: string;
 }
 
 export interface SystemAuditLog {
@@ -416,6 +440,56 @@ export interface SystemObservabilitySummary {
       totalSessions: number;
     };
   };
+  governance?: {
+    latestAudit?: {
+      available: boolean;
+      id?: string;
+      action?: string;
+      summary?: string;
+      actionCount?: number;
+      createdAt?: string;
+      message?: string;
+    };
+  };
+}
+
+export interface IntegrationReadinessItem {
+  key: 'openclaw' | 'hermes' | 'gitlab' | 'stitch';
+  label: string;
+  state: 'code_available' | 'configured' | 'reachable' | 'validated' | 'unavailable';
+  configured: boolean;
+  reachable: boolean;
+  validated: boolean;
+  message: string;
+  checkedAt: string;
+  details?: Record<string, unknown>;
+}
+
+export interface IntegrationReadinessSnapshot {
+  generatedAt: string;
+  integrations: IntegrationReadinessItem[];
+}
+
+export interface SystemDiagnosticCheck {
+  key: string;
+  passed: boolean;
+  message: string;
+}
+
+export interface SystemDiagnosticSuggestion {
+  key: string;
+  title: string;
+  message: string;
+  action: 'open-settings' | 'open-workflow-console' | 'run-model-routing-self-heal';
+}
+
+export interface SystemDiagnosticsReport {
+  generatedAt: string;
+  observability: SystemObservabilitySummary;
+  readiness: Record<string, unknown>;
+  integrations: IntegrationReadinessSnapshot;
+  checks: SystemDiagnosticCheck[];
+  suggestions: SystemDiagnosticSuggestion[];
 }
 
 export interface RuntimeRouteHealthItem {

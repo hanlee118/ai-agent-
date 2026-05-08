@@ -5,6 +5,7 @@ import { prisma } from "../db.js";
 import {
   addStageInputArtifact,
   addStageOutputArtifact,
+  approveWorkflowStageManual,
   createWorkflowFromTemplate,
   getActiveWorkflow,
   listWorkflowTemplates,
@@ -15,6 +16,7 @@ import {
 import { getHermesMcpRuntimeStatus, probeHermesMcpEndpoint } from "../workflow-v2/hermes-mcp.js";
 import { getWorkflowV2SchemaStatus } from "../workflow-v2/schema-ready.js";
 import { asRecord, asRecordArray, normalizeText } from "../workflow-v2/types.js";
+import { advanceProjectStageViaWorkflowV2, skipProjectStageViaWorkflowV2 } from "../workflow-v2/project-advancement-service.js";
 import { asyncRoute, sendError, sendSuccess } from "./utils.js";
 
 type CreateTemplateBody = {
@@ -31,6 +33,7 @@ type CreateTemplateBody = {
   outputContract?: unknown;
   acceptanceCriteria?: unknown;
   integrationConfig?: unknown;
+  stageTasks?: unknown;
   defaultTimeout?: unknown;
   allowParallel?: unknown;
 };
@@ -97,6 +100,53 @@ function parseBoolean(value: unknown, fallback: boolean) {
     return false;
   }
   return fallback;
+}
+
+async function withAdvanceTimeout<T>(task: Promise<T>, timeoutMs: number): Promise<T> {
+  const effectiveTimeout = Math.max(5_000, Math.round(timeoutMs));
+  return await new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`WORKFLOW_ADVANCE_TIMEOUT:${effectiveTimeout}ms`));
+    }, effectiveTimeout);
+    task.then((value) => {
+      clearTimeout(timer);
+      resolve(value);
+    }).catch((error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+async function findWorkflowForOverview(projectId: string) {
+  const activeWorkflow = await prisma.workflow.findFirst({
+    where: {
+      projectId,
+      status: "active"
+    },
+    include: {
+      stages: true,
+      template: true
+    },
+    orderBy: {
+      createdAt: "desc"
+    }
+  });
+  if (activeWorkflow) {
+    return activeWorkflow;
+  }
+  return prisma.workflow.findFirst({
+    where: {
+      projectId
+    },
+    include: {
+      stages: true,
+      template: true
+    },
+    orderBy: {
+      createdAt: "desc"
+    }
+  });
 }
 
 function summarizeStageArtifacts(outputArtifacts: unknown[]) {
@@ -425,6 +475,7 @@ export function createWorkflowsV2Router() {
         config: asRecord(item.config) ?? {}
       })),
       integrationConfig: asRecord(payload.integrationConfig) as Record<string, unknown> | undefined,
+      stageTasks: asRecord(payload.stageTasks) as Record<string, unknown> | undefined,
       defaultTimeout: payload.defaultTimeout === undefined ? null : Number(payload.defaultTimeout),
       allowParallel: Boolean(payload.allowParallel)
     });
@@ -634,16 +685,10 @@ export function createWorkflowsV2Router() {
       sendError(res, 400, "VALIDATION_ERROR", "projectId is required");
       return;
     }
-    let workflow: Awaited<ReturnType<typeof getActiveWorkflow>>;
-    try {
-      workflow = await getActiveWorkflow(projectId);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/no active workflow/i.test(message)) {
-        sendError(res, 404, "NOT_FOUND", message);
-        return;
-      }
-      throw error;
+    const workflow = await findWorkflowForOverview(projectId);
+    if (!workflow) {
+      sendError(res, 404, "NOT_FOUND", `No workflow found for project ${projectId}`);
+      return;
     }
     const assignedAgentIds = Array.from(new Set(
       workflow.stages.flatMap((stage) => asStringList(stage.assignedAgents))
@@ -667,6 +712,94 @@ export function createWorkflowsV2Router() {
       });
     }
     sendSuccess(res, buildWorkflowOverview(workflow, agentProfileMap));
+  }));
+
+  router.post("/projects/:projectId/advance", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+    const status = await getWorkflowV2SchemaStatus();
+    if (!status.ready) {
+      sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
+      return;
+    }
+    const projectId = normalizeText(req.params.projectId);
+    if (!projectId) {
+      sendError(res, 400, "VALIDATION_ERROR", "projectId is required");
+      return;
+    }
+    const payload = asRecord(req.body) ?? {};
+    const triggeredBy = normalizeText(payload.triggeredBy) || "ROLE_PM";
+    const reason = normalizeText(payload.reason) || "manual_advance";
+    const timeoutMs = Number(process.env.WORKFLOW_V2_ADVANCE_ROUTE_TIMEOUT_MS ?? 45_000);
+    try {
+      const result = await withAdvanceTimeout(
+        advanceProjectStageViaWorkflowV2({
+          projectId,
+          triggeredBy,
+          reason
+        }),
+        Number.isFinite(timeoutMs) ? timeoutMs : 45_000
+      );
+      sendSuccess(res, result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("WORKFLOW_ADVANCE_TIMEOUT:")) {
+        sendError(
+          res,
+          504,
+          "WORKFLOW_ADVANCE_TIMEOUT",
+          "项目推进执行超时，请稍后重试或切换 scripted 模式验证链路。"
+        );
+        return;
+      }
+      throw error;
+    }
+  }));
+
+  router.post("/projects/:projectId/skip-stage", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+    const status = await getWorkflowV2SchemaStatus();
+    if (!status.ready) {
+      sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
+      return;
+    }
+    const projectId = normalizeText(req.params.projectId);
+    if (!projectId) {
+      sendError(res, 400, "VALIDATION_ERROR", "projectId is required");
+      return;
+    }
+    const payload = asRecord(req.body) ?? {};
+    const triggeredBy = normalizeText(payload.triggeredBy) || "ROLE_PM";
+    const reason = normalizeText(payload.reason) || "external_service_unavailable";
+    const result = await skipProjectStageViaWorkflowV2({
+      projectId,
+      triggeredBy,
+      reason
+    });
+    sendSuccess(res, result);
+  }));
+
+  router.post("/stages/:stageId/manual-approve", validateBody(MutationPassthroughSchema), asyncRoute(async (req, res) => {
+    const status = await getWorkflowV2SchemaStatus();
+    if (!status.ready) {
+      sendError(res, 503, "SERVICE_UNAVAILABLE", `workflow-v2 schema not ready: ${status.reason || "unknown"}`);
+      return;
+    }
+    const stageId = normalizeText(req.params.stageId);
+    const payload = asRecord(req.body) ?? {};
+    const workflowId = normalizeText(payload.workflowId);
+    const role = normalizeText(payload.role) || "qa_lead";
+    const approvedBy = normalizeText(payload.approvedBy) || "ROLE_PM";
+    const reason = normalizeText(payload.reason) || "manual_approval";
+    if (!stageId || !workflowId) {
+      sendError(res, 400, "VALIDATION_ERROR", "stageId and workflowId are required");
+      return;
+    }
+    const result = await approveWorkflowStageManual({
+      workflowId,
+      stageId,
+      role,
+      approvedBy,
+      reason
+    });
+    sendSuccess(res, result);
   }));
 
   return router;

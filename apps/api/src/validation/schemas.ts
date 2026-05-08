@@ -6,7 +6,7 @@ export const MutationOptionalSchema = z.object({}).passthrough().optional().tran
 export const ProjectCreateSchema = z.object({
   name: z.string().trim().min(1, "项目名称不能为空").max(200).optional(),
   description: z.string({ error: "description is required" }).trim().min(1, "description is required").max(5000),
-  projectType: z.enum(["complete", "relay"]).default("complete"),
+  projectType: z.enum(["complete", "standalone", "relay"]).default("complete"),
   parentProjectId: z.string().trim().min(1).optional(),
   relaySourceStageId: z.string().trim().min(1).optional(),
   projectInputs: z.array(z.unknown()).optional(),
@@ -52,7 +52,8 @@ export const ProjectPostCreatePrepSchema = z.object({
   rawRequirements: z.string().optional(),
   prd: z.string().optional(),
   debateSummary: z.string().optional(),
-  discussionTrace: z.string().optional()
+  discussionTrace: z.string().optional(),
+  feedback: z.string().optional()
 });
 
 export const ProjectPostCreatePrepConfirmSchema = ProjectPostCreatePrepSchema.extend({
@@ -70,7 +71,11 @@ export const ProjectInterveneSchema = z.object({
 
 export const ProjectStageSubmitSchema = z.object({
   title: z.string().optional(),
-  content: z.string().trim().min(1, "content is required"),
+  content: z.string().trim().min(1, "content is required").optional(),
+  deliverables: z.array(z.object({
+    name: z.string().trim().min(1, "deliverables[].name is required"),
+    content: z.string().trim().min(1, "deliverables[].content is required")
+  })).optional(),
   designReview: z.unknown().optional(),
   finalizeApproval: z.boolean().optional()
 });
@@ -113,6 +118,20 @@ export const TaskDelegationCreateSchema = z.object({
   maxRetries: z.coerce.number().int().min(0).optional()
 });
 
+export const ClarificationCreateSchema = z.object({
+  requestedByAgentId: z.string().trim().min(1, "requestedByAgentId is required"),
+  question: z.string().trim().min(1, "question is required"),
+  targetAgentId: z.string().trim().optional(),
+  targetRole: z.string().trim().optional(),
+  deliverableId: z.string().trim().optional(),
+  timeoutSec: z.coerce.number().int().positive().optional()
+});
+
+export const ClarificationReplySchema = z.object({
+  respondedByAgentId: z.string().trim().min(1, "respondedByAgentId is required"),
+  response: z.string().trim().min(1, "response is required")
+});
+
 export const DelegationCompleteSchema = z.object({
   outputSummary: z.string().trim().min(1, "outputSummary is required"),
   outputPayloadJson: z.unknown().optional(),
@@ -138,7 +157,10 @@ export const RuntimeConfigUpdateSchema = z.object({
 export const ExecutionProtocolUpdateSchema = z.object({
   requireSkillEvidence: z.boolean().optional(),
   requireCollaborationHandoff: z.boolean().optional(),
-  blockDegradedWrites: z.boolean().optional()
+  blockDegradedWrites: z.boolean().optional(),
+  blockSecretLeak: z.boolean().optional(),
+  blockLargeFileCommit: z.boolean().optional(),
+  largeFileSizeThreshold: z.coerce.number().int().positive().optional()
 });
 
 export const UiPreferencesUpdateSchema = z.object({

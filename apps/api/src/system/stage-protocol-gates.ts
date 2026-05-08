@@ -63,7 +63,7 @@ const STAGE_CONTENT_RULES: Record<StageType, Array<{ key: string; label: string;
     { key: "constraints", label: "约束条件", patterns: [/约束条件|约束清单|关键约束|约束[:：]/i] },
     { key: "risks", label: "风险清单", patterns: [/风险清单|关键风险|风险[:：]/i] },
     { key: "acceptance", label: "验收标准", patterns: [/验收标准|成功标准|acceptance/i] },
-    { key: "milestone", label: "项目排期与里程碑", patterns: [/项目排期|里程碑|关键路径|raci|owner/i] }
+    { key: "stage_exit", label: "阶段退出标准与责任人", patterns: [/阶段退出标准|exit criteria|definition of done|dod|验收标准|负责人|owner|raci/i] }
   ],
   DESIGN: [
     { key: "prd_scope", label: "PRD 范围与功能清单", patterns: [/产品需求文档|prd|功能清单|非目标|mvp/i] },

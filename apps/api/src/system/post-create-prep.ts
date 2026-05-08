@@ -27,6 +27,7 @@ const ANALYSIS_SECTION_TITLE = "## 项目详情理解确认草案";
 const PREP_CONFIRM_SECTION_TITLE = "## 预备阶段用户确认";
 const REQUIRED_INPUT_NAMES = ["rawRequirements", "prd", "debateSummary"] as const;
 const PREP_DISCUSSION_TRACE_INPUT_NAME = "prepDiscussionTrace";
+const PREP_FEEDBACK_INPUT_NAME = "prepUserFeedback";
 const PREP_DISCUSSION_ROLE_IDS: RoleType[] = [
   "ROLE_PM",
   "ROLE_ANALYST",
@@ -77,6 +78,7 @@ export type ProjectPostCreatePrepStatus = {
     prd: string;
     debateSummary: string;
     discussionTrace: string;
+    feedback: string;
     confirmed: boolean;
     confirmedBy?: string;
     confirmedAt?: string;
@@ -227,8 +229,193 @@ function buildPrepDraftSnapshot(input: {
     prd: getInputContentByName(input.projectInputs, "prd"),
     debateSummary: getInputContentByName(input.projectInputs, "debateSummary"),
     discussionTrace: getInputContentByName(input.projectInputs, PREP_DISCUSSION_TRACE_INPUT_NAME),
+    feedback: getInputContentByName(input.projectInputs, PREP_FEEDBACK_INPUT_NAME),
     ...confirmation
   };
+}
+
+function hasStructuredPrepDiscussion(source: string) {
+  const text = String(source || "").trim();
+  if (!text) {
+    return false;
+  }
+  return /###\s*共识/i.test(text)
+    && /###\s*分歧与处理/i.test(text)
+    && /###\s*角色决策建议/i.test(text)
+    && /###\s*决策锚点/i.test(text);
+}
+
+function inspectPrepDiscussionTrace(source: string) {
+  const text = String(source || "").replace(/\r\n/g, "\n").trim();
+  if (!text) {
+    return {
+      hasTrace: false,
+      roleCount: 0,
+      hasModelRound: false
+    };
+  }
+  const roleMatches = Array.from(
+    text.matchAll(/###\s*\d+\.\s*.*\((ROLE_[A-Z_]+)\)/g)
+  );
+  const roleSet = new Set(
+    roleMatches.map((item) => String(item[1] || "").trim()).filter(Boolean)
+  );
+  const hasModelRound = /-\s*模式[:：]\s*model\b/i.test(text)
+    || /-\s*debateMode:\s*model\b/i.test(text);
+  return {
+    hasTrace: true,
+    roleCount: roleSet.size,
+    hasModelRound
+  };
+}
+
+function parseBooleanEnvFlag(value: string | undefined, defaultValue: boolean) {
+  if (typeof value !== "string") {
+    return defaultValue;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return defaultValue;
+  }
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return defaultValue;
+}
+
+function shouldEnforcePrepModelRound() {
+  const envOverride = process.env.PREP_DISCUSSION_ENFORCE_MODEL_ROUND;
+  if (typeof envOverride === "string" && envOverride.trim()) {
+    return parseBooleanEnvFlag(envOverride, false);
+  }
+  const runtimeMode = String(process.env.RUNTIME_MODE || "").trim().toLowerCase();
+  const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+  if (runtimeMode === "scripted" || nodeEnv === "test") {
+    return false;
+  }
+  return true;
+}
+
+function normalizePrepDocumentByName(
+  name: string,
+  content: string | undefined,
+  fallback?: {
+    discussion?: string;
+    analysis?: string;
+    requirement?: string;
+    trace?: string;
+  }
+) {
+  const normalizedName = normalizeKey(name);
+  const text = String(content || "").replace(/\r\n/g, "\n").trim();
+  if (normalizedName === normalizeKey("rawRequirements")) {
+    const body = text || "待补充用户原始诉求。";
+    if (/^#\s*rawrequirements\b/i.test(body) && /##\s*原始需求输入/i.test(body)) {
+      return body;
+    }
+    return [
+      "# rawRequirements",
+      "",
+      "## 原始需求输入",
+      body,
+      "",
+      "## 用户诉求提炼",
+      "- 待补充",
+      "",
+      "## 输入边界说明",
+      "- 本输入由预备阶段维护，供后续讨论与回填复用。"
+    ].join("\n");
+  }
+  if (normalizedName === normalizeKey("prd")) {
+    const analysis = String(fallback?.analysis || "").trim() || "待补充结构化需求草案。";
+    const requirement = String(fallback?.requirement || "").trim() || "需求确认单:\n- 目标: 待补充\n- In Scope: 待补充\n- Out of Scope: 待补充\n- 验收: 待补充\n- 产出: 待补充";
+    if (/^#\s*prd\b/i.test(text) && /##\s*结构化需求草案/i.test(text) && /##\s*需求确认单/i.test(text)) {
+      return text;
+    }
+    return [
+      "# prd",
+      "",
+      "## 结构化需求草案",
+      text || analysis,
+      "",
+      "## 需求确认单",
+      requirement
+    ].join("\n");
+  }
+  if (normalizedName === normalizeKey("debateSummary")) {
+    const body = text || String(fallback?.discussion || "").trim() || "待补充多Agent讨论结论。";
+    if (/^#\s*debatesummary\b/i.test(body) && /###\s*共识/i.test(body)) {
+      return body;
+    }
+    return [
+      "# debateSummary",
+      "",
+      hasStructuredPrepDiscussion(body)
+        ? body
+        : [
+          DISCUSSION_SECTION_TITLE,
+          "",
+          "### 共识",
+          "- 待补充",
+          "",
+          "### 分歧与处理",
+          "- 待补充",
+          "",
+          "### 角色决策建议",
+          "- 待补充",
+          "",
+          "### 决策锚点",
+          "- 待补充"
+        ].join("\n")
+    ].join("\n");
+  }
+  if (normalizedName === normalizeKey(PREP_DISCUSSION_TRACE_INPUT_NAME)) {
+    const body = text || String(fallback?.trace || "").trim();
+    if (body && /^#\s*prepdiscussiontrace\b/i.test(body) && /##\s*讨论回合记录/i.test(body)) {
+      return body;
+    }
+    return [
+      `# ${PREP_DISCUSSION_TRACE_INPUT_NAME}`,
+      "",
+      "- generatedAt: 未记录",
+      "- triggeredBy: manual_feedback",
+      "- phase: pre_stage_multi_agent_debate",
+      "- debateMode: fallback",
+      "- debateNote: 待补充",
+      "- backfillTargets: rawRequirements, prd, debateSummary",
+      "- sourceRawInput: 待补充原始需求",
+      "- sourceObjective: 待补充目标",
+      "",
+      "## 讨论回合记录",
+      "### 1. 需求分析师 (ROLE_ANALYST)",
+      "- 关注: 待补充",
+      "- 风险: 待补充",
+      "- 建议: 待补充",
+      "- 模式: fallback",
+      "- 模型: heuristic",
+      "- Provider: issue_engine",
+      "- 耗时(ms): 0"
+    ].join("\n");
+  }
+  if (normalizedName === normalizeKey(PREP_FEEDBACK_INPUT_NAME)) {
+    const body = text || "待补充用户反馈。";
+    if (/^#\s*prepuserfeedback\b/i.test(body)) {
+      return body;
+    }
+    return [
+      `# ${PREP_FEEDBACK_INPUT_NAME}`,
+      "",
+      "## 最新用户反馈",
+      body,
+      "",
+      "## 期望修订点",
+      "- 待补充"
+    ].join("\n");
+  }
+  return text;
 }
 
 function normalizeProjectType(value: string) {
@@ -299,6 +486,21 @@ function normalizeRawRequirementsSeed(source: string) {
   return normalizeRawInputSeed(stripPrepGeneratedSections(explicitRawInput || text));
 }
 
+function hasMeaningfulPrepFeedback(source: string) {
+  const text = String(source || "").replace(/\r\n/g, "\n").trim();
+  if (!text) {
+    return false;
+  }
+  const normalized = text
+    .replace(/^#\s*prepuserfeedback\s*$/gim, "")
+    .replace(/^##\s*最新用户反馈\s*$/gim, "")
+    .replace(/^##\s*期望修订点\s*$/gim, "")
+    .replace(/^\s*-\s*待补充\s*$/gim, "")
+    .replace(/待补充用户反馈。?/g, "")
+    .trim();
+  return normalized.length > 0;
+}
+
 function extractStructuredLines(description: string, fallback: string) {
   const raw = stripMarkdownDecorators(description).replace(/\r/g, "\n");
   const chunks = raw
@@ -317,7 +519,8 @@ function inferRawInputFromProject(input: {
   const description = normalizeRawInputSeed(stripPrepGeneratedSections(input.projectDescription));
   const prd = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "prd")));
   const debateSummary = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, "debateSummary")));
-  const candidates = [rawRequirements, description, prd, debateSummary]
+  const feedback = normalizeRawInputSeed(stripPrepGeneratedSections(getInputContentByName(input.projectInputs, PREP_FEEDBACK_INPUT_NAME)));
+  const candidates = [rawRequirements, description, prd, debateSummary, feedback]
     .map((item) => sanitizeLine(item, ""))
     .filter(Boolean);
   return candidates[0] || "待补充原始需求";
@@ -824,6 +1027,7 @@ function buildSeededInputs(issue: PrepIssueLike, blocks: {
   analysis: string;
   requirement: string;
   trace: string;
+  feedback?: string;
 }) {
   return buildSeededInputsFromRawInput({
     rawInput: sanitizeLine(issue.rawInput, "待补充原始需求"),
@@ -838,6 +1042,7 @@ function buildSeededInputsFromRawInput(input: {
     analysis: string;
     requirement: string;
     trace: string;
+    feedback?: string;
   };
 }) {
   const normalizedRawInput = sanitizeLine(input.rawInput, "待补充原始需求");
@@ -876,6 +1081,18 @@ function buildSeededInputsFromRawInput(input: {
     input.blocks.debate
   ].join("\n");
   const discussionTraceContent = String(input.blocks.trace || "").trim();
+  const feedbackSeed = String(input.blocks.feedback || "").trim();
+  const feedbackContent = hasMeaningfulPrepFeedback(feedbackSeed)
+    ? normalizePrepDocumentByName(PREP_FEEDBACK_INPUT_NAME, feedbackSeed)
+    : [
+      `# ${PREP_FEEDBACK_INPUT_NAME}`,
+      "",
+      "## 最新用户反馈",
+      "待补充用户反馈。",
+      "",
+      "## 期望修订点",
+      "- 待补充",
+    ].join("\n");
   return [
     {
       name: "rawRequirements",
@@ -900,6 +1117,12 @@ function buildSeededInputsFromRawInput(input: {
       type: "document",
       description: "项目创建后自动生成：多Agent讨论回合日志（用于预备阶段展示与审阅）",
       content: discussionTraceContent
+    },
+    {
+      name: PREP_FEEDBACK_INPUT_NAME,
+      type: "document",
+      description: "预备阶段用户反馈与修订诉求（用于再次触发讨论时引导Agent修改）",
+      content: feedbackContent
     }
   ] as const;
 }
@@ -938,9 +1161,12 @@ export async function evaluateProjectPostCreatePrepStatus(input: {
     });
   const existingNameKeys = new Set(projectInputs.map((item) => normalizeKey(item.name)));
   const draft = buildPrepDraftSnapshot({ description, projectInputs });
+  const enforceModelRound = shouldEnforcePrepModelRound();
   const missingItems: string[] = [];
   if (!draft.discussion) {
     missingItems.push("多Agent讨论结论");
+  } else if (!hasStructuredPrepDiscussion(draft.discussion)) {
+    missingItems.push("多Agent讨论结论(结构不完整)");
   }
   if (!draft.analysis) {
     missingItems.push("项目详情理解确认草案");
@@ -953,6 +1179,20 @@ export async function evaluateProjectPostCreatePrepStatus(input: {
     if (!getInputContentByName(projectInputs, name)) {
       missingItems.push(`项目输入:${name}(内容为空)`);
     }
+  }
+  const traceQuality = inspectPrepDiscussionTrace(draft.discussionTrace);
+  if (!traceQuality.hasTrace) {
+    missingItems.push("多Agent讨论日志");
+  } else {
+    if (traceQuality.roleCount < 3) {
+      missingItems.push("多Agent讨论日志(角色回合不足)");
+    }
+    if (enforceModelRound && !traceQuality.hasModelRound) {
+      missingItems.push("多Agent讨论日志(未检测到真实模型回合)");
+    }
+  }
+  if (!hasMeaningfulPrepFeedback(draft.feedback)) {
+    missingItems.push("用户反馈与修订记录");
   }
   if (!draft.confirmed) {
     missingItems.push("用户确认预备内容");
@@ -970,6 +1210,7 @@ export async function runProjectPostCreatePrep(input: {
   projectId: string;
   issue?: IssueRecord | null;
   triggeredBy?: string;
+  feedback?: string;
 }) {
   const [project, projectInputs] = await Promise.all([
     prisma.project.findUnique({
@@ -984,6 +1225,31 @@ export async function runProjectPostCreatePrep(input: {
   if (!project) {
     throw new Error(`PROJECT_NOT_FOUND:${input.projectId}`);
   }
+  const normalizedFeedbackOverride = typeof input.feedback === "string"
+    ? normalizePrepDocumentByName(PREP_FEEDBACK_INPUT_NAME, input.feedback)
+    : "";
+  const projectInputsForPrep = normalizedFeedbackOverride
+    ? (() => {
+      const clone = projectInputs.map((item) => ({ ...item }));
+      const feedbackIndex = clone.findIndex((item) => normalizeKey(item.name) === normalizeKey(PREP_FEEDBACK_INPUT_NAME));
+      if (feedbackIndex >= 0) {
+        clone[feedbackIndex] = {
+          ...clone[feedbackIndex],
+          content: normalizedFeedbackOverride,
+          inputSource: "manual"
+        };
+      } else {
+        clone.push({
+          id: "prep-feedback-override",
+          name: PREP_FEEDBACK_INPUT_NAME,
+          content: normalizedFeedbackOverride,
+          description: "预备阶段用户反馈与修订诉求（用于再次触发讨论时引导Agent修改）",
+          inputSource: "manual"
+        });
+      }
+      return clone;
+    })()
+    : projectInputs;
   const issue = input.issue ?? await getIssueByProjectId(input.projectId);
   const source: ProjectPostCreatePrepSource = {
     projectId: project.id,
@@ -1005,7 +1271,7 @@ export async function runProjectPostCreatePrep(input: {
   const prepIssueLike = await resolvePrepIssueLike({
     issue: source.issue,
     projectDescription: source.projectDescription,
-    projectInputs
+    projectInputs: projectInputsForPrep
   });
   const requirementBlock = buildRequirementContractBlock(prepIssueLike);
   const debateBlock = buildDebateConclusionSection(prepIssueLike);
@@ -1030,7 +1296,8 @@ export async function runProjectPostCreatePrep(input: {
     debate: debateBlock,
     analysis: analysisBlock,
     requirement: requirementBlock,
-    trace: discussionTraceBlock
+    trace: discussionTraceBlock,
+    feedback: normalizedFeedbackOverride || getInputContentByName(projectInputsForPrep, PREP_FEEDBACK_INPUT_NAME)
   });
 
   const now = new Date();
@@ -1062,7 +1329,9 @@ export async function runProjectPostCreatePrep(input: {
             content: item.content,
             validationStatus: "valid",
             validationErrors: [],
-            inputSource: "template_generated"
+            inputSource: item.name === PREP_FEEDBACK_INPUT_NAME && hasMeaningfulPrepFeedback(String(item.content || ""))
+              ? "manual"
+              : "template_generated"
           }
         });
       } else {
@@ -1073,11 +1342,13 @@ export async function runProjectPostCreatePrep(input: {
             type: item.type,
             description: item.description,
             content: item.content,
-            validationStatus: "valid",
-            validationErrors: [],
-            inputSource: "template_generated"
-          }
-        });
+              validationStatus: "valid",
+              validationErrors: [],
+              inputSource: item.name === PREP_FEEDBACK_INPUT_NAME && hasMeaningfulPrepFeedback(String(item.content || ""))
+                ? "manual"
+                : "template_generated"
+            }
+          });
       }
     }
 
@@ -1096,6 +1367,9 @@ export async function runProjectPostCreatePrep(input: {
         priority: "normal"
       }
     });
+  }, {
+    maxWait: 30_000,
+    timeout: 120_000
   });
 
   return evaluateProjectPostCreatePrepStatus({
@@ -1114,6 +1388,7 @@ export async function saveProjectPostCreatePrepDraft(input: {
     prd?: string;
     debateSummary?: string;
     discussionTrace?: string;
+    feedback?: string;
   };
   triggeredBy?: string;
 }) {
@@ -1143,7 +1418,8 @@ export async function saveProjectPostCreatePrepDraft(input: {
   const hasPrd = typeof draftInput.prd === "string";
   const hasDebateSummary = typeof draftInput.debateSummary === "string";
   const hasDiscussionTrace = typeof draftInput.discussionTrace === "string";
-  if (!hasDiscussion && !hasAnalysis && !hasRawRequirements && !hasPrd && !hasDebateSummary && !hasDiscussionTrace) {
+  const hasFeedback = typeof draftInput.feedback === "string";
+  if (!hasDiscussion && !hasAnalysis && !hasRawRequirements && !hasPrd && !hasDebateSummary && !hasDiscussionTrace && !hasFeedback) {
     return evaluateProjectPostCreatePrepStatus({
       projectId: project.id,
       description: project.description,
@@ -1186,7 +1462,12 @@ export async function saveProjectPostCreatePrepDraft(input: {
     }
 
     const upsertInputContent = async (
-      name: "rawRequirements" | "prd" | "debateSummary" | typeof PREP_DISCUSSION_TRACE_INPUT_NAME,
+      name:
+        | "rawRequirements"
+        | "prd"
+        | "debateSummary"
+        | typeof PREP_DISCUSSION_TRACE_INPUT_NAME
+        | typeof PREP_FEEDBACK_INPUT_NAME,
       content: string | undefined
     ) => {
       if (typeof content !== "string") {
@@ -1195,15 +1476,16 @@ export async function saveProjectPostCreatePrepDraft(input: {
       const key = normalizeKey(name);
       const existing = byKey.get(key);
       const normalizedContent = String(content).trim();
+      const normalizedStructuredContent = normalizePrepDocumentByName(name, normalizedContent);
       if (existing) {
         await tx.projectInput.update({
           where: { id: existing.id },
           data: {
             type: "document",
-            content: normalizedContent,
+            content: normalizedStructuredContent,
             description: existing.description || `预备阶段草案编辑：${name}`,
-            validationStatus: normalizedContent ? "valid" : "warning",
-            validationErrors: normalizedContent ? [] : ["内容为空"],
+            validationStatus: normalizedStructuredContent ? "valid" : "warning",
+            validationErrors: normalizedStructuredContent ? [] : ["内容为空"],
             inputSource: "manual"
           }
         });
@@ -1215,9 +1497,9 @@ export async function saveProjectPostCreatePrepDraft(input: {
           name,
           type: "document",
           description: `预备阶段草案编辑：${name}`,
-          content: normalizedContent || undefined,
-          validationStatus: normalizedContent ? "valid" : "warning",
-          validationErrors: normalizedContent ? [] : ["内容为空"],
+          content: normalizedStructuredContent || undefined,
+          validationStatus: normalizedStructuredContent ? "valid" : "warning",
+          validationErrors: normalizedStructuredContent ? [] : ["内容为空"],
           inputSource: "manual"
         }
       });
@@ -1227,6 +1509,10 @@ export async function saveProjectPostCreatePrepDraft(input: {
     await upsertInputContent("prd", draftInput.prd);
     await upsertInputContent("debateSummary", draftInput.debateSummary);
     await upsertInputContent(PREP_DISCUSSION_TRACE_INPUT_NAME, draftInput.discussionTrace);
+    await upsertInputContent(PREP_FEEDBACK_INPUT_NAME, draftInput.feedback);
+  }, {
+    maxWait: 30_000,
+    timeout: 120_000
   });
 
   return evaluateProjectPostCreatePrepStatus({
@@ -1247,6 +1533,7 @@ export async function confirmProjectPostCreatePrep(input: {
     prd?: string;
     debateSummary?: string;
     discussionTrace?: string;
+    feedback?: string;
   };
 }) {
   if (input.draft) {
@@ -1313,6 +1600,9 @@ export async function confirmProjectPostCreatePrep(input: {
         priority: "normal"
       }
     });
+  }, {
+    maxWait: 30_000,
+    timeout: 120_000
   });
 
   return evaluateProjectPostCreatePrepStatus({

@@ -143,6 +143,27 @@ function normalizeProjectType(input: unknown) {
   return "complete" as const;
 }
 
+function isProjectModeTemplateCompatible(input: {
+  projectType: "complete" | "standalone" | "relay";
+  workflowTemplateKey: unknown;
+}) {
+  const normalizedTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
+  const templateKey = normalizedTemplateKey || "standard_software_development";
+  if (input.projectType === "complete") {
+    return templateKey === "standard_software_development"
+      || templateKey === "full"
+      || templateKey === "lean"
+      || templateKey === "maintenance"
+      || templateKey === "none";
+  }
+  return templateKey === "none"
+    || templateKey === "requirements_design"
+    || templateKey === "visual_design"
+    || templateKey === "tech_design"
+    || templateKey === "code_dev"
+    || templateKey === "qa_acceptance";
+}
+
 function applyTemplateRolePlan(input: {
   recommendedRoleIds: RoleType[];
   workflowTemplateKey: unknown;
@@ -1239,6 +1260,13 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
     const autoStartWorkflow = normalizeOptionalBoolean(payload.autoStartWorkflow);
     if (projectType === "relay" && !parentProjectId) {
       sendError(res, 400, "VALIDATION_ERROR", "relay mode requires parentProjectId");
+      return;
+    }
+    if (!isProjectModeTemplateCompatible({ projectType, workflowTemplateKey })) {
+      const message = projectType === "complete"
+        ? "workflowTemplateKey must be standard_software_development or none when projectType=complete"
+        : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance/none for standalone or relay projectType";
+      sendError(res, 400, "VALIDATION_ERROR", message);
       return;
     }
     const requiredQuestions = issue.questions.filter((question) => question.required);

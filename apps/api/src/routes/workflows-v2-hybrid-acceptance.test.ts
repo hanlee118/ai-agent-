@@ -358,13 +358,9 @@ test("workflow-v2 hybrid acceptance: hermes + openclaw stage execution and knowl
   assert.equal(startRes.status, 200);
   assert.equal(startRes.body.success, true);
 
-  let workflow = await prismaClient.workflow.findUnique({ where: { id: workflowId } });
+  const workflow = await prismaClient.workflow.findUnique({ where: { id: workflowId } });
   assert.ok(workflow);
-  for (let retry = 0; retry < 30 && workflow?.status !== "completed"; retry += 1) {
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    workflow = await prismaClient.workflow.findUnique({ where: { id: workflowId } });
-  }
-  assert.equal(workflow?.status, "completed");
+  assert.equal(workflow.status, "completed");
 
   const stages = await prismaClient.workflowStage.findMany({
     where: { workflowId },

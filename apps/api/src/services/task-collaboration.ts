@@ -1,4 +1,5 @@
 import type {
+  RoleType,
   TaskBlockedReason,
   TaskDelegationSummary,
   TaskDependencySummary,
@@ -10,6 +11,26 @@ import type {
 const GITLAB_BASE_URL = String(process.env.GITLAB_BASE_URL || "https://gitlab.com").trim().replace(/\/$/, "");
 
 const DONE_STATUSES = new Set(["done", "completed"]);
+const ROLE_TO_DEFAULT_OWNER: Partial<Record<RoleType, string>> = {
+  ROLE_ASSISTANT: "main",
+  ROLE_PM: "project_manager",
+  ROLE_ANALYST: "requirements_analyst",
+  ROLE_PRODUCT: "product_director",
+  ROLE_DESIGN: "jeremy",
+  ROLE_ARCH: "rd_director",
+  ROLE_DEV: "rd_manager",
+  ROLE_QA: "qa_engineer",
+  ROLE_HR: "hr_director"
+};
+
+function resolveOwnerAgentId(ownerAgentId?: string | null, assignee?: string | null) {
+  const explicitOwner = String(ownerAgentId || "").trim();
+  if (explicitOwner) {
+    return explicitOwner;
+  }
+  const roleId = String(assignee || "").trim() as RoleType;
+  return ROLE_TO_DEFAULT_OWNER[roleId] || "";
+}
 
 function toIsoString(value?: Date | null) {
   return value ? value.toISOString() : undefined;
@@ -127,6 +148,14 @@ export function deriveTaskBlockedReason(input: {
   delegationSummary?: TaskDelegationSummary[];
   gitlab?: TaskGitLabSyncInfo;
 }): TaskBlockedReason | undefined {
+  if (input.status === "pending_approval" || input.projectPendingApproval) {
+    return {
+      code: "pending_approval",
+      label: formatBlockedReasonLabel("pending_approval"),
+      detail: "当前任务或所在项目正在等待人工审批/验收。"
+    };
+  }
+
   const blockingDependency = (input.dependencies || []).find(
     (item) => item.type === "blocks" && item.dependsOnTaskStatus && !DONE_STATUSES.has(item.dependsOnTaskStatus)
   );
@@ -137,14 +166,6 @@ export function deriveTaskBlockedReason(input: {
       detail: `依赖任务 ${blockingDependency.dependsOnTaskTitle || blockingDependency.dependsOnTaskId} 尚未完成。`,
       dependsOnTaskId: blockingDependency.dependsOnTaskId,
       dependsOnTaskTitle: blockingDependency.dependsOnTaskTitle
-    };
-  }
-
-  if (input.status === "pending_approval" || input.projectPendingApproval) {
-    return {
-      code: "pending_approval",
-      label: formatBlockedReasonLabel("pending_approval"),
-      detail: "当前任务或所在项目正在等待人工审批/验收。"
     };
   }
 
@@ -186,6 +207,14 @@ export function deriveTaskNextAction(input: {
   blockedReason?: TaskBlockedReason;
   delegationSummary?: TaskDelegationSummary[];
 }): TaskNextAction | undefined {
+  if (input.blockedReason?.code === "pending_approval") {
+    return {
+      code: "waiting_for_approval",
+      label: formatNextActionLabel("waiting_for_approval"),
+      detail: "当前阶段已提交验收，等待项目经理审批。"
+    };
+  }
+
   if (!input.ownerAgentId) {
     return {
       code: "waiting_for_owner",
@@ -229,7 +258,7 @@ export function deriveTaskNextAction(input: {
     };
   }
 
-  if (input.status === "pending_approval" || input.blockedReason?.code === "pending_approval") {
+  if (input.status === "pending_approval") {
     return {
       code: "waiting_for_approval",
       label: formatNextActionLabel("waiting_for_approval"),
@@ -288,6 +317,7 @@ export function buildTaskCollaboration(input: {
   status: string;
   description: string;
   syncPolicy?: string | null;
+  assignee?: string | null;
   ownerAgentId?: string | null;
   reviewAgentId?: string | null;
   projectPendingApproval?: boolean;
@@ -325,6 +355,7 @@ export function buildTaskCollaboration(input: {
     lastSyncHash: string | null;
   } | null;
 }) {
+  const resolvedOwnerAgentId = resolveOwnerAgentId(input.ownerAgentId, input.assignee);
   const dependencies = buildTaskDependencySummary(input.dependencies || []);
   const delegationSummary = buildDelegationSummary(input.delegations || []);
   const preliminaryGitlab = buildTaskGitLabInfo({
@@ -342,7 +373,7 @@ export function buildTaskCollaboration(input: {
     gitlab: preliminaryGitlab
   });
   const nextAction = deriveTaskNextAction({
-    ownerAgentId: input.ownerAgentId,
+    ownerAgentId: resolvedOwnerAgentId || undefined,
     reviewAgentId: input.reviewAgentId,
     status: input.status,
     blockedReason,
@@ -357,6 +388,7 @@ export function buildTaskCollaboration(input: {
   });
 
   return {
+    resolvedOwnerAgentId: resolvedOwnerAgentId || undefined,
     blockedReason,
     nextAction,
     dependencies,

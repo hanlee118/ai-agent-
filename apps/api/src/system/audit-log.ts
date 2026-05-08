@@ -1,5 +1,5 @@
 import type { AuditLogItem } from "@occ/shared";
-import { prisma } from "../db.js";
+import { prisma, withPrismaReadRetry } from "../db.js";
 
 export async function writeAuditLog(input: {
   actorType: AuditLogItem["actorType"];
@@ -27,11 +27,12 @@ export async function writeAuditLog(input: {
   });
 }
 
-export async function listAuditLogs(limit = 50): Promise<AuditLogItem[]> {
-  const logs = await prisma.auditLog.findMany({
+export async function listAuditLogs(limit = 20, offset = 0): Promise<AuditLogItem[]> {
+  const logs = await withPrismaReadRetry("findMany", () => prisma.auditLog.findMany({
     orderBy: { createdAt: "desc" },
-    take: Math.min(Math.max(limit, 1), 200)
-  });
+    take: Math.min(Math.max(limit, 1), 100),
+    skip: Math.max(offset, 0)
+  }));
 
   return logs.map((log) => ({
     id: log.id,
@@ -46,4 +47,18 @@ export async function listAuditLogs(limit = 50): Promise<AuditLogItem[]> {
     ipAddress: log.ipAddress ?? undefined,
     createdAt: log.createdAt.toISOString()
   }));
+}
+
+export function summarizeAuditLogs(
+  logs: AuditLogItem[],
+  maxLength = 200
+): AuditLogItem[] {
+  const safe = Math.max(40, Math.floor(maxLength));
+  return logs.map((log) => {
+    const detail = String(log.detail || "");
+    return {
+      ...log,
+      detail: detail.length > safe ? `${detail.slice(0, safe)}...` : (detail || undefined)
+    };
+  });
 }

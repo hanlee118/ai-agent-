@@ -17,9 +17,59 @@ type WorkflowTemplateSeed = {
   integrationConfig?: Prisma.InputJsonValue;
   defaultTimeout: number | null;
   allowParallel: boolean;
+  stageTasks?: Prisma.InputJsonValue;
 };
 
 export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
+  {
+    key: "audit_inspection",
+    name: "巡检治理",
+    category: "ops",
+    description: "GitLab 工程治理巡检（MR 生命周期、Issue 关联、分支命名）",
+    isStandalone: true,
+    standaloneCategory: "audit",
+    executorConfig: {
+      type: "agent",
+      agentRole: "Auditor",
+      requiredCapabilities: ["gitlab_audit", "governance"],
+      modelPreference: "openai/gpt-5.3-codex"
+    },
+    inputSchema: {
+      type: "object",
+      properties: { trigger: { type: "string" } },
+      required: []
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        scannedCount: { type: "number" },
+        actions: { type: "array" }
+      },
+      required: ["scannedCount"]
+    },
+    inputContract: {
+      requiresExternalInput: false,
+      allowedInputTypes: [],
+      inputValidationRules: []
+    },
+    outputContract: {
+      deliverables: ["auditReport"],
+      handoffFormat: "json",
+      archiveLocation: "system_audit"
+    },
+    acceptanceCriteria: [
+      { type: "artifact_exists", config: { artifact: "auditReport", minLength: 20 } }
+    ],
+    defaultTimeout: 90,
+    allowParallel: false,
+    stageTasks: {
+      ACCEPT: [
+        { title: "扫描打开中的 MR", assignedRole: "ROLE_QA" },
+        { title: "标记规范异常", assignedRole: "ROLE_QA", dependsOn: ["扫描打开中的 MR"] },
+        { title: "输出巡检报告", assignedRole: "ROLE_PM", dependsOn: ["标记规范异常"] }
+      ]
+    }
+  },
   {
     key: "requirements_design",
     name: "需求设计",
@@ -54,7 +104,15 @@ export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
     },
     acceptanceCriteria: [{ type: "artifact_exists", config: { artifact: "prd", minLength: 800 } }],
     defaultTimeout: 120,
-    allowParallel: false
+    allowParallel: false,
+    stageTasks: {
+      ANALYSIS: [
+        { title: "需求初筛", description: "冲突检测、风险分析与约束确认", assignedRole: "ROLE_ANALYST" },
+        { title: "历史经验检索", description: "检索可复用的历史方案与风险模式", assignedRole: "ROLE_ANALYST", dependsOn: ["需求初筛"] },
+        { title: "PRD 撰写", description: "形成结构化产品需求文档", assignedRole: "ROLE_PRODUCT", dependsOn: ["历史经验检索"] },
+        { title: "项目排期方案", description: "产出里程碑与资源计划", assignedRole: "ROLE_PM", dependsOn: ["PRD 撰写"] }
+      ]
+    }
   },
   {
     key: "visual_design",
@@ -94,7 +152,15 @@ export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
     ],
     integrationConfig: { useStitch: true, requiredTools: ["figma", "stitch"] },
     defaultTimeout: 180,
-    allowParallel: false
+    allowParallel: false,
+    stageTasks: {
+      DESIGN: [
+        { title: "设计目标与约束提炼", assignedRole: "ROLE_PRODUCT" },
+        { title: "视觉设计草稿", assignedRole: "ROLE_DESIGN", dependsOn: ["设计目标与约束提炼"] },
+        { title: "设计审查", assignedRole: "ROLE_DESIGN", dependsOn: ["视觉设计草稿"] },
+        { title: "设计定稿与标注", assignedRole: "ROLE_DESIGN", dependsOn: ["设计审查"] }
+      ]
+    }
   },
   {
     key: "tech_design",
@@ -130,7 +196,13 @@ export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
     },
     acceptanceCriteria: [{ type: "artifact_exists", config: { artifact: "techSpec" } }],
     defaultTimeout: 150,
-    allowParallel: false
+    allowParallel: false,
+    stageTasks: {
+      DEV: [
+        { title: "技术方案选型", assignedRole: "ROLE_ARCH" },
+        { title: "技术方案评审", assignedRole: "ROLE_ARCH", dependsOn: ["技术方案选型"] }
+      ]
+    }
   },
   {
     key: "code_dev",
@@ -169,7 +241,14 @@ export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
       { type: "auto_check", config: { validator: "no_placeholder", artifact: "sourceCode" } }
     ],
     defaultTimeout: 300,
-    allowParallel: true
+    allowParallel: true,
+    stageTasks: {
+      DEV: [
+        { title: "代码实现（分模块）", assignedRole: "ROLE_DEV" },
+        { title: "联调与部署", assignedRole: "ROLE_DEV", dependsOn: ["代码实现（分模块）"] },
+        { title: "实现结果说明", assignedRole: "ROLE_DEV", dependsOn: ["联调与部署"] }
+      ]
+    }
   },
   {
     key: "qa_acceptance",
@@ -208,7 +287,17 @@ export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
       { type: "manual_approval", config: { role: "qa_lead" } }
     ],
     defaultTimeout: 240,
-    allowParallel: false
+    allowParallel: false,
+    stageTasks: {
+      ACCEPT: [
+        { title: "测试用例编写", assignedRole: "ROLE_QA" },
+        { title: "自动化测试执行", assignedRole: "ROLE_QA", dependsOn: ["测试用例编写"] },
+        { title: "性能测试执行", assignedRole: "ROLE_QA", dependsOn: ["自动化测试执行"] },
+        { title: "用户验收测试", assignedRole: "ROLE_QA", dependsOn: ["性能测试执行"] },
+        { title: "产品文档回填", assignedRole: "ROLE_QA", dependsOn: ["用户验收测试"] },
+        { title: "复盘报告", assignedRole: "ROLE_PM", dependsOn: ["产品文档回填"] }
+      ]
+    }
   },
   {
     key: "standard_software_development",
@@ -232,7 +321,162 @@ export const WORKFLOW_V2_DEFAULT_TEMPLATES: WorkflowTemplateSeed[] = [
     },
     acceptanceCriteria: [],
     defaultTimeout: null,
-    allowParallel: false
+    allowParallel: false,
+    stageTasks: {
+      INIT: [
+        { title: "项目边界定义", assignedRole: "ROLE_PM" },
+        { title: "团队角色确认", assignedRole: "ROLE_PM", dependsOn: ["项目边界定义"] },
+        { title: "章程撰写", assignedRole: "ROLE_PM", dependsOn: ["团队角色确认"] },
+        { title: "章程评审", assignedRole: "ROLE_ARCH", dependsOn: ["章程撰写"] }
+      ],
+      ANALYSIS: [
+        { title: "需求初筛", assignedRole: "ROLE_ANALYST" },
+        { title: "历史经验检索", assignedRole: "ROLE_ANALYST", dependsOn: ["需求初筛"] },
+        { title: "PRD 撰写", assignedRole: "ROLE_PRODUCT", dependsOn: ["历史经验检索"] },
+        { title: "PRD 技术可行性评审", assignedRole: "ROLE_DEV", dependsOn: ["PRD 撰写"] },
+        { title: "项目排期方案", assignedRole: "ROLE_PM", dependsOn: ["PRD 技术可行性评审"] },
+        { title: "排期评审", assignedRole: "ROLE_PM", dependsOn: ["项目排期方案"] }
+      ],
+      DESIGN: [
+        { title: "设计目标与约束提炼", assignedRole: "ROLE_PRODUCT" },
+        { title: "视觉设计草稿", assignedRole: "ROLE_DESIGN", dependsOn: ["设计目标与约束提炼"] },
+        { title: "设计审查（内部+外部）", assignedRole: "ROLE_DESIGN", dependsOn: ["视觉设计草稿"] },
+        { title: "设计定稿与标注", assignedRole: "ROLE_DESIGN", dependsOn: ["设计审查（内部+外部）"] }
+      ],
+      DEV: [
+        { title: "技术方案选型", assignedRole: "ROLE_ARCH" },
+        { title: "技术方案评审", assignedRole: "ROLE_ARCH", dependsOn: ["技术方案选型"] },
+        { title: "代码实现（分模块）", assignedRole: "ROLE_DEV", dependsOn: ["技术方案评审"] },
+        { title: "联调与部署", assignedRole: "ROLE_DEV", dependsOn: ["代码实现（分模块）"] },
+        { title: "实现结果说明", assignedRole: "ROLE_DEV", dependsOn: ["联调与部署"] }
+      ],
+      ACCEPT: [
+        { title: "测试用例编写", assignedRole: "ROLE_QA" },
+        { title: "自动化测试执行", assignedRole: "ROLE_QA", dependsOn: ["测试用例编写"] },
+        { title: "性能测试执行", assignedRole: "ROLE_QA", dependsOn: ["自动化测试执行"] },
+        { title: "用户验收测试", assignedRole: "ROLE_QA", dependsOn: ["性能测试执行"] },
+        { title: "产品文档回填", assignedRole: "ROLE_QA", dependsOn: ["用户验收测试"] },
+        { title: "复盘报告", assignedRole: "ROLE_PM", dependsOn: ["产品文档回填"] }
+      ]
+    }
+  },
+  {
+    key: "full",
+    name: "完整流程（full）",
+    category: "pm",
+    description: "标准五阶段完整流程",
+    isStandalone: false,
+    standaloneCategory: null,
+    executorConfig: { type: "agent", agentRole: "Project_Manager", requiredCapabilities: [] },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object", properties: {} },
+    inputContract: { requiresExternalInput: false, allowedInputTypes: [], inputValidationRules: [] },
+    outputContract: { deliverables: [], handoffFormat: "json", archiveLocation: "project_deliverables" },
+    acceptanceCriteria: [],
+    defaultTimeout: null,
+    allowParallel: false,
+    stageTasks: {
+      INIT: [
+        { title: "项目边界定义", assignedRole: "ROLE_PM" },
+        { title: "团队角色确认", assignedRole: "ROLE_PM", dependsOn: ["项目边界定义"] },
+        { title: "章程撰写", assignedRole: "ROLE_PM", dependsOn: ["团队角色确认"] },
+        { title: "章程评审", assignedRole: "ROLE_ARCH", dependsOn: ["章程撰写"] }
+      ],
+      ANALYSIS: [
+        { title: "需求初筛", assignedRole: "ROLE_ANALYST" },
+        { title: "历史经验检索", assignedRole: "ROLE_ANALYST", dependsOn: ["需求初筛"] },
+        { title: "PRD 撰写", assignedRole: "ROLE_PRODUCT", dependsOn: ["历史经验检索"] },
+        { title: "PRD 技术可行性评审", assignedRole: "ROLE_DEV", dependsOn: ["PRD 撰写"] },
+        { title: "项目排期方案", assignedRole: "ROLE_PM", dependsOn: ["PRD 技术可行性评审"] },
+        { title: "排期评审", assignedRole: "ROLE_PM", dependsOn: ["项目排期方案"] }
+      ],
+      DESIGN: [
+        { title: "设计目标与约束提炼", assignedRole: "ROLE_PRODUCT" },
+        { title: "视觉设计草稿", assignedRole: "ROLE_DESIGN", dependsOn: ["设计目标与约束提炼"] },
+        { title: "设计审查（内部+外部）", assignedRole: "ROLE_DESIGN", dependsOn: ["视觉设计草稿"] },
+        { title: "设计定稿与标注", assignedRole: "ROLE_DESIGN", dependsOn: ["设计审查（内部+外部）"] }
+      ],
+      DEV: [
+        { title: "技术方案选型", assignedRole: "ROLE_ARCH" },
+        { title: "技术方案评审", assignedRole: "ROLE_ARCH", dependsOn: ["技术方案选型"] },
+        { title: "代码实现（分模块）", assignedRole: "ROLE_DEV", dependsOn: ["技术方案评审"] },
+        { title: "联调与部署", assignedRole: "ROLE_DEV", dependsOn: ["代码实现（分模块）"] },
+        { title: "实现结果说明", assignedRole: "ROLE_DEV", dependsOn: ["联调与部署"] }
+      ],
+      ACCEPT: [
+        { title: "测试用例编写", assignedRole: "ROLE_QA" },
+        { title: "自动化测试执行", assignedRole: "ROLE_QA", dependsOn: ["测试用例编写"] },
+        { title: "性能测试执行", assignedRole: "ROLE_QA", dependsOn: ["自动化测试执行"] },
+        { title: "用户验收测试", assignedRole: "ROLE_QA", dependsOn: ["性能测试执行"] },
+        { title: "产品文档回填", assignedRole: "ROLE_QA", dependsOn: ["用户验收测试"] },
+        { title: "复盘报告", assignedRole: "ROLE_PM", dependsOn: ["产品文档回填"] }
+      ]
+    }
+  },
+  {
+    key: "lean",
+    name: "精简流程（lean）",
+    category: "pm",
+    description: "精简流程：INIT→ANALYSIS→DEV→ACCEPT（ANALYSIS 含需求与设计约束）",
+    isStandalone: false,
+    standaloneCategory: null,
+    executorConfig: { type: "agent", agentRole: "Project_Manager", requiredCapabilities: [] },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object", properties: {} },
+    inputContract: { requiresExternalInput: false, allowedInputTypes: [], inputValidationRules: [] },
+    outputContract: { deliverables: [], handoffFormat: "json", archiveLocation: "project_deliverables" },
+    acceptanceCriteria: [],
+    defaultTimeout: null,
+    allowParallel: false,
+    stageTasks: {
+      INIT: [
+        { title: "项目边界定义", assignedRole: "ROLE_PM" },
+        { title: "团队角色确认", assignedRole: "ROLE_PM", dependsOn: ["项目边界定义"] }
+      ],
+      ANALYSIS: [
+        { title: "需求初筛", assignedRole: "ROLE_ANALYST" },
+        { title: "PRD 撰写", assignedRole: "ROLE_PRODUCT", dependsOn: ["需求初筛"] },
+        { title: "项目排期方案", assignedRole: "ROLE_PM", dependsOn: ["PRD 撰写"] }
+      ],
+      DEV: [
+        { title: "技术方案选型", assignedRole: "ROLE_ARCH" },
+        { title: "代码实现（分模块）", assignedRole: "ROLE_DEV", dependsOn: ["技术方案选型"] },
+        { title: "联调与部署", assignedRole: "ROLE_DEV", dependsOn: ["代码实现（分模块）"] }
+      ],
+      ACCEPT: [
+        { title: "自动化测试执行", assignedRole: "ROLE_QA" },
+        { title: "用户验收测试", assignedRole: "ROLE_QA", dependsOn: ["自动化测试执行"] },
+        { title: "复盘报告", assignedRole: "ROLE_PM", dependsOn: ["用户验收测试"] }
+      ]
+    }
+  },
+  {
+    key: "maintenance",
+    name: "维护流程（maintenance）",
+    category: "pm",
+    description: "维护场景：DEV→ACCEPT",
+    isStandalone: false,
+    standaloneCategory: null,
+    executorConfig: { type: "agent", agentRole: "Project_Manager", requiredCapabilities: [] },
+    inputSchema: { type: "object", properties: {} },
+    outputSchema: { type: "object", properties: {} },
+    inputContract: { requiresExternalInput: false, allowedInputTypes: [], inputValidationRules: [] },
+    outputContract: { deliverables: [], handoffFormat: "json", archiveLocation: "project_deliverables" },
+    acceptanceCriteria: [],
+    defaultTimeout: null,
+    allowParallel: false,
+    stageTasks: {
+      DEV: [
+        { title: "技术方案选型", assignedRole: "ROLE_ARCH" },
+        { title: "代码实现（分模块）", assignedRole: "ROLE_DEV", dependsOn: ["技术方案选型"] },
+        { title: "联调与部署", assignedRole: "ROLE_DEV", dependsOn: ["代码实现（分模块）"] }
+      ],
+      ACCEPT: [
+        { title: "回归测试执行", assignedRole: "ROLE_QA" },
+        { title: "上线验收确认", assignedRole: "ROLE_QA", dependsOn: ["回归测试执行"] },
+        { title: "复盘报告", assignedRole: "ROLE_PM", dependsOn: ["上线验收确认"] }
+      ]
+    }
   }
 ];
 

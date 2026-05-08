@@ -63,12 +63,12 @@ const ROLE_ATTEMPT_TIMEOUT_BASELINE_MS: Partial<Record<RoleType, number>> = {
   ROLE_ANALYST: 90000,
   ROLE_PRODUCT: 90000,
   ROLE_DESIGN: 90000,
-  ROLE_ARCH: 60000,
-  ROLE_DEV: 60000,
-  ROLE_QA: 60000
+  ROLE_ARCH: 90000,
+  ROLE_DEV: 120000,
+  ROLE_QA: 120000
 };
 
-const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
+const STAGE_MODEL_PREFERENCES_DEFAULT: Record<StageType, string[]> = {
   INIT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus"],
   ANALYSIS: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "qwen3-coder-plus", "glm-5"],
   DESIGN: [
@@ -85,13 +85,26 @@ const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = {
   ACCEPT: ["openai/gpt-5.4", "openai/gpt-5.3-codex", "qwen3-max-2026-01-23", "qwen3.5-plus", "glm-5"]
 };
 
+const RUNTIME_FORCED_MODEL = String(process.env.RUNTIME_FORCED_MODEL ?? "").trim();
+const STAGE_MODEL_PREFERENCES: Record<StageType, string[]> = RUNTIME_FORCED_MODEL
+  ? {
+      INIT: [RUNTIME_FORCED_MODEL],
+      ANALYSIS: [RUNTIME_FORCED_MODEL],
+      DESIGN: [RUNTIME_FORCED_MODEL],
+      DEV: [RUNTIME_FORCED_MODEL],
+      ACCEPT: [RUNTIME_FORCED_MODEL]
+    }
+  : STAGE_MODEL_PREFERENCES_DEFAULT;
+
 // Issue 讨论优先走当前网关已实测可用的模型链，避免把不可用模型写成首选。
-const ISSUE_DEBATE_MODEL_PREFERENCES = [
-  "openai/gpt-5.4",
-  "openai/gpt-5.3-codex",
-  "gpt-5.4",
-  "hermes-v2.1"
-] as const;
+const ISSUE_DEBATE_MODEL_PREFERENCES = RUNTIME_FORCED_MODEL
+  ? [RUNTIME_FORCED_MODEL, "hermes-v2.1"] as const
+  : [
+      "openai/gpt-5.4",
+      "openai/gpt-5.3-codex",
+      "gpt-5.4",
+      "hermes-v2.1"
+    ] as const;
 
 const STAGE_MODEL_RATIONALE: Record<StageType, { objective: string; bestFit: string }> = {
   INIT: {
@@ -1164,6 +1177,13 @@ type OpenAIExecutionConfigInput = {
 };
 
 async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput): Promise<ExecutionRoute[]> {
+  if (RUNTIME_FORCED_MODEL) {
+    return dedupeExecutionRoutes([{
+      source: "runtime-selected",
+      apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
+      apiKey: String(input.runtimeApiKey ?? "").trim()
+    }]);
+  }
   const config = await readOpenClawRuntimeConfig();
   const provider = config.models?.providers?.openai;
   const requestedModel = String(input.model ?? "").trim().toLowerCase();
@@ -1213,6 +1233,13 @@ async function resolveOpenAIExecutionConfigs(input: OpenAIExecutionConfigInput):
 }
 
 async function resolveAnthropicExecutionConfigs(input: AnthropicExecutionConfigInput): Promise<ExecutionRoute[]> {
+  if (RUNTIME_FORCED_MODEL) {
+    return dedupeExecutionRoutes([{
+      source: "runtime-selected",
+      apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
+      apiKey: String(input.runtimeApiKey ?? "").trim()
+    }]);
+  }
   const config = await readOpenClawRuntimeConfig();
   const provider = config.models?.providers?.anthropic;
   const routes: ExecutionRoute[] = [
@@ -1236,6 +1263,13 @@ type KimiExecutionConfigInput = {
 };
 
 async function resolveKimiExecutionConfigs(input: KimiExecutionConfigInput): Promise<ExecutionRoute[]> {
+  if (RUNTIME_FORCED_MODEL) {
+    return dedupeExecutionRoutes([{
+      source: "runtime-selected",
+      apiBaseUrl: String(input.runtimeApiBaseUrl ?? "").trim(),
+      apiKey: String(input.runtimeApiKey ?? "").trim()
+    }]);
+  }
   const config = await readOpenClawRuntimeConfig();
   const provider = config.models?.providers?.kimi;
   const routes: ExecutionRoute[] = [

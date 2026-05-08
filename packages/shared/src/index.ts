@@ -8,7 +8,7 @@ export type SyncPolicy = "db_only" | "db_plus_gitlab" | "full_mirror";
 export type ContextScope = "local" | "stage" | "project" | "cross_project";
 export type TaskParticipantRole = "owner" | "supporter" | "reviewer" | "observer";
 export type TaskDependencyType = "blocks" | "soft_depends" | "relates_to";
-export type TaskDelegationMode = "research" | "coding" | "validation" | "summarization" | "review";
+export type TaskDelegationMode = "research" | "coding" | "validation" | "summarization" | "review" | "clarification";
 export type TaskDelegationStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "expired";
 export type TaskBlockedReasonCode =
   | "dependency_blocked"
@@ -32,6 +32,7 @@ export type RoleType =
   | "ROLE_ARCH"
   | "ROLE_DEV"
   | "ROLE_QA"
+  | "ROLE_AUDITOR"
   | "ROLE_HR";
 export type TimelinePriority = "low" | "normal" | "high" | "urgent";
 export type RuntimeMode = "scripted" | "openai-compatible";
@@ -180,6 +181,11 @@ export interface TaskDelegation {
   completedAt?: string;
   expiredAt?: string;
   failureReason?: string;
+  clarificationDeliverableId?: string;
+  clarificationTargetRole?: RoleType | string;
+  clarificationResponse?: string;
+  clarificationRespondedBy?: string;
+  clarificationRespondedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -191,6 +197,9 @@ export interface TaskDelegationSummary {
   targetAgentId?: string;
   outputSummary?: string;
   failureReason?: string;
+  clarificationDeliverableId?: string;
+  clarificationTargetRole?: RoleType | string;
+  clarificationRespondedAt?: string;
   retryCount: number;
   maxRetries: number;
   startedAt?: string;
@@ -403,6 +412,9 @@ export interface ExecutionProtocolSettings {
   requireSkillEvidence: boolean;
   requireCollaborationHandoff: boolean;
   blockDegradedWrites: boolean;
+  blockSecretLeak: boolean;
+  blockLargeFileCommit: boolean;
+  largeFileSizeThreshold: number;
 }
 
 export interface ExecutionProtocolLocks {
@@ -416,6 +428,9 @@ export interface ExecutionProtocolSettingsInput {
   requireSkillEvidence?: boolean;
   requireCollaborationHandoff?: boolean;
   blockDegradedWrites?: boolean;
+  blockSecretLeak?: boolean;
+  blockLargeFileCommit?: boolean;
+  largeFileSizeThreshold?: number;
 }
 
 export interface ExecutionProtocolStageRule {
@@ -486,6 +501,12 @@ export interface NotificationInboxItem {
   detail: string;
   actionLabel: string;
   to: string;
+  target?: {
+    tab?: string;
+    projectId?: string;
+    agentId?: string;
+    modal?: string;
+  };
   timestamp?: string;
   read: boolean;
   assignedTo?: string;
@@ -1062,7 +1083,7 @@ export interface TaskUpdateInput {
 export const STAGE_LABELS: Record<StageType, string> = {
   INIT: "项目立项",
   ANALYSIS: "需求分析",
-  DESIGN: "需求设计/视觉设计",
+  DESIGN: "视觉设计",
   DEV: "代码开发",
   ACCEPT: "测试验收"
 };
@@ -1076,6 +1097,7 @@ export const ROLE_LABELS: Record<RoleType, string> = {
   ROLE_ARCH: "研发总监",
   ROLE_DEV: "研发经理",
   ROLE_QA: "测试工程师",
+  ROLE_AUDITOR: "巡检审计员",
   ROLE_HR: "HR总监"
 };
 

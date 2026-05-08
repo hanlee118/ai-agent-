@@ -28,6 +28,9 @@ const defaultTestTargets = [
   "scripts/e2e/ui-visual-hermes-prefer.spec.ts",
 ];
 const effectiveTestTargets = testTargets.length > 0 ? testTargets : defaultTestTargets;
+const API_BASE_URL = process.env.API_BASE_URL || "http://127.0.0.1:8787";
+const VERIFY_REUSE_EXISTING_API_ONLY =
+  String(process.env.VERIFY_REUSE_EXISTING_API_ONLY ?? "true").trim().toLowerCase() !== "false";
 
 function summarizeOutput(text, maxLength = 2400) {
   const normalized = String(text || "").trim();
@@ -97,6 +100,28 @@ function waitForApiReady(child) {
   });
 }
 
+async function checkExistingApiReady() {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 8_000) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 1500);
+      const response = await fetch(`${API_BASE_URL}/api/health`, {
+        method: "GET",
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (response.ok) {
+        return true;
+      }
+    } catch {
+      // keep retrying during short readiness window
+    }
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+  return false;
+}
+
 function runUiSuite() {
   return new Promise((resolve) => {
     const startedAt = Date.now();
@@ -156,6 +181,52 @@ function runUiSuite() {
 
 async function runRound(round) {
   const roundStartedAt = new Date().toISOString();
+  const hasReadyApi = await checkExistingApiReady();
+  if (!hasReadyApi && VERIFY_REUSE_EXISTING_API_ONLY) {
+    return {
+      round,
+      ok: false,
+      startedAt: roundStartedAt,
+      steps: [
+        {
+          step: "boot-api",
+          ok: false,
+          reason: "existing_api_not_ready",
+          durationMs: 0,
+          stdout: "",
+          stderr: `expected existing API at ${API_BASE_URL} to be ready`,
+        },
+        {
+          step: "ui-e2e",
+          ok: false,
+          status: "skipped_api_not_ready"
+        }
+      ]
+    };
+  }
+  if (hasReadyApi) {
+    const uiResult = await runUiSuite();
+    return {
+      round,
+      ok: uiResult.ok,
+      startedAt: roundStartedAt,
+      steps: [
+        {
+          step: "boot-api",
+          ok: true,
+          reason: "reuse_existing",
+          durationMs: 0,
+          stdout: "",
+          stderr: ""
+        },
+        {
+          step: "ui-e2e",
+          ...uiResult
+        }
+      ]
+    };
+  }
+
   const apiEnv = {
     ...process.env,
     PROJECT_DIRECT_CREATE_ENABLED: process.env.VERIFY_PROJECT_DIRECT_CREATE_ENABLED || "true",

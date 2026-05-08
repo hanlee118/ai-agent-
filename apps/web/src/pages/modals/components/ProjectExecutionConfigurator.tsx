@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { roleLabel } from '../utils/newProjectHelpers';
-import { getTemplateRequiredRoles, isSingleStageWorkflowTemplate } from '../utils/workflowTemplateMeta';
+import { getTemplateRequiredRoles } from '../utils/workflowTemplateMeta';
 
 type ProjectMode = 'complete' | 'standalone' | 'relay';
 
@@ -47,7 +47,7 @@ const FULL_WORKFLOW_TEMPLATE_OPTIONS: Array<{ key: string; label: string; descri
     key: 'standard_software_development',
     label: '全流程编排（推荐）',
     description: '自动初始化需求、设计、研发、QA 全链路',
-    stagePreview: '需求设计 → 视觉设计/技术设计 → 代码研发 → QA 验收',
+    stagePreview: '项目立项（INIT） → 需求分析（ANALYSIS） → 需求/视觉设计（DESIGN） → 代码研发（DEV） → QA 验收（ACCEPT）',
   },
   {
     key: 'none',
@@ -94,12 +94,6 @@ const STANDALONE_TEMPLATE_OPTIONS: Array<{ key: string; label: string; descripti
     description: '先创建项目，不自动初始化 workflow',
     stagePreview: '无自动阶段（可在项目内手动初始化）',
   },
-];
-
-const ALL_WORKFLOW_TEMPLATE_OPTIONS: Array<{ key: string; label: string; description: string; stagePreview: string }> = [
-  FULL_WORKFLOW_TEMPLATE_OPTIONS[0],
-  ...STANDALONE_TEMPLATE_OPTIONS.filter((item) => item.key !== 'none'),
-  FULL_WORKFLOW_TEMPLATE_OPTIONS[1],
 ];
 
 const STAGE_INPUT_TYPE_OPTIONS: Array<{ value: string; label: string; description: string }> = [
@@ -176,7 +170,9 @@ export default function ProjectExecutionConfigurator({
 }: Props) {
   const [showContentOverride, setShowContentOverride] = useState(Boolean(standaloneInputContent.trim()));
 
-  const workflowOptions = ALL_WORKFLOW_TEMPLATE_OPTIONS;
+  const workflowOptions = projectType === 'complete'
+    ? FULL_WORKFLOW_TEMPLATE_OPTIONS
+    : STANDALONE_TEMPLATE_OPTIONS;
   const activeWorkflowOption = workflowOptions.find((item) => item.key === workflowTemplateKey) || workflowOptions[0];
 
   const activeInputGuide = useMemo(() => {
@@ -198,6 +194,7 @@ export default function ProjectExecutionConfigurator({
       <div className="space-y-1">
         <label className="text-xs font-bold text-slate-500 uppercase tracking-widest">项目策略模式</label>
         <p className="text-[11px] text-slate-500">创建时直接决定：是全流程执行，还是独立阶段执行。</p>
+        <p className="text-[11px] text-slate-500">全流程模式会先进入项目立项（INIT），再推进后续阶段。</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
@@ -209,12 +206,11 @@ export default function ProjectExecutionConfigurator({
               type="button"
               onClick={() => {
                 setProjectType(option.key);
-                if (option.key === 'complete' && isSingleStageWorkflowTemplate(workflowTemplateKey)) {
+                if (option.key === 'complete' && workflowTemplateKey !== 'standard_software_development' && workflowTemplateKey !== 'none') {
                   setWorkflowTemplateKey('standard_software_development');
                   return;
                 }
-                if ((option.key === 'standalone' || option.key === 'relay')
-                  && workflowTemplateKey === 'standard_software_development') {
+                if ((option.key === 'standalone' || option.key === 'relay') && workflowTemplateKey === 'standard_software_development') {
                   setWorkflowTemplateKey('requirements_design');
                 }
               }}
@@ -337,13 +333,6 @@ export default function ProjectExecutionConfigurator({
                 } else if (!autoStartWorkflow) {
                   setAutoStartWorkflow(true);
                 }
-                if (option.key === 'standard_software_development' && projectType !== 'complete') {
-                  setProjectType('complete');
-                  return;
-                }
-                if (isSingleStageWorkflowTemplate(option.key) && projectType === 'complete') {
-                  setProjectType('standalone');
-                }
               }}
               className={`text-left rounded-xl border px-3 py-2 transition-colors ${
                 active
@@ -367,7 +356,7 @@ export default function ProjectExecutionConfigurator({
           当前选择：{activeWorkflowOption?.label || '未选择'} · {activeWorkflowOption?.stagePreview || '未配置阶段'}
         </p>
         <p className="text-[11px] text-slate-500">
-          说明：若在“完整流程”模式下选择单阶段模板，系统会自动切换到“单阶段交付”。
+          说明：模板列表按当前项目策略模式过滤，避免模式与模板错配导致流程丢失。
         </p>
         <label className="inline-flex items-center gap-2 text-xs text-slate-300">
           <input

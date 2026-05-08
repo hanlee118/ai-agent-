@@ -8,6 +8,16 @@ export type GateEvaluationResult = {
   checks?: Array<{ type: string; passed: boolean; details: string }>;
 };
 
+export type EngineeringPolicyGateInput = {
+  branchName?: string;
+  commitMessage?: string;
+  mergeRequestDescription?: string;
+};
+
+const BRANCH_RULE = /^(feature|fix|hotfix)\/issue-\d+-[a-z0-9-]+$/;
+const COMMIT_RULE = /^(feat:|fix:|refactor:|docs:|test:|chore:)/i;
+const MR_ISSUE_RULE = /(Related to #\d+|Closes #\d+)/i;
+
 type CheckResult = { passed: boolean; details: string };
 
 type AutoCheckValidator = (input: {
@@ -196,6 +206,57 @@ export async function evaluateWorkflowStageGate(input: {
     if (!result.passed) {
       violations.push(`${criterion.type}: ${result.details}`);
     }
+  }
+
+  return {
+    passed: violations.length === 0,
+    violations: violations.length > 0 ? violations : undefined,
+    checks
+  };
+}
+
+export function evaluateEngineeringPolicyGate(input: EngineeringPolicyGateInput): GateEvaluationResult {
+  const violations: string[] = [];
+  const checks: Array<{ type: string; passed: boolean; details: string }> = [];
+
+  const branch = String(input.branchName ?? "").trim();
+  const commit = String(input.commitMessage ?? "").trim();
+  const mrDesc = String(input.mergeRequestDescription ?? "").trim();
+
+  const branchPassed = BRANCH_RULE.test(branch);
+  checks.push({
+    type: "engineering_branch_name",
+    passed: branchPassed,
+    details: branchPassed
+      ? "branch name ok"
+      : "分支名不符合规范，请使用 feature/issue-<ID>-<描述> 格式"
+  });
+  if (!branchPassed) {
+    violations.push("engineering_branch_name: 分支名不符合规范，请使用 feature/issue-<ID>-<描述> 格式");
+  }
+
+  const commitPassed = COMMIT_RULE.test(commit);
+  checks.push({
+    type: "engineering_commit_message",
+    passed: commitPassed,
+    details: commitPassed
+      ? "commit message ok"
+      : "Commit message 不符合规范，需以 feat:/fix:/refactor:/docs:/test:/chore: 开头"
+  });
+  if (!commitPassed) {
+    violations.push("engineering_commit_message: Commit message 不符合规范");
+  }
+
+  const mrPassed = MR_ISSUE_RULE.test(mrDesc);
+  checks.push({
+    type: "engineering_mr_issue_link",
+    passed: mrPassed,
+    details: mrPassed
+      ? "mr issue link ok"
+      : "MR 描述缺少 Issue 关联，请包含 Related to #<ID> 或 Closes #<ID>"
+  });
+  if (!mrPassed) {
+    violations.push("engineering_mr_issue_link: MR 描述缺少 Issue 关联");
   }
 
   return {

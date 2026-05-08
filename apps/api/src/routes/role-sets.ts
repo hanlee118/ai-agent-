@@ -16,6 +16,7 @@ export type RoleId =
   | "ROLE_ARCH"
   | "ROLE_DEV"
   | "ROLE_QA"
+  | "ROLE_AUDITOR"
   | "ROLE_HR";
 
 type RoleSetStatus = "active" | "inactive";
@@ -119,7 +120,7 @@ const BUILTIN_INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
             order: 4,
             roleId: "ROLE_DEV",
             title: "任务拆解与开发执行",
-            input: "已确认需求确认单 + 设计审查卡",
+            input: "已确认需求确认单 + 设计输出审查包",
             output: "代码变更与 Demo"
           },
           {
@@ -183,13 +184,13 @@ const BUILTIN_INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
             roleId: "ROLE_DESIGN",
             title: "视觉方案与品牌一致性审查",
             input: "体验与流程方案",
-            output: "视觉规范、组件清单、设计审查卡"
+            output: "视觉规范、组件清单、设计输出审查包"
           },
           {
             order: 4,
             roleId: "ROLE_DEV",
             title: "研发实施与联调",
-            input: "确认方案 + 设计审查卡",
+            input: "确认方案 + 设计输出审查包",
             output: "可演示原型与实现说明"
           },
           {
@@ -253,13 +254,13 @@ const BUILTIN_INDUSTRY_TEAM_CONFIGS: Record<string, IndustryTeamConfig> = {
             roleId: "ROLE_DESIGN",
             title: "高风险场景视觉与交互审查",
             input: "结构化方案",
-            output: "视觉风险说明、无障碍清单、设计审查卡"
+            output: "视觉风险说明、无障碍清单、设计输出审查包"
           },
           {
             order: 4,
             roleId: "ROLE_ARCH",
             title: "架构与安全方案",
-            input: "确认需求 + 设计审查卡",
+            input: "确认需求 + 设计输出审查包",
             output: "架构方案与风控措施"
           },
           {
@@ -472,6 +473,7 @@ function buildDefaultWorkflows(roleSet: IndustryRoleSet): TeamSopWorkflow[] {
     ROLE_ARCH: "系统架构与技术方案",
     ROLE_DEV: "研发实现与联调",
     ROLE_QA: "质量验证与回归测试",
+    ROLE_AUDITOR: "工程巡检与治理审计",
     ROLE_HR: "组织协同与资源保障"
   };
   return [
