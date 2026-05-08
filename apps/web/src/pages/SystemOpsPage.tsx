@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Users,
   ShieldCheck,
@@ -24,7 +24,7 @@ import {
 import { cn } from '../lib/utils';
 import { agents, models, projects, sessions } from '../lib/runtimeCollections';
 import { systemApi } from '../lib/api';
-import type { SystemDiagnosticsReport } from '../lib/api/types';
+import type { SystemDiagnosticsReport, SystemPerformanceSummary } from '../lib/api/types';
 
 const ROLE_BINDING_RULES: Array<{
   roleId: string;
@@ -160,6 +160,7 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
   const [isExportingReport, setIsExportingReport] = useState(false);
   const [optimizationSuggestions, setOptimizationSuggestions] = useState<Array<{ title: string; message: string; type: 'warning' | 'info' }>>([]);
   const [diagnosticReport, setDiagnosticReport] = useState<SystemDiagnosticsReport | null>(null);
+  const [performanceSummary, setPerformanceSummary] = useState<SystemPerformanceSummary | null>(null);
 
   const topConsumers = useMemo(
     () => [...agents].sort((a, b) => (b.tokensUsed || 0) - (a.tokensUsed || 0)).slice(0, 5),
@@ -344,6 +345,20 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
     }
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    void systemApi.getPerformanceSummary()
+      .then((data) => {
+        if (!cancelled) {
+          setPerformanceSummary(data);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div className="p-8 space-y-8 max-w-7xl mx-auto">
       <header className="flex justify-between items-end">
@@ -387,6 +402,42 @@ const SystemOperations = ({ onNavigate, addToast, onRefreshData }: any) => {
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+
+          <div className="bg-surface-soft border border-border-subtle rounded-2xl overflow-hidden">
+            <div className="px-6 py-4 border-b border-border-subtle flex justify-between items-center bg-white/5">
+              <h2 className="font-semibold text-white flex items-center gap-2">
+                <BarChart3 size={18} className="text-primary" />
+                接口性能摘要
+              </h2>
+              <Badge variant="default">
+                {performanceSummary ? `窗口 ${Math.round((performanceSummary.windowMs || 0) / 60000)} 分钟` : '加载中'}
+              </Badge>
+            </div>
+            <div className="p-6">
+              {performanceSummary && performanceSummary.routes.length > 0 ? (
+                <div className="space-y-3">
+                  {performanceSummary.routes.slice(0, 6).map((route) => (
+                    <div key={route.route} className="p-3 rounded-xl border border-border-subtle bg-white/5">
+                      <div className="flex items-center justify-between gap-4">
+                        <p className="text-xs text-white font-medium break-all">{route.route}</p>
+                        <Badge variant={route.p95 > performanceSummary.thresholds.p95AlertMs ? 'warning' : 'primary'}>
+                          p95 {route.p95}ms
+                        </Badge>
+                      </div>
+                      <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] text-slate-400">
+                        <span>count: {route.count}</span>
+                        <span>error: {route.errorCount}</span>
+                        <span>avg: {route.avgMs}ms</span>
+                        <span>max: {route.maxMs}ms</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-slate-400">暂无性能采样数据，请先产生一些接口请求。</p>
+              )}
             </div>
           </div>
 
