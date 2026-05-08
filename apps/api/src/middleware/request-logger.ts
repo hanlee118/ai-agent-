@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { Request, Response, NextFunction } from "express";
+import { trackRequestSample } from "../system/performance-monitor.js";
 
 const LOG_FILE_PATH = path.resolve(process.cwd(), process.env.API_LOG_PATH || "logs/api.log");
 let logDirectoryReady: Promise<void> | undefined;
@@ -25,14 +26,29 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
 
   const start = Date.now();
   res.on("finish", () => {
+    const durationMs = Date.now() - start;
+    const contentLengthRaw = res.getHeader("content-length");
+    const bytes = Number(
+      typeof contentLengthRaw === "string"
+        ? contentLengthRaw
+        : Array.isArray(contentLengthRaw)
+          ? contentLengthRaw[0]
+          : contentLengthRaw ?? 0
+    );
     const log = {
       requestId,
       method: req.method,
       path: req.originalUrl,
       statusCode: res.statusCode,
-      durationMs: Date.now() - start,
+      durationMs,
       timestamp: new Date().toISOString()
     };
+    trackRequestSample({
+      route: req.path || req.originalUrl || "/unknown",
+      durationMs,
+      statusCode: res.statusCode,
+      bytes: Number.isFinite(bytes) ? bytes : 0
+    });
     void ensureLogDirectoryReady()
       .then(() => appendFile(LOG_FILE_PATH, `${JSON.stringify(log)}\n`, "utf8"))
       .catch(() => undefined);
