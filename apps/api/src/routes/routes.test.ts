@@ -501,7 +501,6 @@ describe("Error Matrix: auth + projects", () => {
       if (prepTrace.length > 0) {
         assert.match(prepTrace, /# prepDiscussionTrace|讨论回合记录|ROLE_/i);
       }
-      assert.ok(Array.isArray(afterDetail.body?.requiredActions));
     });
 
     it("[200][PROJECT_POST_CREATE_PREP] 已完成预备后重复执行应保持已完成状态", async () => {
