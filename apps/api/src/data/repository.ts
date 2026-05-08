@@ -6760,6 +6760,10 @@ export async function createProject(
   input: CreateProjectInput & { requirementContract?: RequirementContract; parsedIntent?: ParsedIntent },
   runtimeMode: RuntimeMode
 ): Promise<ProjectDetail> {
+  const rawWorkflowTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
+  if (rawWorkflowTemplateKey === "none") {
+    throw new Error("WORKFLOW_TEMPLATE_NONE_FORBIDDEN");
+  }
   const parsedIntent = input.parsedIntent ?? previewRequirement(input.description);
   const projectType = normalizeProjectExecutionMode(input.projectType);
   const parentProjectId = String(input.parentProjectId ?? "").trim() || undefined;
