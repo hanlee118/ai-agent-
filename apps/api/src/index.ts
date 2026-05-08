@@ -5206,24 +5206,33 @@ function asyncRoute(
 
 async function start() {
   installRuntimeErrorGuards();
-  await ensureSeedData((await getRuntimeStatus()).mode);
-  ensureLocalAgentMonitorLive();
-  restartProjectAutomationTicker();
-  restartProjectStateSweepTicker();
-  restartAuditInspectionTicker();
-  void runProjectStateConsistencySweep();
-  if (AUDIT_INSPECTION_SCHEDULER_ENABLED) {
-    void runAuditInspectionTick();
-  }
-  if (projectAutomationState.enabled) {
-    void runProjectAutomationTick();
-  }
-
   app.listen(port, host, () => {
     console.log(
       `OCC API listening on http://${host}:${port}${existsSync(webDistPath) ? " (serving web dist)" : ""}`
     );
   });
+
+  // Do not block HTTP availability on optional bootstrap tasks.
+  // If bootstrap fails, API stays up and reports errors per-endpoint instead of full 500 proxy failures.
+  void (async () => {
+    try {
+      await ensureSeedData((await getRuntimeStatus()).mode);
+      ensureLocalAgentMonitorLive();
+      restartProjectAutomationTicker();
+      restartProjectStateSweepTicker();
+      restartAuditInspectionTicker();
+      void runProjectStateConsistencySweep();
+      if (AUDIT_INSPECTION_SCHEDULER_ENABLED) {
+        void runAuditInspectionTick();
+      }
+      if (projectAutomationState.enabled) {
+        void runProjectAutomationTick();
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`[bootstrap] startup tasks failed: ${message}`);
+    }
+  })();
 }
 
 function isDirectExecution() {
