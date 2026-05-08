@@ -157,7 +157,10 @@ export async function runAuditInspectionNow() {
   return {
     ok: true,
     scanned: mrs.length,
-    actions
+    actions,
+    message: mrs.length === 0
+      ? "未发现 opened MR，巡检已完成但当前无可扫描对象"
+      : `巡检完成：扫描 ${mrs.length} 个 MR，执行 ${actions.length} 个动作`
   };
 }
 

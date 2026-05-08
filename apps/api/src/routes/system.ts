@@ -406,7 +406,15 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
   const { asyncRoute, safeAudit, sendEvent } = options;
 
   router.get("/health", asyncRoute(async (_req, res) => {
-    res.json(await getSystemHealth());
+    const [health, observabilitySummary] = await Promise.all([
+      getSystemHealth(),
+      getObservabilitySummarySnapshot()
+    ]);
+    res.json({
+      ...health,
+      // Backward-compatible field for dashboard consumers still expecting aggregated observability payload.
+      observabilitySummary
+    });
   }));
 
   router.get("/runtime", asyncRoute(async (_req, res) => {
