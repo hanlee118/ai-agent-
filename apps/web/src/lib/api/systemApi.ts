@@ -13,6 +13,7 @@ import type {
   SystemRuntimeConfig,
   SystemRuntimeConfigInput,
   SystemObservabilitySummary,
+  SystemPerformanceSummary,
   SystemUiAutonomousModeApplyResult,
   SystemUiPreferences,
   SystemUiPreferencesInput,
@@ -91,6 +92,10 @@ export const systemApi = {
       method: 'POST',
       body: JSON.stringify({}),
     });
+  },
+
+  async getPerformanceSummary() {
+    return request<SystemPerformanceSummary>('/system/performance/summary');
   },
 
   async selfHealModelRouting(apply = true) {

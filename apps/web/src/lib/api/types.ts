@@ -492,6 +492,26 @@ export interface SystemDiagnosticsReport {
   suggestions: SystemDiagnosticSuggestion[];
 }
 
+export interface SystemPerformanceSummary {
+  generatedAt: string;
+  windowMs: number;
+  thresholds: {
+    p95AlertMs: number;
+    errorRateAlert: number;
+  };
+  routes: Array<{
+    route: string;
+    count: number;
+    errorCount: number;
+    p50: number;
+    p95: number;
+    p99: number;
+    avgMs: number;
+    maxMs: number;
+    avgBytes: number;
+  }>;
+}
+
 export interface RuntimeRouteHealthItem {
   route: string;
   source: string;
