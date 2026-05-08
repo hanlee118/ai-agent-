@@ -49,6 +49,7 @@ import {
 import { getHermesMcpRuntimeStatus, probeHermesMcpEndpoint } from "../workflow-v2/hermes-mcp.js";
 import { cleanupContextHygiene, getContextHygieneReport } from "../system/context-hygiene.js";
 import { getLatestAuditInspectionSummary, runAuditInspectionNow } from "../workflow-v2/audit-tasks.js";
+import { getPerformanceSummary } from "../system/performance-monitor.js";
 import { prisma, withPrismaReadRetry } from "../db.js";
 import { validateBody } from "../validation/middleware.js";
 import {
@@ -415,6 +416,10 @@ export function createSystemRouter(options: CreateSystemRouterOptions) {
       // Backward-compatible field for dashboard consumers still expecting aggregated observability payload.
       observabilitySummary
     });
+  }));
+
+  router.get("/performance/summary", asyncRoute(async (_req, res) => {
+    res.json(getPerformanceSummary());
   }));
 
   router.get("/runtime", asyncRoute(async (_req, res) => {
