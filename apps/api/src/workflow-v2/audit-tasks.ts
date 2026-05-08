@@ -127,17 +127,23 @@ export async function runAuditInspectionNow() {
     }
   }
 
-  await prisma.timelineEvent.create({
-    data: {
-      projectId: "SYSTEM",
-      timestamp: new Date(),
-      agentId: "auditor-agent",
-      type: "audit_inspection",
-      title: "GitLab 巡检完成",
-      content: `扫描 MR ${mrs.length} 个，动作 ${actions.length} 个`,
-      priority: "info"
-    }
+  const systemProject = await prisma.project.findFirst({
+    where: { id: "SYSTEM" },
+    select: { id: true }
   }).catch(() => null);
+  if (systemProject?.id) {
+    await prisma.timelineEvent.create({
+      data: {
+        projectId: systemProject.id,
+        timestamp: new Date(),
+        agentId: "auditor-agent",
+        type: "audit_inspection",
+        title: "GitLab 巡检完成",
+        content: `扫描 MR ${mrs.length} 个，动作 ${actions.length} 个`,
+        priority: "info"
+      }
+    }).catch(() => null);
+  }
 
   await writeAuditLog({
     actorType: "system",
