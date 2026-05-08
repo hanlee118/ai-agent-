@@ -111,6 +111,10 @@ import {
 } from "../workflow-v2/project-modes.js";
 import { getRuntimeStoreHealth } from "../system/runtime-store-health.js";
 import { ensureBuiltinPromptTemplates, getBuiltinPromptTemplateByKey } from "../system/prompt-templates.js";
+import {
+  isWorkflowTemplateKeyNone,
+  normalizeGovernedProjectType
+} from "../system/project-governance.js";
 
 const stageOrder: StageType[] = ["INIT", "ANALYSIS", "DESIGN", "DEV", "ACCEPT"];
 const DESIGN_REVIEW_MARKER = "## 设计审查卡";
@@ -344,11 +348,7 @@ const PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED_ENABLED =
   String(process.env.PROJECT_WORKFLOW_V2_TEMPLATE_AUTO_SEED ?? "true").trim().toLowerCase() !== "false";
 
 function normalizeProjectExecutionMode(value: unknown): ProjectExecutionMode {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  if (normalized === "standalone" || normalized === "relay") {
-    return normalized as ProjectExecutionMode;
-  }
-  return "complete";
+  return normalizeGovernedProjectType(value);
 }
 
 function resolveWorkflowTemplateKeyForProjectMode(input: {
@@ -6760,8 +6760,7 @@ export async function createProject(
   input: CreateProjectInput & { requirementContract?: RequirementContract; parsedIntent?: ParsedIntent },
   runtimeMode: RuntimeMode
 ): Promise<ProjectDetail> {
-  const rawWorkflowTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
-  if (rawWorkflowTemplateKey === "none") {
+  if (isWorkflowTemplateKeyNone(input.workflowTemplateKey)) {
     throw new Error("WORKFLOW_TEMPLATE_NONE_FORBIDDEN");
   }
   const parsedIntent = input.parsedIntent ?? previewRequirement(input.description);

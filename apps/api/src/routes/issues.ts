@@ -49,6 +49,12 @@ import {
   type IssueSourceType
 } from "../system/v1-method-store.js";
 import { runProjectPostCreatePrep } from "../system/post-create-prep.js";
+import {
+  isProjectModeTemplateCompatible,
+  isWorkflowTemplateKeyNone,
+  normalizeGovernedProjectType,
+  projectModeTemplateCompatibilityError
+} from "../system/project-governance.js";
 
 interface PreviewIssueBody {
   input?: unknown;
@@ -133,33 +139,6 @@ function normalizeOptionalBoolean(input: unknown) {
     return false;
   }
   return undefined;
-}
-
-function normalizeProjectType(input: unknown) {
-  const text = String(input ?? "").trim().toLowerCase();
-  if (text === "standalone" || text === "relay") {
-    return text as "standalone" | "relay";
-  }
-  return "complete" as const;
-}
-
-function isProjectModeTemplateCompatible(input: {
-  projectType: "complete" | "standalone" | "relay";
-  workflowTemplateKey: unknown;
-}) {
-  const normalizedTemplateKey = String(input.workflowTemplateKey ?? "").trim().toLowerCase();
-  const templateKey = normalizedTemplateKey || "standard_software_development";
-  if (input.projectType === "complete") {
-    return templateKey === "standard_software_development"
-      || templateKey === "full"
-      || templateKey === "lean"
-      || templateKey === "maintenance";
-  }
-  return templateKey === "requirements_design"
-    || templateKey === "visual_design"
-    || templateKey === "tech_design"
-    || templateKey === "code_dev"
-    || templateKey === "qa_acceptance";
 }
 
 function applyTemplateRolePlan(input: {
@@ -1248,7 +1227,7 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
 
     const clarificationAnswers = normalizeStringMap(payload.clarificationAnswers);
     const conflictResolution = String(payload.conflictResolution ?? "").trim();
-    const projectType = normalizeProjectType(payload.projectType);
+    const projectType = normalizeGovernedProjectType(payload.projectType);
     const parentProjectId = String(payload.parentProjectId ?? "").trim() || undefined;
     const relaySourceStageId = String(payload.relaySourceStageId ?? "").trim() || undefined;
     const userProjectInputs = normalizeProjectInputs(payload.projectInputs);
@@ -1261,13 +1240,11 @@ export function createIssuesRouter(options: CreateIssuesRouterOptions = {}) {
       return;
     }
     if (!isProjectModeTemplateCompatible({ projectType, workflowTemplateKey })) {
-      const message = projectType === "complete"
-        ? "workflowTemplateKey must be standard_software_development/full/lean/maintenance when projectType=complete"
-        : "workflowTemplateKey must be one of requirements_design/visual_design/tech_design/code_dev/qa_acceptance for standalone or relay projectType";
+      const message = projectModeTemplateCompatibilityError(projectType);
       sendError(res, 400, "VALIDATION_ERROR", message);
       return;
     }
-    if (workflowTemplateKeyRaw.toLowerCase() === "none") {
+    if (isWorkflowTemplateKeyNone(workflowTemplateKeyRaw)) {
       sendError(
         res,
         400,
