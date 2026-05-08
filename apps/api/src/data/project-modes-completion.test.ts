@@ -282,7 +282,7 @@ test("relay projects: different relay templates can reach 100% completion with d
       name: "Relay Source",
       description: "阶段接力来源项目",
       projectType: "complete",
-      workflowTemplateKey: "none",
+      workflowTemplateKey: "standard_software_development",
       autoStartWorkflow: false
     },
     "scripted"
