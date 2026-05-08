@@ -47,7 +47,8 @@
     "db:baseline": "node scripts/prisma-baseline.mjs",
     "db:baseline:apply": "node scripts/prisma-baseline.mjs --mark-applied",
     "db:seed:workflow-v2": "pnpm --filter @occ/api db:migrate:deploy && pnpm --filter @occ/api exec tsx ../../scripts/seed-workflow-templates-v2.ts",
-    "health:check": "node scripts/health-check.mjs"
+    "health:check": "node scripts/health-check.mjs",
+    "verify:perf:gate": "node scripts/verify-perf-gate.mjs"
   },
   "dependencies": {
     "socket.io-client": "^4.8.3"
